@@ -1,143 +1,111 @@
 # Meridies Backend — Agent Guide
 
+> **Repo:** `MeridiesAI/meridies-backend` · **Deploy:** Railway API
+>
+> Read the monorepo onboarding doc at `MeridiesAI/context` (`CODEBASE_GUIDE.md`) for cross-repo conventions.
+
 ## What this repo is
 
-**This is the real backend that powers MeridiesAI.**
+**The API for MeridiesAI.** Fastify 5, Node ≥20, ESM, TypeScript strict.
 
-`meridies-backend` is a Fastify (Node.js ≥20, ESM, TypeScript) API that handles:
+Handles auth, profiles, invites, student rosters, deadlines, and all Anthropic AI routes for the production app (`meridies-app`).
 
-- **Auth** — Supabase JWT validation on every protected route
-- **Profiles & onboarding** — counselor/student user records
-- **Student rosters** — counselor ↔ student relationships
-- **Invites** — counselor-generated codes students redeem
-- **Deadlines** — application deadline tracking
-- **AI features** — all LLM work via the Anthropic API
+## Current implementation vs target
 
-The frontend (`meridies-app-real`) talks to this server exclusively through `lib/api.ts`. The demo app (`meridies-app`) does **not** call this backend — it uses mock data.
+> **Important for agents:** the frontend (`meridies-app`) is built for **Supabase Auth** and sends Supabase access tokens. This repo is mid-migration.
 
-## Architecture
+### Shipped today (what's in `main`)
 
 ```
 src/
-├── index.ts          # Server entry, listens on PORT (default 4000)
-├── app.ts            # Fastify app, CORS, route registration, error handler
-├── env.ts            # Zod-validated env — server exits on invalid config
-├── plugins/
-│   └── supabaseAuth.ts   # Bearer token → Supabase user + client on request
-├── lib/
-│   ├── supabase.ts       # Supabase client factory (anon key + user JWT)
-│   ├── authz.ts          # Authorization helpers (counselor/student access)
-│   └── serialize.ts      # DB row → API response shapes
+├── index.ts, app.ts, env.ts
+├── plugins/jwt.ts          # @fastify/jwt — own token issuance
+├── lib/prisma.ts, guards.ts, serialize.ts, invite-code.ts
 └── routes/
-    ├── health.ts         # GET /health
-    ├── auth.ts           # GET/PATCH /auth/me
-    ├── students.ts       # GET /students, GET /students/:id
-    ├── invites.ts        # POST/GET /invites, POST /invites/redeem
-    ├── deadlines.ts      # GET /deadlines
-    └── ai.ts             # POST /ai/* — all Anthropic calls
+    ├── health.ts           # GET /health
+    ├── auth.ts             # POST /auth/signup, POST /auth/login
+    └── invites.ts          # counselor invite codes
 ```
 
-### Auth model
+- **Database:** Prisma + Postgres (`prisma/schema.prisma`)
+- **Auth:** email/password → JWT from this server
+- **Env:** `DATABASE_URL`, `JWT_SECRET`, `CORS_ORIGIN`, `PORT`
 
-Every protected route uses `{ preHandler: app.authenticate }`. The plugin reads `Authorization: Bearer <supabase_access_token>`, validates it with Supabase, and attaches `request.supabaseUser` + `request.supabase` (a client scoped to that user's JWT, so **RLS applies**).
+### Target (what `meridies-app` expects)
 
-Authorization beyond auth (e.g., "can this counselor see this student?") goes through `lib/authz.ts` — never skip these checks.
+- Supabase JWT validation via `plugins/supabaseAuth.ts`
+- Routes: `/auth/me`, `/students`, `/deadlines`, `/ai/*`
+- Env additions: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `ANTHROPIC_API_KEY`
+- RLS via Supabase anon key + user JWT
 
-### Data layer
-
-Supabase Postgres with Row Level Security. The backend uses the **anon key** with the user's JWT — it does not bypass RLS with a service role key unless explicitly required and reviewed.
+When you touch auth or add routes, **close this seam** — don't document one stack and ship another.
 
 ## Anthropic / AI rules
 
-**All AI in this product goes through Anthropic.** No OpenAI, no other providers, unless explicitly directed by the team.
+**All product AI goes through Anthropic.** No other providers unless the team explicitly decides otherwise.
 
-### Speed first
+- **Speed first** — counselors use tools live in session; latency beats marginal quality
+- **Default model:** `claude-haiku-4-5` in `src/routes/ai.ts`
+- **Sonnet** only when Haiku quality is insufficient; **Opus** effectively never on hot paths
+- **Hard requirement:** every model must support **image and file attachments** (essays, PDFs, screenshots)
+- Never enable `thinking` / `effort` on models that don't support them
 
-This is a **speed-first AI system**. Counselors use these tools in live sessions — latency matters more than marginal quality gains.
+When adding AI routes:
 
-- Default to the fastest model that can handle the task
-- Current baseline in `src/routes/ai.ts`: **`claude-haiku-4-5`**
-- Do not reach for Opus/Sonnet unless the task genuinely requires it and you document why
-- Never enable `thinking` / `effort` on models that don't support them (Haiku 4.5 does not)
-
-### Model selection
-
-You may choose models per task, but follow this hierarchy:
-
-1. **Haiku 4.5** — default for structured summaries, short reports, tool runs, anything interactive
-2. **Sonnet** — only when Haiku quality is insufficient (longer reasoning, nuanced writing)
-3. **Opus** — avoid unless explicitly requested; never for user-facing hot paths
-
-**Hard requirement: every model you use must support attaching images and files.** If a model cannot accept document/image inputs, do not use it. Many counselor workflows will send transcripts, essays, screenshots, and PDFs.
-
-When adding a new AI route:
-
-- Put it in `src/routes/ai.ts` (or split into `src/routes/ai/` if the file grows)
-- Authenticate + authorize via `loadAuthorizedStudent` before calling the model
-- Validate input with Zod
-- Use structured output (`output_config`) or `betaZodTool` where appropriate — already established in this file
-- Log errors server-side; return safe error messages to clients (no stack traces, no API key hints)
+1. Authenticate + authorize (`loadAuthorizedStudent`) before calling the model
+2. Validate input with Zod
+3. Use structured output / `betaZodTool` where shapes matter
+4. Log errors server-side; return safe client messages — no stack traces, no key hints
+5. Treat model output as untrusted — sanitize before storing
 
 ## Safe coding standards
 
-### Security
-
-- **Never log secrets** — no API keys, tokens, or full JWTs in logs
-- **Never commit `.env`** — use `.env.example` as the template
-- **Validate all input** with Zod at route boundaries (`env.ts` pattern)
-- **Always authenticate** protected routes — no "temporary" unauthenticated endpoints
-- **Always authorize** — check counselor/student relationship in `authz.ts`, don't trust client-supplied IDs alone
-- **Respect RLS** — prefer the user's Supabase client over service-role bypass
-- **Sanitize AI output** before storing — treat model responses as untrusted user content
-- **CORS** — only origins listed in `CORS_ORIGIN` (comma-separated in env)
-
-### Error handling
-
-- Use the centralized error handler in `app.ts`
-- Return `{ error: string }` for client errors; include `details` only for validation failures (400)
-- 500s get logged; clients get generic messages
-
-### Code style
-
 - TypeScript strict — no `any`
-- ESM imports with `.js` extensions (see existing files)
-- Zod schemas for request bodies and env vars
-- Prefer `loadAuthorizedStudent` / `loadCounselorName` over duplicating query logic
-- Keep route handlers thin — business logic in `lib/`
+- ESM imports with `.js` extensions (`import { env } from "./env.js"`)
+- Zod at every boundary (env + request bodies)
+- Thin route handlers — logic in `src/lib/`
+- Always authenticate **and** authorize protected routes
+- Never log secrets (API keys, tokens, full JWTs)
+- Never commit `.env` — keep `.env.example` current
+- CORS is an allowlist from `CORS_ORIGIN` (comma-separated) — never `*`
 
-## Environment variables
+## Environment
 
-Required (validated in `src/env.ts`):
+```bash
+cp .env.example .env
+npm install
+npx prisma migrate dev    # local schema
+npm run dev               # http://localhost:4000
+```
 
 | Variable | Purpose |
 |---|---|
-| `NODE_ENV` | `development` / `production` / `test` |
-| `PORT` | Server port (default `4000`) |
-| `CORS_ORIGIN` | Allowed frontend origin(s), comma-separated |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_ANON_KEY` | Supabase anon key (JWT validation) |
-| `ANTHROPIC_API_KEY` | Anthropic API key for all `/ai/*` routes |
-
-Copy `.env.example` → `.env` for local dev.
-
-## Running locally
-
-```bash
-npm install
-npm run dev      # tsx watch, http://localhost:4000
-npm run build    # tsc → dist/
-npm run start    # node dist/index.js
-npm run typecheck
-```
+| `DATABASE_URL` | Postgres (Railway injects in prod) |
+| `JWT_SECRET` | Current auth tokens (`openssl rand -base64 48`) |
+| `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
+| `SUPABASE_URL` | Target — Supabase project URL |
+| `SUPABASE_ANON_KEY` | Target — JWT validation |
+| `ANTHROPIC_API_KEY` | Target — all `/ai/*` routes |
 
 Health check: `GET /health` → `{ "status": "ok" }`
 
 ## Related repos
 
-| Repo | Role |
+| GitHub repo | Role |
 |---|---|
-| `meridies-app-real` | Production-intent frontend (calls this API) |
-| `meridies-app` | Static demo — does not call this backend |
-| `merides-landing` | Marketing site — no backend integration |
+| `MeridiesAI/meridies-app` | Production frontend — calls this API |
+| `MeridiesAI/meridies-demo` | Mock demo — does not call this API |
+| `MeridiesAI/meridies-landing` | Marketing — no backend |
 
-When the frontend needs a new capability, add the route here first, then wire `lib/api.ts` in `meridies-app-real`.
+**Cross-repo rule:** ship backend routes before the frontend wires them in `lib/api.ts`.
+
+## Git workflow
+
+```bash
+git checkout main && git pull
+git checkout -b feat/short-description
+npm run typecheck && npm run build
+# open PR — include migration file if schema changed
+```
+
+Railway runs `prisma migrate deploy` on start — **a deploy is a migration**. Never edit applied migrations; write new ones.
