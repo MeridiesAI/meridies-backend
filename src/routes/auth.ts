@@ -1,89 +1,118 @@
-import bcrypt from "bcryptjs";
+/**
+ * Identity. There is no signup/login here any more — Supabase Auth owns that,
+ * and the frontend talks to it directly. This route only answers "who am I"
+ * and lets a user edit their own profile.
+ */
+
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { prisma } from "../lib/prisma.js";
-import { loadUserDTO } from "../lib/serialize.js";
-
-const BCRYPT_ROUNDS = 12;
-
-const signupSchema = z.object({
-  fullName: z.string().trim().min(1).max(200),
-  email: z.string().trim().toLowerCase().email(),
-  password: z.string().min(8).max(200),
-  role: z.enum(["student", "counselor"]),
-});
-
-const loginSchema = z.object({
-  email: z.string().trim().toLowerCase().email(),
-  password: z.string().min(1),
-});
+import { fromPostgrest, notFound } from "../lib/errors.js";
+import { limit } from "../lib/limits.js";
+import { toMeridiesUser } from "../lib/serialize.js";
 
 const updateMeSchema = z
   .object({
     fullName: z.string().trim().min(1).max(200),
-    onboardingStep: z.number().int().min(0),
+    onboardingStep: z.number().int().min(0).max(50),
     onboardingComplete: z.boolean(),
+    phone: z.string().trim().max(40),
+    timezone: z.string().trim().max(80),
+    title: z.string().trim().max(120),
+    headline: z.string().trim().max(300),
+    hometown: z.string().trim().max(200),
+    highSchool: z.string().trim().max(200),
+    gradYear: z.string().trim().max(10),
+    // Free-form intake answers. Merged, not replaced, so a partial save can
+    // never wipe answers the client didn't happen to send.
     profile: z.record(z.unknown()),
   })
-  .partial();
+  .partial()
+  .strict();
+
+/** Confirm an OAuth sign-up's role, exactly once. */
+const confirmRoleSchema = z.object({ role: z.enum(["student", "counselor"]) });
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.post("/signup", async (request, reply) => {
-    const body = signupSchema.parse(request.body);
+  app.get("/me", { preHandler: app.authenticate }, async (request) => {
+    const p = request.profile;
 
-    const existing = await prisma.user.findUnique({ where: { email: body.email } });
-    if (existing) {
-      return reply.code(409).send({ error: "An account with that email already exists" });
+    let counselorName: string | null = null;
+    if (p.counselor_id) {
+      const { data } = await request.db
+        .from("profiles")
+        .select("full_name")
+        .eq("id", p.counselor_id)
+        .maybeSingle();
+      counselorName = data?.full_name ?? null;
     }
 
-    const passwordHash = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
-    const user = await prisma.user.create({
-      data: {
-        fullName: body.fullName,
-        email: body.email,
-        passwordHash,
-        role: body.role,
-      },
-    });
-
-    const token = app.jwt.sign({ sub: user.id, role: user.role });
-    const dto = await loadUserDTO(user.id);
-    return reply.code(201).send({ user: dto, token });
+    return toMeridiesUser(p, { counselorName });
   });
 
-  app.post("/login", async (request, reply) => {
-    const body = loginSchema.parse(request.body);
+  app.patch(
+    "/me",
+    { preHandler: [app.authenticate, limit("auth:patch", 60, 60)] },
+    async (request) => {
+      const patch = updateMeSchema.parse(request.body);
 
-    const user = await prisma.user.findUnique({ where: { email: body.email } });
-    if (!user) {
-      return reply.code(401).send({ error: "Invalid email or password" });
+      const update: Record<string, unknown> = {};
+      if (patch.fullName !== undefined) update.full_name = patch.fullName;
+      if (patch.onboardingStep !== undefined) update.onboarding_step = patch.onboardingStep;
+      if (patch.onboardingComplete !== undefined)
+        update.onboarding_complete = patch.onboardingComplete;
+      if (patch.phone !== undefined) update.phone = patch.phone;
+      if (patch.timezone !== undefined) update.timezone = patch.timezone;
+      if (patch.title !== undefined) update.title = patch.title;
+      if (patch.headline !== undefined) update.headline = patch.headline;
+      if (patch.hometown !== undefined) update.hometown = patch.hometown;
+      if (patch.highSchool !== undefined) update.high_school = patch.highSchool;
+      if (patch.gradYear !== undefined) update.grad_year = patch.gradYear;
+      if (patch.profile !== undefined) {
+        update.profile = { ...(request.profile.profile ?? {}), ...patch.profile };
+      }
+
+      // `role` is deliberately absent: a user cannot promote themselves.
+      const { data, error } = await request.db
+        .from("profiles")
+        .update(update)
+        .eq("id", request.auth.userId)
+        .select("*")
+        .maybeSingle();
+
+      if (error) throw fromPostgrest(error);
+      if (!data) throw notFound("Profile not found");
+
+      return toMeridiesUser(data as never, { counselorName: null });
     }
+  );
 
-    const valid = await bcrypt.compare(body.password, user.passwordHash);
-    if (!valid) {
-      return reply.code(401).send({ error: "Invalid email or password" });
+  /**
+   * OAuth sign-ups never pick a role, so handle_new_user defaults them to
+   * `student` with role_confirmed=false. This sets the real role once.
+   *
+   * It goes through the `confirm_user_role` function rather than an UPDATE,
+   * because `profiles.role` is not writable by `authenticated` at all — that
+   * column grant was revoked after a check showed a student could otherwise
+   * PATCH themselves into a counselor straight through PostgREST.
+   */
+  app.post(
+    "/confirm-role",
+    { preHandler: [app.authenticate, limit("auth:confirm-role", 10, 3600)] },
+    async (request, reply) => {
+      const { role } = confirmRoleSchema.parse(request.body);
+
+      const { data, error } = await request.db.rpc("confirm_user_role", { p_role: role });
+
+      if (error) {
+        if (/already set/i.test(error.message ?? "")) {
+          return reply.code(409).send({
+            error: "Your role is already set. Contact support to change it.",
+          });
+        }
+        throw fromPostgrest(error);
+      }
+
+      return toMeridiesUser(data as never, { counselorName: null });
     }
-
-    const token = app.jwt.sign({ sub: user.id, role: user.role });
-    const dto = await loadUserDTO(user.id);
-    return reply.send({ user: dto, token });
-  });
-
-  app.get("/me", { preHandler: app.authenticate }, async (request, reply) => {
-    const dto = await loadUserDTO(request.user.sub);
-    if (!dto) return reply.code(404).send({ error: "User not found" });
-    return reply.send({ user: dto });
-  });
-
-  app.patch("/me", { preHandler: app.authenticate }, async (request, reply) => {
-    const patch = updateMeSchema.parse(request.body);
-
-    await prisma.user.update({
-      where: { id: request.user.sub },
-      data: patch as Record<string, unknown>,
-    });
-
-    const dto = await loadUserDTO(request.user.sub);
-    return reply.send({ user: dto });
-  });
+  );
 }

@@ -1,17 +1,18 @@
-import "@fastify/jwt";
 import "fastify";
-
-type JwtPayload = { sub: string; role: "student" | "counselor" };
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Profile } from "../lib/serialize.js";
 
 declare module "fastify" {
   interface FastifyInstance {
     authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
-}
 
-declare module "@fastify/jwt" {
-  interface FastifyJWT {
-    payload: JwtPayload;
-    user: JwtPayload;
+  interface FastifyRequest {
+    /** Set by the supabaseAuth plugin on authenticated routes. */
+    auth: { userId: string; email?: string; token: string };
+    /** Supabase client bound to the caller's JWT, so RLS applies to every query. */
+    db: SupabaseClient;
+    /** The caller's own profiles row. */
+    profile: Profile;
   }
 }
