@@ -8,27 +8,24 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "prisma generate && tsc -p tsconfig.json",
-    "start": "prisma migrate deploy && node dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "postinstall": "prisma generate",
-    "prisma:studio": "prisma studio",
-    "prisma:migrate": "prisma migrate dev"
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
     "@fastify/cors": "^10.0.0",
-    "@fastify/jwt": "^10.0.0",
-    "@prisma/client": "^6.1.0",
-    "bcryptjs": "^2.4.3",
+    "@fastify/rate-limit": "^10.2.2",
+    "@supabase/supabase-js": "^2.112.1",
     "dotenv": "^16.4.5",
     "fastify": "^5.1.0",
     "fastify-plugin": "^5.0.1",
+    "jose": "^5.9.6",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.10.2",
-    "prisma": "^6.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
