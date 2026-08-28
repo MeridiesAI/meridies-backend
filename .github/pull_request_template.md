@@ -1,10 +1,11 @@
-## What
+## Summary
 
-One or two sentences. What changed and why.
+One or two sentences: what changed. A reviewer should be able to stop here and
+know what they're looking at.
 
 ## Why
 
-The problem this solves. Link the issue if there is one.
+The problem this solves, and why this approach. Link the issue if there is one.
 
 ## Repos affected
 
@@ -21,7 +22,7 @@ The problem this solves. Link the issue if there is one.
 
 ## Migrations / env changes
 
-- [ ] Prisma migration included
+- [ ] Schema migration included
 - [ ] New env var — added to `.env.example` AND set on Railway
 - [ ] None
 
