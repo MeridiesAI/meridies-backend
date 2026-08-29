@@ -148,6 +148,104 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
   }
 }
 
+export type ChatTurn = { role: "user" | "assistant"; content: string };
+
+/**
+ * Streaming chat completion. Unlike runStructured this is multi-turn, free-form
+ * text, and streams token deltas via `onDelta` — but it keeps the same audit +
+ * quota discipline: a daily-call gate, an `ai_runs` row, and output-token
+ * accounting on completion. Callers are responsible for transport (SSE).
+ */
+export async function streamChat(opts: {
+  request: FastifyRequest;
+  studentId?: string | null;
+  system: string;
+  messages: ChatTurn[];
+  model?: string;
+  maxTokens?: number;
+  onDelta: (text: string) => void;
+}): Promise<{ text: string; runId: string | null }> {
+  const { request, studentId } = opts;
+  const actorId = request.auth.userId;
+
+  await enforceQuota(
+    actorId,
+    "ai_calls",
+    "day",
+    DAILY_AI_CALL_LIMIT,
+    "You've hit today's AI limit. It resets at midnight."
+  );
+
+  const model = opts.model ?? FAST_MODEL;
+  const svc = serviceClient();
+  const startedAt = Date.now();
+
+  let runId: string | null = null;
+  if (svc) {
+    const { data } = await svc
+      .from("ai_runs")
+      .insert({
+        actor_id: actorId,
+        student_id: studentId ?? null,
+        module: "chat",
+        model,
+        status: "running",
+        input: { promptChars: opts.messages.reduce((n, m) => n + m.content.length, 0) },
+      })
+      .select("id")
+      .single();
+    runId = data?.id ?? null;
+  }
+
+  const finish = async (status: "succeeded" | "failed", extra: Record<string, unknown>) => {
+    if (!svc || !runId) return;
+    await svc
+      .from("ai_runs")
+      .update({
+        status,
+        latency_ms: Date.now() - startedAt,
+        completed_at: new Date().toISOString(),
+        ...extra,
+      })
+      .eq("id", runId);
+  };
+
+  try {
+    let text = "";
+    const stream = anthropic().messages.stream({
+      model,
+      max_tokens: opts.maxTokens ?? 1200,
+      system: opts.system,
+      messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
+    });
+    stream.on("text", (delta: string) => {
+      text += delta;
+      opts.onDelta(delta);
+    });
+
+    const final = await stream.finalMessage();
+    await finish("succeeded", {
+      input_tokens: final.usage.input_tokens,
+      output_tokens: final.usage.output_tokens,
+    });
+    await enforceQuota(
+      actorId,
+      "ai_output_tokens",
+      "month",
+      5_000_000,
+      "Monthly AI usage limit reached.",
+      final.usage.output_tokens
+    ).catch(() => undefined);
+
+    return { text, runId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown error";
+    await finish("failed", { error: message.slice(0, 500) });
+    request.log.error({ module: "chat", err }, "AI chat stream failed");
+    throw err;
+  }
+}
+
 /**
  * The essay guardrail.
  *
