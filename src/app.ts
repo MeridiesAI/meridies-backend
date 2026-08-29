@@ -24,6 +24,11 @@ export function buildApp() {
     // came from the same address and the per-IP limiter is useless.
     trustProxy: true,
     bodyLimit: 1_048_576,
+    // A client whose base URL ends in "/" sends "//auth/me". Fastify treats
+    // that as a distinct, unrouted path and 404s, which reads like the endpoint
+    // is missing rather than like a config typo. Collapse them instead.
+    ignoreDuplicateSlashes: true,
+    ignoreTrailingSlash: true,
   });
 
   app.register(cors, { origin: corsOrigins, credentials: true });
