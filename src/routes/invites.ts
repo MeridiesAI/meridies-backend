@@ -1,144 +1,158 @@
 /**
- * Counselors mint invite codes; students redeem them.
+ * Counselors invite students by email; students accept a tokenized link.
  *
- * Redemption goes through the `redeem_invite_code` database function rather
- * than a SELECT-then-UPDATE here: clients can't read codes they don't own, so a
- * code has to be *known*, not discovered. The function also does the linkage in
- * one transaction, which a two-step API call cannot.
+ * The linkage (setting the student's `counselor_id`) goes through the
+ * `accept_invitation` database function, not a SELECT-then-UPDATE here: that
+ * column's UPDATE grant is withheld from `authenticated`, so a SECURITY DEFINER
+ * function is the only writer — and the token can't be enumerated, so an invite
+ * has to be *received*, not discovered.
  */
 
+import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { env } from "../env.js";
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { formatInviteCode, generateInviteCode, isValidInviteCode } from "../lib/invite-code.js";
 import { enforceQuota, limit } from "../lib/limits.js";
-import { toInvite, toMeridiesUser } from "../lib/serialize.js";
+import { sendInviteEmail } from "../lib/email.js";
+import { anonClient } from "../lib/supabase.js";
+import { toInvitation, toMeridiesUser } from "../lib/serialize.js";
 
-const redeemSchema = z.object({ code: z.string().trim().min(1).max(20) });
-const createSchema = z
-  .object({
-    label: z.string().trim().max(120).optional(),
-    expiresInDays: z.number().int().min(1).max(365).optional(),
-  })
-  .optional();
+const inviteSchema = z
+  .object({ email: z.string().trim().toLowerCase().email().max(320) })
+  .strict();
+const revokeSchema = z.object({ id: z.string().uuid() }).strict();
+const acceptSchema = z.object({ token: z.string().trim().min(10).max(200) }).strict();
+const previewSchema = z.object({ token: z.string().trim().min(10).max(200) });
 
-const MAX_GENERATE_ATTEMPTS = 5;
+/** Unguessable capability. base64url of 24 random bytes ≈ 192 bits. */
+function newToken(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+function appJoinUrl(token: string): string {
+  return `${env.APP_URL.replace(/\/+$/, "")}/join/${token}`;
+}
 
 export default async function inviteRoutes(app: FastifyInstance) {
+  // Counselor invites a student by email — creates the invitation and emails it.
   app.post(
     "/",
-    {
-      preHandler: [app.authenticate, requireRole("counselor"), limit("invites:create", 20, 3600)],
-    },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:create", 30, 3600)] },
     async (request, reply) => {
-      const body = createSchema.parse(request.body ?? undefined) ?? {};
+      const { email } = inviteSchema.parse(request.body);
 
-      // A counselor with a legitimate roster still doesn't mint 200 codes a day.
+      // A real roster doesn't send 100 invites a day.
       await enforceQuota(
         request.auth.userId,
         "invites",
         "day",
-        50,
-        "You've generated a lot of invite codes today. Try again tomorrow."
+        100,
+        "You've sent a lot of invitations today. Try again tomorrow."
       );
 
-      const expiresAt = body.expiresInDays
-        ? new Date(Date.now() + body.expiresInDays * 86_400_000).toISOString()
-        : null;
-
-      for (let attempt = 0; attempt < MAX_GENERATE_ATTEMPTS; attempt++) {
-        const code = generateInviteCode();
-        const { data, error } = await request.db
-          .from("invite_codes")
-          .insert({
-            code,
-            counselor_id: request.auth.userId,
-            label: body.label ?? null,
-            expires_at: expiresAt,
-          })
-          .select("code, created_at, redeemed_at, label, expires_at, revoked_at")
-          .single();
-
-        if (!error && data) return reply.code(201).send(toInvite(data));
-        // Unique collision on `code` is vanishingly rare — just try again.
-        if (error && error.code !== "23505") throw fromPostgrest(error);
-      }
-
-      throw conflict("Could not generate a unique invite code, try again");
-    }
-  );
-
-  app.get(
-    "/",
-    { preHandler: [app.authenticate, requireRole("counselor")] },
-    async (request) => {
-      const { data, error } = await request.db
-        .from("invite_codes")
-        .select(
-          "code, created_at, redeemed_at, label, expires_at, revoked_at, " +
-            "redeemed_by_profile:profiles!invite_codes_redeemed_by_fkey(full_name)"
-        )
+      // Supersede any still-pending invite to the same address so a resend
+      // doesn't pile up duplicates — the newest link is the one that works.
+      await request.db
+        .from("invitations")
+        .update({ status: "revoked" })
         .eq("counselor_id", request.auth.userId)
-        .order("created_at", { ascending: false })
-        .limit(200);
+        .eq("email", email)
+        .eq("status", "pending");
 
+      const token = newToken();
+      const { data, error } = await request.db
+        .from("invitations")
+        .insert({ counselor_id: request.auth.userId, email, token })
+        .select("id, email, status, created_at, expires_at, accepted_at")
+        .single();
       if (error) throw fromPostgrest(error);
-      return (data ?? []).map((row) => toInvite(row as never));
+
+      const { sent } = await sendInviteEmail({
+        to: email,
+        counselorName: request.profile.full_name ?? null,
+        acceptUrl: appJoinUrl(token),
+        logger: request.log,
+      });
+
+      return reply.code(201).send({ ...toInvitation(data), emailSent: sent });
     }
   );
 
+  // Counselor lists their invitations (pending + accepted + revoked).
+  app.get("/", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request) => {
+    const { data, error } = await request.db
+      .from("invitations")
+      .select(
+        "id, email, status, created_at, expires_at, accepted_at, " +
+          "accepted_by_profile:profiles!invitations_accepted_by_fkey(full_name)"
+      )
+      .eq("counselor_id", request.auth.userId)
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    if (error) throw fromPostgrest(error);
+    return (data ?? []).map((row) => toInvitation(row as never));
+  });
+
+  // Counselor revokes a still-pending invitation.
   app.post(
     "/revoke",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:revoke", 60, 3600)] },
     async (request) => {
-      const { code } = redeemSchema.parse(request.body);
+      const { id } = revokeSchema.parse(request.body);
       const { data, error } = await request.db
-        .from("invite_codes")
-        .update({ revoked_at: new Date().toISOString() })
-        .eq("code", formatInviteCode(code))
+        .from("invitations")
+        .update({ status: "revoked" })
+        .eq("id", id)
         .eq("counselor_id", request.auth.userId)
-        .is("redeemed_by", null)
-        .select("code, created_at, redeemed_at, label, expires_at, revoked_at")
+        .eq("status", "pending")
+        .select("id, email, status, created_at, expires_at, accepted_at")
         .maybeSingle();
 
       if (error) throw fromPostgrest(error);
-      if (!data) throw notFound("No unredeemed code of yours matches that");
-      return toInvite(data);
+      if (!data) throw notFound("No pending invitation of yours matches that");
+      return toInvitation(data);
     }
   );
 
+  // Public: the accept landing page shows who invited the student, before they
+  // have an account. The token is the secret; this returns nothing an invited
+  // student doesn't already know.
+  app.get("/preview", async (request) => {
+    const { token } = previewSchema.parse(request.query);
+    const { data, error } = await anonClient().rpc("invitation_preview", { p_token: token });
+    if (error) throw fromPostgrest(error);
+    const row = (Array.isArray(data) ? data[0] : data) as
+      | { counselor_name?: string | null; invited_email?: string | null; valid?: boolean }
+      | undefined;
+    return {
+      counselorName: row?.counselor_name ?? null,
+      invitedEmail: row?.invited_email ?? null,
+      valid: Boolean(row?.valid),
+    };
+  });
+
+  // Signed-in student accepts an invitation → linked to the counselor.
   app.post(
-    "/redeem",
+    "/accept",
     {
-      // Tight: this is the one endpoint where guessing has a payoff.
       preHandler: [
         app.authenticate,
         requireRole("student"),
-        limit("invites:redeem", 10, 3600, "Too many invite attempts. Try again in an hour."),
+        limit("invites:accept", 15, 3600, "Too many attempts. Try again in an hour."),
       ],
     },
     async (request) => {
-      const { code } = redeemSchema.parse(request.body);
-      if (!isValidInviteCode(code)) throw badRequest("That code isn't formatted correctly");
+      const { token } = acceptSchema.parse(request.body);
 
-      const { error } = await request.db.rpc("redeem_invite_code", {
-        p_code: formatInviteCode(code),
-      });
-
+      const { error } = await request.db.rpc("accept_invitation", { p_token: token });
       if (error) {
-        // The function raises with meaningful, non-enumerable messages.
-        const message = error.message?.replace(/^ERROR:\s*/i, "") || "Could not redeem that code";
-        const status = /already been used|already connected/i.test(message)
-          ? 409
-          : /does not exist/i.test(message)
-            ? 404
-            : 400;
-        throw status === 409
-          ? conflict(message)
-          : status === 404
-            ? notFound(message)
-            : badRequest(message);
+        const message =
+          error.message?.replace(/^ERROR:\s*/i, "") || "Could not accept that invitation";
+        const isConflict = /already been used|already connected/i.test(message);
+        throw isConflict ? conflict(message) : badRequest(message);
       }
 
       const { data: profile, error: profileError } = await request.db
