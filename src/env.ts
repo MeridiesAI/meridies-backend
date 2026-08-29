@@ -12,6 +12,16 @@ const envSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(20).optional(),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
+
+  // Outbound email (student invitations). Optional: without the key, invite
+  // creation still works but the email is skipped and logged, rather than
+  // failing the request.
+  RESEND_API_KEY: z.string().min(10).optional(),
+  // "Display Name <address@domain>". Until a domain is verified in Resend, the
+  // only deliverable default is Resend's shared onboarding address.
+  INVITE_FROM_EMAIL: z.string().default("MeridiesAI <onboarding@resend.dev>"),
+  // Base URL of the frontend, used to build the invite accept link.
+  APP_URL: z.string().url().default("https://app.meridiesai.com"),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -31,3 +41,4 @@ export const corsOrigins = env.CORS_ORIGIN.split(",")
 
 export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
+export const hasResend = Boolean(env.RESEND_API_KEY);

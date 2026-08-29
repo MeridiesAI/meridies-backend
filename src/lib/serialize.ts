@@ -208,16 +208,16 @@ export const toDeadline = (r: Row) => ({
   done: Boolean(r.done),
 });
 
-export const toInvite = (r: Row) => {
-  const redeemer = r.redeemed_by_profile as Row | null | undefined;
+export const toInvitation = (r: Row) => {
+  const accepter = r.accepted_by_profile as Row | null | undefined;
   return {
-    code: str(r.code),
+    id: str(r.id),
+    email: str(r.email),
+    status: str(r.status) as "pending" | "accepted" | "revoked",
     createdAt: str(r.created_at),
-    redeemedAt: r.redeemed_at ? str(r.redeemed_at) : null,
-    redeemedByName: redeemer ? str(redeemer.full_name) : null,
-    label: str(r.label),
     expiresAt: r.expires_at ? str(r.expires_at) : null,
-    revokedAt: r.revoked_at ? str(r.revoked_at) : null,
+    acceptedAt: r.accepted_at ? str(r.accepted_at) : null,
+    acceptedByName: accepter ? str(accepter.full_name) : null,
   };
 };
 

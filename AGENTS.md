@@ -64,10 +64,12 @@ Two things the database enforces that the API must not be trusted to:
 - **`profiles.role` is not writable by `authenticated`.** The table-level UPDATE
   grant was dropped and re-issued per column. Role changes go through
   `confirm_user_role()`, which succeeds exactly once. Same for `counselor_id`,
-  which only `redeem_invite_code()` writes.
-- **Invite codes can't be enumerated.** There is no SELECT policy for codes you
-  don't own; redemption matches an exact code inside a SECURITY DEFINER
-  function, so a student has to already know it.
+  which only `accept_invitation()` writes.
+- **Invitation tokens can't be enumerated.** Counselors invite students by email
+  (`routes/invites.ts` → Resend via `lib/email.ts`); the emailed link carries an
+  unguessable token. There is no SELECT policy that exposes a pending invite to
+  the invitee — `invitation_preview()` and `accept_invitation()` are SECURITY
+  DEFINER, so an invite has to be *received*, not discovered.
 
 ## Rate limiting
 

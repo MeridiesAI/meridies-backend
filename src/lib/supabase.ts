@@ -36,3 +36,18 @@ export function serviceClient(): SupabaseClient | null {
   }
   return cachedServiceClient;
 }
+
+let cachedAnonClient: SupabaseClient | null = null;
+
+/**
+ * Anon key, no user token. For public RPCs a signed-out caller may run — e.g.
+ * `invitation_preview`, which an invited student hits before they have an
+ * account. RLS still applies; these RPCs are SECURITY DEFINER and granted to
+ * `anon` deliberately.
+ */
+export function anonClient(): SupabaseClient {
+  if (!cachedAnonClient) {
+    cachedAnonClient = createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, common);
+  }
+  return cachedAnonClient;
+}
