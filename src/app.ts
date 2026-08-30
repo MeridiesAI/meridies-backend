@@ -9,6 +9,7 @@ import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
 import authRoutes from "./routes/auth.js";
+import chatRoutes from "./routes/chat.js";
 import deadlineRoutes from "./routes/deadlines.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
@@ -46,6 +47,7 @@ export function buildApp() {
   app.register(accountabilityRoutes, { prefix: "/accountability" });
   app.register(opportunityRoutes, { prefix: "/opportunities" });
   app.register(aiRoutes, { prefix: "/ai" });
+  app.register(chatRoutes, { prefix: "/chat" });
 
   app.addHook("onReady", async () => {
     if (!hasServiceRole) {
