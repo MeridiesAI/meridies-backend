@@ -18,6 +18,27 @@ const idParam = z.object({ id: z.string().uuid() });
 const listQuery = z.object({ studentId: z.string().uuid().optional() });
 
 /**
+ * `studentId` is routing, not a column.
+ *
+ * It tells the handler which student the caller means; the row's `student_id`
+ * comes from `resolveStudentId` after authorization, never from the body. Every
+ * collection body schema is `.strict()`, so leaving it in the object handed to
+ * Zod makes a counselor's write fail validation — and omitting it makes
+ * `resolveStudentId` throw 403, because a counselor has no implicit self.
+ * Splitting it off before parsing is what lets a counselor write at all.
+ */
+function splitStudentId(raw: unknown): {
+  studentId: string | undefined;
+  rest: Record<string, unknown>;
+} {
+  if (raw === null || typeof raw !== "object") {
+    return { studentId: undefined, rest: {} };
+  }
+  const { studentId, ...rest } = raw as { studentId?: string } & Record<string, unknown>;
+  return { studentId, rest };
+}
+
+/**
  * An extra equality filter the list route accepts, e.g.
  * `{ param: "deliverableId", column: "deliverable_id" }` so a task's stages can
  * be fetched without a second, hand-written route that has to repeat the
@@ -96,12 +117,9 @@ export function registerCollection<T extends ZodTypeAny>(
     `/${path}`,
     { preHandler: [app.authenticate, limit(`${path}:create`, 120, 60)] },
     async (request, reply) => {
-      const parsed = (body as ZodTypeAny).parse(request.body) as Record<string, unknown>;
-      const student = await resolveStudentId(
-        request,
-        (request.body as { studentId?: string })?.studentId,
-        "edit"
-      );
+      const { studentId, rest } = splitStudentId(request.body);
+      const parsed = (body as ZodTypeAny).parse(rest) as Record<string, unknown>;
+      const student = await resolveStudentId(request, studentId, "edit");
 
       await opts.beforeWrite?.(request, student, parsed, "insert");
 
@@ -122,7 +140,8 @@ export function registerCollection<T extends ZodTypeAny>(
     { preHandler: [app.authenticate, limit(`${path}:update`, 240, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
-      const parsed = (body as ZodTypeAny).parse(request.body) as Record<string, unknown>;
+      const { rest } = splitStudentId(request.body);
+      const parsed = (body as ZodTypeAny).parse(rest) as Record<string, unknown>;
 
       // Read the row first so we authorize against its real owner rather than
       // a student id the client supplied.
