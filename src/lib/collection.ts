@@ -40,6 +40,18 @@ export type CollectionOptions<T extends ZodTypeAny> = {
   orderBy?: { column: string; ascending?: boolean };
   /** Optional `?param=` equality filters on the list route. */
   filters?: CollectionFilter[];
+  /**
+   * Called after authorization and before the write lands. The place to assert
+   * a relationship the student_id check can't see — e.g. that a nested row's
+   * parent really belongs to this student — or to narrow what a role may set.
+   * Throw to reject.
+   */
+  beforeWrite?: (
+    request: FastifyRequest,
+    studentId: string,
+    values: Record<string, unknown>,
+    action: "insert" | "update"
+  ) => Promise<void>;
   /** Called after a successful insert/update, e.g. to log progress events. */
   afterWrite?: (
     request: FastifyRequest,
@@ -91,6 +103,8 @@ export function registerCollection<T extends ZodTypeAny>(
         "edit"
       );
 
+      await opts.beforeWrite?.(request, student, parsed, "insert");
+
       const { data, error } = await request.db
         .from(table)
         .insert({ ...parsed, student_id: student })
@@ -121,6 +135,7 @@ export function registerCollection<T extends ZodTypeAny>(
       if (!existing) throw notFound();
 
       await resolveStudentId(request, existing.student_id as string, "edit");
+      await opts.beforeWrite?.(request, existing.student_id as string, parsed, "update");
 
       const { data, error } = await request.db
         .from(table)
