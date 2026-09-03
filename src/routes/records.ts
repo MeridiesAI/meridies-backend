@@ -6,14 +6,15 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { fromPostgrest, notFound } from "../lib/errors.js";
-import { resolveStudentId } from "../lib/guards.js";
+import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
   toActivity,
   toAward,
   toCollege,
   toEssay,
+  toEssayMark,
   toNote,
   toPolygonAxis,
 } from "../lib/serialize.js";
@@ -372,4 +373,266 @@ export default async function recordRoutes(app: FastifyInstance) {
       return { deleted: true };
     }
   );
+
+  // ---- Essay marks (two-dimensional review) --------------------------------
+  //
+  // Produced by POST /ai/essay-review, or written by hand. Commenting mode
+  // reads them; editing mode accepts the ones that carry a replacement, and
+  // only grammar marks ever do.
+
+  app.get("/essays/:id/marks", { preHandler: app.authenticate }, async (request) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const q = z
+      .object({ status: z.enum(["open", "accepted", "rejected", "stale"]).optional() })
+      .parse(request.query);
+
+    const { data: essay } = await request.db
+      .from("essays")
+      .select("student_id")
+      .eq("id", id)
+      .maybeSingle();
+    if (!essay) throw notFound("That essay isn't on file");
+    await resolveStudentId(request, essay.student_id as string, "view");
+
+    let builder = request.db.from("essay_marks").select("*").eq("essay_id", id);
+    if (q.status) builder = builder.eq("status", q.status);
+
+    const { data, error } = await builder.order("start_offset").limit(500);
+    if (error) throw fromPostgrest(error);
+    return (data ?? []).map((r) => toEssayMark(r as Record<string, unknown>));
+  });
+
+  /**
+   * A counselor's own mark.
+   *
+   * The dimension rule still holds — a content mark carries no replacement —
+   * because that is what keeps content edits out of the product. The tighter
+   * filter applied to model output is not applied here: a counselor typing a
+   * correction on their own student's draft is an editorial act, not the
+   * product generating prose.
+   */
+  app.post(
+    "/essays/:id/marks",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("marks:create", 240, 60)] },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const b = z
+        .object({
+          dimension: z.enum(["content", "grammar"]),
+          severity: z.enum(["critical", "major", "minor", "suggestion"]).optional(),
+          category: z.string().trim().max(60).optional(),
+          startOffset: z.number().int().min(0),
+          endOffset: z.number().int().min(0),
+          comment: z.string().trim().min(1).max(240),
+          suggestedReplacement: z.string().trim().max(200).nullable().optional(),
+        })
+        .strict()
+        .parse(request.body);
+
+      if (b.endOffset <= b.startOffset) throw badRequest("That selection is empty");
+
+      const { data: essay } = await request.db
+        .from("essays")
+        .select("student_id, body")
+        .eq("id", id)
+        .maybeSingle();
+      if (!essay) throw notFound("That essay isn't on file");
+      await resolveStudentId(request, essay.student_id as string, "edit");
+
+      const body = String(essay.body ?? "");
+      const quoted = body.slice(b.startOffset, b.endOffset);
+      if (!quoted.trim()) throw badRequest("That selection isn't in the draft");
+
+      if (b.suggestedReplacement && b.dimension !== "grammar") {
+        throw badRequest(
+          "Replacement text is only for grammar and usage. Comment on content instead."
+        );
+      }
+
+      const { data, error } = await request.db
+        .from("essay_marks")
+        .insert({
+          student_id: essay.student_id,
+          essay_id: id,
+          dimension: b.dimension,
+          severity: b.severity ?? "suggestion",
+          category: b.category ?? null,
+          start_offset: b.startOffset,
+          end_offset: b.endOffset,
+          quoted_text: quoted,
+          comment: b.comment,
+          suggested_replacement: b.suggestedReplacement ?? null,
+          created_by: "counselor",
+          author_id: request.auth.userId,
+        })
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return reply.code(201).send(toEssayMark(data as Record<string, unknown>));
+    }
+  );
+
+  /**
+   * Accept or reject a mark. Accepting a grammar mark with a replacement is
+   * editing mode: the span is spliced into the draft, and every other open mark
+   * is re-anchored, because an applied edit moves every offset after it.
+   *
+   * If the draft has changed under the mark, nothing is written — the mark goes
+   * 'stale' and the caller is told, rather than a correction landing in the
+   * wrong place in a student's essay.
+   */
+  app.patch(
+    "/essay-marks/:id",
+    { preHandler: [app.authenticate, limit("marks:update", 240, 60)] },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      // Only accept or reject: reopening an accepted mark would suggest the
+      // applied edit could be taken back, and it can't be.
+      const b = z
+        .object({ status: z.enum(["accepted", "rejected"]) })
+        .strict()
+        .parse(request.body);
+
+      const { data: mark } = await request.db
+        .from("essay_marks")
+        .select("*")
+        .eq("id", id)
+        .maybeSingle();
+      if (!mark) throw notFound("That mark isn't on file");
+      await resolveStudentId(request, mark.student_id as string, "edit");
+
+      const applies =
+        b.status === "accepted" &&
+        mark.dimension === "grammar" &&
+        typeof mark.suggested_replacement === "string" &&
+        mark.suggested_replacement.length > 0;
+
+      if (!applies) {
+        const { data, error } = await request.db
+          .from("essay_marks")
+          .update({ status: b.status })
+          .eq("id", id)
+          .select("*")
+          .maybeSingle();
+        if (error) throw fromPostgrest(error);
+        if (!data) throw notFound();
+        return toEssayMark(data as Record<string, unknown>);
+      }
+
+      const { data: essay } = await request.db
+        .from("essays")
+        .select("id, body, word_count")
+        .eq("id", mark.essay_id as string)
+        .maybeSingle();
+      if (!essay) throw notFound("That essay isn't on file");
+
+      const body = String(essay.body ?? "");
+      const start = Number(mark.start_offset);
+      const end = Number(mark.end_offset);
+      const quoted = String(mark.quoted_text);
+
+      if (body.slice(start, end) !== quoted) {
+        await request.db.from("essay_marks").update({ status: "stale" }).eq("id", id);
+        return reply
+          .code(409)
+          .send({ error: "The draft changed since this mark was made. Re-run the review." });
+      }
+
+      const replacement = String(mark.suggested_replacement);
+      const next = body.slice(0, start) + replacement + body.slice(end);
+      const delta = replacement.length - quoted.length;
+      const wordCount = next.trim() ? next.trim().split(/\s+/).length : 0;
+
+      const { error: essayError } = await request.db
+        .from("essays")
+        .update({ body: next, word_count: wordCount })
+        .eq("id", essay.id as string);
+      if (essayError) throw fromPostgrest(essayError);
+
+      const { data: updated, error } = await request.db
+        .from("essay_marks")
+        .update({
+          status: "accepted",
+          applied_at: new Date().toISOString(),
+          applied_by: request.auth.userId,
+        })
+        .eq("id", id)
+        .select("*")
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+
+      await reanchorMarks(request, essay.id as string, id, { start, end, delta });
+
+      // Same bookkeeping an essay edit does, so accountability sees the change.
+      await request.db.from("progress_events").insert({
+        student_id: mark.student_id as string,
+        entity_type: "essay",
+        entity_id: essay.id as string,
+        event: "edited",
+        word_count: wordCount,
+        actor_id: request.auth.userId,
+        metadata: { appliedMark: id, dimension: "grammar" },
+      });
+      await request.db
+        .from("deliverables")
+        .update({ current_words: wordCount, last_activity_at: new Date().toISOString() })
+        .eq("essay_id", essay.id as string);
+
+      return toEssayMark(updated as Record<string, unknown>);
+    }
+  );
+
+  app.delete(
+    "/essay-marks/:id",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("marks:delete", 120, 60)] },
+    async (request) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { data: mark } = await request.db
+        .from("essay_marks")
+        .select("student_id")
+        .eq("id", id)
+        .maybeSingle();
+      if (!mark) throw notFound("That mark isn't on file");
+      await resolveStudentId(request, mark.student_id as string, "edit");
+
+      const { error } = await request.db.from("essay_marks").delete().eq("id", id);
+      if (error) throw fromPostgrest(error);
+      return { deleted: true };
+    }
+  );
+}
+
+/**
+ * An applied edit shifts every offset after it. Marks entirely past the edit
+ * move by the delta; marks that overlap the edited span no longer describe what
+ * they were written about, so they go 'stale' rather than pointing at text that
+ * has changed underneath them.
+ */
+async function reanchorMarks(
+  request: FastifyRequest,
+  essayId: string,
+  appliedMarkId: string,
+  edit: { start: number; end: number; delta: number }
+): Promise<void> {
+  const { data: others } = await request.db
+    .from("essay_marks")
+    .select("id, start_offset, end_offset")
+    .eq("essay_id", essayId)
+    .eq("status", "open")
+    .neq("id", appliedMarkId);
+
+  for (const other of others ?? []) {
+    const start = Number(other.start_offset);
+    const end = Number(other.end_offset);
+
+    if (start >= edit.end) {
+      if (edit.delta === 0) continue;
+      await request.db
+        .from("essay_marks")
+        .update({ start_offset: start + edit.delta, end_offset: end + edit.delta })
+        .eq("id", other.id as string);
+    } else if (end > edit.start) {
+      await request.db.from("essay_marks").update({ status: "stale" }).eq("id", other.id as string);
+    }
+  }
 }

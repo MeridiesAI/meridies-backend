@@ -34,7 +34,10 @@ function anthropic(): Anthropic {
 export type AiModule =
   | "profile-summary" | "narrative-coherence" | "family-report" | "school-reframing"
   | "college-list" | "college-fit" | "concierge" | "scholarship-match" | "award-appeal"
-  | "aid-report" | "draft-quality" | "essay-advice" | "visualizer" | "chat";
+  | "aid-report" | "draft-quality" | "essay-advice" | "visualizer" | "chat"
+  // Must stay in step with the ai_runs.module CHECK constraint; an unknown
+  // value fails the audit insert, not the request, so it would go unnoticed.
+  | "document-tracker" | "essay-review" | "link-digest";
 
 type RunOptions<T> = {
   request: FastifyRequest;
@@ -257,16 +260,77 @@ export async function streamChat(opts: {
 const MAX_BULLET_CHARS = 240;
 const MAX_SENTENCES = 2;
 
-export function enforceNoProse(bullets: string[]): string[] {
-  return bullets
-    .map((b) => b.trim())
-    .filter(Boolean)
-    .filter((b) => {
-      if (b.length > MAX_BULLET_CHARS) return false;
-      const sentences = b.split(/[.!?]+\s+/).filter((s) => s.trim().length > 0);
-      return sentences.length <= MAX_SENTENCES;
-    });
+/** One bullet's worth of advice, or a paragraph wearing a bullet's clothes. */
+export function isAdviceNotProse(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > MAX_BULLET_CHARS) return false;
+  const sentences = t.split(/[.!?]+\s+/).filter((s) => s.trim().length > 0);
+  return sentences.length <= MAX_SENTENCES;
 }
+
+export function enforceNoProse(bullets: string[]): string[] {
+  return bullets.map((b) => b.trim()).filter(isAdviceNotProse);
+}
+
+/**
+ * The editing-mode guardrail.
+ *
+ * Two-dimensional essay review may make DIRECT changes, but only to
+ * grammar/usage mechanics — "their" for "there", a missing comma, a tense
+ * slip. A replacement that rewrites the thought is essay prose with an edit
+ * button on it, and the product does not do that.
+ *
+ * Enforced here in code, on the model's output, because the schema constraint
+ * (grammar dimension, <= 200 chars) is the floor and the prompt is only a
+ * request. Returns the accepted replacement, or null when the mark must
+ * degrade to a comment.
+ */
+const MAX_EDIT_CHARS = 120;
+const MAX_EDIT_WORDS = 15;
+const MAX_EDIT_GROWTH_CHARS = 30;
+
+export function enforceMechanicalEdit(
+  dimension: "content" | "grammar",
+  quoted: string,
+  replacement: string | null | undefined
+): string | null {
+  // Content marks describe the problem. They never carry the words.
+  if (dimension !== "grammar") return null;
+
+  const next = (replacement ?? "").trim();
+  const from = quoted.trim();
+  if (!next || next === from) return null;
+
+  if (next.length > MAX_EDIT_CHARS) return null;
+  // An "edit" that balloons the span is a rewrite, whatever it is labelled.
+  if (next.length > from.length + MAX_EDIT_GROWTH_CHARS) return null;
+  if (next.split(/\s+/).filter(Boolean).length > MAX_EDIT_WORDS) return null;
+
+  // Mechanics fix a span; they do not add new sentences to it.
+  const sentenceCount = (s: string) =>
+    s.split(/[.!?]+(?:\s|$)/).filter((part) => part.trim().length > 0).length;
+  if (sentenceCount(next) > Math.max(1, sentenceCount(from))) return null;
+
+  return next;
+}
+
+export const ESSAY_REVIEW_SYSTEM = [
+  "You review a student's college application essay on exactly two dimensions:",
+  "  content quality  - does it answer the prompt, is it specific, does it show rather than assert",
+  "  grammar / usage  - spelling, agreement, punctuation, tense, word choice mechanics",
+  "",
+  "You MARK problems. You do not rewrite the essay.",
+  "",
+  "Hard rules, no exceptions:",
+  "- Never draft, ghostwrite, rewrite, continue or 'polish' the student's prose.",
+  "- Never produce example sentences the student could paste in.",
+  "- A content mark explains what is weak and what the student should do about it. It carries NO replacement text.",
+  "- A grammar mark may carry a replacement, but only a mechanical one: a corrected word, a punctuation fix, an agreement fix. Never a reworded idea.",
+  "- Every mark quotes the exact span it is about, copied verbatim from the draft.",
+  "- Each comment is at most two sentences and points at the student's own material.",
+  "",
+  "If you cannot make a point without writing prose for them, say what is missing instead.",
+].join("\n");
 
 export const NO_PROSE_SYSTEM = [
   "You advise on college application essays. You NEVER write essay prose.",

@@ -9,14 +9,19 @@ import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
 import authRoutes from "./routes/auth.js";
+import blastRoutes from "./routes/blasts.js";
 import chatRoutes from "./routes/chat.js";
+import collegeRoutes from "./routes/colleges.js";
 import deadlineRoutes from "./routes/deadlines.js";
+import fileRoutes from "./routes/files.js";
+import firmRoutes from "./routes/firms.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
 import inviteRoutes from "./routes/invites.js";
 import opportunityRoutes from "./routes/opportunities.js";
 import recordRoutes from "./routes/records.js";
 import studentRoutes from "./routes/students.js";
+import taskRoutes from "./routes/tasks.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -42,9 +47,15 @@ export function buildApp() {
   app.register(studentRoutes, { prefix: "/students" });
   app.register(deadlineRoutes, { prefix: "/deadlines" });
   app.register(recordRoutes);
+  // Catalog reads (/colleges, /high-schools) sit at the root like recordRoutes.
+  app.register(collegeRoutes);
   app.register(intakeRoutes, { prefix: "/intake" });
   app.register(aidRoutes, { prefix: "/aid" });
   app.register(accountabilityRoutes, { prefix: "/accountability" });
+  app.register(taskRoutes, { prefix: "/tasks" });
+  app.register(fileRoutes, { prefix: "/files" });
+  app.register(blastRoutes, { prefix: "/blasts" });
+  app.register(firmRoutes, { prefix: "/firms" });
   app.register(opportunityRoutes, { prefix: "/opportunities" });
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });

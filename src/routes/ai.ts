@@ -10,13 +10,17 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   DEEP_MODEL,
+  enforceMechanicalEdit,
   enforceNoProse,
+  ESSAY_REVIEW_SYSTEM,
+  isAdviceNotProse,
   NO_PROSE_SYSTEM,
   runStructured,
 } from "../lib/anthropic.js";
-import { fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { toEssayReview } from "../lib/serialize.js";
 
 const BASE_SYSTEM = [
   "You support independent college counselors at MeridiesAI.",
@@ -714,6 +718,216 @@ export default async function aiRoutes(app: FastifyInstance) {
       return { appeal: data };
     }
   );
+
+  // ---- Two-dimensional essay review ---------------------------------------
+
+  /**
+   * Score a draft on content quality AND grammar/usage, and mark the problems
+   * inline. Commenting mode reads the marks; editing mode applies the ones that
+   * carry a replacement.
+   *
+   * Three code-level guardrails, because a system prompt is a request:
+   *   1. offsets are computed HERE by locating the model's verbatim quote in the
+   *      draft — a model that miscounts characters can't mangle a student's
+   *      essay, its mark is simply dropped;
+   *   2. every comment goes through the same no-prose filter as /ai/essay-advice;
+   *   3. a replacement survives only if enforceMechanicalEdit accepts it, which
+   *      no content-dimension mark ever does.
+   */
+  app.post(
+    "/essay-review",
+    { preHandler: [app.authenticate, aiLimit("essay-review")] },
+    async (request) => {
+      const b = z
+        .object({
+          studentId: z.string().uuid(),
+          essayId: z.string().uuid(),
+          focus: z.string().trim().max(300).optional(),
+          /** 'comment' marks problems only; 'edit' also asks for mechanics fixes. */
+          mode: z.enum(["comment", "edit"]).optional(),
+        })
+        .strict()
+        .parse(request.body);
+
+      await resolveStudentId(request, b.studentId, "edit");
+
+      const { data: essay, error } = await request.db
+        .from("essays")
+        .select("id, title, prompt, school, body, word_count, word_limit")
+        .eq("id", b.essayId)
+        .eq("student_id", b.studentId)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!essay) throw notFound("That essay isn't on file");
+
+      const body = String(essay.body ?? "");
+      if (body.trim().length < 40) {
+        throw badRequest("There isn't enough of a draft to review yet");
+      }
+      const editing = b.mode === "edit";
+
+      const result = await runStructured<{
+        contentScore: number;
+        grammarScore: number;
+        contentNote: string;
+        grammarNote: string;
+        marks: {
+          dimension: "content" | "grammar";
+          severity: "critical" | "major" | "minor" | "suggestion";
+          category?: string;
+          quote: string;
+          comment: string;
+          suggestedReplacement?: string;
+        }[];
+      }>({
+        request,
+        module: "essay-review",
+        studentId: b.studentId,
+        system: ESSAY_REVIEW_SYSTEM,
+        prompt: [
+          `Prompt: ${essay.prompt ?? "(none recorded)"}`,
+          `School: ${essay.school ?? "(general)"}`,
+          `Word count: ${essay.word_count} of ${essay.word_limit ?? "no stated limit"}`,
+          b.focus ? `Counselor's focus: ${b.focus}` : "",
+          editing
+            ? "Editing mode: you may include a replacement on GRAMMAR marks only, and only a mechanical correction."
+            : "Commenting mode: mark the problems. Do not include any replacement text.",
+          "",
+          "Quote each span you mark exactly as it appears in the draft, character for character.",
+          "",
+          "Draft:",
+          body.slice(0, 20_000),
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        toolName: "essay_review",
+        maxTokens: 4000,
+        schema: {
+          type: "object",
+          properties: {
+            contentScore: { type: "number", minimum: 0, maximum: 1 },
+            grammarScore: { type: "number", minimum: 0, maximum: 1 },
+            contentNote: { type: "string", maxLength: 240 },
+            grammarNote: { type: "string", maxLength: 240 },
+            marks: {
+              type: "array",
+              maxItems: 40,
+              items: {
+                type: "object",
+                properties: {
+                  dimension: { type: "string", enum: ["content", "grammar"] },
+                  severity: {
+                    type: "string",
+                    enum: ["critical", "major", "minor", "suggestion"],
+                  },
+                  category: { type: "string", maxLength: 60 },
+                  quote: { type: "string", maxLength: 2000 },
+                  comment: { type: "string", maxLength: 240 },
+                  suggestedReplacement: { type: "string", maxLength: 200 },
+                },
+                required: ["dimension", "severity", "quote", "comment"],
+              },
+            },
+          },
+          required: ["contentScore", "grammarScore", "contentNote", "grammarNote", "marks"],
+        },
+      });
+
+      const { data: check, error: checkError } = await request.db
+        .from("draft_quality_checks")
+        .insert({
+          student_id: b.studentId,
+          essay_id: b.essayId,
+          word_count: essay.word_count,
+          content_score: clamp01(result.contentScore),
+          grammar_score: clamp01(result.grammarScore),
+          // Held to the same two-sentence discipline as every other piece of
+          // counselor-facing advice this API returns.
+          content_note: asBullet(result.contentNote),
+          grammar_note: asBullet(result.grammarNote),
+          reviewed_body_chars: body.length,
+        })
+        .select("*")
+        .single();
+      if (checkError) throw fromPostgrest(checkError);
+
+      // Anchor each mark by locating its quote, walking forwards so repeated
+      // phrases map to successive occurrences rather than all to the first.
+      let cursor = 0;
+      const rows: Record<string, unknown>[] = [];
+      for (const mark of result.marks) {
+        const quote = mark.quote;
+        if (!quote || quote.length > 2000) continue;
+
+        let start = body.indexOf(quote, cursor);
+        if (start === -1) start = body.indexOf(quote);
+        // A quote that isn't in the draft is a hallucinated span. Drop it
+        // rather than guessing where the model meant.
+        if (start === -1) continue;
+        cursor = start + quote.length;
+
+        const comment = mark.comment.trim();
+        if (!isAdviceNotProse(comment)) continue;
+
+        rows.push({
+          student_id: b.studentId,
+          essay_id: b.essayId,
+          quality_check_id: check.id,
+          dimension: mark.dimension,
+          severity: mark.severity,
+          category: mark.category?.slice(0, 60) ?? null,
+          start_offset: start,
+          end_offset: start + quote.length,
+          quoted_text: quote,
+          comment,
+          suggested_replacement: editing
+            ? enforceMechanicalEdit(mark.dimension, quote, mark.suggestedReplacement)
+            : null,
+          created_by: "ai",
+          author_id: request.auth.userId,
+        });
+      }
+
+      if (rows.length > 0) {
+        const { error: markError } = await request.db.from("essay_marks").insert(rows);
+        if (markError) throw fromPostgrest(markError);
+      }
+      await request.db
+        .from("draft_quality_checks")
+        .update({ mark_count: rows.length })
+        .eq("id", check.id);
+
+      const { data: marks } = await request.db
+        .from("essay_marks")
+        .select("*")
+        .eq("quality_check_id", check.id)
+        .order("start_offset");
+
+      return {
+        review: toEssayReview(
+          { ...(check as Record<string, unknown>), mark_count: rows.length },
+          (marks ?? []) as Record<string, unknown>[]
+        ),
+        droppedMarks: result.marks.length - rows.length,
+      };
+    }
+  );
+}
+
+/**
+ * Trim model text to the house style: at most two sentences, at most 240
+ * characters. Deterministic, so a long answer is shortened rather than lost.
+ */
+function asBullet(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const sentences = flat.match(/[^.!?]+[.!?]*/g) ?? [flat];
+  return sentences.slice(0, 2).join("").trim().slice(0, 240);
+}
+
+/** Scores are model output: clamp rather than trust the schema's bounds. */
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
 }
 
 /** Model deadlines come back as "Nov 1" or "2026-11-01"; keep only real dates. */

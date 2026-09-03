@@ -30,13 +30,16 @@ src/
 │   ├── collection.ts      # generates the student-scoped CRUD routes
 │   ├── limits.ts          # DB-backed rate limits + spend quotas
 │   ├── accountability.ts  # stall detection, escalation, anti-spam throttle
-│   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrail
+│   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
+│   ├── email.ts           # Resend sends + message_deliveries audit, SMS queue
+│   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
-│   └── errors.ts, invite-code.ts
+│   └── errors.ts, chat.ts
 ├── routes/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
-│   └── opportunities.ts, ai.ts
+│   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
+│   └── opportunities.ts, ai.ts, chat.ts
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -113,9 +116,35 @@ two sentences or 240 characters *after* the model responds. Keep both. A system
 prompt is a request, not an enforcement mechanism — if you add another
 essay-adjacent route, it needs the code-level filter too.
 
+`/ai/essay-review` is the one route that may change a draft, and the rule is
+narrow: **mechanics only.** `enforceMechanicalEdit()` accepts a replacement only
+on the `grammar` dimension, only when it is short, and only when it doesn't add
+sentences — a content mark may describe the problem but never carries the words.
+`essay_marks_edits_are_mechanics` enforces the same rule in the database, so the
+constraint survives a route someone writes later. That route also computes span
+offsets itself by locating the model's verbatim quote in the draft, because a
+model that miscounts characters must not be able to splice text into the wrong
+place in a student's essay.
+
 Similarly, `/ai/award-appeal` and `/ai/family-report` produce **drafts**. They
 are written with `status: 'draft'` / `'counselor-review'` and nothing in this
 API sends them.
+
+### Fetching a URL a user supplied
+
+`lib/links.ts` is the only place this API makes an HTTP request to an address a
+user chose, which makes it the only place that can be turned into server-side
+request forgery. It validates scheme, port and credentials, resolves the host and
+rejects the private/loopback/link-local/carrier-NAT ranges, follows redirects
+**manually** so every hop is re-validated, and caps time, bytes and content type.
+If another feature ever needs to fetch a user-supplied URL, route it through
+there rather than calling `fetch` directly.
+
+### Documents and AI context
+
+`documents.available_to_llm` and `document_links.available_to_llm` are
+data-handling switches, not display preferences. Anything that reads a document
+into a prompt must filter on them (see `routes/tasks.ts`).
 
 ## Safe coding standards
 

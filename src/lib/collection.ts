@@ -17,6 +17,40 @@ import { limit } from "./limits.js";
 const idParam = z.object({ id: z.string().uuid() });
 const listQuery = z.object({ studentId: z.string().uuid().optional() });
 
+/**
+ * `studentId` is routing, not a column.
+ *
+ * It tells the handler which student the caller means; the row's `student_id`
+ * comes from `resolveStudentId` after authorization, never from the body. Every
+ * collection body schema is `.strict()`, so leaving it in the object handed to
+ * Zod makes a counselor's write fail validation — and omitting it makes
+ * `resolveStudentId` throw 403, because a counselor has no implicit self.
+ * Splitting it off before parsing is what lets a counselor write at all.
+ */
+function splitStudentId(raw: unknown): {
+  studentId: string | undefined;
+  rest: Record<string, unknown>;
+} {
+  if (raw === null || typeof raw !== "object") {
+    return { studentId: undefined, rest: {} };
+  }
+  const { studentId, ...rest } = raw as { studentId?: string } & Record<string, unknown>;
+  return { studentId, rest };
+}
+
+/**
+ * An extra equality filter the list route accepts, e.g.
+ * `{ param: "deliverableId", column: "deliverable_id" }` so a task's stages can
+ * be fetched without a second, hand-written route that has to repeat the
+ * authorization dance.
+ */
+export type CollectionFilter = {
+  param: string;
+  column: string;
+  /** Defaults to a uuid. Anything else must say so. */
+  schema?: ZodTypeAny;
+};
+
 export type CollectionOptions<T extends ZodTypeAny> = {
   /** URL segment, e.g. "activities". */
   path: string;
@@ -25,6 +59,20 @@ export type CollectionOptions<T extends ZodTypeAny> = {
   body: T;
   toDto: (row: Record<string, unknown>) => unknown;
   orderBy?: { column: string; ascending?: boolean };
+  /** Optional `?param=` equality filters on the list route. */
+  filters?: CollectionFilter[];
+  /**
+   * Called after authorization and before the write lands. The place to assert
+   * a relationship the student_id check can't see — e.g. that a nested row's
+   * parent really belongs to this student — or to narrow what a role may set.
+   * Throw to reject.
+   */
+  beforeWrite?: (
+    request: FastifyRequest,
+    studentId: string,
+    values: Record<string, unknown>,
+    action: "insert" | "update"
+  ) => Promise<void>;
   /** Called after a successful insert/update, e.g. to log progress events. */
   afterWrite?: (
     request: FastifyRequest,
@@ -45,10 +93,19 @@ export function registerCollection<T extends ZodTypeAny>(
     const { studentId } = listQuery.parse(request.query);
     const student = await resolveStudentId(request, studentId, "view");
 
-    const { data, error } = await request.db
-      .from(table)
-      .select("*")
-      .eq("student_id", student)
+    let builder = request.db.from(table).select("*").eq("student_id", student);
+
+    // Filters narrow within a student the caller has already been authorized
+    // for, so they can never widen access — only the student_id eq above can.
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    for (const filter of opts.filters ?? []) {
+      const raw = query[filter.param];
+      if (raw === undefined || raw === "") continue;
+      const value = (filter.schema ?? z.string().uuid()).parse(raw);
+      builder = builder.eq(filter.column, value);
+    }
+
+    const { data, error } = await builder
       .order(order.column, { ascending: order.ascending ?? true })
       .limit(500);
 
@@ -60,12 +117,11 @@ export function registerCollection<T extends ZodTypeAny>(
     `/${path}`,
     { preHandler: [app.authenticate, limit(`${path}:create`, 120, 60)] },
     async (request, reply) => {
-      const parsed = (body as ZodTypeAny).parse(request.body) as Record<string, unknown>;
-      const student = await resolveStudentId(
-        request,
-        (request.body as { studentId?: string })?.studentId,
-        "edit"
-      );
+      const { studentId, rest } = splitStudentId(request.body);
+      const parsed = (body as ZodTypeAny).parse(rest) as Record<string, unknown>;
+      const student = await resolveStudentId(request, studentId, "edit");
+
+      await opts.beforeWrite?.(request, student, parsed, "insert");
 
       const { data, error } = await request.db
         .from(table)
@@ -84,7 +140,8 @@ export function registerCollection<T extends ZodTypeAny>(
     { preHandler: [app.authenticate, limit(`${path}:update`, 240, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
-      const parsed = (body as ZodTypeAny).parse(request.body) as Record<string, unknown>;
+      const { rest } = splitStudentId(request.body);
+      const parsed = (body as ZodTypeAny).parse(rest) as Record<string, unknown>;
 
       // Read the row first so we authorize against its real owner rather than
       // a student id the client supplied.
@@ -97,6 +154,7 @@ export function registerCollection<T extends ZodTypeAny>(
       if (!existing) throw notFound();
 
       await resolveStudentId(request, existing.student_id as string, "edit");
+      await opts.beforeWrite?.(request, existing.student_id as string, parsed, "update");
 
       const { data, error } = await request.db
         .from(table)
