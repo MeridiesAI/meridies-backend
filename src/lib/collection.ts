@@ -17,6 +17,19 @@ import { limit } from "./limits.js";
 const idParam = z.object({ id: z.string().uuid() });
 const listQuery = z.object({ studentId: z.string().uuid().optional() });
 
+/**
+ * An extra equality filter the list route accepts, e.g.
+ * `{ param: "deliverableId", column: "deliverable_id" }` so a task's stages can
+ * be fetched without a second, hand-written route that has to repeat the
+ * authorization dance.
+ */
+export type CollectionFilter = {
+  param: string;
+  column: string;
+  /** Defaults to a uuid. Anything else must say so. */
+  schema?: ZodTypeAny;
+};
+
 export type CollectionOptions<T extends ZodTypeAny> = {
   /** URL segment, e.g. "activities". */
   path: string;
@@ -25,6 +38,8 @@ export type CollectionOptions<T extends ZodTypeAny> = {
   body: T;
   toDto: (row: Record<string, unknown>) => unknown;
   orderBy?: { column: string; ascending?: boolean };
+  /** Optional `?param=` equality filters on the list route. */
+  filters?: CollectionFilter[];
   /** Called after a successful insert/update, e.g. to log progress events. */
   afterWrite?: (
     request: FastifyRequest,
@@ -45,10 +60,19 @@ export function registerCollection<T extends ZodTypeAny>(
     const { studentId } = listQuery.parse(request.query);
     const student = await resolveStudentId(request, studentId, "view");
 
-    const { data, error } = await request.db
-      .from(table)
-      .select("*")
-      .eq("student_id", student)
+    let builder = request.db.from(table).select("*").eq("student_id", student);
+
+    // Filters narrow within a student the caller has already been authorized
+    // for, so they can never widen access — only the student_id eq above can.
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    for (const filter of opts.filters ?? []) {
+      const raw = query[filter.param];
+      if (raw === undefined || raw === "") continue;
+      const value = (filter.schema ?? z.string().uuid()).parse(raw);
+      builder = builder.eq(filter.column, value);
+    }
+
+    const { data, error } = await builder
       .order(order.column, { ascending: order.ascending ?? true })
       .limit(500);
 

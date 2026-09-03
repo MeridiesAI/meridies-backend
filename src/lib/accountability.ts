@@ -105,6 +105,32 @@ export async function alertBlockedReason(
   return null;
 }
 
+/**
+ * The single definition of "stalled". The roster alert list and the per-task
+ * document tracker both ask this question, and two implementations that drift
+ * apart is a counselor being told a student is behind on one screen and fine on
+ * the next.
+ */
+export function stallCutoff(settings: AccountabilitySettings, now = Date.now()): string {
+  return new Date(now - settings.stall_after_days * 86_400_000).toISOString();
+}
+
+/** Never touched counts as stalled — that's the case that matters most. */
+export function isStalled(
+  lastActivityAt: string | null | undefined,
+  settings: AccountabilitySettings,
+  now = Date.now()
+): boolean {
+  if (!lastActivityAt) return true;
+  return lastActivityAt < stallCutoff(settings, now);
+}
+
+/** Whole days since an ISO timestamp, or null when there was never one. */
+export function daysSince(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+}
+
 export type StalledDeliverable = {
   id: string;
   title: string;
@@ -127,11 +153,6 @@ export type BehindStudent = {
   lastActivityAt: string | null;
 };
 
-function daysSince(iso: string | null): number | null {
-  if (!iso) return null;
-  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
-}
-
 /**
  * The alert list: every roster student with a stalled deliverable, an open red
  * flag, or an overdue deadline, most-behind first.
@@ -141,9 +162,6 @@ export async function buildBehindList(
   counselorId: string
 ): Promise<BehindStudent[]> {
   const settings = await loadSettings(request, counselorId);
-  const stallCutoff = new Date(
-    Date.now() - settings.stall_after_days * 86_400_000
-  ).toISOString();
   const today = new Date().toISOString().slice(0, 10);
 
   const { data: students } = await request.db
@@ -178,9 +196,7 @@ export async function buildBehindList(
   const stalledByStudent = new Map<string, StalledDeliverable[]>();
   for (const d of deliverables.data ?? []) {
     const last = (d.last_activity_at as string | null) ?? null;
-    // Never touched, or untouched since the cutoff.
-    const isStalled = last === null || last < stallCutoff;
-    if (!isStalled) continue;
+    if (!isStalled(last, settings)) continue;
 
     const sid = d.student_id as string;
     if (!stalledByStudent.has(sid)) stalledByStudent.set(sid, []);
