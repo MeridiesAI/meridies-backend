@@ -807,8 +807,8 @@ export default async function aiRoutes(app: FastifyInstance) {
           properties: {
             contentScore: { type: "number", minimum: 0, maximum: 1 },
             grammarScore: { type: "number", minimum: 0, maximum: 1 },
-            contentNote: { type: "string", maxLength: 400 },
-            grammarNote: { type: "string", maxLength: 400 },
+            contentNote: { type: "string", maxLength: 240 },
+            grammarNote: { type: "string", maxLength: 240 },
             marks: {
               type: "array",
               maxItems: 40,
@@ -841,8 +841,10 @@ export default async function aiRoutes(app: FastifyInstance) {
           word_count: essay.word_count,
           content_score: clamp01(result.contentScore),
           grammar_score: clamp01(result.grammarScore),
-          content_note: result.contentNote.slice(0, 500),
-          grammar_note: result.grammarNote.slice(0, 500),
+          // Held to the same two-sentence discipline as every other piece of
+          // counselor-facing advice this API returns.
+          content_note: asBullet(result.contentNote),
+          grammar_note: asBullet(result.grammarNote),
           reviewed_body_chars: body.length,
         })
         .select("*")
@@ -910,6 +912,16 @@ export default async function aiRoutes(app: FastifyInstance) {
       };
     }
   );
+}
+
+/**
+ * Trim model text to the house style: at most two sentences, at most 240
+ * characters. Deterministic, so a long answer is shortened rather than lost.
+ */
+function asBullet(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const sentences = flat.match(/[^.!?]+[.!?]*/g) ?? [flat];
+  return sentences.slice(0, 2).join("").trim().slice(0, 240);
 }
 
 /** Scores are model output: clamp rather than trust the schema's bounds. */

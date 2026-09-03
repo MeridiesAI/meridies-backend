@@ -605,8 +605,14 @@ async function readLink(request: FastifyRequest, row: Row) {
     context = `Filed for this student: ${JSON.stringify({ student, colleges })}`;
   }
 
+  let digest: {
+    title: string;
+    summary: string;
+    keyPoints: string[];
+    relevance: "high" | "medium" | "low" | "none";
+  };
   try {
-    const digest = await runStructured<{
+    digest = await runStructured<{
       title: string;
       summary: string;
       keyPoints: string[];
@@ -645,7 +651,15 @@ async function readLink(request: FastifyRequest, row: Row) {
         required: ["title", "summary", "keyPoints", "relevance"],
       },
     });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Couldn't summarize that page";
+    request.log.error({ url: row.url, err: message }, "link digest failed");
+    return fail(message);
+  }
 
+  // Outside the catch: a write failure here is a database problem, and marking
+  // the link 'failed' would blame the page for it.
+  {
     const { data, error } = await request.db
       .from("document_links")
       .update({
@@ -664,9 +678,5 @@ async function readLink(request: FastifyRequest, row: Row) {
       .maybeSingle();
     if (error) throw fromPostgrest(error);
     return toDocumentLink(data as Row);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Couldn't summarize that page";
-    request.log.error({ url: row.url, err: message }, "link digest failed");
-    return fail(message);
   }
 }

@@ -326,10 +326,11 @@ export default async function blastRoutes(app: FastifyInstance) {
 
       let delivered = 0;
       let failed = 0;
+      const byStudent = new Map(recipients.map((r) => [r.studentId, r]));
 
       for (const row of rows ?? []) {
         if (row.status === "skipped" || !row.to_email) continue;
-        const recipient = recipients.find((r) => r.studentId === row.student_id);
+        const recipient = byStudent.get(row.student_id as string);
         const template = blastTemplate({
           subject: b.subject,
           body: b.body,

@@ -259,9 +259,7 @@ export function brandedText(t: BrandedEmail): string {
     ...(t.bullets?.length ? ["", ...t.bullets.map((b) => `- ${b}`)] : []),
     ...(t.cta ? ["", t.cta.label + ":", t.cta.url] : []),
     ...(t.footnote ? ["", t.footnote] : []),
-  ]
-    .filter((line) => line !== undefined)
-    .join("\n");
+  ].join("\n");
 }
 
 // ---- Invitations -----------------------------------------------------------

@@ -591,6 +591,7 @@ export default async function taskRoutes(app: FastifyInstance) {
         .select("*")
         .eq("id", id)
         .maybeSingle();
+      if (!fresh) throw notFound("That task isn't on file");
       const [dto] = await hydrate(request, [fresh as Row]);
       return reply.code(201).send(dto);
     }
@@ -1054,13 +1055,11 @@ async function notifyAssignment(
   });
 
   const error = errors.length > 0 ? errors.join("; ").slice(0, 500) : null;
-  await request.db
-    .from("deliverables")
-    .update({
-      notified_at: emailSent || smsState === "queued" ? new Date().toISOString() : null,
-      notify_error: error,
-    })
-    .eq("id", input.taskId);
+  const delivered = emailSent || smsState === "queued";
+  // A failed re-send must not erase the record of the first one that worked.
+  const update: Record<string, unknown> = { notify_error: error };
+  if (delivered) update.notified_at = new Date().toISOString();
+  await request.db.from("deliverables").update(update).eq("id", input.taskId);
 
   return { email: emailSent, sms: smsState, error };
 }

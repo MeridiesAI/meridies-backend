@@ -486,8 +486,10 @@ export default async function recordRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate, limit("marks:update", 240, 60)] },
     async (request, reply) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      // Only accept or reject: reopening an accepted mark would suggest the
+      // applied edit could be taken back, and it can't be.
       const b = z
-        .object({ status: z.enum(["accepted", "rejected", "open"]) })
+        .object({ status: z.enum(["accepted", "rejected"]) })
         .strict()
         .parse(request.body);
 
