@@ -379,7 +379,7 @@ create trigger college_aid_ratings_set_updated_at before update on public.colleg
   for each row execute function public.set_updated_at();
 
 comment on table public.college_aid_ratings is
-  'A curated MeridiesAI rating (1-10) of how generous a school actually is. NOT a federal statistic and never to be displayed as one: rating_kind is pinned by a CHECK constraint, and the sourced figures it reasons from live in college_aid_profiles.';
+  'A curated Meridies rating (1-10) of how generous a school actually is. NOT a federal statistic and never to be displayed as one: rating_kind is pinned by a CHECK constraint, and the sourced figures it reasons from live in college_aid_profiles.';
 comment on column public.college_aid_ratings.gotchas is
   'What families get caught by: renewal conditions, one-time awards, non-custodial parent forms, aid that drops after year one.';
 

@@ -6,7 +6,7 @@
 
 ## What this repo is
 
-**The API for MeridiesAI.** Fastify 5, Node ≥20, ESM, TypeScript strict.
+**The API for Meridies.** Fastify 5, Node ≥20, ESM, TypeScript strict.
 
 Auth, profiles, invites, student records, deadlines, financial aid,
 accountability, the opportunity concierge, and all Anthropic AI routes for the

@@ -252,7 +252,7 @@ export async function streamChat(opts: {
 /**
  * The essay guardrail.
  *
- * MeridiesAI must stay well clear of writing, or closely approximating, essay
+ * Meridies must stay well clear of writing, or closely approximating, essay
  * prose. Advice comes back as short bullets, and anything that reads like a
  * drafted paragraph is rejected here rather than trusted to the prompt — a
  * system prompt is a request, not an enforcement mechanism.

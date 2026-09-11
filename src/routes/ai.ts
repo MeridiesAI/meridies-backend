@@ -23,7 +23,7 @@ import { limit } from "../lib/limits.js";
 import { toEssayReview } from "../lib/serialize.js";
 
 const BASE_SYSTEM = [
-  "You support independent college counselors at MeridiesAI.",
+  "You support independent college counselors at Meridies.",
   "Be concrete, specific to this student, and honest about uncertainty.",
   "Never invent statistics, deadlines, or admissions outcomes. If you don't know, say so.",
   "The counselor reviews everything before a family sees it.",

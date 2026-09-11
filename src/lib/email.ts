@@ -232,7 +232,7 @@ export function brandedEmail(t: BrandedEmail): string {
       <tr><td align="center">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;background:#ffffff;border:1px solid #dce8df;border-radius:16px;overflow:hidden;">
           <tr><td style="padding:32px 32px 8px;">
-            <div style="font-size:14px;font-weight:600;letter-spacing:0.02em;color:#176b45;text-transform:uppercase;">MeridiesAI</div>
+            <div style="font-size:14px;font-weight:600;letter-spacing:0.02em;color:#176b45;text-transform:uppercase;">Meridies</div>
           </td></tr>
           <tr><td style="padding:8px 32px 0;">
             <h1 style="margin:0;font-size:22px;line-height:1.25;color:#10291f;">${escapeHtml(
@@ -282,7 +282,7 @@ export async function sendInviteEmail(
   const template: BrandedEmail = {
     heading: "You've been invited",
     paragraphs: [
-      `${who} has invited you to join MeridiesAI — where you and your counselor track your college applications, deadlines, and profile together in one place.`,
+      `${who} has invited you to join Meridies — where you and your counselor track your college applications, deadlines, and profile together in one place.`,
     ],
     cta: { label: "Accept invitation", url: acceptUrl },
     footnote:
@@ -292,8 +292,8 @@ export async function sendInviteEmail(
   const result = await sendEmail({
     to,
     subject: counselorName
-      ? `${counselorName} invited you to MeridiesAI`
-      : "You're invited to MeridiesAI",
+      ? `${counselorName} invited you to Meridies`
+      : "You're invited to Meridies",
     html: brandedEmail(template),
     text: brandedText(template),
     template: "invite",
@@ -327,7 +327,7 @@ export function taskAssignmentEmail(t: TaskNotification): BrandedEmail {
   return {
     heading: `New task: ${t.title}`,
     paragraphs: [
-      `${who} assigned you a task on MeridiesAI.`,
+      `${who} assigned you a task on Meridies.`,
       ...(t.instructions ? [t.instructions] : []),
       ...(t.documentNames.length
         ? [`Documents to work from: ${t.documentNames.join(", ")}`]
@@ -339,7 +339,7 @@ export function taskAssignmentEmail(t: TaskNotification): BrandedEmail {
         ? [`Due ${t.dueDate}`]
         : undefined,
     cta: { label: "Open the task", url: t.url },
-    footnote: "You're receiving this because your counselor assigned you work in MeridiesAI.",
+    footnote: "You're receiving this because your counselor assigned you work in Meridies.",
   };
 }
 
@@ -348,7 +348,7 @@ export function taskAssignmentSms(t: TaskNotification): string {
   const first = t.stages[0];
   const when = first?.dueDate ?? t.dueDate;
   return [
-    `MeridiesAI: ${t.counselorName ?? "Your counselor"} assigned you "${t.title}"`,
+    `Meridies: ${t.counselorName ?? "Your counselor"} assigned you "${t.title}"`,
     when ? ` (first due ${when})` : "",
     `. ${t.url}`,
   ].join("");
