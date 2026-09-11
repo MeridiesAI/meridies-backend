@@ -11,7 +11,7 @@
 -- editing mode applies them.
 --
 -- THE GUARDRAIL IS IN THE SCHEMA, not only in the prompt and the route.
--- MeridiesAI must stay well clear of writing essay prose, so a mark may carry a
+-- Meridies must stay well clear of writing essay prose, so a mark may carry a
 -- suggested replacement ONLY on the grammar/usage dimension, and only a short
 -- mechanical one. A content-quality mark can say what is wrong; it can never
 -- ship the words to fix it.
@@ -85,6 +85,6 @@ create trigger essay_marks_set_updated_at before update on public.essay_marks
   for each row execute function public.set_updated_at();
 
 comment on constraint essay_marks_edits_are_mechanics on public.essay_marks is
-  'MeridiesAI does not write essay prose. A content-quality mark may describe the problem but may never carry replacement text; a grammar mark may, capped at 200 characters. The route enforces a tighter limit still.';
+  'Meridies does not write essay prose. A content-quality mark may describe the problem but may never carry replacement text; a grammar mark may, capped at 200 characters. The route enforces a tighter limit still.';
 
 select private.attach_student_policies('essay_marks');

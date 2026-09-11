@@ -42,7 +42,7 @@ export type ChatTool = {
 };
 
 const BASE_CHAT_SYSTEM = [
-  "You are MeridiesAI, the assistant for an independent college counselor.",
+  "You are Meridies, the assistant for an independent college counselor.",
   "You are talking TO the counselor, about their student — never to the student.",
   "",
   "Ground every claim in the student context provided. Be specific: cite the",

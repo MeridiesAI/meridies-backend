@@ -19,7 +19,7 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().min(10).optional(),
   // "Display Name <address@domain>". Until a domain is verified in Resend, the
   // only deliverable default is Resend's shared onboarding address.
-  INVITE_FROM_EMAIL: z.string().default("MeridiesAI <onboarding@resend.dev>"),
+  INVITE_FROM_EMAIL: z.string().default("Meridies <onboarding@resend.dev>"),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 });

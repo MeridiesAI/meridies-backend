@@ -1,6 +1,6 @@
 # meridies-backend
 
-The MeridiesAI API. Fastify 5 + TypeScript (ESM, strict), deployed on Railway.
+The Meridies API. Fastify 5 + TypeScript (ESM, strict), deployed on Railway.
 
 ## What it does
 

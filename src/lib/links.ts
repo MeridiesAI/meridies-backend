@@ -72,7 +72,7 @@ async function assertPublicHost(hostname: string): Promise<void> {
   const literal = isIP(hostname);
   if (literal) {
     if (isBlockedAddress(hostname, literal)) {
-      throw badRequest("That address isn't reachable from MeridiesAI");
+      throw badRequest("That address isn't reachable from Meridies");
     }
     return;
   }
@@ -86,7 +86,7 @@ async function assertPublicHost(hostname: string): Promise<void> {
   if (addresses.length === 0) throw badRequest("That domain doesn't resolve");
   for (const { address, family } of addresses) {
     if (isBlockedAddress(address, family)) {
-      throw badRequest("That address isn't reachable from MeridiesAI");
+      throw badRequest("That address isn't reachable from Meridies");
     }
   }
 }
@@ -182,7 +182,7 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
         signal: controller.signal,
         headers: {
           // Identify the crawler honestly; some sites rightly block blanks.
-          "User-Agent": "MeridiesAI-LinkReader/1.0 (+https://meridiesai.com)",
+          "User-Agent": "Meridies-LinkReader/1.0 (+https://meridiesai.com)",
           Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
         },
       });

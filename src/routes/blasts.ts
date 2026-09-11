@@ -140,8 +140,8 @@ function blastTemplate(input: {
     heading: input.subject,
     paragraphs: [greeting, ...input.body.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean)],
     footnote: input.counselorName
-      ? `Sent by ${input.counselorName} through MeridiesAI.`
-      : "Sent through MeridiesAI.",
+      ? `Sent by ${input.counselorName} through Meridies.`
+      : "Sent through Meridies.",
   };
 }
 
