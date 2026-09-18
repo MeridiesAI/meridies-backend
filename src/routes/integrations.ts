@@ -93,9 +93,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
         status: body.status,
         last_error: body.lastError ?? null,
       };
-      // A successful sync is the only thing that moves the timestamp; an error
-      // or a disconnect must not make the connection look freshly healthy.
-      if (body.status === "connected") values.last_synced_at = new Date().toISOString();
+      // `last_synced_at` is deliberately NOT touched here. Resuming a grant is
+      // not a sync, and stamping it would let the UI show a "last synced" time
+      // for data that never moved. It belongs to the sync job, which does not
+      // exist yet — along with the OAuth flow this route's grant stands in for.
 
       const { data, error } = await request.db
         .from("integrations")
