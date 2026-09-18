@@ -8,12 +8,11 @@
  * has to be *received*, not discovered.
  */
 
-import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { env } from "../env.js";
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
+import { appJoinUrl, newInviteToken } from "../lib/invites.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { sendInviteEmail } from "../lib/email.js";
 import { anonClient } from "../lib/supabase.js";
@@ -25,15 +24,6 @@ const inviteSchema = z
 const revokeSchema = z.object({ id: z.string().uuid() }).strict();
 const acceptSchema = z.object({ token: z.string().trim().min(10).max(200) }).strict();
 const previewSchema = z.object({ token: z.string().trim().min(10).max(200) });
-
-/** Unguessable capability. base64url of 24 random bytes ≈ 192 bits. */
-function newToken(): string {
-  return randomBytes(24).toString("base64url");
-}
-
-function appJoinUrl(token: string): string {
-  return `${env.APP_URL.replace(/\/+$/, "")}/join/${token}`;
-}
 
 export default async function inviteRoutes(app: FastifyInstance) {
   // Counselor invites a student by email — creates the invitation and emails it.
@@ -61,7 +51,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
         .eq("email", email)
         .eq("status", "pending");
 
-      const token = newToken();
+      const token = newInviteToken();
       const { data, error } = await request.db
         .from("invitations")
         .insert({ counselor_id: request.auth.userId, email, token })

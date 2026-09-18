@@ -1,0 +1,268 @@
+/**
+ * Family reports and narrative flags — the review queue for the two things the
+ * AI routes write as drafts.
+ *
+ * `/ai/family-report` and `/ai/narrative-coherence` create rows and stop. Until
+ * now there was no way to resolve a flag, approve a report, or record that one
+ * was sent, which meant the counselor's half of the workflow lived nowhere.
+ *
+ * Approving is not sending. `POST /reports/family/:id/sent` records a send that
+ * happened; nothing in this API delivers a family report on its own, and the
+ * `approved -> sent` step is deliberately a separate, explicit call.
+ */
+
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { z } from "zod";
+import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { limit } from "../lib/limits.js";
+import { toFamilyReport, toNarrativeFlag } from "../lib/serialize.js";
+
+type Row = Record<string, unknown>;
+
+const idParam = z.object({ id: z.string().uuid() });
+const studentQuery = z.object({ studentId: z.string().uuid().optional() });
+
+const flagPatch = z
+  .object({
+    status: z.enum(["open", "resolved", "dismissed"]).optional(),
+    sharedWithStudent: z.boolean().optional(),
+  })
+  .strict();
+
+const reportPatch = z
+  .object({
+    title: z.string().trim().min(1).max(200).optional(),
+    summary: z.string().trim().max(4000).nullable().optional(),
+    body: z.string().trim().max(20_000).nullable().optional(),
+    highlights: z.array(z.string().trim().max(240)).max(12).optional(),
+    status: z.enum(["draft", "sent", "archived"]).optional(),
+  })
+  .strict();
+
+export default async function reportRoutes(app: FastifyInstance) {
+  // ---- Narrative flags ------------------------------------------------------
+
+  // Roster-wide by default: a roster lookup plus up to 500 rows, so this one
+  // carries the DB-backed limiter rather than leaning on the in-process cap.
+  app.get(
+    "/flags",
+    { preHandler: [app.authenticate, limit("reports:flags", 120, 60)] },
+    async (request) => {
+      const q = studentQuery
+        .extend({
+          status: z.enum(["open", "resolved", "dismissed"]).optional(),
+          limit: z.coerce.number().int().min(1).max(500).optional(),
+        })
+        .parse(request.query);
+
+      const scope = await rosterScope(request, q.studentId);
+      let builder = request.db.from("narrative_flags").select("*").in("student_id", scope);
+      if (q.status) builder = builder.eq("status", q.status);
+
+      const { data, error } = await builder
+        .order("created_at", { ascending: false })
+        .limit(q.limit ?? 200);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toNarrativeFlag(r as Row));
+    }
+  );
+
+  /**
+   * Resolve, dismiss, or share a flag with the student. A counselor's call: a
+   * flag is a reading of the application, and the student agreeing with it is
+   * not what closes it.
+   */
+  app.patch(
+    "/flags/:id",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("flags:update", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const patch = flagPatch.parse(request.body);
+      if (Object.keys(patch).length === 0) throw badRequest("Nothing to update");
+
+      const owner = await ownerOf(request, "narrative_flags", id, "That flag doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+
+      const values: Record<string, unknown> = {};
+      if (patch.sharedWithStudent !== undefined) values.shared_with_student = patch.sharedWithStudent;
+      if (patch.status !== undefined) {
+        values.status = patch.status;
+        const closing = patch.status !== "open";
+        values.resolved_by = closing ? request.auth.userId : null;
+        values.resolved_at = closing ? new Date().toISOString() : null;
+      }
+
+      const { data, error } = await request.db
+        .from("narrative_flags")
+        .update(values)
+        .eq("id", id)
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return toNarrativeFlag(data as Row);
+    }
+  );
+
+  app.delete(
+    "/flags/:id",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("flags:delete", 60, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const owner = await ownerOf(request, "narrative_flags", id, "That flag doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+
+      const { error } = await request.db.from("narrative_flags").delete().eq("id", id);
+      if (error) throw fromPostgrest(error);
+      return { deleted: true };
+    }
+  );
+
+  // ---- Family reports -------------------------------------------------------
+
+  app.get(
+    "/family",
+    { preHandler: [app.authenticate, limit("reports:family", 120, 60)] },
+    async (request) => {
+      const q = studentQuery
+        .extend({
+          status: z.enum(["draft", "sent", "archived"]).optional(),
+          limit: z.coerce.number().int().min(1).max(500).optional(),
+        })
+        .parse(request.query);
+
+      const scope = await rosterScope(request, q.studentId);
+      let builder = request.db.from("family_reports").select("*").in("student_id", scope);
+      if (q.status) builder = builder.eq("status", q.status);
+
+      const { data, error } = await builder
+        .order("created_at", { ascending: false })
+        .limit(q.limit ?? 200);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toFamilyReport(r as Row));
+    }
+  );
+
+  /** Edit a draft before it goes anywhere. The counselor's words win. */
+  app.patch(
+    "/family/:id",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:update", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const patch = reportPatch.parse(request.body);
+      if (Object.keys(patch).length === 0) throw badRequest("Nothing to update");
+
+      const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+
+      const values: Record<string, unknown> = {};
+      if (patch.title !== undefined) values.title = patch.title;
+      if (patch.summary !== undefined) values.summary = patch.summary;
+      if (patch.body !== undefined) values.body = patch.body;
+      if (patch.highlights !== undefined) values.highlights = patch.highlights;
+      if (patch.status !== undefined) values.status = patch.status;
+
+      const { data, error } = await request.db
+        .from("family_reports")
+        .update(values)
+        .eq("id", id)
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return toFamilyReport(data as Row);
+    }
+  );
+
+  /**
+   * Record that a report was sent. Separate from the patch above on purpose:
+   * "sent" is a fact about the world, and it should take a deliberate call to
+   * assert one rather than falling out of a field update.
+   */
+  app.post(
+    "/family/:id/sent",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:sent", 60, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+
+      const { data, error } = await request.db
+        .from("family_reports")
+        .update({ status: "sent", sent_at: new Date().toISOString() })
+        .eq("id", id)
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return toFamilyReport(data as Row);
+    }
+  );
+
+  app.delete(
+    "/family/:id",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:delete", 60, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+
+      const { error } = await request.db.from("family_reports").delete().eq("id", id);
+      if (error) throw fromPostgrest(error);
+      return { deleted: true };
+    }
+  );
+}
+
+/** The row's real student_id — never one a client claimed. */
+async function ownerOf(
+  request: FastifyRequest,
+  table: "narrative_flags" | "family_reports",
+  id: string,
+  missing: string
+): Promise<string> {
+  const { data, error } = await request.db
+    .from(table)
+    .select("student_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  if (!data) throw notFound(missing);
+  return data.student_id as string;
+}
+
+/**
+ * Scope a review-queue read to one student, or to the counselor's whole roster.
+ *
+ * A review queue is roster-wide by nature — the counselor is asking "what is
+ * waiting on me", not "what is waiting on me for Sophia". Requiring `studentId`
+ * the way `resolveStudentId` does forced the client into one request per
+ * student, which is 2N requests for an N-student roster and does not survive a
+ * real practice.
+ *
+ * Returns ids rather than taking the query builder: a PostgREST builder is
+ * thenable, so handing one to an async function and awaiting the result runs
+ * the query instead of returning the builder.
+ *
+ * RLS would scope this on its own, but the roster filter is applied as well: a
+ * route that leans only on RLS leaks the shape of the answer, and AGENTS.md
+ * asks for both layers.
+ */
+async function rosterScope(
+  request: FastifyRequest,
+  studentId: string | undefined
+): Promise<string[]> {
+  if (studentId || request.profile.role === "student") {
+    return [await resolveStudentId(request, studentId, "view")];
+  }
+
+  const { data, error } = await request.db
+    .from("profiles")
+    .select("id")
+    .eq("counselor_id", request.auth.userId)
+    .is("archived_at", null);
+  if (error) throw fromPostgrest(error);
+
+  const ids = (data ?? []).map((r) => r.id as string);
+  // An empty roster must match nothing, not everything. A uuid that is never a
+  // real profile id keeps the `in` list non-empty without widening it.
+  return ids.length > 0 ? ids : ["00000000-0000-0000-0000-000000000000"];
+}

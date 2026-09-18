@@ -14,10 +14,12 @@ import {
   DEFAULT_SETTINGS,
   inQuietHours,
   loadSettings,
+  resolveAlertRecipients,
 } from "../lib/accountability.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
+import { toAlertPref } from "../lib/serialize.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
 
@@ -131,6 +133,77 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
 
       if (error) throw fromPostgrest(error);
       return { ...DEFAULT_SETTINGS, ...(data as object) };
+    }
+  );
+
+  // ---- Alert recipients ----------------------------------------------------
+  //
+  // Who is copied when an alert or a family update goes out. Counselor-written:
+  // a student switching off the alerts about themselves is the one thing this
+  // must not permit, which is why it does not use the standard student-scoped
+  // policies. Readable by the student, so the arrangement is not a secret.
+
+  app.get(
+    "/alert-prefs",
+    { preHandler: [app.authenticate, limit("alert-prefs:read", 240, 60)] },
+    async (request) => {
+      const { studentId } = studentQuery.parse(request.query);
+      const student = await resolveStudentId(request, studentId, "view");
+
+      const { data, error } = await request.db
+        .from("student_alert_prefs")
+        .select("*")
+        .eq("student_id", student)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+
+      // No row means the default, not "unknown": parents on, student off.
+      return data
+        ? toAlertPref(data as Record<string, unknown>)
+        : {
+            studentId: student,
+            copyParents: true,
+            copyStudent: false,
+            note: null,
+            updatedBy: null,
+            updatedAt: null,
+          };
+    }
+  );
+
+  app.put(
+    "/alert-prefs",
+    {
+      preHandler: [app.authenticate, requireRole("counselor"), limit("alert-prefs:put", 120, 60)],
+    },
+    async (request) => {
+      const b = z
+        .object({
+          studentId: z.string().uuid(),
+          copyParents: z.boolean().optional(),
+          copyStudent: z.boolean().optional(),
+          note: z.string().trim().max(1000).nullable().optional(),
+        })
+        .strict()
+        .parse(request.body);
+
+      const student = await resolveStudentId(request, b.studentId, "edit");
+
+      const row: Record<string, unknown> = {
+        student_id: student,
+        updated_by: request.auth.userId,
+      };
+      if (b.copyParents !== undefined) row.copy_parents = b.copyParents;
+      if (b.copyStudent !== undefined) row.copy_student = b.copyStudent;
+      if (b.note !== undefined) row.note = b.note;
+
+      const { data, error } = await request.db
+        .from("student_alert_prefs")
+        .upsert(row, { onConflict: "student_id" })
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return toAlertPref(data as Record<string, unknown>);
     }
   );
 
@@ -343,22 +416,12 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         ignoreQuietHours: b.overrideQuietHours === true,
       });
 
-      // A guardian who opted out never receives anything, manual or not.
-      let guardianId = b.guardianId ?? null;
-      if (!guardianId) {
-        const { data: guardian } = await request.db
-          .from("guardians")
-          .select("id")
-          .eq("student_id", b.studentId)
-          .eq("alerts_enabled", true)
-          .order("is_primary", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        guardianId = guardian?.id ?? null;
-      }
-      if (!guardianId) {
-        throw badRequest("No guardian on file with alerts enabled for that student");
-      }
+      // Recipients come from `student_alert_prefs` AND the guardian's own
+      // opt-out. A guardian who opted out never receives anything, manual or
+      // not; a counselor who switched the parents off is not overruled by a
+      // guardian still marked enabled.
+      const recipients = await resolveAlertRecipients(request, b.studentId, b.guardianId ?? null);
+      if (recipients.blockedReason) throw badRequest(recipients.blockedReason);
 
       const throttled = Boolean(blocked) && !/quiet hours/i.test(blocked ?? "");
       const status = throttled
@@ -373,7 +436,8 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         .from("parent_alerts")
         .insert({
           student_id: b.studentId,
-          guardian_id: guardianId,
+          guardian_id: recipients.guardianId,
+          copy_student: recipients.copyStudent,
           red_flag_id: b.redFlagId ?? null,
           counselor_id: request.auth.userId,
           trigger: b.trigger ?? "manual",
@@ -449,23 +513,16 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
           continue;
         }
 
-        const { data: guardian } = await request.db
-          .from("guardians")
-          .select("id")
-          .eq("student_id", studentId)
-          .eq("alerts_enabled", true)
-          .order("is_primary", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (!guardian) {
-          skipped.push({ id: flag.id as string, reason: "no guardian with alerts enabled" });
+        const recipients = await resolveAlertRecipients(request, studentId);
+        if (recipients.blockedReason) {
+          skipped.push({ id: flag.id as string, reason: recipients.blockedReason });
           continue;
         }
 
         await request.db.from("parent_alerts").insert({
           student_id: studentId,
-          guardian_id: guardian.id,
+          guardian_id: recipients.guardianId,
+          copy_student: recipients.copyStudent,
           red_flag_id: flag.id as string,
           counselor_id: request.auth.userId,
           trigger: "escalation",

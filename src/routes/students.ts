@@ -24,6 +24,7 @@ import {
   toNote,
   toPolygonAxis,
   toSchoolReframing,
+  toStudentStatus,
 } from "../lib/serialize.js";
 
 const idParam = z.object({ id: z.string().uuid("Not a valid student id") });
@@ -72,9 +73,22 @@ export default async function studentRoutes(app: FastifyInstance) {
       if (!next.has(sid)) next.set(sid, toDeadline(d as never));
     }
 
+    // The counselor's own read on each student, where they have overruled what
+    // the work implies. Fetched with the roster because the sidebar renders it.
+    const { data: overrides } = await request.db
+      .from("student_status_overrides")
+      .select("*")
+      .in("student_id", ids);
+
+    const status = new Map<string, unknown>();
+    for (const o of overrides ?? []) {
+      status.set(o.student_id as string, toStudentStatus(o as never));
+    }
+
     return rows.map((row) => ({
       ...toMeridiesUser(row as never, { counselorName: request.profile.full_name }),
       nextDeadline: next.get(row.id as string) ?? null,
+      counselorStatus: status.get(row.id as string) ?? null,
     }));
   });
 
@@ -96,6 +110,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       reframing,
       axes,
       deadlines,
+      override,
     ] = await Promise.all([
       db.from("profiles").select("*").eq("id", id).maybeSingle(),
       db.from("student_academics").select("*").eq("student_id", id).maybeSingle(),
@@ -109,6 +124,9 @@ export default async function studentRoutes(app: FastifyInstance) {
       db.from("school_reframing").select("*").eq("student_id", id).order("created_at", { ascending: false }).limit(50),
       db.from("student_polygon_axes").select("*").eq("student_id", id).order("sort_order"),
       db.from("deadlines").select("*").eq("student_id", id).order("due_date", { ascending: true, nullsFirst: false }),
+      // RLS keeps this counselor-only, so a student reading their own record
+      // gets null here rather than an assessment written about them.
+      db.from("student_status_overrides").select("*").eq("student_id", id).maybeSingle(),
     ]);
 
     if (profile.error) throw fromPostgrest(profile.error);
@@ -147,7 +165,11 @@ export default async function studentRoutes(app: FastifyInstance) {
       },
     });
 
-    return { ...user, deadlines: (deadlines.data ?? []).map((r) => toDeadline(r as never)) };
+    return {
+      ...user,
+      deadlines: (deadlines.data ?? []).map((r) => toDeadline(r as never)),
+      counselorStatus: override.data ? toStudentStatus(override.data as never) : null,
+    };
   });
 
   app.patch(
@@ -185,6 +207,66 @@ export default async function studentRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That student isn't on your roster");
       return toMeridiesUser(data as never, { counselorName: request.profile.full_name });
+    }
+  );
+
+  // ---- The counselor's status override -------------------------------------
+  //
+  // Counselor-only in both directions. "At risk" is a professional assessment
+  // about a student rather than a record belonging to them, which is the same
+  // reasoning that keeps `parent_alerts` away from the student they concern.
+
+  app.put(
+    "/:id/status",
+    {
+      preHandler: [app.authenticate, requireRole("counselor"), limit("students:status", 120, 60)],
+    },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const body = z
+        .object({
+          status: z.enum(["on-track", "at-risk", "ahead"]),
+          note: z.string().trim().max(2000).nullable().optional(),
+        })
+        .strict()
+        .parse(request.body);
+
+      await assertCanEditStudent(request, id);
+
+      const { data, error } = await request.db
+        .from("student_status_overrides")
+        .upsert(
+          {
+            student_id: id,
+            status: body.status,
+            note: body.note ?? null,
+            set_by: request.auth.userId,
+          },
+          { onConflict: "student_id" }
+        )
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return toStudentStatus(data as never);
+    }
+  );
+
+  /** Drop the override and fall back to the status the work implies. */
+  app.delete(
+    "/:id/status",
+    {
+      preHandler: [app.authenticate, requireRole("counselor"), limit("students:status", 120, 60)],
+    },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      await assertCanEditStudent(request, id);
+
+      const { error } = await request.db
+        .from("student_status_overrides")
+        .delete()
+        .eq("student_id", id);
+      if (error) throw fromPostgrest(error);
+      return { deleted: true };
     }
   );
 

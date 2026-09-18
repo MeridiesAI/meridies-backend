@@ -9,6 +9,7 @@ import { registerCollection } from "../lib/collection.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { bucketHistory } from "../lib/polygonHistory.js";
 import {
   toActivity,
   toAward,
@@ -17,6 +18,7 @@ import {
   toEssayMark,
   toNote,
   toPolygonAxis,
+  toPolygonHistoryPoint,
 } from "../lib/serialize.js";
 
 const trimmed = (max: number) => z.string().trim().max(max);
@@ -256,6 +258,43 @@ export default async function recordRoutes(app: FastifyInstance) {
     if (error) throw fromPostgrest(error);
     return (data ?? []).map((r) => toPolygonAxis(r as never));
   });
+
+  /**
+   * The growth history. Recorded by a trigger on the axes themselves, so it
+   * reflects what actually moved rather than being modelled backwards from
+   * today's shape — which means a new student legitimately has a short chart.
+   */
+  app.get(
+    "/polygon/history",
+    { preHandler: [app.authenticate, limit("polygon:history", 120, 60)] },
+    async (request) => {
+      const query = z
+        .object({
+          studentId: z.string().uuid().optional(),
+          scale: z.enum(["weeks", "months", "years"]).optional(),
+        })
+        .parse(request.query);
+      const student = await resolveStudentId(request, query.studentId, "view");
+      const scale = query.scale ?? "months";
+
+      const { data, error } = await request.db
+        .from("polygon_axis_history")
+        .select("*")
+        .eq("student_id", student)
+        .order("recorded_at", { ascending: true })
+        .limit(2000);
+      if (error) throw fromPostgrest(error);
+
+      const points = (data ?? []).map((r) => toPolygonHistoryPoint(r as never));
+      return {
+        scale,
+        points: bucketHistory(points, scale),
+        // The raw readings too: a counselor asking "when did that change" wants
+        // the reading, not the bucket it fell into.
+        readings: points,
+      };
+    }
+  );
 
   const axisBody = z
     .object({
