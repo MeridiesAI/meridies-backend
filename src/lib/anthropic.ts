@@ -37,7 +37,8 @@ export type AiModule =
   | "aid-report" | "draft-quality" | "essay-advice" | "visualizer" | "chat"
   // Must stay in step with the ai_runs.module CHECK constraint; an unknown
   // value fails the audit insert, not the request, so it would go unnoticed.
-  | "document-tracker" | "essay-review" | "link-digest";
+  | "document-tracker" | "essay-review" | "link-digest"
+  | "parent-alert" | "file-filing";
 
 type RunOptions<T> = {
   request: FastifyRequest;

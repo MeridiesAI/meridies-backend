@@ -561,12 +561,16 @@ export const toRigorFlag = (r: Row) => ({
 });
 
 /**
- * The curated aid rating. `ratingKind` is carried through verbatim so the UI
- * cannot accidentally present a Meridies judgement as a federal statistic.
+ * One of the three curated aid ratings. `kind` says which — need-based,
+ * merit-based, or how *consistent* generosity is across income bands — and
+ * `ratingKind` is carried through verbatim so the UI cannot accidentally
+ * present a Meridies judgement as a federal statistic.
  */
 export const toAidRating = (r: Row) => ({
   collegeId: str(r.college_id),
+  kind: str(r.kind) as "need-based" | "merit-based" | "income-band-consistency",
   rating: num(r.rating) ?? 0,
+  label: nstr(r.label),
   ratingKind: str(r.rating_kind),
   headline: nstr(r.headline),
   rationale: nstr(r.rationale),
@@ -592,4 +596,183 @@ export const toHighSchoolRanking = (r: Row) => ({
   apCoursesOffered: nnum(r.ap_courses_offered),
   ibProgram: r.ib_program == null ? null : Boolean(r.ib_program),
   profileVerifiedAt: nstr(r.profile_verified_at),
+  // The published profile itself. Roughly one school in six publishes nothing,
+  // so every one of these can legitimately come back null.
+  city: nstr(r.city),
+  state: nstr(r.state),
+  type: nstr(r.type),
+  enrollment: nnum(r.enrollment),
+  graduatingClass: nnum(r.graduating_class),
+  weightedScaleMax: nnum(r.weighted_scale_max),
+  unweightedScaleMax: nnum(r.unweighted_scale_max),
+  apCap: nstr(r.ap_cap),
+  ibCoursesOffered: nnum(r.ib_courses_offered),
+  medianSat: nnum(r.median_sat),
+  medianAct: nnum(r.median_act),
+  studentsPerCounselor: nnum(r.students_per_counselor),
+  matriculation: arr(r.matriculation),
+  notes: arr(r.profile_notes),
+  sourceLabel: nstr(r.source_label),
+});
+
+// ---------------------------------------------------------------------------
+// Demo v5 parity DTOs.
+// ---------------------------------------------------------------------------
+
+/**
+ * A preference card. `counselorNote` is why a counselor cares about the answer,
+ * so it is stripped for a student caller by the route rather than here — a DTO
+ * that silently drops a field depending on who asked is hard to reason about.
+ */
+export const toPreferenceCard = (r: Row) => ({
+  id: str(r.id),
+  key: str(r.card_key),
+  category: str(r.category),
+  categoryLabel: str(r.category_label),
+  prompt: str(r.prompt),
+  counselorNote: nstr(r.counselor_note),
+  example: nstr(r.example),
+  sortOrder: num(r.sort_order) ?? 0,
+});
+
+export const toCardRating = (r: Row) => ({
+  id: str(r.id),
+  studentId: str(r.student_id),
+  cardId: str(r.card_id),
+  rating: str(r.rating) as "love" | "good" | "okay" | "bad" | "really-bad",
+  ratedBy: nstr(r.rated_by),
+  updatedAt: nstr(r.updated_at),
+});
+
+export const toPolygonHistoryPoint = (r: Row) => ({
+  id: str(r.id),
+  axisKey: str(r.axis_key),
+  label: str(r.label),
+  score: num(r.score) ?? 0,
+  maxScore: num(r.max_score) ?? 100,
+  isManual: Boolean(r.is_manual),
+  source: str(r.source) as "default" | "custom",
+  recordedAt: nstr(r.recorded_at),
+});
+
+export const toAlertPref = (r: Row) => ({
+  studentId: str(r.student_id),
+  copyParents: Boolean(r.copy_parents),
+  copyStudent: Boolean(r.copy_student),
+  note: nstr(r.note),
+  updatedBy: nstr(r.updated_by),
+  updatedAt: nstr(r.updated_at),
+});
+
+export const toStudentStatus = (r: Row) => ({
+  studentId: str(r.student_id),
+  status: str(r.status) as "on-track" | "at-risk" | "ahead",
+  note: nstr(r.note),
+  setBy: nstr(r.set_by),
+  updatedAt: nstr(r.updated_at),
+});
+
+export const toMeeting = (r: Row) => ({
+  id: str(r.id),
+  studentId: str(r.student_id),
+  counselorId: str(r.counselor_id),
+  title: str(r.title),
+  mode: str(r.mode) as "google-meet" | "in-person" | "phone",
+  location: nstr(r.location),
+  joinUrl: nstr(r.join_url),
+  startsAt: nstr(r.starts_at),
+  endsAt: nstr(r.ends_at),
+  status: str(r.status) as "scheduled" | "held" | "cancelled" | "no-show",
+  agenda: nstr(r.agenda),
+  guardiansInvited: Boolean(r.guardians_invited),
+  meetingNoteId: nstr(r.meeting_note_id),
+  deadlineId: nstr(r.deadline_id),
+  createdAt: nstr(r.created_at),
+});
+
+export const toNotification = (r: Row) => ({
+  id: str(r.id),
+  studentId: nstr(r.student_id),
+  kind: str(r.kind),
+  urgency: str(r.urgency) as "critical" | "high" | "normal" | "low",
+  title: str(r.title),
+  body: nstr(r.body),
+  href: nstr(r.href),
+  actionItems: arr(r.action_items),
+  readAt: nstr(r.read_at),
+  createdAt: nstr(r.created_at),
+});
+
+/**
+ * An integration. `config` never leaves the server: it is where provider ids and
+ * anything token-adjacent live, and a client has no use for either.
+ */
+export const toIntegration = (r: Row) => ({
+  id: str(r.id),
+  provider: str(r.provider),
+  status: str(r.status) as "disconnected" | "connected" | "error" | "syncing",
+  scopes: arr(r.scopes),
+  lastSyncedAt: nstr(r.last_synced_at),
+  lastError: nstr(r.last_error),
+  updatedAt: nstr(r.updated_at),
+});
+
+export const toRosterImport = (r: Row) => ({
+  id: str(r.id),
+  filename: str(r.filename),
+  source: str(r.source) as "csv" | "google" | "microsoft" | "manual",
+  mapping: (r.mapping ?? {}) as Record<string, unknown>,
+  status: str(r.status) as "mapping" | "importing" | "complete" | "failed",
+  rowsTotal: num(r.rows_total) ?? 0,
+  rowsImported: num(r.rows_imported) ?? 0,
+  rowsSkipped: num(r.rows_skipped) ?? 0,
+  rowsFailed: num(r.rows_failed) ?? 0,
+  error: nstr(r.error),
+  createdAt: nstr(r.created_at),
+  completedAt: nstr(r.completed_at),
+});
+
+export const toRosterImportRow = (r: Row) => ({
+  id: str(r.id),
+  importId: str(r.import_id),
+  rowNumber: num(r.row_number) ?? 0,
+  fullName: nstr(r.full_name),
+  email: nstr(r.email),
+  phone: nstr(r.phone),
+  gradeLevel: nstr(r.grade_level),
+  gradYear: nnum(r.grad_year),
+  highSchool: nstr(r.high_school),
+  gpaWeighted: nnum(r.gpa_weighted),
+  gpaUnweighted: nnum(r.gpa_unweighted),
+  satTotal: nnum(r.sat_total),
+  actComposite: nnum(r.act_composite),
+  intendedMajor: nstr(r.intended_major),
+  status: str(r.status) as "pending" | "invited" | "skipped" | "failed",
+  skipReason: nstr(r.skip_reason),
+  invitationId: nstr(r.invitation_id),
+  error: nstr(r.error),
+});
+
+export const toRankBand = (r: Row) => ({
+  id: str(r.id),
+  label: str(r.label),
+  minWeightedGpa: num(r.min_weighted_gpa) ?? 0,
+  percentile: num(r.percentile) ?? 0,
+  sortOrder: num(r.sort_order) ?? 0,
+  ...provenance(r),
+});
+
+/**
+ * Generosity band by band — the evidence behind the income-band-consistency
+ * rating, and the only honest answer when that rating is low.
+ */
+export const toAidBandRating = (r: Row) => ({
+  collegeId: str(r.college_id),
+  band: str(r.band),
+  bandLabel: str(r.band_label),
+  rating: num(r.rating) ?? 0,
+  ratingKind: str(r.rating_kind),
+  note: nstr(r.note),
+  sortOrder: num(r.sort_order) ?? 0,
+  ...provenance(r),
 });

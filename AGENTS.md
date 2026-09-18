@@ -28,6 +28,10 @@ src/
 │   ├── supabase.ts        # userClient (RLS applies) / serviceClient (bypasses)
 │   ├── guards.ts          # requireRole, assertCanView/EditStudent, resolveStudentId
 │   ├── collection.ts      # generates the student-scoped CRUD routes
+│   ├── classRank.ts       # weighted GPA -> percentile, or null. See below
+│   ├── polygonHistory.ts  # buckets the recorded axis history; never invents one
+│   ├── preferences.ts     # the card-sort read-out
+│   ├── invites.ts         # invite tokens, shared by /invites and /roster
 │   ├── limits.ts          # DB-backed rate limits + spend quotas
 │   ├── accountability.ts  # stall detection, escalation, anti-spam throttle
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
@@ -39,6 +43,8 @@ src/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
+│   ├── preferences.ts, meetings.ts, notifications.ts
+│   ├── integrations.ts, reports.ts, roster.ts
 │   └── opportunities.ts, ai.ts, chat.ts
 └── supabase/migrations/   # the schema — this repo owns it
 ```
@@ -73,6 +79,38 @@ Two things the database enforces that the API must not be trusted to:
   unguessable token. There is no SELECT policy that exposes a pending invite to
   the invitee — `invitation_preview()` and `accept_invitation()` are SECURITY
   DEFINER, so an invite has to be *received*, not discovered.
+
+### Three rules the schema encodes, and why they are not the obvious shape
+
+- **`student_alert_prefs` and `student_status_overrides` are not
+  `attach_student_policies` tables.** The standard student-scoped shape lets the
+  student write, and here that is exactly wrong: it would let a student switch
+  off the accountability alerts their counselor sends about them. Alert prefs
+  are counselor-written and student-readable; a status override ("at risk") is a
+  private professional assessment and is counselor-only in both directions, the
+  same reasoning that keeps `parent_alerts` away from the student they concern.
+- **`polygon_axis_history` is append-only and trigger-written.** Select and
+  insert policies only, filled by `private.polygon_axes_record_history()` on the
+  axes themselves, so no route can forget to record a change and no counselor
+  can tidy the past. The demo models growth backwards from today's scores;
+  `lib/polygonHistory.ts` deliberately does not — a student with two weeks of
+  history gets two weeks of chart.
+- **Class rank returns null rather than a guess.** Roughly one high school in
+  six publishes no profile, so `lib/classRank.ts` interpolates only *between*
+  two published bands and never past the strongest one. `GET
+  /high-schools/:id/rank` carries an `unavailableReason` instead of a number. A
+  national assumption wearing a specific school's name is worse than no answer,
+  because a counselor would repeat it to a family.
+
+### Aid generosity is three ratings, not one
+
+v5 settled this and it should not be relitigated: `college_aid_ratings` is keyed
+`(college_id, kind)` over `need-based`, `merit-based` and
+`income-band-consistency`. The third scores how *steady* the headline is across
+income bands — 10 means it holds wherever the family sits, and a low score means
+`college_aid_band_ratings` is the only honest answer. `GET /colleges/:id` serves
+them as `aidRatings` / `aidBandRatings`, outside `aidProfile`, so a curated
+Meridies judgement is never read as one more reported statistic.
 
 ## Rate limiting
 
@@ -126,9 +164,22 @@ offsets itself by locating the model's verbatim quote in the draft, because a
 model that miscounts characters must not be able to splice text into the wrong
 place in a student's essay.
 
-Similarly, `/ai/award-appeal` and `/ai/family-report` produce **drafts**. They
-are written with `status: 'draft'` / `'counselor-review'` and nothing in this
-API sends them.
+Similarly, `/ai/award-appeal`, `/ai/family-report` and `/ai/parent-alert`
+produce **drafts**. The first two are written with `status: 'draft'` /
+`'counselor-review'`; `/ai/parent-alert` persists nothing at all and returns
+text the counselor edits before sending through
+`/accountability/parent-alerts`, which is where quiet hours, the anti-spam
+throttle and `student_alert_prefs` are enforced. Nothing in this API sends any
+of them. `/reports/family/:id/sent` records a send that already happened — it
+does not perform one.
+
+`/ai/file-filing` suggests a folder and never moves a file. It verifies the
+model's `folderId` against the list it was offered and drops to low confidence
+when the id doesn't match, because a fabricated folder id would file a
+student's transcript somewhere nobody looks. `/ai/aid-report` is bullets-only
+under `enforceNoProse`, and the arithmetic stays the database's:
+`award_letters.net_price_cents` is a generated column, so it cannot drift from
+the figures above it.
 
 ### Fetching a URL a user supplied
 

@@ -18,6 +18,7 @@ import {
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
+import { toAlertPref } from "../lib/serialize.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
 
@@ -131,6 +132,73 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
 
       if (error) throw fromPostgrest(error);
       return { ...DEFAULT_SETTINGS, ...(data as object) };
+    }
+  );
+
+  // ---- Alert recipients ----------------------------------------------------
+  //
+  // Who is copied when an alert or a family update goes out. Counselor-written:
+  // a student switching off the alerts about themselves is the one thing this
+  // must not permit, which is why it does not use the standard student-scoped
+  // policies. Readable by the student, so the arrangement is not a secret.
+
+  app.get("/alert-prefs", { preHandler: app.authenticate }, async (request) => {
+    const { studentId } = studentQuery.parse(request.query);
+    const student = await resolveStudentId(request, studentId, "view");
+
+    const { data, error } = await request.db
+      .from("student_alert_prefs")
+      .select("*")
+      .eq("student_id", student)
+      .maybeSingle();
+    if (error) throw fromPostgrest(error);
+
+    // No row means the default, not "unknown": parents on, student off.
+    return data
+      ? toAlertPref(data as Record<string, unknown>)
+      : {
+          studentId: student,
+          copyParents: true,
+          copyStudent: false,
+          note: null,
+          updatedBy: null,
+          updatedAt: null,
+        };
+  });
+
+  app.put(
+    "/alert-prefs",
+    {
+      preHandler: [app.authenticate, requireRole("counselor"), limit("alert-prefs:put", 120, 60)],
+    },
+    async (request) => {
+      const b = z
+        .object({
+          studentId: z.string().uuid(),
+          copyParents: z.boolean().optional(),
+          copyStudent: z.boolean().optional(),
+          note: z.string().trim().max(1000).nullable().optional(),
+        })
+        .strict()
+        .parse(request.body);
+
+      const student = await resolveStudentId(request, b.studentId, "edit");
+
+      const row: Record<string, unknown> = {
+        student_id: student,
+        updated_by: request.auth.userId,
+      };
+      if (b.copyParents !== undefined) row.copy_parents = b.copyParents;
+      if (b.copyStudent !== undefined) row.copy_student = b.copyStudent;
+      if (b.note !== undefined) row.note = b.note;
+
+      const { data, error } = await request.db
+        .from("student_alert_prefs")
+        .upsert(row, { onConflict: "student_id" })
+        .select("*")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return toAlertPref(data as Record<string, unknown>);
     }
   );
 

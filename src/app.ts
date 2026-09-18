@@ -17,9 +17,15 @@ import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
+import integrationRoutes from "./routes/integrations.js";
 import inviteRoutes from "./routes/invites.js";
+import meetingRoutes from "./routes/meetings.js";
+import notificationRoutes from "./routes/notifications.js";
 import opportunityRoutes from "./routes/opportunities.js";
+import preferenceRoutes from "./routes/preferences.js";
 import recordRoutes from "./routes/records.js";
+import reportRoutes from "./routes/reports.js";
+import rosterRoutes from "./routes/roster.js";
 import studentRoutes from "./routes/students.js";
 import taskRoutes from "./routes/tasks.js";
 
@@ -57,6 +63,12 @@ export function buildApp() {
   app.register(blastRoutes, { prefix: "/blasts" });
   app.register(firmRoutes, { prefix: "/firms" });
   app.register(opportunityRoutes, { prefix: "/opportunities" });
+  app.register(preferenceRoutes, { prefix: "/preference-cards" });
+  app.register(meetingRoutes, { prefix: "/meetings" });
+  app.register(notificationRoutes, { prefix: "/notifications" });
+  app.register(integrationRoutes, { prefix: "/integrations" });
+  app.register(reportRoutes, { prefix: "/reports" });
+  app.register(rosterRoutes, { prefix: "/roster" });
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });
 
