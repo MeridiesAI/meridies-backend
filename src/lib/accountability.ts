@@ -253,3 +253,94 @@ export async function buildBehindList(
         b.stalled.length - a.stalled.length
     );
 }
+
+// ---------------------------------------------------------------------------
+// Who an alert actually reaches.
+//
+// `student_alert_prefs` is the counselor's decision about recipients, and it has
+// to be read on the send path or it is decoration. Both the manual send and the
+// escalation sweep go through this, so the two cannot drift.
+// ---------------------------------------------------------------------------
+
+export type AlertPrefs = { copy_parents: boolean; copy_student: boolean };
+
+/** Absent row means the default, not "unknown": parents on, student off. */
+export const DEFAULT_ALERT_PREFS: AlertPrefs = { copy_parents: true, copy_student: false };
+
+export async function loadAlertPrefs(
+  request: FastifyRequest,
+  studentId: string
+): Promise<AlertPrefs> {
+  const { data } = await request.db
+    .from("student_alert_prefs")
+    .select("copy_parents, copy_student")
+    .eq("student_id", studentId)
+    .maybeSingle();
+
+  if (!data) return DEFAULT_ALERT_PREFS;
+  return {
+    copy_parents: data.copy_parents !== false,
+    copy_student: data.copy_student === true,
+  };
+}
+
+export type AlertRecipients = {
+  guardianId: string | null;
+  copyStudent: boolean;
+  /** Set when nobody would receive this. The caller refuses rather than queues. */
+  blockedReason: string | null;
+};
+
+/**
+ * Resolve the recipients for one alert.
+ *
+ * Two independent gates, and both have to pass for a guardian to be included:
+ * the per-student `copy_parents` switch, and the guardian's own
+ * `alerts_enabled`. A guardian who opted out never receives anything whatever
+ * the counselor sets, and a counselor who switched the parents off is not
+ * overruled by a guardian who is still marked enabled.
+ */
+export async function resolveAlertRecipients(
+  request: FastifyRequest,
+  studentId: string,
+  requestedGuardianId?: string | null
+): Promise<AlertRecipients> {
+  const prefs = await loadAlertPrefs(request, studentId);
+
+  let guardianId: string | null = null;
+  if (prefs.copy_parents) {
+    if (requestedGuardianId) {
+      // An explicitly named guardian still has to be this student's, and still
+      // has to have alerts enabled.
+      const { data } = await request.db
+        .from("guardians")
+        .select("id")
+        .eq("id", requestedGuardianId)
+        .eq("student_id", studentId)
+        .eq("alerts_enabled", true)
+        .maybeSingle();
+      guardianId = data?.id ?? null;
+    } else {
+      const { data } = await request.db
+        .from("guardians")
+        .select("id")
+        .eq("student_id", studentId)
+        .eq("alerts_enabled", true)
+        .order("is_primary", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      guardianId = data?.id ?? null;
+    }
+  }
+
+  if (!guardianId && !prefs.copy_student) {
+    // Say which of the two reasons it is. "No recipients" sends a counselor
+    // looking at the guardian list when the switch is what is off.
+    const blockedReason = prefs.copy_parents
+      ? "No guardian on file with alerts enabled for that student"
+      : "Alerts for that student are switched off for both the parents and the student";
+    return { guardianId: null, copyStudent: false, blockedReason };
+  }
+
+  return { guardianId, copyStudent: prefs.copy_student, blockedReason: null };
+}

@@ -14,6 +14,7 @@ import {
   DEFAULT_SETTINGS,
   inQuietHours,
   loadSettings,
+  resolveAlertRecipients,
 } from "../lib/accountability.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -411,22 +412,12 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         ignoreQuietHours: b.overrideQuietHours === true,
       });
 
-      // A guardian who opted out never receives anything, manual or not.
-      let guardianId = b.guardianId ?? null;
-      if (!guardianId) {
-        const { data: guardian } = await request.db
-          .from("guardians")
-          .select("id")
-          .eq("student_id", b.studentId)
-          .eq("alerts_enabled", true)
-          .order("is_primary", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        guardianId = guardian?.id ?? null;
-      }
-      if (!guardianId) {
-        throw badRequest("No guardian on file with alerts enabled for that student");
-      }
+      // Recipients come from `student_alert_prefs` AND the guardian's own
+      // opt-out. A guardian who opted out never receives anything, manual or
+      // not; a counselor who switched the parents off is not overruled by a
+      // guardian still marked enabled.
+      const recipients = await resolveAlertRecipients(request, b.studentId, b.guardianId ?? null);
+      if (recipients.blockedReason) throw badRequest(recipients.blockedReason);
 
       const throttled = Boolean(blocked) && !/quiet hours/i.test(blocked ?? "");
       const status = throttled
@@ -441,7 +432,8 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         .from("parent_alerts")
         .insert({
           student_id: b.studentId,
-          guardian_id: guardianId,
+          guardian_id: recipients.guardianId,
+          copy_student: recipients.copyStudent,
           red_flag_id: b.redFlagId ?? null,
           counselor_id: request.auth.userId,
           trigger: b.trigger ?? "manual",
@@ -517,23 +509,16 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
           continue;
         }
 
-        const { data: guardian } = await request.db
-          .from("guardians")
-          .select("id")
-          .eq("student_id", studentId)
-          .eq("alerts_enabled", true)
-          .order("is_primary", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (!guardian) {
-          skipped.push({ id: flag.id as string, reason: "no guardian with alerts enabled" });
+        const recipients = await resolveAlertRecipients(request, studentId);
+        if (recipients.blockedReason) {
+          skipped.push({ id: flag.id as string, reason: recipients.blockedReason });
           continue;
         }
 
         await request.db.from("parent_alerts").insert({
           student_id: studentId,
-          guardian_id: guardian.id,
+          guardian_id: recipients.guardianId,
+          copy_student: recipients.copyStudent,
           red_flag_id: flag.id as string,
           counselor_id: request.auth.userId,
           trigger: "escalation",
