@@ -41,16 +41,20 @@ const statusBody = z
   .strict();
 
 export default async function integrationRoutes(app: FastifyInstance) {
-  app.get("/", { preHandler: app.authenticate }, async (request) => {
-    const { data, error } = await request.db
-      .from("integrations")
-      .select("id, provider, status, scopes, last_synced_at, last_error, updated_at")
-      .eq("owner_id", request.auth.userId)
-      .order("provider")
-      .limit(50);
-    if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toIntegration(r as Row));
-  });
+  app.get(
+    "/",
+    { preHandler: [app.authenticate, limit("integrations:list", 120, 60)] },
+    async (request) => {
+      const { data, error } = await request.db
+        .from("integrations")
+        .select("id, provider, status, scopes, last_synced_at, last_error, updated_at")
+        .eq("owner_id", request.auth.userId)
+        .order("provider")
+        .limit(50);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toIntegration(r as Row));
+    }
+  );
 
   /**
    * Record a grant. The OAuth dance itself happens outside this API; this is

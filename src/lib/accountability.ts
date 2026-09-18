@@ -10,6 +10,7 @@
  */
 
 import type { FastifyRequest } from "fastify";
+import { fromPostgrest } from "./errors.js";
 
 export type AccountabilitySettings = {
   enabled: boolean;
@@ -267,16 +268,23 @@ export type AlertPrefs = { copy_parents: boolean; copy_student: boolean };
 /** Absent row means the default, not "unknown": parents on, student off. */
 export const DEFAULT_ALERT_PREFS: AlertPrefs = { copy_parents: true, copy_student: false };
 
+/**
+ * Fails CLOSED. An absent row is the default, but a query that *errored* is not
+ * an absent row: swallowing it would fall through to `copy_parents: true` and
+ * copy a guardian the counselor had switched off. For a recipient preference
+ * the safe direction is to refuse the send, not to guess the permissive answer.
+ */
 export async function loadAlertPrefs(
   request: FastifyRequest,
   studentId: string
 ): Promise<AlertPrefs> {
-  const { data } = await request.db
+  const { data, error } = await request.db
     .from("student_alert_prefs")
     .select("copy_parents, copy_student")
     .eq("student_id", studentId)
     .maybeSingle();
 
+  if (error) throw fromPostgrest(error);
   if (!data) return DEFAULT_ALERT_PREFS;
   return {
     copy_parents: data.copy_parents !== false,
@@ -312,16 +320,19 @@ export async function resolveAlertRecipients(
     if (requestedGuardianId) {
       // An explicitly named guardian still has to be this student's, and still
       // has to have alerts enabled.
-      const { data } = await request.db
+      const { data, error } = await request.db
         .from("guardians")
         .select("id")
         .eq("id", requestedGuardianId)
         .eq("student_id", studentId)
         .eq("alerts_enabled", true)
         .maybeSingle();
+      // Surface the failure rather than letting it read as "no guardian on
+      // file" — that message would send a counselor to fix a list that is fine.
+      if (error) throw fromPostgrest(error);
       guardianId = data?.id ?? null;
     } else {
-      const { data } = await request.db
+      const { data, error } = await request.db
         .from("guardians")
         .select("id")
         .eq("student_id", studentId)
@@ -329,6 +340,7 @@ export async function resolveAlertRecipients(
         .order("is_primary", { ascending: false })
         .limit(1)
         .maybeSingle();
+      if (error) throw fromPostgrest(error);
       guardianId = data?.id ?? null;
     }
   }

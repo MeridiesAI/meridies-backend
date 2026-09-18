@@ -15,6 +15,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { rankPercentile } from "../lib/classRank.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
+import { limit } from "../lib/limits.js";
 import {
   toAidBandRating,
   toAidRating,
@@ -33,6 +34,14 @@ type Row = Record<string, unknown>;
 const idParam = z.object({ id: z.string().uuid() });
 
 export default async function collegeRoutes(app: FastifyInstance) {
+  /**
+   * The catalog reads that pull real volume — a scattergram is up to 2000 rows
+   * — carry the DB-backed limiter as well as the in-process one. The single-row
+   * lookups do not: a limiter round trip would cost more than the query it
+   * guards.
+   */
+  const read = (name: string, max = 120) => [app.authenticate, limit(name, max, 60)];
+
   app.get("/colleges", { preHandler: app.authenticate }, async (request) => {
     const q = z
       .object({
@@ -250,7 +259,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
    * national assumption wearing this school's name is worse than no answer,
    * because a counselor would repeat it to a family.
    */
-  app.get("/high-schools/:id/rank", { preHandler: app.authenticate }, async (request) => {
+  app.get("/high-schools/:id/rank", { preHandler: read("high-schools:rank", 240) }, async (request) => {
     const { id } = idParam.parse(request.params);
     const { weightedGpa } = z
       .object({ weightedGpa: z.coerce.number().min(0).max(20) })
@@ -299,7 +308,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
   // reference at all, only a GPA, a score, an outcome and the high school it
   // came from. That is what makes it publishable inside the product.
 
-  app.get("/colleges/:id/scattergram", { preHandler: app.authenticate }, async (request) => {
+  app.get("/colleges/:id/scattergram", { preHandler: read("colleges:scattergram") }, async (request) => {
     const { id } = idParam.parse(request.params);
     const q = z
       .object({
@@ -320,7 +329,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
     return data ?? [];
   });
 
-  app.get("/colleges/:id/combined-programs", { preHandler: app.authenticate }, async (request) => {
+  app.get("/colleges/:id/combined-programs", { preHandler: read("colleges:programs") }, async (request) => {
     const { id } = idParam.parse(request.params);
     const { data, error } = await request.db
       .from("combined_programs")

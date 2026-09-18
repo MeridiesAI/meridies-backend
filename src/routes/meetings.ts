@@ -54,42 +54,50 @@ const meetingPatch = meetingBody
   .strict();
 
 export default async function meetingRoutes(app: FastifyInstance) {
-  app.get("/", { preHandler: app.authenticate }, async (request) => {
-    const q = listQuery.parse(request.query);
+  app.get(
+    "/",
+    { preHandler: [app.authenticate, limit("meetings:list", 240, 60)] },
+    async (request) => {
+      const q = listQuery.parse(request.query);
 
-    let builder = request.db.from("meetings").select("*");
+      let builder = request.db.from("meetings").select("*");
 
-    // A counselor with no studentId wants their whole calendar; with one, they
-    // want that student's — and resolveStudentId is what proves they may.
-    if (q.studentId || request.profile.role === "student") {
-      const student = await resolveStudentId(request, q.studentId, "view");
-      builder = builder.eq("student_id", student);
-    } else {
-      builder = builder.eq("counselor_id", request.auth.userId);
+      // A counselor with no studentId wants their whole calendar; with one, they
+      // want that student's — and resolveStudentId is what proves they may.
+      if (q.studentId || request.profile.role === "student") {
+        const student = await resolveStudentId(request, q.studentId, "view");
+        builder = builder.eq("student_id", student);
+      } else {
+        builder = builder.eq("counselor_id", request.auth.userId);
+      }
+
+      if (q.status) builder = builder.eq("status", q.status);
+      if (q.from) builder = builder.gte("starts_at", q.from);
+      if (q.to) builder = builder.lte("starts_at", q.to);
+
+      const { data, error } = await builder
+        .order("starts_at", { ascending: true })
+        .limit(q.limit ?? 100);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toMeeting(r as Row));
     }
+  );
 
-    if (q.status) builder = builder.eq("status", q.status);
-    if (q.from) builder = builder.gte("starts_at", q.from);
-    if (q.to) builder = builder.lte("starts_at", q.to);
-
-    const { data, error } = await builder
-      .order("starts_at", { ascending: true })
-      .limit(q.limit ?? 100);
-    if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toMeeting(r as Row));
-  });
-
-  app.get("/:id", { preHandler: app.authenticate }, async (request) => {
-    const { id } = idParam.parse(request.params);
-    const { data, error } = await request.db
-      .from("meetings")
-      .select("*")
-      .eq("id", id)
-      .maybeSingle();
-    if (error) throw fromPostgrest(error);
-    if (!data) throw notFound("That meeting doesn't exist");
-    return toMeeting(data as Row);
-  });
+  app.get(
+    "/:id",
+    { preHandler: [app.authenticate, limit("meetings:read", 240, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const { data, error } = await request.db
+        .from("meetings")
+        .select("*")
+        .eq("id", id)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!data) throw notFound("That meeting doesn't exist");
+      return toMeeting(data as Row);
+    }
+  );
 
   app.post(
     "/",

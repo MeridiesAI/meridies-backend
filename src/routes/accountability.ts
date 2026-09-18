@@ -143,29 +143,33 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
   // must not permit, which is why it does not use the standard student-scoped
   // policies. Readable by the student, so the arrangement is not a secret.
 
-  app.get("/alert-prefs", { preHandler: app.authenticate }, async (request) => {
-    const { studentId } = studentQuery.parse(request.query);
-    const student = await resolveStudentId(request, studentId, "view");
+  app.get(
+    "/alert-prefs",
+    { preHandler: [app.authenticate, limit("alert-prefs:read", 240, 60)] },
+    async (request) => {
+      const { studentId } = studentQuery.parse(request.query);
+      const student = await resolveStudentId(request, studentId, "view");
 
-    const { data, error } = await request.db
-      .from("student_alert_prefs")
-      .select("*")
-      .eq("student_id", student)
-      .maybeSingle();
-    if (error) throw fromPostgrest(error);
+      const { data, error } = await request.db
+        .from("student_alert_prefs")
+        .select("*")
+        .eq("student_id", student)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
 
-    // No row means the default, not "unknown": parents on, student off.
-    return data
-      ? toAlertPref(data as Record<string, unknown>)
-      : {
-          studentId: student,
-          copyParents: true,
-          copyStudent: false,
-          note: null,
-          updatedBy: null,
-          updatedAt: null,
-        };
-  });
+      // No row means the default, not "unknown": parents on, student off.
+      return data
+        ? toAlertPref(data as Record<string, unknown>)
+        : {
+            studentId: student,
+            copyParents: true,
+            copyStudent: false,
+            note: null,
+            updatedBy: null,
+            updatedAt: null,
+          };
+    }
+  );
 
   app.put(
     "/alert-prefs",

@@ -43,24 +43,30 @@ const reportPatch = z
 export default async function reportRoutes(app: FastifyInstance) {
   // ---- Narrative flags ------------------------------------------------------
 
-  app.get("/flags", { preHandler: app.authenticate }, async (request) => {
-    const q = studentQuery
-      .extend({
-        status: z.enum(["open", "resolved", "dismissed"]).optional(),
-        limit: z.coerce.number().int().min(1).max(500).optional(),
-      })
-      .parse(request.query);
+  // Roster-wide by default: a roster lookup plus up to 500 rows, so this one
+  // carries the DB-backed limiter rather than leaning on the in-process cap.
+  app.get(
+    "/flags",
+    { preHandler: [app.authenticate, limit("reports:flags", 120, 60)] },
+    async (request) => {
+      const q = studentQuery
+        .extend({
+          status: z.enum(["open", "resolved", "dismissed"]).optional(),
+          limit: z.coerce.number().int().min(1).max(500).optional(),
+        })
+        .parse(request.query);
 
-    const scope = await rosterScope(request, q.studentId);
-    let builder = request.db.from("narrative_flags").select("*").in("student_id", scope);
-    if (q.status) builder = builder.eq("status", q.status);
+      const scope = await rosterScope(request, q.studentId);
+      let builder = request.db.from("narrative_flags").select("*").in("student_id", scope);
+      if (q.status) builder = builder.eq("status", q.status);
 
-    const { data, error } = await builder
-      .order("created_at", { ascending: false })
-      .limit(q.limit ?? 200);
-    if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toNarrativeFlag(r as Row));
-  });
+      const { data, error } = await builder
+        .order("created_at", { ascending: false })
+        .limit(q.limit ?? 200);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toNarrativeFlag(r as Row));
+    }
+  );
 
   /**
    * Resolve, dismiss, or share a flag with the student. A counselor's call: a
@@ -114,24 +120,28 @@ export default async function reportRoutes(app: FastifyInstance) {
 
   // ---- Family reports -------------------------------------------------------
 
-  app.get("/family", { preHandler: app.authenticate }, async (request) => {
-    const q = studentQuery
-      .extend({
-        status: z.enum(["draft", "sent", "archived"]).optional(),
-        limit: z.coerce.number().int().min(1).max(500).optional(),
-      })
-      .parse(request.query);
+  app.get(
+    "/family",
+    { preHandler: [app.authenticate, limit("reports:family", 120, 60)] },
+    async (request) => {
+      const q = studentQuery
+        .extend({
+          status: z.enum(["draft", "sent", "archived"]).optional(),
+          limit: z.coerce.number().int().min(1).max(500).optional(),
+        })
+        .parse(request.query);
 
-    const scope = await rosterScope(request, q.studentId);
-    let builder = request.db.from("family_reports").select("*").in("student_id", scope);
-    if (q.status) builder = builder.eq("status", q.status);
+      const scope = await rosterScope(request, q.studentId);
+      let builder = request.db.from("family_reports").select("*").in("student_id", scope);
+      if (q.status) builder = builder.eq("status", q.status);
 
-    const { data, error } = await builder
-      .order("created_at", { ascending: false })
-      .limit(q.limit ?? 200);
-    if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toFamilyReport(r as Row));
-  });
+      const { data, error } = await builder
+        .order("created_at", { ascending: false })
+        .limit(q.limit ?? 200);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toFamilyReport(r as Row));
+    }
+  );
 
   /** Edit a draft before it goes anywhere. The counselor's words win. */
   app.patch(

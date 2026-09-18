@@ -28,32 +28,40 @@ const ratingBody = z
 
 export default async function preferenceRoutes(app: FastifyInstance) {
   /** The deck itself. */
-  app.get("/", { preHandler: app.authenticate }, async (request) => {
-    const deck = await loadDeck(request);
-    const isStudent = request.profile.role === "student";
-    return deck.map((card) => (isStudent ? { ...card, counselorNote: null } : card));
-  });
+  app.get(
+    "/",
+    { preHandler: [app.authenticate, limit("preference-cards:deck", 120, 60)] },
+    async (request) => {
+      const deck = await loadDeck(request);
+      const isStudent = request.profile.role === "student";
+      return deck.map((card) => (isStudent ? { ...card, counselorNote: null } : card));
+    }
+  );
 
   /**
    * A student's sort, plus the read-out. Both come back together because a
    * ratings map with no deck beside it is unreadable, and the client would
    * only have to ask for the deck next.
    */
-  app.get("/ratings", { preHandler: app.authenticate }, async (request) => {
-    const { studentId } = studentQuery.parse(request.query);
-    const student = await resolveStudentId(request, studentId, "view");
+  app.get(
+    "/ratings",
+    { preHandler: [app.authenticate, limit("preference-cards:read", 240, 60)] },
+    async (request) => {
+      const { studentId } = studentQuery.parse(request.query);
+      const student = await resolveStudentId(request, studentId, "view");
 
-    const [deck, ratings] = await Promise.all([loadDeck(request), loadRatings(request, student)]);
-    const byCard = new Map<string, Rating>(
-      ratings.map((r) => [r.cardId, r.rating] as [string, Rating])
-    );
+      const [deck, ratings] = await Promise.all([loadDeck(request), loadRatings(request, student)]);
+      const byCard = new Map<string, Rating>(
+        ratings.map((r) => [r.cardId, r.rating] as [string, Rating])
+      );
 
-    return {
-      studentId: student,
-      ratings,
-      summary: summarisePreferences(deck, byCard),
-    };
-  });
+      return {
+        studentId: student,
+        ratings,
+        summary: summarisePreferences(deck, byCard),
+      };
+    }
+  );
 
   /** Rate one card. Idempotent — re-rating replaces, it does not stack. */
   app.put(

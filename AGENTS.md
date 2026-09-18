@@ -128,6 +128,20 @@ map and logs a warning at boot. Set it before going live.
 New expensive route? Add a `limit(...)` preHandler. AI routes get 20/min per
 user plus a 300-call daily quota.
 
+**Reads get the DB-backed limiter when they carry volume or fan out** — a list,
+a roster-wide query, a 2000-row scattergram or history series. Single-row point
+lookups mostly do not: the limiter is itself a database round trip, so guarding
+a one-row read with one roughly doubles its cost for no protection the
+in-process cap doesn't already give. `routes/colleges.ts` has a local `read()`
+helper for this; everywhere else spells the array out.
+
+**Fail closed on anything that decides who receives a message.**
+`loadAlertPrefs()` throws on a query error rather than returning the default,
+because the default is the permissive answer: swallowing the error would copy a
+guardian the counselor had switched off. The same reasoning applies to any
+future preference of this shape — an absent row is a default, an errored query
+is not.
+
 ## Anthropic / AI rules
 
 **All product AI goes through Anthropic.** No other providers unless the team

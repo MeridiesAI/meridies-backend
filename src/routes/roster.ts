@@ -64,7 +64,7 @@ const createBody = z
 export default async function rosterRoutes(app: FastifyInstance) {
   app.get(
     "/imports",
-    { preHandler: [app.authenticate, requireRole("counselor")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("roster:list", 120, 60)] },
     async (request) => {
       const { data, error } = await request.db
         .from("roster_imports")
@@ -79,7 +79,7 @@ export default async function rosterRoutes(app: FastifyInstance) {
 
   app.get(
     "/imports/:id",
-    { preHandler: [app.authenticate, requireRole("counselor")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("roster:detail", 240, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
       const record = await loadImport(request, id);
@@ -210,7 +210,13 @@ export default async function rosterRoutes(app: FastifyInstance) {
         rows.length
       );
 
-      await request.db.from("roster_imports").update({ status: "importing" }).eq("id", id);
+      const { error: markingError } = await request.db
+        .from("roster_imports")
+        .update({ status: "importing" })
+        .eq("id", id);
+      // Refuse before sending anything rather than emailing a roster whose
+      // import row we could not move out of "mapping".
+      if (markingError) throw fromPostgrest(markingError);
 
       let invited = 0;
       let failed = 0;
