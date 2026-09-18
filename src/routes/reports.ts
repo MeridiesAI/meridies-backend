@@ -45,16 +45,19 @@ export default async function reportRoutes(app: FastifyInstance) {
 
   app.get("/flags", { preHandler: app.authenticate }, async (request) => {
     const q = studentQuery
-      .extend({ status: z.enum(["open", "resolved", "dismissed"]).optional() })
+      .extend({
+        status: z.enum(["open", "resolved", "dismissed"]).optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+      })
       .parse(request.query);
-    const student = await resolveStudentId(request, q.studentId, "view");
 
-    let builder = request.db.from("narrative_flags").select("*").eq("student_id", student);
+    const scope = await rosterScope(request, q.studentId);
+    let builder = request.db.from("narrative_flags").select("*").in("student_id", scope);
     if (q.status) builder = builder.eq("status", q.status);
 
     const { data, error } = await builder
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(q.limit ?? 200);
     if (error) throw fromPostgrest(error);
     return (data ?? []).map((r) => toNarrativeFlag(r as Row));
   });
@@ -113,16 +116,19 @@ export default async function reportRoutes(app: FastifyInstance) {
 
   app.get("/family", { preHandler: app.authenticate }, async (request) => {
     const q = studentQuery
-      .extend({ status: z.enum(["draft", "sent", "archived"]).optional() })
+      .extend({
+        status: z.enum(["draft", "sent", "archived"]).optional(),
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+      })
       .parse(request.query);
-    const student = await resolveStudentId(request, q.studentId, "view");
 
-    let builder = request.db.from("family_reports").select("*").eq("student_id", student);
+    const scope = await rosterScope(request, q.studentId);
+    let builder = request.db.from("family_reports").select("*").in("student_id", scope);
     if (q.status) builder = builder.eq("status", q.status);
 
     const { data, error } = await builder
       .order("created_at", { ascending: false })
-      .limit(100);
+      .limit(q.limit ?? 200);
     if (error) throw fromPostgrest(error);
     return (data ?? []).map((r) => toFamilyReport(r as Row));
   });
@@ -211,4 +217,42 @@ async function ownerOf(
   if (error) throw fromPostgrest(error);
   if (!data) throw notFound(missing);
   return data.student_id as string;
+}
+
+/**
+ * Scope a review-queue read to one student, or to the counselor's whole roster.
+ *
+ * A review queue is roster-wide by nature — the counselor is asking "what is
+ * waiting on me", not "what is waiting on me for Sophia". Requiring `studentId`
+ * the way `resolveStudentId` does forced the client into one request per
+ * student, which is 2N requests for an N-student roster and does not survive a
+ * real practice.
+ *
+ * Returns ids rather than taking the query builder: a PostgREST builder is
+ * thenable, so handing one to an async function and awaiting the result runs
+ * the query instead of returning the builder.
+ *
+ * RLS would scope this on its own, but the roster filter is applied as well: a
+ * route that leans only on RLS leaks the shape of the answer, and AGENTS.md
+ * asks for both layers.
+ */
+async function rosterScope(
+  request: FastifyRequest,
+  studentId: string | undefined
+): Promise<string[]> {
+  if (studentId || request.profile.role === "student") {
+    return [await resolveStudentId(request, studentId, "view")];
+  }
+
+  const { data, error } = await request.db
+    .from("profiles")
+    .select("id")
+    .eq("counselor_id", request.auth.userId)
+    .is("archived_at", null);
+  if (error) throw fromPostgrest(error);
+
+  const ids = (data ?? []).map((r) => r.id as string);
+  // An empty roster must match nothing, not everything. A uuid that is never a
+  // real profile id keeps the `in` list non-empty without widening it.
+  return ids.length > 0 ? ids : ["00000000-0000-0000-0000-000000000000"];
 }

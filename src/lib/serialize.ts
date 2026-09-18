@@ -148,6 +148,7 @@ export const toNote = (r: Row) => ({
 
 export const toNarrativeFlag = (r: Row) => ({
   id: str(r.id),
+  studentId: str(r.student_id),
   severity: str(r.severity) as "high" | "medium" | "low",
   title: str(r.title),
   detail: str(r.detail),
@@ -161,6 +162,7 @@ export const toNarrativeFlag = (r: Row) => ({
 
 export const toFamilyReport = (r: Row) => ({
   id: str(r.id),
+  studentId: str(r.student_id),
   title: str(r.title),
   kind: str(r.kind),
   date: str(r.created_at).slice(0, 10),
