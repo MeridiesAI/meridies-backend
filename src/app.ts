@@ -5,6 +5,7 @@ import { corsOrigins, env, hasAnthropic, hasServiceRole } from "./env.js";
 import { HttpError } from "./lib/errors.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
+import { startSweepInterval } from "./lib/sweepSchedule.js";
 import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
@@ -17,6 +18,7 @@ import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
+import internalRoutes from "./routes/internal.js";
 import integrationRoutes from "./routes/integrations.js";
 import inviteRoutes from "./routes/invites.js";
 import meetingRoutes from "./routes/meetings.js";
@@ -71,6 +73,9 @@ export function buildApp() {
   app.register(rosterRoutes, { prefix: "/roster" });
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });
+  // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
+  app.register(internalRoutes, { prefix: "/internal" });
+  startSweepInterval(app);
 
   app.addHook("onReady", async () => {
     if (!hasServiceRole) {

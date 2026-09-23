@@ -33,7 +33,8 @@ src/
 │   ├── preferences.ts     # the card-sort read-out
 │   ├── invites.ts         # invite tokens, shared by /invites and /roster
 │   ├── limits.ts          # DB-backed rate limits + spend quotas
-│   ├── accountability.ts  # stall detection, escalation, anti-spam throttle
+│   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
+│   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
 │   ├── email.ts           # Resend sends + message_deliveries audit, SMS queue
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
@@ -45,7 +46,8 @@ src/
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
-│   └── opportunities.ts, ai.ts, chat.ts
+│   ├── opportunities.ts, ai.ts, chat.ts
+│   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -140,7 +142,42 @@ helper for this; everywhere else spells the array out.
 because the default is the permissive answer: swallowing the error would copy a
 guardian the counselor had switched off. The same reasoning applies to any
 future preference of this shape — an absent row is a default, an errored query
-is not.
+is not. `loadSettings()` and the throttle read in `alertBlockedReason()` throw on
+error for the same reason: a defaulted `enabled: true` would switch alerts back
+on for a counselor who turned them off.
+
+## Scheduled jobs
+
+The escalation sweep (`runEscalationSweep` in `lib/accountability.ts`) turns red
+flags whose timer expired into parent alerts. One implementation, three
+triggers:
+
+- **The dashboard button** — `POST /accountability/sweep`, the caller's own
+  roster on their RLS-bound client. Unchanged.
+- **Railway cron** — `POST /internal/accountability/sweep` with
+  `Authorization: Bearer $CRON_SECRET` (constant-time compare; 503 when the
+  secret is unset, 409 when a sweep is already running). Create a Railway cron
+  service, e.g. schedule `*/15 * * * *`, command:
+  ```bash
+  curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
+    "https://<api-host>/internal/accountability/sweep"
+  ```
+- **In-process interval** — `SWEEP_INTERVAL_MINUTES` (5–1440) on every replica.
+  Use it *or* the cron; both together is safe but redundant.
+
+Scheduled runs (`lib/sweepSchedule.ts`) use `serviceClient()`, so RLS scopes
+nothing: each counselor's sweep is handed only students whose `counselor_id`
+is that counselor, and archived students are skipped. A run first takes the
+`accountability-sweep` lease (`acquire_job_lease` / `release_job_lease`,
+migration `20260923000003`, EXECUTE to `service_role` only) — a lease row, not
+`pg_advisory_lock`, because PostgREST RPCs don't share a session. Each flag is
+also *claimed* with a conditional `open -> escalated` update before its alert is
+inserted, so an overlapping button click and scheduled run can't queue the same
+escalation twice. The throttle, quiet hours (auto-send never fires inside them)
+and fail-closed alert prefs apply identically on every path; a flag whose reads
+error is held, not sent. Every run writes one `audit_log` row
+(`accountability.sweep.{manual,cron,interval}`). Without
+`SUPABASE_SERVICE_ROLE_KEY` a scheduled run logs and skips.
 
 ## Anthropic / AI rules
 
@@ -239,9 +276,13 @@ npm run dev               # http://localhost:4000
 | `ANTHROPIC_API_KEY` | Optional; `/ai/*` returns 503 without it |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
+| `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*`, which 503s without it |
+| `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 
-`GET /health` reports `{ status, anthropic, serviceRole }` — presence only,
-never values.
+`GET /health` reports `{ status, database, anthropic, serviceRole }` — presence
+and reachability only, never values, URLs or error text. `database` is a 2s HEAD
+probe on `colleges` (cached 5s); when it fails the route returns **503** with
+`status: "degraded"`, so a Railway healthcheck sees an unreachable database.
 
 ## Related repos
 

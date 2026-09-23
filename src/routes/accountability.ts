@@ -14,12 +14,15 @@ import {
   DEFAULT_SETTINGS,
   inQuietHours,
   loadSettings,
+  nextSendWindow,
   resolveAlertRecipients,
+  runEscalationSweep,
 } from "../lib/accountability.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { deliverParentAlert, type ParentAlertRow } from "../lib/parentAlertDelivery.js";
+import { recordSweepAudit } from "../lib/sweepSchedule.js";
 import { toAlertPref, toStudentRedFlag } from "../lib/serialize.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
@@ -530,98 +533,26 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
 
   /**
    * Escalation sweep. Turns red flags whose timer expired — and whose
-   * deliverable hasn't moved — into queued parent alerts. Meant to be called on
-   * a schedule; it only ever touches the caller's own roster.
+   * deliverable hasn't moved — into queued parent alerts. It only ever touches
+   * the caller's own roster (RLS-bound client). The same core also runs on a
+   * schedule for every counselor: see `lib/sweepSchedule.ts`.
    */
   app.post(
     "/sweep",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("accountability:sweep", 12, 3600)] },
     async (request) => {
-      const now = new Date().toISOString();
-
-      const { data: due, error } = await request.db
-        .from("red_flags")
-        .select("*")
-        .eq("status", "open")
-        .lt("escalate_at", now)
-        .limit(100);
-
-      if (error) throw fromPostgrest(error);
-
-      const escalated: string[] = [];
-      const skipped: { id: string; reason: string }[] = [];
-
-      for (const flag of due ?? []) {
-        const studentId = flag.student_id as string;
-        const settings = await loadSettings(request, request.auth.userId, studentId);
-
-        // Did the student actually do the work? If so, close the flag instead.
-        if (flag.deliverable_id) {
-          const { data: deliverable } = await request.db
-            .from("deliverables")
-            .select("current_words")
-            .eq("id", flag.deliverable_id as string)
-            .maybeSingle();
-
-          const moved =
-            deliverable != null &&
-            Number(deliverable.current_words ?? 0) > Number(flag.baseline_words ?? 0);
-
-          if (moved) {
-            await request.db
-              .from("red_flags")
-              .update({ status: "resolved", resolved_at: now })
-              .eq("id", flag.id as string);
-            skipped.push({ id: flag.id as string, reason: "student made progress" });
-            continue;
-          }
-        }
-
-        const blocked = await alertBlockedReason(request, studentId, settings);
-        if (blocked && !/quiet hours/i.test(blocked)) {
-          skipped.push({ id: flag.id as string, reason: blocked });
-          continue;
-        }
-
-        const recipients = await resolveAlertRecipients(request, studentId);
-        if (recipients.blockedReason) {
-          skipped.push({ id: flag.id as string, reason: recipients.blockedReason });
-          continue;
-        }
-
-        await request.db.from("parent_alerts").insert({
-          student_id: studentId,
-          guardian_id: recipients.guardianId,
-          copy_student: recipients.copyStudent,
-          red_flag_id: flag.id as string,
-          counselor_id: request.auth.userId,
-          trigger: "escalation",
-          urgency: "high",
-          subject: `Action needed: ${flag.title}`,
-          body: String(flag.message),
-          action_items: (flag.action_items as string[]) ?? [],
-          channel: "email",
-          status: settings.auto_send_parent_alerts ? "queued" : "scheduled",
-          scheduled_for: settings.auto_send_parent_alerts ? null : nextSendWindow(settings),
-        });
-
-        await request.db
-          .from("red_flags")
-          .update({ status: "escalated", escalated_at: now })
-          .eq("id", flag.id as string);
-
-        escalated.push(flag.id as string);
-      }
-
-      return { escalated: escalated.length, skipped };
+      const startedAt = Date.now();
+      const result = await runEscalationSweep(request, request.auth.userId, { log: request.log });
+      await recordSweepAudit(request.log, {
+        actorId: request.auth.userId,
+        trigger: "manual",
+        counselors: 1,
+        escalated: result.escalated,
+        skipped: result.skipped.length,
+        failedCounselors: 0,
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
     }
   );
-}
-
-/** Next moment outside quiet hours, so a held alert has a real send time. */
-function nextSendWindow(settings: { quiet_hours_end: number | null }): string {
-  const next = new Date();
-  next.setHours((settings.quiet_hours_end ?? 8) + 1, 0, 0, 0);
-  if (next.getTime() < Date.now()) next.setDate(next.getDate() + 1);
-  return next.toISOString();
 }
