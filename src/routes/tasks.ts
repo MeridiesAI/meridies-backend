@@ -26,7 +26,7 @@ import {
 import { enforceNoProse, runStructured } from "../lib/anthropic.js";
 import { registerCollection } from "../lib/collection.js";
 import {
-  queueSms,
+  sendSms,
   sendEmail,
   brandedEmail,
   brandedText,
@@ -953,14 +953,18 @@ async function saveCheck(
 }
 
 /**
- * Send the assignment. Email goes out through Resend; SMS is queued for the
- * outbound worker, because no SMS provider is configured and a task that claims
- * to have texted a student when it didn't is worse than one that says queued.
+ * Send the assignment. Email goes out through Resend; SMS through Twilio. The
+ * SMS state reported back is the true one — `sent` only after Twilio accepted
+ * it, `queued` when no SMS provider is configured, `failed` otherwise — because
+ * a task that claims to have texted a student when it didn't is worse than one
+ * that says queued.
  *
  * A delivery failure is recorded on the task, never thrown: the assignment
  * exists, and the counselor needs to be told the message didn't go rather than
  * losing the task they just wrote.
  */
+type SmsNotifyState = "sent" | "queued" | "failed" | "skipped" | "unavailable";
+
 async function notifyAssignment(
   request: FastifyRequest,
   input: {
@@ -974,7 +978,7 @@ async function notifyAssignment(
     email: boolean;
     sms: boolean;
   }
-): Promise<{ email: boolean; sms: "queued" | "skipped" | "unavailable"; error: string | null }> {
+): Promise<{ email: boolean; sms: SmsNotifyState; error: string | null }> {
   const { data: student } = await request.db
     .from("profiles")
     .select("full_name, email, phone")
@@ -994,7 +998,7 @@ async function notifyAssignment(
   const template = taskAssignmentEmail(payload);
 
   let emailSent = false;
-  let smsState: "queued" | "skipped" | "unavailable" = "skipped";
+  let smsState: SmsNotifyState = "skipped";
   const errors: string[] = [];
 
   if (input.email) {
@@ -1025,7 +1029,7 @@ async function notifyAssignment(
       smsState = "unavailable";
       errors.push("no phone number on file");
     } else {
-      await queueSms({
+      const sms = await sendSms({
         to: phone,
         body: taskAssignmentSms(payload),
         template: "task-assigned",
@@ -1035,7 +1039,8 @@ async function notifyAssignment(
         recipient_kind: "student",
         logger: request.log,
       });
-      smsState = "queued";
+      smsState = sms.status;
+      if (sms.status === "failed" && sms.error) errors.push(sms.error);
     }
   }
 
@@ -1055,7 +1060,9 @@ async function notifyAssignment(
   });
 
   const error = errors.length > 0 ? errors.join("; ").slice(0, 500) : null;
-  const delivered = emailSent || smsState === "queued";
+  // Only a message a provider accepted counts. A text sitting in the queue
+  // because no SMS provider is configured has not reached the student.
+  const delivered = emailSent || smsState === "sent";
   // A failed re-send must not erase the record of the first one that worked.
   const update: Record<string, unknown> = { notify_error: error };
   if (delivered) update.notified_at = new Date().toISOString();

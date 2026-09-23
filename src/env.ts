@@ -1,6 +1,11 @@
 import "dotenv/config";
 import { z } from "zod";
 
+/** `KEY=` in a .env file means unset, not an invalid empty value. */
+function blankIsUnset<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((v) => (v === "" ? undefined : v), schema);
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4000),
@@ -22,6 +27,28 @@ const envSchema = z.object({
   INVITE_FROM_EMAIL: z.string().default("Meridies <onboarding@resend.dev>"),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
+
+  // Outbound SMS (Twilio REST, no SDK). Optional: without a complete set, an
+  // SMS is recorded as `queued` in message_deliveries and never claimed sent.
+  // A sender is either a number (E.164) or a Messaging Service; the service
+  // wins when both are set.
+  TWILIO_ACCOUNT_SID: blankIsUnset(
+    z.string().regex(/^AC[0-9a-fA-F]{32}$/, "TWILIO_ACCOUNT_SID must look like AC…").optional()
+  ),
+  TWILIO_AUTH_TOKEN: blankIsUnset(z.string().min(16).optional()),
+  TWILIO_FROM_NUMBER: blankIsUnset(
+    z.string().regex(/^\+[1-9]\d{7,14}$/, "TWILIO_FROM_NUMBER must be E.164, e.g. +15551234567").optional()
+  ),
+  TWILIO_MESSAGING_SERVICE_SID: blankIsUnset(
+    z.string().regex(/^MG[0-9a-fA-F]{32}$/, "TWILIO_MESSAGING_SERVICE_SID must look like MG…").optional()
+  ),
+
+  // Scheduled accountability sweep. CRON_SECRET authenticates
+  // POST /internal/accountability/sweep (a Railway cron service); unset, that
+  // route returns 503. SWEEP_INTERVAL_MINUTES additionally runs the sweep
+  // in-process on every replica — a lease row keeps runs from overlapping.
+  CRON_SECRET: blankIsUnset(z.string().min(32, "CRON_SECRET must be at least 32 characters").optional()),
+  SWEEP_INTERVAL_MINUTES: blankIsUnset(z.coerce.number().int().min(5).max(1440).optional()),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -42,3 +69,9 @@ export const corsOrigins = env.CORS_ORIGIN.split(",")
 export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
 export const hasResend = Boolean(env.RESEND_API_KEY);
+export const hasCronSecret = Boolean(env.CRON_SECRET);
+export const hasTwilio = Boolean(
+  env.TWILIO_ACCOUNT_SID &&
+    env.TWILIO_AUTH_TOKEN &&
+    (env.TWILIO_FROM_NUMBER || env.TWILIO_MESSAGING_SERVICE_SID)
+);
