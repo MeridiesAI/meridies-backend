@@ -33,7 +33,25 @@ import taskRoutes from "./routes/tasks.js";
 
 export function buildApp() {
   const app = Fastify({
-    logger: true,
+    logger: {
+      // Query values are dropped from request logs: the OAuth callback carries
+      // a live authorization code and state there, and nothing in a query
+      // string is worth keeping in Railway's logs. Keys stay for debugging.
+      serializers: {
+        req(req) {
+          const [path, query] = req.url.split("?", 2);
+          const keys = query
+            ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
+            : "";
+          return {
+            method: req.method,
+            url: keys ? `${path}?${keys}` : path,
+            hostname: req.hostname,
+            remoteAddress: req.ip,
+          };
+        },
+      },
+    },
     // Railway sits behind a proxy; without this every request looks like it
     // came from the same address and the per-IP limiter is useless.
     trustProxy: true,
