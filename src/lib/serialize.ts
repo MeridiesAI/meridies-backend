@@ -349,6 +349,10 @@ export const toDocument = (r: Row) => ({
   source: str(r.source),
   parseStatus: str(r.parse_status),
   availableToLlm: Boolean(r.available_to_llm),
+  /** Drive / OneDrive file this was imported from; the tracker watches it. */
+  externalProvider: nstr(r.external_provider) as "google" | "microsoft" | null,
+  externalWebUrl: nstr(r.external_web_url),
+  externalModifiedAt: nstr(r.external_modified_at),
   createdAt: nstr(r.created_at),
   updatedAt: nstr(r.updated_at),
 });
@@ -679,7 +683,7 @@ export const toMeeting = (r: Row) => ({
   studentId: str(r.student_id),
   counselorId: str(r.counselor_id),
   title: str(r.title),
-  mode: str(r.mode) as "google-meet" | "in-person" | "phone",
+  mode: str(r.mode) as "google-meet" | "teams" | "in-person" | "phone",
   location: nstr(r.location),
   joinUrl: nstr(r.join_url),
   startsAt: nstr(r.starts_at),
@@ -689,6 +693,8 @@ export const toMeeting = (r: Row) => ({
   guardiansInvited: Boolean(r.guardians_invited),
   meetingNoteId: nstr(r.meeting_note_id),
   deadlineId: nstr(r.deadline_id),
+  /** Set when the API booked it on a connected Google / Outlook calendar. */
+  calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | null,
   createdAt: nstr(r.created_at),
 });
 

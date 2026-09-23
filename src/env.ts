@@ -49,6 +49,33 @@ const envSchema = z.object({
   // in-process on every replica — a lease row keeps runs from overlapping.
   CRON_SECRET: blankIsUnset(z.string().min(32, "CRON_SECRET must be at least 32 characters").optional()),
   SWEEP_INTERVAL_MINUTES: blankIsUnset(z.coerce.number().int().min(5).max(1440).optional()),
+
+  // Google / Microsoft OAuth (lib/oauth.ts). All optional: a provider whose
+  // client id + secret are unset answers 503 on /integrations/:provider/*, and
+  // nothing else in the API depends on it. API_PUBLIC_URL is this API's own
+  // public origin, used to build the redirect URI registered with each
+  // provider: <API_PUBLIC_URL>/integrations/<provider>/callback.
+  GOOGLE_CLIENT_ID: blankIsUnset(z.string().min(10).optional()),
+  GOOGLE_CLIENT_SECRET: blankIsUnset(z.string().min(10).optional()),
+  MICROSOFT_CLIENT_ID: blankIsUnset(z.string().min(10).optional()),
+  MICROSOFT_CLIENT_SECRET: blankIsUnset(z.string().min(10).optional()),
+  // "common" (work + personal accounts), "organizations", or a tenant id.
+  MICROSOFT_TENANT: blankIsUnset(
+    z.string().regex(/^[A-Za-z0-9.-]{1,100}$/, "MICROSOFT_TENANT must be a tenant id or alias").default("common")
+  ),
+  API_PUBLIC_URL: blankIsUnset(z.string().url().optional()),
+  // 32 random bytes, base64 (`openssl rand -base64 32`). Encrypts OAuth tokens
+  // at rest with AES-256-GCM. Rotating it strands stored tokens: every
+  // counselor has to reconnect.
+  INTEGRATION_TOKEN_KEY: blankIsUnset(
+    z
+      .string()
+      .refine(
+        (v) => Buffer.from(v, "base64").length === 32,
+        "INTEGRATION_TOKEN_KEY must be 32 bytes, base64-encoded"
+      )
+      .optional()
+  ),
 });
 
 const parsed = envSchema.safeParse(process.env);

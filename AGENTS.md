@@ -38,6 +38,10 @@ src/
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
+│   ├── oauth.ts           # Google/Microsoft OAuth (code + PKCE), token refresh/revoke
+│   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
+│   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
+│   ├── liveDocuments.ts   # live edit times of linked files, for the task tracker
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
 │   └── errors.ts, chat.ts
 ├── routes/
@@ -255,6 +259,35 @@ rejects the private/loopback/link-local/carrier-NAT ranges, follows redirects
 If another feature ever needs to fetch a user-supplied URL, route it through
 there rather than calling `fetch` directly.
 
+### Connected apps (Google / Microsoft OAuth)
+
+`GET /integrations/:provider/authorize` (counselor) returns the consent URL;
+the provider redirects to `GET /integrations/:provider/callback`, which
+consumes the single-use, ten-minute `state` (stored as sha256, bound to the
+user, PKCE verifier encrypted), exchanges the code and redirects to the app's
+`/dashboard/counselor/data-hub?integration=…&result=…#apps`. Tokens live in
+`integration_tokens` — RLS on, **no policies**, grants revoked, service role
+only, AES-256-GCM ciphertext — never in `integrations.config`. The
+`integrations` row is the visible grant, with the scopes the provider actually
+returned; `PUT /integrations/google|microsoft` is refused for that reason.
+`DELETE` revokes at Google and deletes the tokens (Microsoft has no per-app
+revoke endpoint; the response says so). Refresh happens in `accessTokenFor()`;
+a refused refresh marks the grant `error` so the card says "reconnect".
+
+After connect: `GET /integrations/:provider/files?q=` lists Drive/OneDrive
+files; `POST /integrations/:provider/files/import` copies one into the
+student's folder (Storage upload on the caller's client, `source:
+'integration'`, `external_*` pointer kept). `POST /meetings` (and `PATCH`) with
+`createConference: true` creates the event on the counselor's calendar with a
+real Meet/Teams link *before* saving; moves are strict, cancel/delete are best
+effort. `POST /tasks/:id/tracker` asks the provider for each linked file's edit
+time: an edit by someone other than the importing counselor inside the stall
+window makes the task active; none means stalled. Microsoft asks for
+`Files.Read.All` (not `Files.Read`) because the watched file is usually the
+student's, shared with the counselor. These calls go to fixed provider hosts
+with provider-issued ids, so they are not the `lib/links.ts` SSRF surface.
+Every route answers 503 with the missing setting when a provider is unset.
+
 ### Documents and AI context
 
 `documents.available_to_llm` and `document_links.available_to_llm` are
@@ -293,6 +326,10 @@ npm run dev               # http://localhost:4000
 | `PORT` | Defaults to 4000 |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*`, which 503s without it |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI `<API_PUBLIC_URL>/integrations/google/callback` |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`) |
+| `API_PUBLIC_URL` | This API's public origin, for OAuth redirect URIs |
+| `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 
 `GET /health` reports `{ status, database, anthropic, serviceRole }` — presence
 and reachability only, never values, URLs or error text. `database` is a 2s HEAD

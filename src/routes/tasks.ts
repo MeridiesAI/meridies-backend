@@ -37,6 +37,7 @@ import {
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 
 type Row = Record<string, unknown>;
@@ -742,8 +743,9 @@ export default async function taskRoutes(app: FastifyInstance) {
         request.db
           .from("deliverable_documents")
           .select(
-            "role, document:documents(id, filename, title, description, parsed_data, " +
-              "parse_status, available_to_llm, updated_at)"
+            "role, document:documents(id, owner_id, filename, title, description, parsed_data, " +
+              "parse_status, available_to_llm, updated_at, external_provider, external_file_id, " +
+              "external_drive_id, external_modified_at)"
           )
           .eq("deliverable_id", id),
         request.db
@@ -753,16 +755,29 @@ export default async function taskRoutes(app: FastifyInstance) {
           .order("sequence"),
       ]);
 
-      const lastActivity =
+      const attachedDocs = ((attached ?? []) as unknown as Row[]).map((row) => ({
+        role: String(row.role),
+        doc: row.document as Row | null,
+      }));
+
+      // A connected Google Doc / Word file reports its own edits: someone typing
+      // in the live file is active even if nothing new was uploaded here.
+      const live = await checkLiveDocuments(
+        request,
+        attachedDocs.map((r) => r.doc).filter((d): d is Row => d !== null)
+      );
+
+      const recordedActivity =
         (task.last_activity_at as string | null) ??
         ((events ?? [])[0]?.created_at as string | undefined) ??
         null;
+      const lastActivity = laterOf(recordedActivity, live.latestEdit);
       const stale = isStalled(lastActivity, settings);
+      const liveEditInWindow = live.latestEdit !== null && !isStalled(live.latestEdit, settings);
+      const liveCaveat = liveProblems(live.checks);
 
       // Only documents the counselor left available to AI context are read.
-      const readable = ((attached ?? []) as unknown as Row[])
-        .map((row) => ({ role: String(row.role), doc: row.document as Row | null }))
-        .filter((row) => row.doc && row.doc.available_to_llm !== false);
+      const readable = attachedDocs.filter((row) => row.doc && row.doc.available_to_llm !== false);
 
       const submissions = readable.filter((r) => documentText(r.doc!).length > 0);
 
@@ -771,9 +786,15 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       if (stale && !hasWork) {
         const days = daysSince(lastActivity);
-        const note = lastActivity
-          ? `No activity for ${days} days — nothing uploaded against this assignment yet.`
-          : "Nothing has happened on this task since it was assigned.";
+        const watched = live.checks.filter((c) => !c.error);
+        const base = lastActivity
+          ? watched.length > 0
+            ? `No activity for ${days} days — no edits to ${quoteNames(watched)} and nothing uploaded.`
+            : `No activity for ${days} days — nothing uploaded against this assignment yet.`
+          : watched.length > 0
+            ? `No edits to ${quoteNames(watched)} since this task was assigned.`
+            : "Nothing has happened on this task since it was assigned.";
+        const note = liveCaveat ? `${base} ${liveCaveat}` : base;
 
         const saved = await saveCheck(request, {
           studentId,
@@ -781,6 +802,31 @@ export default async function taskRoutes(app: FastifyInstance) {
           verdict: "no-activity",
           note,
           daysSinceActivity: days,
+          stallAfterDays: settings.stall_after_days,
+          documentsChecked: 0,
+          source: "system",
+          checkedBy: request.auth.userId,
+        });
+        return reply.code(201).send(saved);
+      }
+
+      // Live edits but nothing readable to compare (a Word file, or a document
+      // kept out of AI): active, and the note says only that — no alignment claim.
+      if (!hasWork && liveEditInWindow) {
+        const latest = live.checks
+          .filter((c) => c.counts && c.modifiedAt)
+          .sort((a, b) => new Date(b.modifiedAt!).getTime() - new Date(a.modifiedAt!).getTime())[0]!;
+        const days = daysSince(latest.modifiedAt);
+        const when = days === 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+        const who = latest.editedBy ? ` by ${latest.editedBy}` : "";
+        const base = `"${latest.name}" was edited ${when}${who} — active, but there is no readable text to check against the assignment.`;
+        const saved = await saveCheck(request, {
+          studentId,
+          deliverableId: id,
+          documentId: latest.documentId,
+          verdict: "on-track",
+          note: liveCaveat ? `${base} ${liveCaveat}` : base,
+          daysSinceActivity: daysSince(lastActivity),
           stallAfterDays: settings.stall_after_days,
           documentsChecked: 0,
           source: "system",
@@ -886,6 +932,25 @@ export default async function taskRoutes(app: FastifyInstance) {
 }
 
 // ---- helpers ---------------------------------------------------------------
+
+/** The later of two timestamps, as ISO, or whichever exists. */
+function laterOf(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
+}
+
+function quoteNames(checks: LiveFileCheck[]): string {
+  const names = checks.slice(0, 2).map((c) => `"${c.name}"`);
+  return checks.length > 2 ? `${names.join(", ")} and ${checks.length - 2} more` : names.join(" or ");
+}
+
+/** A one-line admission when a linked file couldn't be checked. */
+function liveProblems(checks: LiveFileCheck[]): string {
+  const failed = checks.filter((c) => c.error);
+  if (failed.length === 0) return "";
+  return `Couldn't check ${quoteNames(failed)} live (${failed[0]!.error}).`;
+}
 
 /** Whatever readable text the parser managed to pull out of a document. */
 function documentText(doc: Row): string {
