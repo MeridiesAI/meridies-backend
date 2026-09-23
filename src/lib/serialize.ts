@@ -778,3 +778,34 @@ export const toAidBandRating = (r: Row) => ({
   sortOrder: num(r.sort_order) ?? 0,
   ...provenance(r),
 });
+
+/**
+ * A red flag as its student sees it — the `student_red_flags` view's columns,
+ * plus the title of the deadline or deliverable it is about. No escalation
+ * timing and no issuer id: when a parent alert fires is the counselor's lever.
+ */
+export const toStudentRedFlag = (
+  r: Row,
+  related: { deadlineTitle?: string | null; deliverableTitle?: string | null } = {}
+) => ({
+  id: str(r.id),
+  severity: str(r.severity) as "critical" | "high" | "medium",
+  title: str(r.title),
+  message: str(r.message),
+  actionItems: arr(r.action_items),
+  trigger: str(r.trigger) as
+    | "no-progress"
+    | "low-quality"
+    | "likely-ai"
+    | "missed-deadline"
+    | "manual",
+  issuedBy: str(r.issued_by) as "system" | "counselor",
+  status: str(r.status) as "open" | "acknowledged" | "escalated" | "resolved",
+  deadlineId: nstr(r.deadline_id),
+  deadlineTitle: related.deadlineTitle ?? null,
+  deliverableId: nstr(r.deliverable_id),
+  deliverableTitle: related.deliverableTitle ?? null,
+  acknowledgedAt: nstr(r.acknowledged_at),
+  resolvedAt: nstr(r.resolved_at),
+  createdAt: nstr(r.created_at),
+});

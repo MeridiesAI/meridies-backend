@@ -19,7 +19,7 @@ import {
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
-import { toAlertPref } from "../lib/serialize.js";
+import { toAlertPref, toStudentRedFlag } from "../lib/serialize.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
 
@@ -209,6 +209,60 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
 
   // ---- Red flags -----------------------------------------------------------
 
+  /**
+   * A student's own flags, for `/dashboard/student/flags`. Reads the
+   * `student_red_flags` view (security_invoker, so red_flags RLS applies),
+   * which leaves out escalation timing and the issuer id. Resolved flags stay
+   * for 90 days so a student can see the thing they fixed was noticed.
+   */
+  app.get(
+    "/red-flags/mine",
+    { preHandler: [app.authenticate, requireRole("student"), limit("redflags:mine", 240, 60)] },
+    async (request) => {
+      const student = await resolveStudentId(request, undefined, "view");
+      const since = new Date(Date.now() - 90 * 86_400_000).toISOString();
+
+      const { data, error } = await request.db
+        .from("student_red_flags")
+        .select("*")
+        .eq("student_id", student)
+        .or(`status.neq.resolved,resolved_at.gte.${since}`)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (error) throw fromPostgrest(error);
+      const rows = (data ?? []) as Record<string, unknown>[];
+
+      const ids = (key: string) =>
+        [...new Set(rows.map((r) => r[key]).filter((v): v is string => typeof v === "string"))];
+      const deadlineIds = ids("deadline_id");
+      const deliverableIds = ids("deliverable_id");
+
+      const [deadlines, deliverables] = await Promise.all([
+        deadlineIds.length
+          ? request.db.from("deadlines").select("id, title").in("id", deadlineIds)
+          : Promise.resolve({ data: [], error: null }),
+        deliverableIds.length
+          ? request.db.from("deliverables").select("id, title").in("id", deliverableIds)
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (deadlines.error) throw fromPostgrest(deadlines.error);
+      if (deliverables.error) throw fromPostgrest(deliverables.error);
+
+      const titles = (list: { id: unknown; title: unknown }[] | null) =>
+        new Map((list ?? []).map((r) => [String(r.id), String(r.title)]));
+      const deadlineTitle = titles(deadlines.data);
+      const deliverableTitle = titles(deliverables.data);
+
+      return rows.map((r) =>
+        toStudentRedFlag(r, {
+          deadlineTitle: typeof r.deadline_id === "string" ? deadlineTitle.get(r.deadline_id) ?? null : null,
+          deliverableTitle:
+            typeof r.deliverable_id === "string" ? deliverableTitle.get(r.deliverable_id) ?? null : null,
+        })
+      );
+    }
+  );
+
   app.get("/red-flags", { preHandler: app.authenticate }, async (request) => {
     const { studentId } = studentQuery.parse(request.query);
 
@@ -295,7 +349,7 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         body: b.message,
         action_items: b.actionItems ?? [],
         created_by: request.auth.userId,
-        href: "/dashboard/student",
+        href: `/dashboard/student/flags?flag=${String((data as { id: unknown }).id)}`,
       });
 
       return reply.code(201).send(data);
