@@ -1,7 +1,7 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
-import { corsOrigins, env, hasAnthropic, hasServiceRole } from "./env.js";
+import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio } from "./env.js";
 import { HttpError } from "./lib/errors.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
@@ -86,6 +86,13 @@ export function buildApp() {
     }
     if (!hasAnthropic) {
       app.log.warn("ANTHROPIC_API_KEY is not set: /ai/* will return 503.");
+    }
+    if (!hasTwilio) {
+      app.log.warn(
+        "Twilio is not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and " +
+          "TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID): SMS is recorded " +
+          "as queued and not sent."
+      );
     }
   });
 

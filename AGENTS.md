@@ -36,7 +36,7 @@ src/
 │   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
 │   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
-│   ├── email.ts           # Resend sends + message_deliveries audit, SMS queue
+│   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
 │   └── errors.ts, chat.ts
@@ -276,6 +276,8 @@ npm run dev               # http://localhost:4000
 | `SUPABASE_ANON_KEY` | The key every user-scoped query runs under |
 | `SUPABASE_SERVICE_ROLE_KEY` | Optional; rate limits/quotas/audit degrade without it |
 | `ANTHROPIC_API_KEY` | Optional; `/ai/*` returns 503 without it |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Optional; without them (and a sender) SMS is recorded `queued`, never sent |
+| `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*`, which 503s without it |
