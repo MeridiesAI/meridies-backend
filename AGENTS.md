@@ -170,7 +170,9 @@ nothing: each counselor's sweep is handed only students whose `counselor_id`
 is that counselor, and archived students are skipped. A run first takes the
 `accountability-sweep` lease (`acquire_job_lease` / `release_job_lease`,
 migration `20260923000003`, EXECUTE to `service_role` only) — a lease row, not
-`pg_advisory_lock`, because PostgREST RPCs don't share a session. Each flag is
+`pg_advisory_lock`, because PostgREST RPCs don't share a session. The schedule
+deliberately lives outside Postgres: the project has neither `pg_cron` nor
+`pg_net`, and the migration depends on neither. Each flag is
 also *claimed* with a conditional `open -> escalated` update before its alert is
 inserted, so an overlapping button click and scheduled run can't queue the same
 escalation twice. The throttle, quiet hours (auto-send never fires inside them)

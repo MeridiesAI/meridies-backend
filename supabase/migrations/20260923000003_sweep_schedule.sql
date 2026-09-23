@@ -14,6 +14,10 @@
 -- released the moment the RPC returns — neither spans a sweep that makes many
 -- round trips. A row with an expiry does, and a crashed holder simply times out.
 --
+-- No pg_cron / pg_net: neither is installed on the project, and this migration
+-- has no dependency on them. The schedule lives outside the database (Railway
+-- cron or the in-process interval); Postgres only arbitrates who runs.
+--
 -- The table lives in `private` (not exposed by PostgREST) with RLS on and no
 -- policies. The two RPCs are SECURITY DEFINER with EXECUTE granted to
 -- service_role only, matching consume_rate_limit / consume_quota.
