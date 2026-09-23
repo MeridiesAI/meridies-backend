@@ -1,10 +1,11 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
-import { corsOrigins, env, hasAnthropic, hasServiceRole } from "./env.js";
+import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio } from "./env.js";
 import { HttpError } from "./lib/errors.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
+import { startSweepInterval } from "./lib/sweepSchedule.js";
 import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
@@ -17,6 +18,7 @@ import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
+import internalRoutes from "./routes/internal.js";
 import integrationRoutes from "./routes/integrations.js";
 import inviteRoutes from "./routes/invites.js";
 import meetingRoutes from "./routes/meetings.js";
@@ -31,7 +33,25 @@ import taskRoutes from "./routes/tasks.js";
 
 export function buildApp() {
   const app = Fastify({
-    logger: true,
+    logger: {
+      // Query values are dropped from request logs: the OAuth callback carries
+      // a live authorization code and state there, and nothing in a query
+      // string is worth keeping in Railway's logs. Keys stay for debugging.
+      serializers: {
+        req(req) {
+          const [path, query] = req.url.split("?", 2);
+          const keys = query
+            ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
+            : "";
+          return {
+            method: req.method,
+            url: keys ? `${path}?${keys}` : path,
+            hostname: req.hostname,
+            remoteAddress: req.ip,
+          };
+        },
+      },
+    },
     // Railway sits behind a proxy; without this every request looks like it
     // came from the same address and the per-IP limiter is useless.
     trustProxy: true,
@@ -71,6 +91,9 @@ export function buildApp() {
   app.register(rosterRoutes, { prefix: "/roster" });
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });
+  // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
+  app.register(internalRoutes, { prefix: "/internal" });
+  startSweepInterval(app);
 
   app.addHook("onReady", async () => {
     if (!hasServiceRole) {
@@ -81,6 +104,13 @@ export function buildApp() {
     }
     if (!hasAnthropic) {
       app.log.warn("ANTHROPIC_API_KEY is not set: /ai/* will return 503.");
+    }
+    if (!hasTwilio) {
+      app.log.warn(
+        "Twilio is not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and " +
+          "TWILIO_FROM_NUMBER or TWILIO_MESSAGING_SERVICE_SID): SMS is recorded " +
+          "as queued and not sent."
+      );
     }
   });
 

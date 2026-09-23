@@ -1,5 +1,5 @@
 /**
- * Outbound email and SMS via Resend — the API's outbound edge.
+ * Outbound email (Resend) and SMS (Twilio) — the API's outbound edge.
  *
  * Sends are best-effort: a failure logs and returns `{ sent: false }` rather
  * than throwing, so a Resend outage never blocks a counselor from creating the
@@ -8,17 +8,18 @@
  * table anticipates, using the service role because the table is deliberately
  * not client-writable.
  *
- * SMS has no provider wired yet. `queueSms` therefore writes a `queued`
- * delivery row for the outbound worker rather than pretending to have sent
- * anything — a task that claims it texted a student and didn't is worse than
- * one that says it's queued.
+ * SMS goes through Twilio's REST API (`sendSms`, plain fetch, no SDK). Without
+ * Twilio configured it writes a `queued` delivery row rather than pretending to
+ * have sent anything — a task that claims it texted a student and didn't is
+ * worse than one that says it's queued. A text is only ever `sent` after a 2xx
+ * from Twilio carrying a message SID.
  *
  * Without `RESEND_API_KEY` the send is skipped (and logged) — useful in local
  * dev. Until a domain is verified in Resend, `INVITE_FROM_EMAIL` must stay on
  * the shared `onboarding@resend.dev`, which only delivers to the account owner.
  */
 
-import { env, hasResend } from "../env.js";
+import { env, hasResend, hasTwilio } from "../env.js";
 import { serviceClient } from "./supabase.js";
 
 type Logger = {
@@ -140,31 +141,155 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
   return { id: providerId, sent, deliveryId, error: errorText };
 }
 
+// ---- SMS (Twilio REST) -----------------------------------------------------
+
+const TWILIO_TIMEOUT_MS = 10_000;
+const SMS_MAX_CHARS = 1600;
+
+export type SmsStatus = "queued" | "sent" | "failed";
+
+export type SmsResult = OutboundResult & {
+  /**
+   * The truth about this text, and the only thing a caller may report:
+   * `sent` means Twilio answered 2xx with a message SID; `queued` means no
+   * provider is configured and the row waits; `failed` carries `error`.
+   */
+  status: SmsStatus;
+};
+
 /**
- * Queue an SMS. There is no SMS provider configured yet, so this records the
- * intent and leaves the row `queued` for the outbound worker. It returns
- * `sent: false` deliberately — callers must not report a text as delivered.
+ * Normalise a phone number to E.164, or null when it isn't one.
+ *
+ * Formatting characters (spaces, dashes, dots, parentheses) are stripped. A
+ * bare 10-digit number, or 11 digits with a leading 1, is read as a North
+ * American number only when its area code and exchange are valid NANP (first
+ * digit 2-9) — the product is sold to US counselors and that is how a parent's
+ * number is typed. Anything else must already carry its `+country` prefix;
+ * we never guess a country.
  */
-export async function queueSms(
+export function toE164(raw: string): string | null {
+  const stripped = raw.trim().replace(/[\s().-]/g, "");
+  if (/^\+[1-9]\d{7,14}$/.test(stripped)) return stripped;
+  const nanp = /^1?([2-9]\d{2}[2-9]\d{6})$/.exec(stripped);
+  if (nanp) return `+1${nanp[1]}`;
+  return null;
+}
+
+type TwilioReply = { sid?: string; code?: number; message?: string };
+
+/**
+ * One POST to Twilio. Returns the message SID only on a 2xx that carries one;
+ * every other outcome is an error string that is safe to store and show (no
+ * credentials, no raw exception text from the network stack).
+ */
+async function postToTwilio(
+  to: string,
+  body: string
+): Promise<{ sid: string; error: null } | { sid: null; error: string }> {
+  const sid = env.TWILIO_ACCOUNT_SID as string;
+  const token = env.TWILIO_AUTH_TOKEN as string;
+  const form = new URLSearchParams({ To: to, Body: body });
+  if (env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", env.TWILIO_MESSAGING_SERVICE_SID);
+  else form.set("From", env.TWILIO_FROM_NUMBER as string);
+
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+          Accept: "application/json",
+        },
+        body: form.toString(),
+        signal: AbortSignal.timeout(TWILIO_TIMEOUT_MS),
+      }
+    );
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    return { sid: null, error: timedOut ? "SMS provider timed out" : "SMS provider unreachable" };
+  }
+
+  const payload = (await res.json().catch(() => ({}))) as TwilioReply;
+  if (res.ok && typeof payload.sid === "string" && payload.sid) {
+    return { sid: payload.sid, error: null };
+  }
+  if (res.status === 401 || res.status === 403) {
+    return { sid: null, error: "SMS provider rejected the configured credentials" };
+  }
+  const detail = typeof payload.message === "string" ? payload.message : `HTTP ${res.status}`;
+  const code = typeof payload.code === "number" ? ` ${payload.code}` : "";
+  return { sid: null, error: `SMS provider error${code}: ${detail}`.slice(0, 300) };
+}
+
+/**
+ * Send an SMS through Twilio, and record the attempt in `message_deliveries`.
+ *
+ * - No provider configured: the row is written `queued` and left for a later
+ *   worker. `status: 'queued'`, `sent: false` — never reported as a send.
+ * - Invalid number: the row is written `failed`; nothing is sent.
+ * - Otherwise the row is written `queued` first (the intent survives a crash
+ *   mid-request), then updated to `sent` with Twilio's SID on a 2xx, or to
+ *   `failed` with a safe error.
+ *
+ * Best-effort like `sendEmail`: never throws for a delivery failure.
+ */
+export async function sendSms(
   args: DeliveryColumns & { to: string; body: string; template: string; logger?: Logger }
-): Promise<OutboundResult> {
-  const deliveryId = await recordDelivery(
-    {
-      student_id: args.student_id ?? null,
-      deliverable_id: args.deliverable_id ?? null,
-      blast_id: args.blast_id ?? null,
-      recipient_kind: args.recipient_kind ?? "student",
-      recipient_id: args.recipient_id ?? null,
-      to_phone: args.to,
-      channel: "sms",
-      provider: null,
-      template: args.template,
-      body: args.body.slice(0, 1600),
-      status: "queued",
-    },
-    args.logger
-  );
-  return { id: null, sent: false, deliveryId, error: null };
+): Promise<SmsResult> {
+  const { logger, template } = args;
+  const body = args.body.slice(0, SMS_MAX_CHARS);
+  const to = toE164(args.to);
+
+  const base = {
+    student_id: args.student_id ?? null,
+    deliverable_id: args.deliverable_id ?? null,
+    blast_id: args.blast_id ?? null,
+    parent_alert_id: args.parent_alert_id ?? null,
+    family_report_id: args.family_report_id ?? null,
+    recipient_kind: args.recipient_kind ?? "student",
+    recipient_id: args.recipient_id ?? null,
+    to_phone: to ?? args.to.slice(0, 40),
+    channel: "sms",
+    template,
+    body,
+  };
+
+  if (!to) {
+    const error = "Phone number on file is not a valid number (use +country format, e.g. +15551234567)";
+    const deliveryId = await recordDelivery(
+      { ...base, provider: hasTwilio ? "twilio" : null, status: "failed", error },
+      logger
+    );
+    return { id: null, sent: false, deliveryId, error, status: "failed" };
+  }
+
+  if (!hasTwilio) {
+    const deliveryId = await recordDelivery({ ...base, provider: null, status: "queued" }, logger);
+    return { id: null, sent: false, deliveryId, error: null, status: "queued" };
+  }
+
+  const deliveryId = await recordDelivery({ ...base, provider: "twilio", status: "queued" }, logger);
+  const result = await postToTwilio(to, body);
+
+  const update = result.sid
+    ? { status: "sent", provider_message_id: result.sid, sent_at: new Date().toISOString(), error: null }
+    : { status: "failed", error: result.error };
+  if (!result.sid) logger?.error({ template, err: result.error }, "sms send failed");
+
+  if (deliveryId) {
+    const svc = serviceClient();
+    const { error } = svc
+      ? await svc.from("message_deliveries").update(update).eq("id", deliveryId)
+      : { error: null };
+    if (error) logger?.warn({ err: error.message }, "message_deliveries sms status update failed");
+  }
+
+  return result.sid
+    ? { id: result.sid, sent: true, deliveryId, error: null, status: "sent" }
+    : { id: null, sent: false, deliveryId, error: result.error, status: "failed" };
 }
 
 // ---- Templates -------------------------------------------------------------

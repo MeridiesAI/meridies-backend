@@ -14,12 +14,16 @@ import {
   DEFAULT_SETTINGS,
   inQuietHours,
   loadSettings,
+  nextSendWindow,
   resolveAlertRecipients,
+  runEscalationSweep,
 } from "../lib/accountability.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
-import { toAlertPref } from "../lib/serialize.js";
+import { deliverParentAlert, type ParentAlertRow } from "../lib/parentAlertDelivery.js";
+import { recordSweepAudit } from "../lib/sweepSchedule.js";
+import { toAlertPref, toStudentRedFlag } from "../lib/serialize.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
 
@@ -209,6 +213,60 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
 
   // ---- Red flags -----------------------------------------------------------
 
+  /**
+   * A student's own flags, for `/dashboard/student/flags`. Reads the
+   * `student_red_flags` view (security_invoker, so red_flags RLS applies),
+   * which leaves out escalation timing and the issuer id. Resolved flags stay
+   * for 90 days so a student can see the thing they fixed was noticed.
+   */
+  app.get(
+    "/red-flags/mine",
+    { preHandler: [app.authenticate, requireRole("student"), limit("redflags:mine", 240, 60)] },
+    async (request) => {
+      const student = await resolveStudentId(request, undefined, "view");
+      const since = new Date(Date.now() - 90 * 86_400_000).toISOString();
+
+      const { data, error } = await request.db
+        .from("student_red_flags")
+        .select("*")
+        .eq("student_id", student)
+        .or(`status.neq.resolved,resolved_at.gte.${since}`)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (error) throw fromPostgrest(error);
+      const rows = (data ?? []) as Record<string, unknown>[];
+
+      const ids = (key: string) =>
+        [...new Set(rows.map((r) => r[key]).filter((v): v is string => typeof v === "string"))];
+      const deadlineIds = ids("deadline_id");
+      const deliverableIds = ids("deliverable_id");
+
+      const [deadlines, deliverables] = await Promise.all([
+        deadlineIds.length
+          ? request.db.from("deadlines").select("id, title").in("id", deadlineIds)
+          : Promise.resolve({ data: [], error: null }),
+        deliverableIds.length
+          ? request.db.from("deliverables").select("id, title").in("id", deliverableIds)
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+      if (deadlines.error) throw fromPostgrest(deadlines.error);
+      if (deliverables.error) throw fromPostgrest(deliverables.error);
+
+      const titles = (list: { id: unknown; title: unknown }[] | null) =>
+        new Map((list ?? []).map((r) => [String(r.id), String(r.title)]));
+      const deadlineTitle = titles(deadlines.data);
+      const deliverableTitle = titles(deliverables.data);
+
+      return rows.map((r) =>
+        toStudentRedFlag(r, {
+          deadlineTitle: typeof r.deadline_id === "string" ? deadlineTitle.get(r.deadline_id) ?? null : null,
+          deliverableTitle:
+            typeof r.deliverable_id === "string" ? deliverableTitle.get(r.deliverable_id) ?? null : null,
+        })
+      );
+    }
+  );
+
   app.get("/red-flags", { preHandler: app.authenticate }, async (request) => {
     const { studentId } = studentQuery.parse(request.query);
 
@@ -295,7 +353,7 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         body: b.message,
         action_items: b.actionItems ?? [],
         created_by: request.auth.userId,
-        href: "/dashboard/student",
+        href: `/dashboard/student/flags?flag=${String((data as { id: unknown }).id)}`,
       });
 
       return reply.code(201).send(data);
@@ -368,9 +426,11 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
   );
 
   /**
-   * Queue a parent alert. Always goes through the throttle — including the
+   * Send a parent alert. Always goes through the throttle — including the
    * manual "send now" button, unless the counselor explicitly overrides quiet
-   * hours. The minimum gap between alerts is never overridable.
+   * hours. The minimum gap between alerts is never overridable. An alert that
+   * clears the gates is delivered in-request (email via Resend, SMS via
+   * Twilio) and the response's `status` / `delivery` report the real outcome.
    */
   app.post(
     "/parent-alerts",
@@ -454,104 +514,45 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         .single();
 
       if (error) throw fromPostgrest(error);
-      return reply.code(201).send({ ...data, blockedReason: blocked });
+
+      // Cleared every gate: deliver it now, and answer with what actually
+      // happened rather than the optimistic `queued` the row was written as.
+      // Held or suppressed alerts are not delivered here.
+      if (status !== "queued") {
+        return reply.code(201).send({ ...data, blockedReason: blocked, delivery: null });
+      }
+      const delivery = await deliverParentAlert(request, data as ParentAlertRow, request.log);
+      return reply.code(201).send({
+        ...data,
+        status: delivery.status,
+        blockedReason: blocked,
+        delivery,
+      });
     }
   );
 
   /**
    * Escalation sweep. Turns red flags whose timer expired — and whose
-   * deliverable hasn't moved — into queued parent alerts. Meant to be called on
-   * a schedule; it only ever touches the caller's own roster.
+   * deliverable hasn't moved — into queued parent alerts. It only ever touches
+   * the caller's own roster (RLS-bound client). The same core also runs on a
+   * schedule for every counselor: see `lib/sweepSchedule.ts`.
    */
   app.post(
     "/sweep",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("accountability:sweep", 12, 3600)] },
     async (request) => {
-      const now = new Date().toISOString();
-
-      const { data: due, error } = await request.db
-        .from("red_flags")
-        .select("*")
-        .eq("status", "open")
-        .lt("escalate_at", now)
-        .limit(100);
-
-      if (error) throw fromPostgrest(error);
-
-      const escalated: string[] = [];
-      const skipped: { id: string; reason: string }[] = [];
-
-      for (const flag of due ?? []) {
-        const studentId = flag.student_id as string;
-        const settings = await loadSettings(request, request.auth.userId, studentId);
-
-        // Did the student actually do the work? If so, close the flag instead.
-        if (flag.deliverable_id) {
-          const { data: deliverable } = await request.db
-            .from("deliverables")
-            .select("current_words")
-            .eq("id", flag.deliverable_id as string)
-            .maybeSingle();
-
-          const moved =
-            deliverable != null &&
-            Number(deliverable.current_words ?? 0) > Number(flag.baseline_words ?? 0);
-
-          if (moved) {
-            await request.db
-              .from("red_flags")
-              .update({ status: "resolved", resolved_at: now })
-              .eq("id", flag.id as string);
-            skipped.push({ id: flag.id as string, reason: "student made progress" });
-            continue;
-          }
-        }
-
-        const blocked = await alertBlockedReason(request, studentId, settings);
-        if (blocked && !/quiet hours/i.test(blocked)) {
-          skipped.push({ id: flag.id as string, reason: blocked });
-          continue;
-        }
-
-        const recipients = await resolveAlertRecipients(request, studentId);
-        if (recipients.blockedReason) {
-          skipped.push({ id: flag.id as string, reason: recipients.blockedReason });
-          continue;
-        }
-
-        await request.db.from("parent_alerts").insert({
-          student_id: studentId,
-          guardian_id: recipients.guardianId,
-          copy_student: recipients.copyStudent,
-          red_flag_id: flag.id as string,
-          counselor_id: request.auth.userId,
-          trigger: "escalation",
-          urgency: "high",
-          subject: `Action needed: ${flag.title}`,
-          body: String(flag.message),
-          action_items: (flag.action_items as string[]) ?? [],
-          channel: "email",
-          status: settings.auto_send_parent_alerts ? "queued" : "scheduled",
-          scheduled_for: settings.auto_send_parent_alerts ? null : nextSendWindow(settings),
-        });
-
-        await request.db
-          .from("red_flags")
-          .update({ status: "escalated", escalated_at: now })
-          .eq("id", flag.id as string);
-
-        escalated.push(flag.id as string);
-      }
-
-      return { escalated: escalated.length, skipped };
+      const startedAt = Date.now();
+      const result = await runEscalationSweep(request, request.auth.userId, { log: request.log });
+      await recordSweepAudit(request.log, {
+        actorId: request.auth.userId,
+        trigger: "manual",
+        counselors: 1,
+        escalated: result.escalated,
+        skipped: result.skipped.length,
+        failedCounselors: 0,
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
     }
   );
-}
-
-/** Next moment outside quiet hours, so a held alert has a real send time. */
-function nextSendWindow(settings: { quiet_hours_end: number | null }): string {
-  const next = new Date();
-  next.setHours((settings.quiet_hours_end ?? 8) + 1, 0, 0, 0);
-  if (next.getTime() < Date.now()) next.setDate(next.getDate() + 1);
-  return next.toISOString();
 }

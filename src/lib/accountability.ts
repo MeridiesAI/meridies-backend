@@ -9,8 +9,16 @@
  *    whatever triggered them. That throttle is what keeps this from being spam.
  */
 
-import type { FastifyRequest } from "fastify";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "./errors.js";
+
+/**
+ * Anything carrying a Supabase client. A `FastifyRequest` satisfies it (its
+ * `db` is the caller's RLS-bound client), and so does `{ db: serviceClient() }`
+ * for the scheduled sweep — which is why these helpers take this rather than
+ * the request: the same rules run on both paths, so they cannot drift.
+ */
+export type DbContext = { db: SupabaseClient };
 
 export type AccountabilitySettings = {
   enabled: boolean;
@@ -39,14 +47,18 @@ export const DEFAULT_SETTINGS: AccountabilitySettings = {
 
 /** Student-specific row wins over the counselor default, which wins over ours. */
 export async function loadSettings(
-  request: FastifyRequest,
+  request: DbContext,
   counselorId: string,
   studentId?: string
 ): Promise<AccountabilitySettings> {
-  const { data } = await request.db
+  const { data, error } = await request.db
     .from("accountability_settings")
     .select("*")
     .eq("counselor_id", counselorId);
+
+  // An errored read is not "no settings row": falling through to the defaults
+  // would switch alerts back on for a counselor who turned them off.
+  if (error) throw fromPostgrest(error);
 
   const rows = data ?? [];
   const forStudent = studentId ? rows.find((r) => r.student_id === studentId) : undefined;
@@ -78,7 +90,7 @@ export function inQuietHours(settings: AccountabilitySettings, now = new Date())
  * or null when it may go.
  */
 export async function alertBlockedReason(
-  request: FastifyRequest,
+  request: DbContext,
   studentId: string,
   settings: AccountabilitySettings,
   opts: { ignoreQuietHours?: boolean } = {}
@@ -89,7 +101,7 @@ export async function alertBlockedReason(
     Date.now() - settings.min_days_between_alerts * 86_400_000
   ).toISOString();
 
-  const { data } = await request.db
+  const { data, error } = await request.db
     .from("parent_alerts")
     .select("id, sent_at")
     .eq("student_id", studentId)
@@ -97,6 +109,8 @@ export async function alertBlockedReason(
     .gte("sent_at", since)
     .limit(1);
 
+  // Fail closed: an errored throttle read must not read as "nothing sent".
+  if (error) throw fromPostgrest(error);
   if (data && data.length > 0) {
     return `A parent alert already went out in the last ${settings.min_days_between_alerts} days`;
   }
@@ -159,7 +173,7 @@ export type BehindStudent = {
  * flag, or an overdue deadline, most-behind first.
  */
 export async function buildBehindList(
-  request: FastifyRequest,
+  request: DbContext,
   counselorId: string
 ): Promise<BehindStudent[]> {
   const settings = await loadSettings(request, counselorId);
@@ -275,7 +289,7 @@ export const DEFAULT_ALERT_PREFS: AlertPrefs = { copy_parents: true, copy_studen
  * the safe direction is to refuse the send, not to guess the permissive answer.
  */
 export async function loadAlertPrefs(
-  request: FastifyRequest,
+  request: DbContext,
   studentId: string
 ): Promise<AlertPrefs> {
   const { data, error } = await request.db
@@ -309,7 +323,7 @@ export type AlertRecipients = {
  * overruled by a guardian who is still marked enabled.
  */
 export async function resolveAlertRecipients(
-  request: FastifyRequest,
+  request: DbContext,
   studentId: string,
   requestedGuardianId?: string | null
 ): Promise<AlertRecipients> {
@@ -355,4 +369,166 @@ export async function resolveAlertRecipients(
   }
 
   return { guardianId, copyStudent: prefs.copy_student, blockedReason: null };
+}
+
+// ---------------------------------------------------------------------------
+// The escalation sweep.
+//
+// One implementation, two callers: `POST /accountability/sweep` (a counselor's
+// dashboard button, RLS-bound client, the caller's own roster) and the
+// scheduled runner in `lib/sweepSchedule.ts` (service-role client, one call per
+// counselor, `studentIds` restricted to students whose `counselor_id` is that
+// counselor). Every gate the button respects — the anti-spam throttle, quiet
+// hours, fail-closed recipient prefs — is applied here, so the schedule cannot
+// be the path that skips one.
+// ---------------------------------------------------------------------------
+
+export type SweepSkip = { id: string; reason: string };
+export type SweepResult = { escalated: number; skipped: SweepSkip[] };
+type SweepLog = { error: (obj: unknown, msg?: string) => void };
+
+/** Next moment outside quiet hours, so a held alert has a real send time. */
+export function nextSendWindow(settings: { quiet_hours_end: number | null }): string {
+  const next = new Date();
+  next.setHours((settings.quiet_hours_end ?? 8) + 1, 0, 0, 0);
+  if (next.getTime() < Date.now()) next.setDate(next.getDate() + 1);
+  return next.toISOString();
+}
+
+/**
+ * Turn red flags whose timer expired — and whose deliverable hasn't moved —
+ * into parent alerts.
+ *
+ * `studentIds` is required whenever `ctx.db` is the service-role client: RLS is
+ * not there to scope the flags, so the caller must have established the
+ * counselor relationship already. With a user client it may be omitted and RLS
+ * scopes the read, which is how the dashboard button has always behaved.
+ */
+export async function runEscalationSweep(
+  ctx: DbContext,
+  counselorId: string,
+  opts: { studentIds?: string[]; limit?: number; log?: SweepLog } = {}
+): Promise<SweepResult> {
+  const now = new Date().toISOString();
+  if (opts.studentIds && opts.studentIds.length === 0) return { escalated: 0, skipped: [] };
+
+  let query = ctx.db
+    .from("red_flags")
+    .select("*")
+    .eq("status", "open")
+    .lt("escalate_at", now)
+    .order("escalate_at", { ascending: true })
+    .limit(opts.limit ?? 100);
+  if (opts.studentIds) query = query.in("student_id", opts.studentIds);
+
+  const { data: due, error } = await query;
+  if (error) throw fromPostgrest(error);
+
+  let escalated = 0;
+  const skipped: SweepSkip[] = [];
+
+  for (const flag of due ?? []) {
+    const flagId = flag.id as string;
+    const studentId = flag.student_id as string;
+    try {
+      const settings = await loadSettings(ctx, counselorId, studentId);
+
+      // Did the student actually do the work? If so, close the flag instead.
+      if (flag.deliverable_id) {
+        const { data: deliverable, error: dErr } = await ctx.db
+          .from("deliverables")
+          .select("current_words")
+          .eq("id", flag.deliverable_id as string)
+          .maybeSingle();
+        if (dErr) throw fromPostgrest(dErr);
+
+        const moved =
+          deliverable != null &&
+          Number(deliverable.current_words ?? 0) > Number(flag.baseline_words ?? 0);
+
+        if (moved) {
+          await ctx.db
+            .from("red_flags")
+            .update({ status: "resolved", resolved_at: now })
+            .eq("id", flagId)
+            .eq("status", "open");
+          skipped.push({ id: flagId, reason: "student made progress" });
+          continue;
+        }
+      }
+
+      // The anti-spam throttle. Quiet hours don't skip the flag — they hold the
+      // alert until the next send window, below.
+      const blocked = await alertBlockedReason(ctx, studentId, settings);
+      if (blocked && !/quiet hours/i.test(blocked)) {
+        skipped.push({ id: flagId, reason: blocked });
+        continue;
+      }
+
+      // Throws on a prefs read error (fail closed) — caught below as a hold.
+      const recipients = await resolveAlertRecipients(ctx, studentId);
+      if (recipients.blockedReason) {
+        skipped.push({ id: flagId, reason: recipients.blockedReason });
+        continue;
+      }
+
+      // Claim the flag before queueing anything. A counselor's click and the
+      // scheduled run can overlap; only the one whose conditional update lands
+      // queues an alert, so a family never gets the same escalation twice.
+      const { data: claimed, error: claimErr } = await ctx.db
+        .from("red_flags")
+        .update({ status: "escalated", escalated_at: now })
+        .eq("id", flagId)
+        .eq("status", "open")
+        .select("id");
+      if (claimErr) throw fromPostgrest(claimErr);
+      if (!claimed || claimed.length === 0) {
+        skipped.push({ id: flagId, reason: "already handled by another sweep" });
+        continue;
+      }
+
+      // Auto-send never overrides quiet hours: inside them the alert is held
+      // for the next window like any other.
+      const sendNow = settings.auto_send_parent_alerts && !inQuietHours(settings);
+
+      const { error: insertErr } = await ctx.db.from("parent_alerts").insert({
+        student_id: studentId,
+        guardian_id: recipients.guardianId,
+        copy_student: recipients.copyStudent,
+        red_flag_id: flagId,
+        counselor_id: counselorId,
+        trigger: "escalation",
+        urgency: "high",
+        subject: `Action needed: ${flag.title}`,
+        body: String(flag.message),
+        action_items: (flag.action_items as string[]) ?? [],
+        channel: "email",
+        status: sendNow ? "queued" : "scheduled",
+        scheduled_for: sendNow ? null : nextSendWindow(settings),
+      });
+
+      if (insertErr) {
+        // Put the flag back so the next sweep retries it rather than leaving
+        // it marked escalated with no alert behind it.
+        await ctx.db
+          .from("red_flags")
+          .update({ status: "open", escalated_at: null })
+          .eq("id", flagId)
+          .eq("status", "escalated");
+        throw fromPostgrest(insertErr);
+      }
+
+      escalated += 1;
+    } catch (err) {
+      // Held, not sent. One student's failed read must not stop the rest of
+      // the roster, and must never degrade into a permissive default.
+      opts.log?.error({ err, flagId }, "accountability sweep: flag held after an error");
+      skipped.push({
+        id: flagId,
+        reason: "Couldn't confirm this alert's settings or recipients, so it was held",
+      });
+    }
+  }
+
+  return { escalated, skipped };
 }

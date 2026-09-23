@@ -63,7 +63,7 @@ const documentBody = z
   .strict();
 
 /** A folder the caller may file into: their own, anywhere in their drive. */
-async function assertOwnFolder(request: FastifyRequest, folderId: string): Promise<Row> {
+export async function assertOwnFolder(request: FastifyRequest, folderId: string): Promise<Row> {
   const { data, error } = await request.db
     .from("folders")
     .select("*")
@@ -78,7 +78,7 @@ async function assertOwnFolder(request: FastifyRequest, folderId: string): Promi
 }
 
 /** The system folder a student's uploads land in when nothing else is chosen. */
-async function studentFolderId(
+export async function studentFolderId(
   request: FastifyRequest,
   studentId: string
 ): Promise<string | null> {

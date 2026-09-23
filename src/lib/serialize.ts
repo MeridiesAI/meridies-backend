@@ -349,6 +349,10 @@ export const toDocument = (r: Row) => ({
   source: str(r.source),
   parseStatus: str(r.parse_status),
   availableToLlm: Boolean(r.available_to_llm),
+  /** Drive / OneDrive file this was imported from; the tracker watches it. */
+  externalProvider: nstr(r.external_provider) as "google" | "microsoft" | null,
+  externalWebUrl: nstr(r.external_web_url),
+  externalModifiedAt: nstr(r.external_modified_at),
   createdAt: nstr(r.created_at),
   updatedAt: nstr(r.updated_at),
 });
@@ -679,7 +683,7 @@ export const toMeeting = (r: Row) => ({
   studentId: str(r.student_id),
   counselorId: str(r.counselor_id),
   title: str(r.title),
-  mode: str(r.mode) as "google-meet" | "in-person" | "phone",
+  mode: str(r.mode) as "google-meet" | "teams" | "in-person" | "phone",
   location: nstr(r.location),
   joinUrl: nstr(r.join_url),
   startsAt: nstr(r.starts_at),
@@ -689,6 +693,8 @@ export const toMeeting = (r: Row) => ({
   guardiansInvited: Boolean(r.guardians_invited),
   meetingNoteId: nstr(r.meeting_note_id),
   deadlineId: nstr(r.deadline_id),
+  /** Set when the API booked it on a connected Google / Outlook calendar. */
+  calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | null,
   createdAt: nstr(r.created_at),
 });
 
@@ -777,4 +783,35 @@ export const toAidBandRating = (r: Row) => ({
   note: nstr(r.note),
   sortOrder: num(r.sort_order) ?? 0,
   ...provenance(r),
+});
+
+/**
+ * A red flag as its student sees it — the `student_red_flags` view's columns,
+ * plus the title of the deadline or deliverable it is about. No escalation
+ * timing and no issuer id: when a parent alert fires is the counselor's lever.
+ */
+export const toStudentRedFlag = (
+  r: Row,
+  related: { deadlineTitle?: string | null; deliverableTitle?: string | null } = {}
+) => ({
+  id: str(r.id),
+  severity: str(r.severity) as "critical" | "high" | "medium",
+  title: str(r.title),
+  message: str(r.message),
+  actionItems: arr(r.action_items),
+  trigger: str(r.trigger) as
+    | "no-progress"
+    | "low-quality"
+    | "likely-ai"
+    | "missed-deadline"
+    | "manual",
+  issuedBy: str(r.issued_by) as "system" | "counselor",
+  status: str(r.status) as "open" | "acknowledged" | "escalated" | "resolved",
+  deadlineId: nstr(r.deadline_id),
+  deadlineTitle: related.deadlineTitle ?? null,
+  deliverableId: nstr(r.deliverable_id),
+  deliverableTitle: related.deliverableTitle ?? null,
+  acknowledgedAt: nstr(r.acknowledged_at),
+  resolvedAt: nstr(r.resolved_at),
+  createdAt: nstr(r.created_at),
 });
