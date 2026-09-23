@@ -52,9 +52,10 @@ const envSchema = z.object({
 
   // Google / Microsoft OAuth (lib/oauth.ts). All optional: a provider whose
   // client id + secret are unset answers 503 on /integrations/:provider/*, and
-  // nothing else in the API depends on it. API_PUBLIC_URL is this API's own
-  // public origin, used to build the redirect URI registered with each
-  // provider: <API_PUBLIC_URL>/integrations/<provider>/callback.
+  // nothing else in the API depends on it. The redirect URI registered with
+  // each provider is an APP page, built from APP_URL:
+  //   <APP_URL>/dashboard/counselor/data-hub/callback/<provider>
+  // That page posts the code to the authenticated /integrations/:provider/complete.
   GOOGLE_CLIENT_ID: blankIsUnset(z.string().min(10).optional()),
   GOOGLE_CLIENT_SECRET: blankIsUnset(z.string().min(10).optional()),
   MICROSOFT_CLIENT_ID: blankIsUnset(z.string().min(10).optional()),
@@ -63,7 +64,6 @@ const envSchema = z.object({
   MICROSOFT_TENANT: blankIsUnset(
     z.string().regex(/^[A-Za-z0-9.-]{1,100}$/, "MICROSOFT_TENANT must be a tenant id or alias").default("common")
   ),
-  API_PUBLIC_URL: blankIsUnset(z.string().url().optional()),
   // 32 random bytes, base64 (`openssl rand -base64 32`). Encrypts OAuth tokens
   // at rest with AES-256-GCM. Rotating it strands stored tokens: every
   // counselor has to reconnect.

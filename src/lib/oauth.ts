@@ -7,19 +7,29 @@
  *   1. `beginAuthorization` mints a random `state` and a PKCE verifier, stores
  *      sha256(state) bound to the signed-in user with a ten-minute expiry, and
  *      returns the provider's consent URL.
- *   2. The provider redirects the browser to /integrations/:provider/callback.
- *      `completeAuthorization` consumes the state (DELETE ... RETURNING, so it
- *      works once), exchanges the code with the verifier, and stores the tokens
- *      encrypted in `integration_tokens` — never in `integrations.config`.
+ *   2. The provider redirects the browser to an APP page
+ *      (<APP_URL>/dashboard/counselor/data-hub/callback/:provider), never to
+ *      this API. That page runs under the counselor's Meridies session and
+ *      POSTs {code, state} to the authenticated /integrations/:provider/complete.
+ *      `completeAuthorization` consumes the state only if it belongs to the
+ *      caller (DELETE ... WHERE owner_id = caller RETURNING, so it works once),
+ *      exchanges the code with the verifier, and stores the tokens encrypted in
+ *      `integration_tokens` — never in `integrations.config`.
  *   3. `accessTokenFor` hands a live access token to the feature code,
- *      refreshing it when it is within a minute of expiry.
+ *      refreshing it when it is within a minute of expiry. Refreshes are
+ *      serialized per grant, because Microsoft rotates refresh tokens.
  *
  * Plain fetch, no SDKs. Provider error bodies are logged by their `error` code
  * only and never returned to a client: they can echo request parameters.
  *
- * Everything here runs on the service client. The state row is what binds the
- * callback to a user, because the callback is a browser redirect from Google or
- * Microsoft and carries no Meridies session.
+ * Why the callback is not an API route: a browser redirect from Google or
+ * Microsoft carries no Meridies session, so an unauthenticated callback could
+ * only trust the state row — and an attacker could start a sign-in on their own
+ * account and hand the consent link to a counselor, whose Google/Microsoft
+ * tokens would then land on the attacker's Meridies account. Requiring the
+ * signed-in user to match the state's owner closes that.
+ *
+ * Everything here runs on the service client.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -116,7 +126,6 @@ export function unavailableReason(provider: SuiteProvider): string | null {
       provider === "google" ? "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET" : "MICROSOFT_CLIENT_ID / MICROSOFT_CLIENT_SECRET"
     }).`;
   }
-  if (!env.API_PUBLIC_URL) return `${label} sign-in needs API_PUBLIC_URL for its redirect address.`;
   if (!hasTokenKey()) return `${label} sign-in needs INTEGRATION_TOKEN_KEY to store tokens safely.`;
   if (!serviceClient()) return `${label} sign-in needs SUPABASE_SERVICE_ROLE_KEY to store tokens.`;
   return null;
@@ -132,8 +141,13 @@ function configured(provider: SuiteProvider) {
   };
 }
 
+/**
+ * The app page the provider sends the browser back to. Register exactly this
+ * with Google / Microsoft; it must be byte-identical in the authorize request
+ * and the token exchange, so both build it here.
+ */
 export function redirectUri(provider: SuiteProvider): string {
-  return `${String(env.API_PUBLIC_URL).replace(/\/+$/, "")}/integrations/${provider}/callback`;
+  return `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/data-hub/callback/${provider}`;
 }
 
 const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
@@ -201,7 +215,7 @@ export async function beginAuthorization(userId: string, provider: SuiteProvider
   return `${config.authorizeUrl}?${params.toString()}`;
 }
 
-// ---- 2. Callback --------------------------------------------------------------
+// ---- 2. Completion ------------------------------------------------------------
 
 /** The id_token came straight from the token endpoint over TLS, so its payload
  *  may be read without re-verifying the signature (OIDC Core 3.1.3.7). */
@@ -230,42 +244,39 @@ async function microsoftIdentity(accessToken: string): Promise<{ id: string | nu
   }
 }
 
-export class OAuthCallbackError extends Error {
-  constructor(
-    message: string,
-    readonly ownerId: string | null = null
-  ) {
-    super(message);
-    this.name = "OAuthCallbackError";
-  }
-}
-
 /**
- * Consume the state, exchange the code, store the tokens, record the grant.
- * Throws OAuthCallbackError with a counselor-readable message; the route turns
- * that into a redirect back to the app rather than a JSON error page.
+ * Consume the caller's own state, exchange the code, store the tokens, record
+ * the grant. Every failure is an HttpError with a counselor-readable message;
+ * a state that belongs to someone else reads exactly like one that was used.
  */
 export async function completeAuthorization(
+  userId: string,
   provider: SuiteProvider,
   code: string,
   state: string,
   log: { warn: (obj: object, msg: string) => void }
-): Promise<{ ownerId: string; scopes: string[] }> {
+): Promise<{ scopes: string[] }> {
   const { config, db } = configured(provider);
 
+  // owner_id in the WHERE clause is the CSRF binding: another user's state is
+  // neither matched nor consumed.
   const { data: pending, error: stateError } = await db
     .from("integration_oauth_states")
     .delete()
     .eq("state_hash", sha256Hex(state))
     .eq("provider", provider)
+    .eq("owner_id", userId)
     .select("owner_id, code_verifier_enc, expires_at")
     .maybeSingle();
-  if (stateError || !pending) {
-    throw new OAuthCallbackError("That sign-in link was already used or isn't ours. Start again from Meridies.");
+  if (stateError) throw new HttpError(500, "Couldn't finish the sign-in. Try again.");
+  if (!pending) {
+    throw badRequest(
+      `That ${config.label} sign-in was already used, or was started from a different Meridies account. Start again from Connected apps.`
+    );
   }
-  const ownerId = String(pending.owner_id);
+  const ownerId = userId;
   if (new Date(String(pending.expires_at)).getTime() < Date.now()) {
-    throw new OAuthCallbackError("That sign-in took longer than ten minutes. Start again.", ownerId);
+    throw badRequest("That sign-in took longer than ten minutes. Start again.");
   }
 
   const res = await postForm(config.tokenUrl, {
@@ -280,7 +291,7 @@ export async function completeAuthorization(
   const token = await readTokenResponse(res);
   if (!res.ok || !token.access_token) {
     log.warn({ provider, status: res.status, error: token.error ?? null }, "oauth code exchange failed");
-    throw new OAuthCallbackError(`${config.label} didn't accept the sign-in. Try connecting again.`, ownerId);
+    throw new HttpError(502, `${config.label} didn't accept the sign-in. Try connecting again.`);
   }
 
   const granted = (token.scope ?? "").split(/\s+/).filter(Boolean);
@@ -307,7 +318,7 @@ export async function completeAuthorization(
     },
     { onConflict: "owner_id,provider" }
   );
-  if (saveError) throw new OAuthCallbackError("The sign-in worked but couldn't be saved. Try again.", ownerId);
+  if (saveError) throw new HttpError(500, "The sign-in worked but couldn't be saved. Try again.");
 
   // The visible grant: what the provider actually returned, not what we asked.
   const { error: grantError } = await db.from("integrations").upsert(
@@ -320,9 +331,9 @@ export async function completeAuthorization(
     },
     { onConflict: "owner_id,provider" }
   );
-  if (grantError) throw new OAuthCallbackError("The sign-in worked but couldn't be recorded. Try again.", ownerId);
+  if (grantError) throw new HttpError(500, "The sign-in worked but couldn't be recorded. Try again.");
 
-  return { ownerId, scopes: granted };
+  return { scopes: granted };
 }
 
 // ---- 3. Live access tokens ----------------------------------------------------
@@ -344,20 +355,14 @@ async function markGrantBroken(ownerId: string, provider: SuiteProvider, message
     .eq("provider", provider);
 }
 
-/**
- * A usable access token for `ownerId`'s grant. Refreshes within a minute of
- * expiry (or when `force` is set after a 401). A refresh the provider refuses
- * marks the grant `error` so the Connected apps card says "reconnect" instead
- * of every feature failing mysteriously.
- */
-export async function accessTokenFor(
+type TokenRow = Record<string, unknown>;
+
+async function readTokenRow(
+  db: NonNullable<ReturnType<typeof serviceClient>>,
   ownerId: string,
   provider: SuiteProvider,
-  opts: { force?: boolean } = {}
-): Promise<LiveToken> {
-  const { config, db } = configured(provider);
-  const label = config.label;
-
+  label: string
+): Promise<TokenRow> {
   const { data: row, error } = await db
     .from("integration_tokens")
     .select("*")
@@ -366,17 +371,72 @@ export async function accessTokenFor(
     .maybeSingle();
   if (error) throw new HttpError(500, "Couldn't read the connection");
   if (!row) throw conflict(`${label} isn't connected. Connect it under App Integrations first.`);
+  return row as TokenRow;
+}
 
-  const base = {
+function isFresh(row: TokenRow): boolean {
+  const expiresAt = row.expires_at ? new Date(String(row.expires_at)).getTime() : 0;
+  return expiresAt - REFRESH_MARGIN_MS > Date.now();
+}
+
+function liveFromRow(row: TokenRow): LiveToken {
+  return {
+    accessToken: decryptToken(String(row.access_token_enc)),
     accountId: (row.account_id as string | null) ?? null,
     accountEmail: (row.account_email as string | null) ?? null,
     scopes: (row.scopes as string[] | null) ?? [],
   };
+}
 
-  const expiresAt = row.expires_at ? new Date(String(row.expires_at)).getTime() : 0;
-  if (!opts.force && expiresAt - REFRESH_MARGIN_MS > Date.now()) {
-    return { ...base, accessToken: decryptToken(String(row.access_token_enc)) };
-  }
+/**
+ * Refreshes in flight, one per grant. Microsoft rotates the refresh token on
+ * every use, so two concurrent refreshes in this process would send the same
+ * token twice and the loser would read `invalid_grant` as a revocation. A
+ * second caller joins the first refresh instead.
+ */
+const refreshing = new Map<string, Promise<LiveToken>>();
+
+/**
+ * A usable access token for `ownerId`'s grant. Refreshes within a minute of
+ * expiry (or when `force` is set after a 401). A refresh the provider refuses
+ * marks the grant `error` so the Connected apps card says "reconnect" instead
+ * of every feature failing mysteriously — unless the row shows another
+ * refresher (another replica) already rotated it, in which case its token is
+ * used.
+ */
+export async function accessTokenFor(
+  ownerId: string,
+  provider: SuiteProvider,
+  opts: { force?: boolean } = {}
+): Promise<LiveToken> {
+  const { config, db } = configured(provider);
+  const key = `${provider}:${ownerId}`;
+
+  const inFlight = refreshing.get(key);
+  if (inFlight) return inFlight;
+
+  const row = await readTokenRow(db, ownerId, provider, config.label);
+  if (!opts.force && isFresh(row)) return liveFromRow(row);
+
+  // Re-check after the read: another caller may have started meanwhile.
+  const joined = refreshing.get(key);
+  if (joined) return joined;
+
+  const run = refreshGrant(db, config, ownerId, provider, row).finally(() => {
+    refreshing.delete(key);
+  });
+  refreshing.set(key, run);
+  return run;
+}
+
+async function refreshGrant(
+  db: NonNullable<ReturnType<typeof serviceClient>>,
+  config: ProviderConfig,
+  ownerId: string,
+  provider: SuiteProvider,
+  row: TokenRow
+): Promise<LiveToken> {
+  const label = config.label;
 
   if (!row.refresh_token_enc) {
     const message = `${label} access expired and can't be renewed. Reconnect ${label}.`;
@@ -393,6 +453,19 @@ export async function accessTokenFor(
   });
   const token = await readTokenResponse(res);
   if (!res.ok || !token.access_token) {
+    // Before calling the grant broken, look again: a refresh on another
+    // replica may have rotated the token we just spent. Ciphertext carries a
+    // random IV, so any rewrite of the row changes it.
+    const latest = await readTokenRow(db, ownerId, provider, label).catch(() => null);
+    if (
+      latest &&
+      (latest.refresh_token_enc !== row.refresh_token_enc ||
+        latest.access_token_enc !== row.access_token_enc) &&
+      isFresh(latest)
+    ) {
+      return liveFromRow(latest);
+    }
+
     const revoked = token.error === "invalid_grant";
     const message = revoked
       ? `${label} access was revoked or has lapsed. Reconnect ${label}.`
@@ -408,11 +481,22 @@ export async function accessTokenFor(
   // Microsoft rotates refresh tokens; Google usually doesn't send a new one.
   if (token.refresh_token) update.refresh_token_enc = encryptToken(token.refresh_token);
   if (token.scope) update.scopes = token.scope.split(/\s+/).filter(Boolean);
-  await db.from("integration_tokens").update(update).eq("owner_id", ownerId).eq("provider", provider);
+  const { error: saveError } = await db
+    .from("integration_tokens")
+    .update(update)
+    .eq("owner_id", ownerId)
+    .eq("provider", provider);
+  if (saveError && token.refresh_token) {
+    // The old refresh token is now spent and the new one wasn't kept: the
+    // next refresh will fail, so say so now rather than later.
+    const message = `${label} access was renewed but couldn't be saved. Reconnect ${label}.`;
+    await markGrantBroken(ownerId, provider, message);
+  }
 
+  const live = liveFromRow(row);
   return {
-    ...base,
-    scopes: (update.scopes as string[] | undefined) ?? base.scopes,
+    ...live,
+    scopes: (update.scopes as string[] | undefined) ?? live.scopes,
     accessToken: token.access_token,
   };
 }

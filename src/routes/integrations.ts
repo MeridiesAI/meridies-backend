@@ -8,7 +8,8 @@
  *
  * `google` and `microsoft` connect through a real OAuth handshake
  * (lib/oauth.ts): `GET /:provider/authorize` returns the consent URL, the
- * provider redirects the browser to `GET /:provider/callback`, and the tokens
+ * provider redirects the browser to an app page, that page POSTs the code and
+ * state to the authenticated `POST /:provider/complete`, and the tokens
  * land encrypted in `integration_tokens` — a service-role-only table — never in
  * `integrations.config`. The `integrations` row is the visible grant, and its
  * `scopes` are what the provider actually returned.
@@ -19,14 +20,12 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { env } from "../env.js";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
   beginAuthorization,
   completeAuthorization,
-  OAuthCallbackError,
   providerLabel,
   revokeAndForget,
   SUITE_PROVIDERS,
@@ -71,11 +70,12 @@ const statusBody = z
   })
   .strict();
 
-const callbackQuery = z.object({
-  code: z.string().min(1).max(4096).optional(),
-  state: z.string().min(1).max(512).optional(),
-  error: z.string().max(200).optional(),
-});
+const completeBody = z
+  .object({
+    code: z.string().min(1).max(4096),
+    state: z.string().min(1).max(512),
+  })
+  .strict();
 
 const importBody = z
   .object({
@@ -96,16 +96,6 @@ const importBody = z
 
 const GRANT_COLUMNS = "id, provider, status, scopes, last_synced_at, last_error, updated_at";
 const BUCKET = "student-documents";
-
-/** Where the browser lands after consent: the Connected apps tab. */
-function appReturnUrl(provider: string, result: "connected" | "error", message?: string): string {
-  const url = new URL("/dashboard/counselor/data-hub", env.APP_URL);
-  url.searchParams.set("integration", provider);
-  url.searchParams.set("result", result);
-  if (message) url.searchParams.set("message", message.slice(0, 200));
-  url.hash = "apps";
-  return url.toString();
-}
 
 export default async function integrationRoutes(app: FastifyInstance) {
   app.get(
@@ -175,40 +165,34 @@ export default async function integrationRoutes(app: FastifyInstance) {
   );
 
   /**
-   * The provider's redirect. No Meridies session rides along — the consumed
-   * `state` row is what says whose grant this is. Always answers with a
-   * redirect back to the app, carrying a message we wrote (never the
-   * provider's own error text).
+   * Finish a sign-in. The provider redirected the browser to an app page, not
+   * here; that page runs under the counselor's session and posts what it was
+   * handed. The state is consumed only if the caller started it, so a consent
+   * link someone else began can't attach this counselor's account to theirs.
+   * There is deliberately no unauthenticated GET callback.
    */
-  app.get("/:provider/callback", async (request, reply) => {
-    const parsedParams = suiteParam.safeParse(request.params);
-    if (!parsedParams.success) return reply.code(404).send({ error: "Not found" });
-    const provider = parsedParams.data.provider;
-    const q = callbackQuery.safeParse(request.query);
-    const query = q.success ? q.data : {};
-
-    if (query.error || !query.code || !query.state) {
-      const message =
-        query.error === "access_denied"
-          ? `You cancelled the ${providerLabel(provider)} sign-in. Nothing was connected.`
-          : `${providerLabel(provider)} didn't complete the sign-in. Nothing was connected.`;
-      return reply.redirect(appReturnUrl(provider, "error", message), 302);
+  app.post(
+    "/:provider/complete",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRole("counselor"),
+        limit("integrations:complete", 20, 60, "You're finishing sign-ins very fast."),
+      ],
+    },
+    async (request) => {
+      const { provider } = suiteParam.parse(request.params);
+      const body = completeBody.parse(request.body);
+      const { scopes } = await completeAuthorization(
+        request.auth.userId,
+        provider,
+        body.code,
+        body.state,
+        request.log
+      );
+      return { connected: true, provider, scopes };
     }
-
-    try {
-      await completeAuthorization(provider, query.code, query.state, request.log);
-      return reply.redirect(appReturnUrl(provider, "connected"), 302);
-    } catch (err) {
-      const message =
-        err instanceof OAuthCallbackError || err instanceof HttpError
-          ? err.message
-          : `Couldn't finish connecting ${providerLabel(provider)}. Try again.`;
-      if (!(err instanceof OAuthCallbackError)) {
-        request.log.error({ provider, err: err instanceof Error ? err.message : "unknown" }, "oauth callback failed");
-      }
-      return reply.redirect(appReturnUrl(provider, "error", message), 302);
-    }
-  });
+  );
 
   // ---- Files -----------------------------------------------------------------
 
@@ -334,7 +318,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
 
   /**
    * Record a grant for a provider that has no handshake. Google and Microsoft
-   * are refused here: their grant is written by the OAuth callback, from the
+   * are refused here: their grant is written by the OAuth completion, from the
    * scopes the provider returned, and a hand-written one would claim access
    * that was never given.
    */

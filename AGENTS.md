@@ -261,18 +261,29 @@ there rather than calling `fetch` directly.
 
 ### Connected apps (Google / Microsoft OAuth)
 
-`GET /integrations/:provider/authorize` (counselor) returns the consent URL;
-the provider redirects to `GET /integrations/:provider/callback`, which
-consumes the single-use, ten-minute `state` (stored as sha256, bound to the
-user, PKCE verifier encrypted), exchanges the code and redirects to the app's
-`/dashboard/counselor/data-hub?integration=…&result=…#apps`. Tokens live in
+`GET /integrations/:provider/authorize` (counselor) returns the consent URL
+and stores a single-use, ten-minute `state` (sha256, bound to the user, PKCE
+verifier encrypted). The provider redirects to an **app** page,
+`<APP_URL>/dashboard/counselor/data-hub/callback/:provider`, never to this API.
+That page runs under the counselor's session and posts `{ code, state }` to the
+authenticated `POST /integrations/:provider/complete`, which consumes the state
+only where `owner_id` is the caller, checks expiry, and exchanges the code with
+the same redirect URI and the verifier. This is the login-CSRF fix: an
+unauthenticated callback could only trust the state row, so an attacker could
+start a sign-in on their own account, hand the consent link to a counselor, and
+receive the counselor's Google/Microsoft tokens. **Do not add a GET callback
+back.** Tokens live in
 `integration_tokens` — RLS on, **no policies**, grants revoked, service role
 only, AES-256-GCM ciphertext — never in `integrations.config`. The
 `integrations` row is the visible grant, with the scopes the provider actually
 returned; `PUT /integrations/google|microsoft` is refused for that reason.
 `DELETE` revokes at Google and deletes the tokens (Microsoft has no per-app
-revoke endpoint; the response says so). Refresh happens in `accessTokenFor()`;
-a refused refresh marks the grant `error` so the card says "reconnect".
+revoke endpoint; the response says so). Refresh happens in `accessTokenFor()`,
+serialized per grant (an in-process promise map), because Microsoft rotates
+refresh tokens and a second concurrent refresh would spend a dead one. A
+refused refresh re-reads the row first — if another replica already rotated it,
+that token is used — and only then marks the grant `error` so the card says
+"reconnect".
 
 After connect: `GET /integrations/:provider/files?q=` lists Drive/OneDrive
 files; `POST /integrations/:provider/files/import` copies one into the
@@ -326,9 +337,9 @@ npm run dev               # http://localhost:4000
 | `PORT` | Defaults to 4000 |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*`, which 503s without it |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI `<API_PUBLIC_URL>/integrations/google/callback` |
-| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`) |
-| `API_PUBLIC_URL` | This API's public origin, for OAuth redirect URIs |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |
+| `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 
 `GET /health` reports `{ status, database, anthropic, serviceRole }` — presence
