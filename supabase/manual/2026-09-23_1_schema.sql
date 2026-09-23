@@ -783,6 +783,48 @@ alter table public.documents drop constraint if exists documents_external_pointe
 alter table public.documents add constraint documents_external_pointer_complete
   check ((external_provider is null) = (external_file_id is null));
 
+-- The pointer is resolved with owner_id's OAuth grant, and the file's text is
+-- written back into parsed_data, which everyone who can view the student can
+-- read. documents_write lets anyone who can edit the student — the student
+-- included — write any column, so without this a student could point a row
+-- at an arbitrary file id, set owner_id to their counselor, and have the
+-- tracker read the counselor's Drive into a column the student can see. So:
+-- whoever sets or moves a pointer (or re-owns a row carrying one) must be the
+-- owner whose grant will resolve it. The service role (auth.uid() null) passes.
+create or replace function private.documents_external_pointer_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path to 'private', 'public'
+as $$
+declare
+  caller uuid := (select auth.uid());
+begin
+  if caller is null or new.external_provider is null then
+    return new;
+  end if;
+  if tg_op = 'INSERT'
+    or new.owner_id          is distinct from old.owner_id
+    or new.external_provider is distinct from old.external_provider
+    or new.external_file_id  is distinct from old.external_file_id
+    or new.external_drive_id is distinct from old.external_drive_id
+  then
+    if new.owner_id is distinct from caller then
+      raise exception 'Only the account that imported a linked file may set its pointer'
+        using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function private.documents_external_pointer_guard() from public, anon, authenticated;
+
+drop trigger if exists documents_external_pointer_guard on public.documents;
+create trigger documents_external_pointer_guard
+  before insert or update on public.documents
+  for each row execute function private.documents_external_pointer_guard();
+
 create index if not exists documents_external_idx
   on public.documents (external_provider, external_file_id)
   where external_provider is not null;
@@ -864,7 +906,10 @@ where f.status <> 'cancelled';
 comment on view public.student_red_flags is
   'Student-safe projection of red_flags. Omits escalation timing and issuer id. security_invoker: red_flags RLS applies.';
 
-revoke all on public.student_red_flags from public, anon;
+-- The schema's default privileges hand `authenticated` every privilege on a new
+-- relation, and this view is auto-updatable, so revoke from it too: the view is
+-- a read, and writes go to red_flags where the policies and guard live.
+revoke all on public.student_red_flags from public, anon, authenticated;
 grant select on public.student_red_flags to authenticated;
 
 -- ---------------------------------------------------------------------------

@@ -49,7 +49,10 @@ where f.status <> 'cancelled';
 comment on view public.student_red_flags is
   'Student-safe projection of red_flags. Omits escalation timing and issuer id. security_invoker: red_flags RLS applies.';
 
-revoke all on public.student_red_flags from public, anon;
+-- The schema's default privileges hand `authenticated` every privilege on a new
+-- relation, and this view is auto-updatable, so revoke from it too: the view is
+-- a read, and writes go to red_flags where the policies and guard live.
+revoke all on public.student_red_flags from public, anon, authenticated;
 grant select on public.student_red_flags to authenticated;
 
 -- ---------------------------------------------------------------------------
