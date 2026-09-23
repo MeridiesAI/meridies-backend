@@ -19,6 +19,7 @@ import {
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
+import { deliverParentAlert, type ParentAlertRow } from "../lib/parentAlertDelivery.js";
 import { toAlertPref, toStudentRedFlag } from "../lib/serialize.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
@@ -422,9 +423,11 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
   );
 
   /**
-   * Queue a parent alert. Always goes through the throttle — including the
+   * Send a parent alert. Always goes through the throttle — including the
    * manual "send now" button, unless the counselor explicitly overrides quiet
-   * hours. The minimum gap between alerts is never overridable.
+   * hours. The minimum gap between alerts is never overridable. An alert that
+   * clears the gates is delivered in-request (email via Resend, SMS via
+   * Twilio) and the response's `status` / `delivery` report the real outcome.
    */
   app.post(
     "/parent-alerts",
@@ -508,7 +511,20 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         .single();
 
       if (error) throw fromPostgrest(error);
-      return reply.code(201).send({ ...data, blockedReason: blocked });
+
+      // Cleared every gate: deliver it now, and answer with what actually
+      // happened rather than the optimistic `queued` the row was written as.
+      // Held or suppressed alerts are not delivered here.
+      if (status !== "queued") {
+        return reply.code(201).send({ ...data, blockedReason: blocked, delivery: null });
+      }
+      const delivery = await deliverParentAlert(request, data as ParentAlertRow, request.log);
+      return reply.code(201).send({
+        ...data,
+        status: delivery.status,
+        blockedReason: blocked,
+        delivery,
+      });
     }
   );
 
