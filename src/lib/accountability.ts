@@ -111,7 +111,21 @@ export async function alertBlockedReason(
 
   // Fail closed: an errored throttle read must not read as "nothing sent".
   if (error) throw fromPostgrest(error);
-  if (data && data.length > 0) {
+
+  // v10 sync (student-aid-comms): an alert written in the Communication
+  // composer (`student_messages`, kind 'alert') counts too, so the sweep and
+  // the button cannot send a second alert right behind a hand-written one.
+  const composed = await request.db
+    .from("student_messages")
+    .select("id")
+    .eq("student_id", studentId)
+    .eq("kind", "alert")
+    .eq("status", "sent")
+    .gte("sent_at", since)
+    .limit(1);
+  if (composed.error) throw fromPostgrest(composed.error);
+
+  if ((data && data.length > 0) || (composed.data?.length ?? 0) > 0) {
     return `A parent alert already went out in the last ${settings.min_days_between_alerts} days`;
   }
   if (!opts.ignoreQuietHours && inQuietHours(settings)) {
