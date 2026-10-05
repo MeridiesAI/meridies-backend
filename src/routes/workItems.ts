@@ -145,7 +145,7 @@ export default async function workItemRoutes(app: FastifyInstance) {
       .order("created_at", { ascending: false })
       .limit(500);
     if (error) throw fromPostgrest(error);
-    const items = ((data ?? []) as Row[]).map((r) => toWorkItem(r, me));
+    const items = ((data ?? []) as unknown as Row[]).map((r) => toWorkItem(r, me));
 
     if (q.includeDerived !== "true" || q.scope === "assigned") return items;
 
@@ -220,7 +220,7 @@ export default async function workItemRoutes(app: FastifyInstance) {
     // RLS refuses an assignee outside the caller's firm; say so plainly.
     if (error?.code === "42501") throw notFound("That counselor isn't in your practice");
     if (error) throw fromPostgrest(error);
-    return reply.code(201).send(toWorkItem(data as Row, me));
+    return reply.code(201).send(toWorkItem(data as unknown as Row, me));
   });
 
   app.patch("/:id", { preHandler: [...counselor, limit("work-items:write", 240, 60)] }, async (request) => {
@@ -239,7 +239,7 @@ export default async function workItemRoutes(app: FastifyInstance) {
     if (error?.code === "42501") throw notFound("That counselor isn't in your practice");
     if (error) throw fromPostgrest(error);
     if (!data) throw notFound("That item isn't on your queue");
-    return toWorkItem(data as Row, me);
+    return toWorkItem(data as unknown as Row, me);
   });
 
   app.delete("/:id", { preHandler: [...counselor, limit("work-items:write", 240, 60)] }, async (request) => {

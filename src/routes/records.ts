@@ -82,7 +82,7 @@ const essayBody = z
     prompt: trimmed(2000).optional(),
     school: trimmed(200).optional(),
     body: z.string().max(60_000).optional(),
-    word_count: z.number().int().min(0).max(100_000).optional(),
+    // word_count is the database's (private.essays_set_word_count), never a client's.
     word_limit: z.number().int().min(0).max(20_000).optional(),
     status: z.enum(["not-started", "drafting", "review", "final"]).optional(),
     due_date: z.string().date().optional(),
@@ -97,11 +97,11 @@ const collegeBody = z
     college_id: z.string().uuid().optional(),
     initials: trimmed(8).optional(),
     brand_color: trimmed(20).optional(),
-    round: z.enum(["ED", "ED2", "EA", "REA", "RD", "rolling", "priority"]).optional(),
+    round: z.enum(["ED", "ED2", "EA", "REA", "SCEA", "RD", "rolling", "priority"]).optional(),
     fit: z.enum(["reach", "target", "likely"]).optional(),
     status: z
       .enum([
-        "considering", "applying", "submitted", "accepted", "denied",
+        "not-started", "in-progress", "submitted", "accepted", "denied",
         "waitlisted", "deferred", "enrolled", "withdrawn",
       ])
       .optional(),

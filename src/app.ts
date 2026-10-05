@@ -32,10 +32,25 @@ import studentRoutes from "./routes/students.js";
 import taskRoutes from "./routes/tasks.js";
 // v10 sync imports: foundations
 // v10 sync imports: overview
+import workItemRoutes from "./routes/workItems.js";
+import pinRoutes from "./routes/pins.js";
+import outcomeRoutes, { alumniRoutes } from "./routes/outcomes.js";
+import referralRoutes from "./routes/referrals.js";
 // v10 sync imports: student-application
+import applicationRoutes from "./routes/application.js";
+import applicationAiRoutes from "./routes/applicationAi.js";
 // v10 sync imports: student-aid-comms
+import studentPageRoutes from "./routes/studentPage.js";
+import studentAidRoutes from "./routes/studentAid.js";
+import communicationRoutes from "./routes/communication.js";
 // v10 sync imports: colleges-events
+import collegeV10Routes from "./routes/collegesV10.js";
+import collegeAiRoutes from "./routes/collegeAi.js";
+import eventRoutes from "./routes/events.js";
 // v10 sync imports: management-pipeline
+import emailTemplateRoutes from "./routes/emailTemplates.js";
+import managementRoutes from "./routes/management.js";
+import pipelineRoutes from "./routes/pipeline.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 
@@ -101,10 +116,26 @@ export function buildApp() {
   app.register(chatRoutes, { prefix: "/chat" });
   // v10 sync routes: foundations
   // v10 sync routes: overview
+  app.register(workItemRoutes, { prefix: "/work-items" });
+  app.register(pinRoutes, { prefix: "/pins" });
+  app.register(outcomeRoutes, { prefix: "/outcomes" });
+  app.register(alumniRoutes, { prefix: "/alumni" });
+  app.register(referralRoutes, { prefix: "/referrals" });
   // v10 sync routes: student-application
+  app.register(applicationRoutes, { prefix: "/application" });
+  app.register(applicationAiRoutes, { prefix: "/application" });
   // v10 sync routes: student-aid-comms
+  app.register(studentPageRoutes, { prefix: "/student-page" });
+  app.register(studentAidRoutes, { prefix: "/student-aid" });
+  app.register(communicationRoutes, { prefix: "/communication" });
   // v10 sync routes: colleges-events
+  app.register(collegeV10Routes, { prefix: "/colleges" });
+  app.register(collegeAiRoutes, { prefix: "/ai" });
+  app.register(eventRoutes, { prefix: "/events" });
   // v10 sync routes: management-pipeline
+  app.register(pipelineRoutes, { prefix: "/pipeline" });
+  app.register(managementRoutes, { prefix: "/management" });
+  app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.

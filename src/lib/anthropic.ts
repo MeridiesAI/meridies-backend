@@ -40,7 +40,11 @@ export type AiModule =
   | "document-tracker" | "essay-review" | "link-digest"
   | "parent-alert" | "file-filing"
   // v10 sync (overview): Mass invite's sort.
-  | "mass-invite";
+  | "mass-invite"
+  // v10 sync (management-pipeline): AxIS drafting an email template.
+  | "email-template"
+  // v10 sync (colleges-events): Colleges › Search & research.
+  | "college-research";
 
 type RunOptions<T> = {
   request: FastifyRequest;

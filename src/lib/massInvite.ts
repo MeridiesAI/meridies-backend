@@ -305,9 +305,14 @@ export function groundModelEntries(
       // A repair: must sit within a small edit of a fragment or address that
       // is really in the paste, and its local part must be there verbatim.
       const local = email.split("@")[0];
-      const fragment = fragments.find(
-        (f) => !usedFragments.has(f.raw) && editDistance(f.norm, email) <= 3
-      );
+      const fragment = fragments.find((f) => {
+        if (usedFragments.has(f.raw)) return false;
+        if (editDistance(f.norm, email) <= 3) return true;
+        // A missing or garbled ending (".org") on the same local part.
+        const [fLocal, fDomain = ""] = f.norm.split("@");
+        const domain = email.split("@")[1] ?? "";
+        return fLocal === local && domain.startsWith(fDomain.split(".")[0]) && editDistance(fDomain, domain) <= 4;
+      });
       const near = fragment
         ? null
         : parsed.ready.find((r) => editDistance(r.email, email) <= 2 && r.email.split("@")[0] === local);
@@ -336,5 +341,11 @@ export function groundModelEntries(
   }
 
   const unreadable = parsed.unreadable.filter((f) => !usedFragments.has(f));
-  return { ready: [...out.values()], unreadable, duplicates };
+  // Back in the order the paste had them.
+  const at = (r: SortedAddress) => {
+    const i = pasteLower.indexOf((r.fixedFrom ?? r.email).split("@")[0]);
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  const ready = [...out.values()].sort((a, b) => at(a) - at(b));
+  return { ready, unreadable, duplicates };
 }
