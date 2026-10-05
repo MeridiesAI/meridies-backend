@@ -129,7 +129,7 @@ export function toRecommendation(r: Row) {
 // ---- Essays ------------------------------------------------------------------
 
 export const ESSAY_SELECT =
-  "*, document:documents(id, filename, mime_type, source, external_provider, external_web_url, available_to_llm, parse_status), supplement_doc:supplement_docs(id, web_url, admission_cycle)";
+  "*, document:documents(id, filename, mime_type, source, external_provider, external_web_url, available_to_llm, parse_status, bucket, storage_path), supplement_doc:supplement_docs(id, web_url, admission_cycle)";
 
 function fileKindOf(doc: Row | null, url: string | null): "google-doc" | "word" | "pdf" | "image" | "other" {
   if (url && /docs\.google\.com\/document/.test(url)) return "google-doc";
@@ -185,6 +185,8 @@ export function toEssayDoc(r: Row) {
     textStatus,
     readable: textStatus !== "unreadable",
     availableToLlm: doc ? doc.available_to_llm !== false : true,
+    /** An upload's Storage object, for a signed preview link (null for suite files). */
+    file: doc && !url && doc.storage_path ? { bucket: str(doc.bucket) || "student-documents", path: str(doc.storage_path) } : null,
     excerpt: body.slice(0, 800),
     updatedAt: str(r.updated_at),
     sortOrder: nnum(r.sort_order) ?? 0,
