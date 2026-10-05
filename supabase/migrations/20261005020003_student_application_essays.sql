@@ -125,7 +125,7 @@ create table if not exists public.supplement_docs (
   -- Whose Google grant created the Doc and reads it back for word counts.
   owner_id            uuid not null references public.profiles(id) on delete cascade,
   provider            text not null default 'google' check (provider in ('google')),
-  external_file_id    text not null check (external_file_id ~ '^[A-Za-z0-9_-]{5,300}$'),
+  external_file_id    text not null check (external_file_id ~ '^[A-Za-z0-9_-]+$' and length(external_file_id) between 5 and 300),
   web_url             text not null check (web_url ~ '^https://'),
   shared_with         text check (length(shared_with) <= 320),
   share_status        text not null default 'not-shared'
