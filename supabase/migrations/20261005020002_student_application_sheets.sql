@@ -62,8 +62,10 @@ alter table public.awards drop constraint if exists awards_recognition_levels_ch
 alter table public.awards add constraint awards_recognition_levels_check
   check (recognition_levels <@ array['school','state-regional','national','international']::text[]);
 alter table public.awards drop constraint if exists awards_uc_text_caps;
+-- NOT VALID: v5 never capped these columns, so an existing row past 2000
+-- characters must not fail the migration. New writes are held to the cap.
 alter table public.awards add constraint awards_uc_text_caps
-  check (coalesce(length(uc_criteria), 0) <= 2000 and coalesce(length(uc_earned), 0) <= 2000);
+  check (coalesce(length(uc_criteria), 0) <= 2000 and coalesce(length(uc_earned), 0) <= 2000) not valid;
 
 comment on column public.awards.recognition_levels is 'Common App "Level of recognition" (multi).';
 comment on column public.awards.uc_criteria is 'UC "Eligibility requirements" (250 characters, soft).';

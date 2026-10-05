@@ -20,7 +20,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
@@ -169,6 +169,12 @@ export default async function studentPageRoutes(app: FastifyInstance) {
         patch.parentEmail !== undefined ||
         patch.parentPhone !== undefined
       ) {
+        // Parent messages and alerts go to this address, so only the counselor
+        // may change it: a student who could rewrite it could route their own
+        // accountability alerts to an inbox they control.
+        if (request.profile.role !== "counselor") {
+          throw forbidden("Ask your counselor to update your parent's contact details");
+        }
         const { data: existing, error: readError } = await db
           .from("guardians")
           .select("id, email, phone")

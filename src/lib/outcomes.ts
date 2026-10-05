@@ -16,7 +16,7 @@ import { fromPostgrest } from "./errors.js";
 
 type Row = Record<string, unknown>;
 
-export const ROUNDS = ["ED", "ED2", "EA", "REA", "RD", "rolling", "priority"] as const;
+export const ROUNDS = ["ED", "ED2", "EA", "REA", "SCEA", "RD", "rolling", "priority"] as const;
 export const RESULTS = ["admitted", "denied", "waitlisted", "deferred", "withdrawn"] as const;
 export const HOOKS = ["first_gen", "full_pay", "recruited_athlete", "legacy", "ed"] as const;
 

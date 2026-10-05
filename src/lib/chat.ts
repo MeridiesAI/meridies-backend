@@ -312,7 +312,11 @@ export async function buildRosterContext(
   );
   const who = (id: unknown) => names.get(String(id)) ?? "Student";
   const label = <T extends Record<string, unknown>>(rows: T[] | null) =>
-    (rows ?? []).map(({ student_id, ...rest }) => ({ student: who(student_id), ...rest }));
+    // RLS can return rows for students the counselor sees but does not hold
+    // (a firm colleague's); the roster question is about their own.
+    (rows ?? [])
+      .filter((r) => names.has(String(r.student_id)))
+      .map(({ student_id, ...rest }) => ({ student: who(student_id), ...rest }));
 
   const sources = ["Roster"];
   if ((deadlines.data ?? []).length || (meetings.data ?? []).length || (tasks.data ?? []).length) {

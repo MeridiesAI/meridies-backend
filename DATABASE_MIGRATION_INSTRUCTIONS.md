@@ -87,8 +87,9 @@ due date only. It:
 ### Data that is changed in place
 
 - `20261005020001`: `student_colleges.status` `considering` becomes `not-started` and `applying`
-  becomes `in-progress`. If a student had the same college twice, the rows collapse onto the oldest
-  one before the new unique index is created.
+  becomes `in-progress`. If a student had the same catalog college on their list twice, the newer row
+  is kept but unlinked from the catalog (it stays on the list under its typed name), so the new
+  unique index can be created without deleting anything.
 - `20261005020003`: every existing essay's word count is recomputed from its text.
 - `20261005030001`: existing students keep their current polygon axes; only students with no axes get
   the new default five.

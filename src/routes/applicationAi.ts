@@ -454,7 +454,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         .filter((s) => ["Origin", "Through-line", "Landing"].includes(s.label) && isAdviceNotProse(s.text))
         .map((s) => `${s.label}: ${s.text.trim()}`);
       const flags = (result.flags ?? []).filter(
-        (f) => isAdviceNotProse(f.what) && isAdviceNotProse(f.fix) && clip(f.where, 200).length > 0
+        (f) => isAdviceNotProse(f.what) && isAdviceNotProse(f.fix) && isAdviceNotProse(clip(f.where, 200))
       );
       const next = enforceNoProse(result.next ?? []).slice(0, 2);
       next.push(`Bring the report to ${first}'s next meeting and assign each fix as a task with a word budget.`);

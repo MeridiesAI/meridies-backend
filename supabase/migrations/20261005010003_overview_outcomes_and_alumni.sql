@@ -34,7 +34,7 @@ create table if not exists public.admission_outcomes (
   college_id         uuid references public.colleges(id) on delete set null,
   college_name       text not null check (length(btrim(college_name)) between 1 and 300),
   round              text not null default 'RD'
-                       check (round in ('ED','ED2','EA','REA','RD','rolling','priority')),
+                       check (round in ('ED','ED2','EA','REA','SCEA','RD','rolling','priority')),
   result             text not null check (result in ('admitted','denied','waitlisted','deferred','withdrawn')),
   enrolled           boolean not null default false,
   gpa_unweighted     numeric(4,3) check (gpa_unweighted between 0 and 10),

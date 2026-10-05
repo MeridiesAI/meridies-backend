@@ -605,6 +605,29 @@ export async function dispatchDueMessages(
       continue;
     }
 
+    // The recipients were frozen when the counselor wrote the message, but
+    // who may receive it is re-decided now, failing closed: the student must
+    // still be this counselor's, the parents still switched on, each guardian
+    // still on file with alerts on and the same address, and an alert still
+    // clear of the throttle. Anything unreadable holds the send.
+    let recipients: Recipient[];
+    try {
+      const blocked = await sendBlockedReason(svc, row, settings);
+      if (typeof blocked === "string") {
+        await svc
+          .from("student_messages")
+          .update({ status: "cancelled", hold_reason: blocked })
+          .eq("id", row.id)
+          .eq("status", "scheduled");
+        tally.held += 1;
+        continue;
+      }
+      recipients = blocked.recipients;
+    } catch {
+      tally.held += 1;
+      continue;
+    }
+
     const claim = await svc
       .from("student_messages")
       .update({ status: "queued" })
@@ -618,9 +641,51 @@ export async function dispatchDueMessages(
       const { data: c } = await svc.from("profiles").select("full_name").eq("id", row.counselor_id).maybeSingle();
       names.set(row.counselor_id, s((c as Row | null)?.full_name));
     }
-    const outcome = await deliverMessage(row, names.get(row.counselor_id) ?? null, logger);
+    const outcome = await deliverMessage({ ...row, recipients }, names.get(row.counselor_id) ?? null, logger);
     await recordOutcome(svc, row.id, outcome, logger);
     tally[outcome.status] += 1;
   }
   return tally;
+}
+
+/**
+ * Re-check a scheduled message just before it leaves. Returns the reason it
+ * must not go (the row is cancelled with it), or the recipients still allowed.
+ * Throws on any read error, which the caller treats as "hold".
+ */
+async function sendBlockedReason(
+  svc: SupabaseClient,
+  row: MessageRow,
+  settings: AccountabilitySettings
+): Promise<string | { recipients: Recipient[] }> {
+  const { data: student, error } = await svc
+    .from("profiles")
+    .select("counselor_id, archived_at")
+    .eq("id", row.student_id)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  if (!student || student.counselor_id !== row.counselor_id || student.archived_at) {
+    return "The student is no longer on this counselor's roster";
+  }
+  if (row.kind === "alert") {
+    const throttled = await alertThrottleReason(svc, row.student_id, settings);
+    if (throttled) return throttled;
+  }
+  if (row.audience !== "parent") {
+    return { recipients: row.recipients };
+  }
+
+  const prefs = await loadAlertPrefs({ db: svc }, row.student_id);
+  if (!prefs.copy_parents) return "Messages to the parents were switched off before this went out";
+  const family = await loadFamily(svc, row.student_id);
+  const allowed = new Map(
+    family
+      .filter((g) => g.receivesMessages && g.email)
+      .map((g) => [g.id, (g.email as string).trim().toLowerCase()])
+  );
+  const recipients = row.recipients.filter(
+    (r) => r.kind === "guardian" && r.email && allowed.get(r.id) === r.email.trim().toLowerCase()
+  );
+  if (recipients.length === 0) return "No parent on file still receives messages";
+  return { recipients };
 }

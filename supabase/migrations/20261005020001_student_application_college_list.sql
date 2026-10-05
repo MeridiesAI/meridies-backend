@@ -94,10 +94,16 @@ comment on column public.student_colleges.testing is 'Per-student override; null
 comment on column public.student_colleges.application_fee_cents is
   'Per-student override (a waiver, a different program); null reads colleges.application_fee_cents.';
 
--- "Add to list" dedupes by catalog identity as well as by name. Collapse any
--- existing duplicates onto the oldest row first so the index can be built.
-delete from public.student_colleges a
- using public.student_colleges b
+-- "Add to list" dedupes by catalog identity as well as by name. An existing
+-- list can already hold the same school twice under different names ("MIT"
+-- and "Massachusetts Institute of Technology"). Deleting the newer row would
+-- cascade through deliverables, the aid checklist, net price estimates and fit
+-- rows, and lose whatever status it carried, so the newer row is unlinked from
+-- the catalog instead: it stays on the list as a free-text school, exactly as
+-- a counselor-typed school does, and the counselor can remove it by hand.
+update public.student_colleges a
+   set college_id = null
+  from public.student_colleges b
  where a.college_id is not null
    and a.student_id = b.student_id
    and a.college_id = b.college_id
