@@ -387,7 +387,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   app.get("/:id/extras", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const counselorView = request.profile.role === "counselor";
-    const [college, facts, admitted, cds, programs, tips, listProfile] = await Promise.all([
+    const [college, facts, admitted, cds, programs, tips, listProfile, supplements] = await Promise.all([
       request.db.from("colleges").select("id, name, website, deadlines").eq("id", id).maybeSingle(),
       request.db.from("college_profile_facts").select("*").eq("college_id", id).maybeSingle(),
       request.db.from("college_admitted_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -403,10 +403,21 @@ export default async function collegeV10Routes(app: FastifyInstance) {
             .limit(50)
         : Promise.resolve({ data: [] as Row[], error: null }),
       request.db.from("college_list_profiles").select("campus_setting").eq("college_id", id).maybeSingle(),
+      // The school's published prompts (student-application's catalog table),
+      // newest cycle first; only the latest cycle is shown.
+      request.db
+        .from("college_supplements")
+        .select("admission_cycle, title, prompt, word_limit, required, sort_order, source_url")
+        .eq("college_id", id)
+        .order("admission_cycle", { ascending: false })
+        .order("sort_order")
+        .limit(40),
     ]);
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
-    for (const r of [facts, admitted, cds, programs, tips, listProfile]) if (r.error) throw fromPostgrest(r.error);
+    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements]) if (r.error) throw fromPostgrest(r.error);
+    const supplementRows = (supplements.data ?? []) as Row[];
+    const latestCycle = supplementRows[0]?.admission_cycle ?? null;
 
     const c = college.data as Row;
     const programRows = ((programs.data ?? []) as Row[]).map(toCollegeProgram);
@@ -434,6 +445,16 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         special: programRows.filter((p) => p.kind === "special"),
       },
       webinarTips: ((tips.data ?? []) as Row[]).map((t) => toWebinarTip(t, request.auth.userId)),
+      supplementCycle: latestCycle == null ? null : String(latestCycle),
+      supplements: supplementRows
+        .filter((r) => r.admission_cycle === latestCycle)
+        .map((r) => ({
+          title: String(r.title),
+          prompt: String(r.prompt),
+          wordLimit: r.word_limit == null ? null : Number(r.word_limit),
+          required: Boolean(r.required),
+          sourceUrl: (r.source_url as string | null) ?? null,
+        })),
     };
   });
 
