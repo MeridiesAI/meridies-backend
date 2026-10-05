@@ -37,6 +37,7 @@ import taskRoutes from "./routes/tasks.js";
 // v10 sync imports: colleges-events
 // v10 sync imports: management-pipeline
 // v10 sync imports: calendar-files-axis
+import calendarRoutes from "./routes/calendar.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -105,6 +106,7 @@ export function buildApp() {
   // v10 sync routes: colleges-events
   // v10 sync routes: management-pipeline
   // v10 sync routes: calendar-files-axis
+  app.register(calendarRoutes, { prefix: "/calendar" });
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
   app.register(internalRoutes, { prefix: "/internal" });
   startSweepInterval(app);

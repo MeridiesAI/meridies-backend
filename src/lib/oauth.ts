@@ -47,13 +47,17 @@ const HTTP_TIMEOUT_MS = 15_000;
 
 /**
  * Google: Drive read-only (listing and importing a file the counselor picks,
- * and reading a shared Doc's `modifiedTime` for the tracker), Gmail send,
+ * and reading a shared Doc's `modifiedTime` for the tracker), Drive per-file
+ * (creating supplement Docs), Gmail send,
  * Calendar events (including creating the Meet conference), plus identity.
  */
 const GOOGLE_SCOPES = [
   "openid",
   "email",
   "https://www.googleapis.com/auth/drive.readonly",
+  // Create the student's supplement Docs (v7/v10 Application page). drive.file
+  // only reaches files this app created, so it adds no read of anything else.
+  "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar.events",
 ];

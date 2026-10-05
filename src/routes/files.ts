@@ -21,6 +21,12 @@ import { fetchReadablePage, normalizeLink } from "../lib/links.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
+import {
+  ensurePracticeFolders,
+  findOrCreateChild,
+  practiceFolder,
+  PRACTICE_FOLDER_KEYS,
+} from "../lib/practiceFolders.js";
 
 type Row = Record<string, unknown>;
 
@@ -102,6 +108,9 @@ export default async function fileRoutes(app: FastifyInstance) {
     if (q.studentId) {
       await resolveStudentId(request, q.studentId, "view");
       builder = builder.eq("student_id", q.studentId);
+    } else {
+      // A counselor's drive always opens with the practice folders in it.
+      await ensurePracticeFolders(request);
     }
     // No filter: RLS returns the caller's own drive plus, for a student, the
     // single folder that is theirs.
@@ -114,6 +123,48 @@ export default async function fileRoutes(app: FastifyInstance) {
     if (error) throw fromPostgrest(error);
     return (data ?? []).map((r) => toFolder(r as Row));
   });
+
+  /**
+   * A practice folder by key ("policy-research", "practice-templates"),
+   * created if missing. Lets a feature file into "Policy & research" without
+   * knowing what the counselor renamed it to.
+   */
+  app.get(
+    "/folders/system/:key",
+    { preHandler: [app.authenticate, requireRole("counselor")] },
+    async (request) => {
+      const { key } = z.object({ key: z.enum(PRACTICE_FOLDER_KEYS) }).parse(request.params);
+      return toFolder(await practiceFolder(request, key));
+    }
+  );
+
+  /**
+   * Find-or-create a folder by name under a parent — the parent given either
+   * as one of the caller's folder ids or as a practice folder key. The
+   * Colleges tab's Search & Research files each resource into
+   * "Policy & research › <School>" this way.
+   */
+  app.post(
+    "/folders/ensure",
+    {
+      preHandler: [app.authenticate, requireRole("counselor"), limit("folders:create", 120, 60)],
+    },
+    async (request, reply) => {
+      const b = z
+        .object({
+          parent: z.union([z.enum(PRACTICE_FOLDER_KEYS), z.string().uuid()]),
+          name: z.string().trim().min(1).max(200),
+        })
+        .strict()
+        .parse(request.body);
+      const parent = (PRACTICE_FOLDER_KEYS as readonly string[]).includes(b.parent)
+        ? await practiceFolder(request, b.parent as (typeof PRACTICE_FOLDER_KEYS)[number])
+        : await assertOwnFolder(request, b.parent);
+      if (parent.kind === "student") throw badRequest("Folders don't nest under a student's folder");
+      const { folder, created } = await findOrCreateChild(request, String(parent.id), b.name);
+      return reply.code(created ? 201 : 200).send(toFolder(folder));
+    }
+  );
 
   app.post(
     "/folders",
@@ -158,7 +209,11 @@ export default async function fileRoutes(app: FastifyInstance) {
       // The student folder is the anchor for that student's filing: rename and
       // recolour it freely, but it stays where the trigger put it.
       if (existing.is_system && b.parentId !== undefined) {
-        throw badRequest("A student's own folder can't be moved");
+        throw badRequest(
+          existing.kind === "student"
+            ? "A student's own folder can't be moved"
+            : "This folder stays at the top of your files"
+        );
       }
 
       const update: Row = {};
@@ -192,7 +247,11 @@ export default async function fileRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       const existing = await assertOwnFolder(request, id);
       if (existing.is_system) {
-        throw badRequest("A student's own folder can't be deleted");
+        throw badRequest(
+          existing.kind === "student"
+            ? "A student's own folder can't be deleted"
+            : "This folder is where Meridies files your research, so it stays"
+        );
       }
 
       const [children, docs, links] = await Promise.all([

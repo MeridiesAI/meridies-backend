@@ -396,18 +396,25 @@ type SendInviteArgs = {
   /** Null while the invited student has no account yet. */
   studentId?: string | null;
   logger?: Logger;
+  /** v10 sync (overview): the counselor's personal note, e.g. what to send. */
+  note?: string | null;
+  /** v10 sync (overview): a referred family is invited, not a student. */
+  audience?: "student" | "family";
 };
 
 export async function sendInviteEmail(
   args: SendInviteArgs
 ): Promise<{ id: string | null; sent: boolean }> {
-  const { to, counselorName, acceptUrl, studentId = null, logger } = args;
+  const { to, counselorName, acceptUrl, studentId = null, logger, note = null, audience = "student" } = args;
   const who = counselorName ?? "Your counselor";
 
   const template: BrandedEmail = {
     heading: "You've been invited",
     paragraphs: [
-      `${who} has invited you to join Meridies — where you and your counselor track your college applications, deadlines, and profile together in one place.`,
+      audience === "family"
+        ? `${who} has invited your family to Meridies. Share this link with your student: it is where they and their counselor track college applications, deadlines, and their profile together in one place.`
+        : `${who} has invited you to join Meridies — where you and your counselor track your college applications, deadlines, and profile together in one place.`,
+      ...(note?.trim() ? [note.trim()] : []),
     ],
     cta: { label: "Accept invitation", url: acceptUrl },
     footnote:

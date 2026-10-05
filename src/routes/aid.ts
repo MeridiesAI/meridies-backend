@@ -16,17 +16,19 @@ import { limit } from "../lib/limits.js";
 const money = z.number().int().min(0).max(100_000_000);
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
 
+/**
+ * v8 (see migration 20261005030002): the FAFSA carries its status and due date
+ * and nothing else — no filing date, no EFC, no SSN, no detail from the form.
+ * The CSS Profile sits beside it with the same two facts.
+ */
 const aidProfileBody = z
   .object({
-    fafsa_status: z.enum([
-      "not-started", "in-progress", "submitted", "verified",
-      "corrections-needed", "not-applicable",
-    ]),
-    fafsa_submitted_at: z.string().date().nullable(),
+    fafsa_status: z.enum(["not-started", "in-progress", "submitted"]),
+    fafsa_due_date: z.string().date().nullable(),
     css_status: z.enum(["not-started", "in-progress", "submitted", "not-required", "not-applicable"]),
     css_submitted_at: z.string().date().nullable(),
-    sai_estimate: z.number().int().min(-10_000).max(1_000_000).nullable(),
-    efc_estimate: z.number().int().min(-10_000).max(1_000_000).nullable(),
+    css_due_date: z.string().date().nullable(),
+    sai_estimate: z.number().int().min(-1_500).max(1_000_000).nullable(),
     household_size: z.number().int().min(1).max(20).nullable(),
     number_in_college: z.number().int().min(0).max(20).nullable(),
     income_band: z.string().trim().max(60).nullable(),
@@ -36,6 +38,13 @@ const aidProfileBody = z
     aid_types_pursued: z.array(z.string().trim().max(60)).max(20),
     special_circumstances: z.string().trim().max(4000).nullable(),
     npc_inputs: z.record(z.unknown()),
+    parent_agi_cents: z.number().int().min(0).max(100_000_000_000).nullable(),
+    home_equity: z.enum(["renting", "under-100k", "100k-300k", "over-300k", "declined"]).nullable(),
+    family_business: z.enum(["none", "under-100", "100-plus", "farm", "declined"]).nullable(),
+    parent_status: z
+      .enum(["married", "divorced-separated", "single", "remarried", "declined"])
+      .nullable(),
+    siblings_in_college: z.enum(["none", "one", "two-plus", "declined"]).nullable(),
   })
   .partial()
   .strict();
@@ -43,8 +52,9 @@ const aidProfileBody = z
 const checklistBody = z
   .object({
     student_college_id: z.string().uuid().nullable().optional(),
+    // No "fafsa": the per-school FAFSA row was deleted in v5 and stays deleted.
     item: z.enum([
-      "fafsa", "css-profile", "idoc", "verification", "institutional-form",
+      "css-profile", "idoc", "verification", "institutional-form",
       "award-letter", "appeal", "scholarship-application", "tax-transcript",
     ]),
     status: z
