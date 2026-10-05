@@ -36,6 +36,7 @@ import workItemRoutes from "./routes/workItems.js";
 import pinRoutes from "./routes/pins.js";
 import outcomeRoutes, { alumniRoutes } from "./routes/outcomes.js";
 import referralRoutes from "./routes/referrals.js";
+import overviewSummaryRoutes from "./routes/overviewSummaries.js";
 // v10 sync imports: student-application
 import applicationRoutes from "./routes/application.js";
 import applicationAiRoutes from "./routes/applicationAi.js";
@@ -121,6 +122,7 @@ export function buildApp() {
   app.register(outcomeRoutes, { prefix: "/outcomes" });
   app.register(alumniRoutes, { prefix: "/alumni" });
   app.register(referralRoutes, { prefix: "/referrals" });
+  app.register(overviewSummaryRoutes, { prefix: "/overview" });
   // v10 sync routes: student-application
   app.register(applicationRoutes, { prefix: "/application" });
   app.register(applicationAiRoutes, { prefix: "/application" });

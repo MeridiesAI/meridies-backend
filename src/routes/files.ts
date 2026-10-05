@@ -397,10 +397,16 @@ export default async function fileRoutes(app: FastifyInstance) {
         throw notFound("That document isn't on file");
       }
 
-      if (b.folderId) await assertOwnFolder(request, b.folderId);
+      const target = b.folderId ? await assertOwnFolder(request, b.folderId) : null;
 
       const update: Row = {};
       if (b.folderId !== undefined) update.folder_id = b.folderId;
+      // Refiled into a student's own folder: the document is now about that
+      // student, so the student (and their RLS) can see it like any upload there.
+      if (target?.kind === "student" && target.student_id) {
+        await resolveStudentId(request, String(target.student_id), "edit");
+        update.student_id = target.student_id;
+      }
       if (b.title !== undefined) update.title = b.title;
       if (b.description !== undefined) update.description = b.description;
       if (b.kind !== undefined) update.kind = b.kind;

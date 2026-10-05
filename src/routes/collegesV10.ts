@@ -148,6 +148,48 @@ export async function studentNumbers(request: FastifyRequest, studentId: string)
   };
 }
 
+
+/** Income band the cards quote, as the demo's cards do. */
+const CARD_BAND = "$75k–110k";
+
+/**
+ * What a college card shows beyond the catalog row: net price at the card's
+ * band (sourced), the two curated generosity ratings, and for a school with no
+ * profile, the list builder's SAT middle (estimated).
+ */
+async function cardExtras(request: FastifyRequest, ids: string[]) {
+  const out = new Map<
+    string,
+    {
+      netPrice: { band: string; priceCents: number } | null;
+      needRating: number | null;
+      meritRating: number | null;
+      satMid: number | null;
+    }
+  >();
+  if (!ids.length) return out;
+  const [facts, ratings, lists] = await Promise.all([
+    request.db.from("college_profile_facts").select("college_id, net_price_by_income").in("college_id", ids),
+    request.db.from("college_aid_ratings").select("college_id, kind, rating").in("college_id", ids),
+    request.db.from("college_list_profiles").select("college_id, sat_mid").in("college_id", ids),
+  ]);
+  for (const r of [facts, ratings, lists]) if (r.error) throw fromPostgrest(r.error);
+  for (const id of ids) out.set(id, { netPrice: null, needRating: null, meritRating: null, satMid: null });
+  for (const f of (facts.data ?? []) as Row[]) {
+    const bands = Array.isArray(f.net_price_by_income) ? (f.net_price_by_income as { band: string; priceCents: number }[]) : [];
+    out.get(String(f.college_id))!.netPrice = bands.find((b) => b.band === CARD_BAND) ?? bands[0] ?? null;
+  }
+  for (const r of (ratings.data ?? []) as Row[]) {
+    const e = out.get(String(r.college_id))!;
+    if (r.kind === "need-based") e.needRating = Number(r.rating);
+    if (r.kind === "merit-based") e.meritRating = Number(r.rating);
+  }
+  for (const l of (lists.data ?? []) as Row[]) {
+    out.get(String(l.college_id))!.satMid = l.sat_mid == null ? null : Number(l.sat_mid);
+  }
+  return out;
+}
+
 const PER_TIER_MAX = 12;
 
 export default async function collegeV10Routes(app: FastifyInstance) {
@@ -217,7 +259,8 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       .in("college_id", ranked.map((x) => x.card.id));
     if (factsError) throw fromPostgrest(factsError);
     const profiled = new Set(((withFacts ?? []) as Row[]).map((r) => String(r.college_id)));
-    return ranked.map(({ card }) => ({ ...card, profiled: profiled.has(card.id) }));
+    const extras = await cardExtras(request, ranked.map((x) => x.card.id));
+    return ranked.map(({ card }) => ({ ...card, ...extras.get(card.id)!, profiled: profiled.has(card.id) }));
   });
 
   /**
@@ -263,10 +306,16 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     const { data: cards, error: e2 } = await request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", ids);
     if (e2) throw fromPostgrest(e2);
     const profiledIds = new Set(((profiled.data ?? []) as Row[]).map((p) => String(p.college_id)));
+    const extras = await cardExtras(request, ids);
     return ((cards ?? []) as unknown as Row[])
       .map((r) => {
         const card = toCollegeCard(r);
-        return { ...card, profiled: profiledIds.has(card.id), students: byCollege.get(card.id) ?? [] };
+        return {
+          ...card,
+          ...extras.get(card.id)!,
+          profiled: profiledIds.has(card.id),
+          students: byCollege.get(card.id) ?? [],
+        };
       })
       .sort((a, b) => b.students.length - a.students.length || a.name.localeCompare(b.name));
   });

@@ -160,7 +160,7 @@ export default async function communicationRoutes(app: FastifyInstance) {
         db.from("profiles").select("full_name, grad_year, high_school").eq("id", student).maybeSingle(),
         db
           .from("student_colleges")
-          .select("name, round, deadline, status")
+          .select("name, round, deadline, custom_deadline, status")
           .eq("student_id", student)
           .order("deadline", { ascending: true, nullsFirst: false })
           .limit(25),

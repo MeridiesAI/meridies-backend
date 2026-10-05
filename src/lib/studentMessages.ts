@@ -419,7 +419,8 @@ export type ComposerFacts = {
   behind: boolean;
   hasAid: boolean;
   parentFirstName: string | null;
-  nextDeadline: { school: string; round: string | null; date: string } | null;
+  /** `custom` when it is the counselor's own internal date ("Your deadline"). */
+  nextDeadline: { school: string; round: string | null; date: string; custom: boolean } | null;
   unstartedEssay: string | null;
   month: string;
 };
@@ -441,7 +442,10 @@ export async function loadComposerFacts(db: SupabaseClient, studentId: string, n
   const today = now.toISOString().slice(0, 10);
   const [profile, colleges, overdue, flags, aid, letters, essays, guardian] = await Promise.all([
     db.from("profiles").select("full_name").eq("id", studentId).maybeSingle(),
-    db.from("student_colleges").select("name, round, deadline, status").eq("student_id", studentId),
+    db
+      .from("student_colleges")
+      .select("name, round, deadline, custom_deadline, status")
+      .eq("student_id", studentId),
     db
       .from("deliverables")
       .select("id")
@@ -474,8 +478,14 @@ export async function loadComposerFacts(db: SupabaseClient, studentId: string, n
   const list = ((colleges.data ?? []) as Row[]).filter((c) => c.status !== "withdrawn");
   const applicationsIn = list.length > 0 && list.every((c) => SUBMITTED.has(String(c.status)));
   const next = list
-    .filter((c) => !SUBMITTED.has(String(c.status)) && c.deadline && String(c.deadline) >= today)
-    .sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)))[0];
+    .filter((c) => !SUBMITTED.has(String(c.status)))
+    .map((c) => {
+      const custom = s(c.custom_deadline);
+      const date = custom ?? s(c.deadline);
+      return { c, date, custom: custom !== null };
+    })
+    .filter((x): x is { c: Row; date: string; custom: boolean } => !!x.date && x.date >= today)
+    .sort((a, b) => a.date.localeCompare(b.date))[0];
 
   const parent = s((guardian.data as Row | null)?.full_name);
   return {
@@ -485,7 +495,7 @@ export async function loadComposerFacts(db: SupabaseClient, studentId: string, n
     hasAid: Boolean(aid.data) || (letters.data?.length ?? 0) > 0,
     parentFirstName: parent ? firstName(parent) : null,
     nextDeadline: next
-      ? { school: String(next.name), round: s(next.round), date: String(next.deadline) }
+      ? { school: String(next.c.name), round: s(next.c.round), date: next.date, custom: next.custom }
       : null,
     unstartedEssay: s(((essays.data ?? []) as Row[])[0]?.title),
     month: MONTHS[now.getUTCMonth()],
@@ -506,7 +516,11 @@ export function suggestionsFor(audience: Audience, f: ComposerFacts): string[] {
   }
   if (f.nextDeadline) {
     const round = f.nextDeadline.round ? ` ${f.nextDeadline.round}` : "";
-    list.push(`Remind ${first} the ${f.nextDeadline.school}${round} deadline is ${shortDate(f.nextDeadline.date)}`);
+    list.push(
+      f.nextDeadline.custom
+        ? `Remind ${first} the ${f.nextDeadline.school}${round} draft is due ${shortDate(f.nextDeadline.date)}`
+        : `Remind ${first} the ${f.nextDeadline.school}${round} deadline is ${shortDate(f.nextDeadline.date)}`
+    );
   }
   if (f.behind) list.push(`Nudge ${first} about overdue work`);
   list.push(`Send ${first} this week's open tasks`);
