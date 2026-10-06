@@ -4,9 +4,13 @@ The Meridies API. Fastify 5 + TypeScript (ESM, strict), deployed on Railway.
 
 ## What it does
 
-Serves the production app at `app.meridiesai.com`: profiles, invite codes,
-student records, deadlines, intake, financial aid, accountability and parent
-alerts, the opportunity concierge, and every Anthropic-backed AI route.
+Serves the production app at `app.meridiesai.com`: profiles, email
+invitations, student records, deadlines, intake, financial aid, accountability
+and parent alerts, the opportunity concierge, and every Anthropic-backed AI
+route. Since the Demo v10 sync it also backs My Work Queue, the student page's
+four sections, the family message composer, Colleges and Build College Lists,
+Events Hub, Contact Pipeline and its Payment Tracker, Management and the
+Calendar.
 
 ## Auth
 
@@ -47,7 +51,16 @@ check when "nothing loads".
 
 Lives in `supabase/migrations/` and is applied to the Supabase project. Each
 migration carries its own RLS policies. Nothing runs migrations automatically —
-apply them deliberately and commit the SQL in the same PR as the code.
+apply them deliberately and commit the SQL in the same PR as the code. The v10
+sync's 24 migrations, and the two settings outside the database that go with
+them, are in [`DATABASE_MIGRATION_INSTRUCTIONS.md`](DATABASE_MIGRATION_INSTRUCTIONS.md).
+
+## Scheduled jobs
+
+Two Railway crons call this API with `Authorization: Bearer $CRON_SECRET`:
+`POST /internal/accountability/sweep` (escalations) and
+`POST /communication/internal/dispatch` (scheduled family messages). Both need
+`SUPABASE_SERVICE_ROLE_KEY`. See `AGENTS.md`.
 
 ## Rate limiting
 
