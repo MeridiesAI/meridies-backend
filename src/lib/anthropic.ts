@@ -14,8 +14,9 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { env, hasAnthropic } from "../env.js";
-import { unavailable } from "./errors.js";
+import { HttpError, unavailable } from "./errors.js";
 import { enforceQuota } from "./limits.js";
+import { assertAiAllowed } from "./practiceSettings.js";
 import { serviceClient } from "./supabase.js";
 
 export const FAST_MODEL = "claude-haiku-4-5";
@@ -29,6 +30,41 @@ function anthropic(): Anthropic {
   }
   if (!client) client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   return client;
+}
+
+/** A working key is re-checked this often; a failing one, sooner. */
+const KEY_CHECK_OK_MS = 10 * 60 * 1000;
+const KEY_CHECK_FAIL_MS = 60 * 1000;
+let keyCheck: { at: number; ok: boolean } | null = null;
+let keyCheckInFlight: Promise<boolean> | null = null;
+
+/**
+ * Whether ANTHROPIC_API_KEY is set *and accepted*. A set-but-revoked key used
+ * to read as healthy until a counselor opened AxIS; this asks Anthropic (one
+ * cheap models.list call, cached) so /health and monitoring see it first.
+ */
+export async function anthropicKeyWorks(log?: { warn: (o: object, m: string) => void }): Promise<boolean> {
+  if (!hasAnthropic) return false;
+  const now = Date.now();
+  if (keyCheck && now - keyCheck.at < (keyCheck.ok ? KEY_CHECK_OK_MS : KEY_CHECK_FAIL_MS)) return keyCheck.ok;
+  if (!keyCheckInFlight) {
+    keyCheckInFlight = anthropic()
+      .models.list({ limit: 1 }, { timeout: 5000, maxRetries: 0 })
+      .then(() => true)
+      .catch((err: unknown) => {
+        const status = err && typeof err === "object" && "status" in err ? (err as { status?: number }).status : undefined;
+        log?.warn({ status }, "anthropic key check failed");
+        return false;
+      })
+      .then((ok) => {
+        keyCheck = { at: Date.now(), ok };
+        return ok;
+      })
+      .finally(() => {
+        keyCheckInFlight = null;
+      });
+  }
+  return keyCheckInFlight;
 }
 
 export type AiModule =
@@ -67,6 +103,9 @@ const DAILY_AI_CALL_LIMIT = 300;
 export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
   const { request, module, studentId } = opts;
   const actorId = request.auth.userId;
+
+  // The practice's Data & privacy switches come before the quota is spent.
+  await assertAiAllowed(request, module);
 
   await enforceQuota(
     actorId,
@@ -252,7 +291,8 @@ export async function streamChat(opts: {
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });
     request.log.error({ module: "chat", err }, "AI chat stream failed");
-    throw err;
+    if (err instanceof HttpError) throw err;
+    throw unavailable("AxIS is unavailable right now. Try again in a few minutes.");
   }
 }
 

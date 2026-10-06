@@ -56,19 +56,38 @@ export const toCollegeCard = (r: Row) => ({
  * a name being typed. -1 means no match.
  */
 export function searchRank(name: string, aka: string[], extra: string[], query: string): number {
-  const q = query.trim().toLowerCase();
+  // Both sides lose punctuation the same way, so "st johns" and "St. John's" meet.
+  const norm = (s: string) => safeIlikeTerm(s).toLowerCase();
+  const q = norm(query);
   if (!q) return -1;
-  const names = [name, ...aka].map((n) => n.toLowerCase());
+  const names = [name, ...aka].map(norm);
   if (names.some((n) => n.startsWith(q))) return 0;
   if (q.length < 3) return -1;
   if (names.some((n) => n.split(/[\s,–-]+/).some((w) => w.startsWith(q)))) return 1;
   if (names.some((n) => n.includes(q))) return 2;
-  return extra.some((e) => e.toLowerCase().includes(q)) ? 3 : -1;
+  return extra.some((e) => norm(e).includes(q)) ? 3 : -1;
 }
 
-/** Characters PostgREST's `or=(...)` filter would read as syntax. */
+/**
+ * A search term safe to splice into PostgREST's `or=(...)` filter and an ILIKE
+ * pattern. An allow-list, not a block-list: letters (any script), digits and
+ * spaces survive; everything else (`;`, `-`, `,`, `(`, `%`, `&`...) becomes a
+ * space, so no input can change the filter's syntax or its wildcards. "Texas
+ * A&M" and "St. John's" still find their school through the words left over.
+ */
 export function safeIlikeTerm(q: string): string {
-  return q.replace(/[%_,()*\\:."']/g, " ").trim();
+  return q
+    .normalize("NFC")
+    .replace(/['\u2019]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+/** Escape ILIKE's own wildcards so user text matches literally. */
+export function escapeIlike(q: string): string {
+  return q.replace(/[%_\\]/g, (c) => `\\${c}`);
 }
 
 // ---- Research filing ----------------------------------------------------------

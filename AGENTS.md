@@ -64,6 +64,7 @@ src/
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
+│   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
@@ -88,6 +89,8 @@ src/
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
+│   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
+│   ├── settings.ts        # /settings     Data & privacy (practice_settings)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
 └── supabase/migrations/   # the schema — this repo owns it

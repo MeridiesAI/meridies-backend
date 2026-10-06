@@ -13,9 +13,10 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { toFamilyReport, toNarrativeFlag } from "../lib/serialize.js";
 
 type Row = Record<string, unknown>;
@@ -83,6 +84,13 @@ export default async function reportRoutes(app: FastifyInstance) {
 
       const owner = await ownerOf(request, "narrative_flags", id, "That flag doesn't exist");
       await resolveStudentId(request, owner, "edit");
+
+      if (patch.sharedWithStudent === true) {
+        const { settings } = await loadPracticeSettings(request);
+        if (!settings.studentsSeeSharedReports) {
+          throw forbidden("Sharing reports with students is turned off in Settings › Data & privacy.");
+        }
+      }
 
       const values: Record<string, unknown> = {};
       if (patch.sharedWithStudent !== undefined) values.shared_with_student = patch.sharedWithStudent;

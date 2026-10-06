@@ -203,8 +203,11 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       .parse(request.query);
     const term = safeIlikeTerm(q.q);
     if (!term) return [];
+    // The database narrows on the longest word ("john" for "St. John's"), which
+    // survives punctuation in the stored name; searchRank then ranks on the whole query.
+    const word = term.split(" ").sort((a, b) => b.length - a.length)[0];
 
-    const ors = [`name.ilike.%${term}%`, `city.ilike.%${term}%`];
+    const ors = [`name.ilike.%${word}%`, `city.ilike.%${word}%`];
     if (term.length === 2) ors.push(`state.ilike.${term}`);
     const [direct, aliased, majors] = await Promise.all([
       request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).or(ors.join(",")).limit(300),
@@ -222,7 +225,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       ((majors.data ?? []) as Row[]).map((r) => [String(r.college_id), (r.popular_majors as string[] | null) ?? []])
     );
     const majorIds = [...byMajor]
-      .filter(([, list]) => list.some((m) => m.toLowerCase().includes(term.toLowerCase())))
+      .filter(([, list]) => list.some((m) => safeIlikeTerm(m).toLowerCase().includes(term.toLowerCase())))
       .map(([id]) => id);
     const extra = majorIds.length
       ? await request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", majorIds.slice(0, 200))

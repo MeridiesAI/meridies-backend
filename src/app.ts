@@ -18,6 +18,8 @@ import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
+import searchRoutes from "./routes/search.js";
+import settingsRoutes from "./routes/settings.js";
 import internalRoutes from "./routes/internal.js";
 import integrationRoutes from "./routes/integrations.js";
 import inviteRoutes from "./routes/invites.js";
@@ -141,6 +143,8 @@ export function buildApp() {
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
+  app.register(searchRoutes, { prefix: "/search" });
+  app.register(settingsRoutes, { prefix: "/settings" });
   app.register(internalRoutes, { prefix: "/internal" });
   startSweepInterval(app);
 
