@@ -9,6 +9,8 @@
  *   DELETE /:id/polygon/axes/:axisId custom: delete; default: hide
  *   POST  /:id/polygon/reset        back to the derived shape
  *   GET   /:id/polygon/years        freshman-to-now, from recorded history
+ *   GET   /:id/note                 the counselor's "Add notes" box (counselor-only)
+ *   PUT   /:id/note                 save it as they type
  *
  * Every route authorizes in code (resolveStudentId) and runs on the caller's
  * RLS-bound client, so RLS is the backstop. The student may read and edit
@@ -21,7 +23,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
-import { resolveStudentId } from "../lib/guards.js";
+import { assertCanEditStudent, assertCanViewStudent, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
   axisKeyFor,
@@ -75,6 +77,8 @@ const infoPatch = z
   })
   .partial()
   .strict();
+
+const noteBody = z.object({ body: z.string().max(4000) }).strict();
 
 const addAxisBody = z
   .object({
@@ -216,6 +220,43 @@ export default async function studentPageRoutes(app: FastifyInstance) {
       const info = await loadStudentInfo(db, student);
       if (!info) throw notFound("That student isn't on your roster");
       return info;
+    }
+  );
+
+  // ---- The counselor's note ------------------------------------------------------
+  // Counselor-only both ways (student_private_notes RLS): it is the counselor's
+  // own working note about the student, not a record the student owns.
+
+  app.get(
+    "/:id/note",
+    { preHandler: [app.authenticate, requireRole("counselor")] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      await assertCanViewStudent(request, id);
+      const { data, error } = await request.db
+        .from("student_private_notes")
+        .select("body, updated_at")
+        .eq("student_id", id)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      return { body: (data?.body as string | undefined) ?? "", updatedAt: (data?.updated_at as string | undefined) ?? null };
+    }
+  );
+
+  app.put(
+    "/:id/note",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("student-page:note", 240, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const { body } = noteBody.parse(request.body);
+      await assertCanEditStudent(request, id);
+      const { data, error } = await request.db
+        .from("student_private_notes")
+        .upsert({ student_id: id, body, updated_by: request.auth.userId }, { onConflict: "student_id" })
+        .select("body, updated_at")
+        .single();
+      if (error) throw fromPostgrest(error);
+      return { body: data.body as string, updatedAt: data.updated_at as string };
     }
   );
 
