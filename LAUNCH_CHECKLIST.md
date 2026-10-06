@@ -5,7 +5,7 @@ above it are done. Database steps are in `DATABASE_MIGRATION_INSTRUCTIONS.md`; t
 rather than repeating it.
 
 **State on 2026-10-06:** the v10 code is deployed (`main` on Railway and Vercel, PR #14 in both repos),
-the 24 v10 migrations are applied, and P0 is done apart from the two open items under Email and auth.
+the 24 v10 migrations are applied, and P0 is done apart from merging the signup fix.
 
 ---
 
@@ -75,7 +75,7 @@ the 24 v10 migrations are applied, and P0 is done apart from the two open items 
 - [x] **Google sign-in**: Auth > Providers > Google is enabled with a client id and secret. Its
   redirect URI in Google Cloud is `https://kerstlpuvpmstiavxblv.supabase.co/auth/v1/callback`.
   This is a different redirect from the Files integration below, and can be the same Google client.
-- [ ] **Remove the redirect entry `https://*meridiesai.com`.** With no dot after `*` it also matches
+- [x] **Remove the redirect entry `https://*meridiesai.com`** (done 2026-10-06). With no dot after `*` it also matches
   look-alike domains such as `fakemeridiesai.com`, which could receive login links.
   `https://app.meridiesai.com/**` already covers the app.
 - [ ] **Merge the app's signup fix** (meridies-app #16, in review) (`fix/signup-email-confirmation`): confirmation links go through
