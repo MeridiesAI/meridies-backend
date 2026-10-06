@@ -117,6 +117,9 @@ order, what each file changes in place, the checks, and the two settings
 outside the database (Google's `drive.file` scope, the dispatch cron). Routes
 that read the new columns fail until it has run, including existing screens
 (meetings, AxIS chats, Files, invitations, Financial aid).
+`node --env-file=.env scripts/verify-v10.mjs` checks, read-only, that every
+table the 24 files create exists. `LAUNCH_CHECKLIST.md` is everything else
+left before going live (Railway, crons, Supabase Auth, Resend, OAuth, smoke test).
 `private.attach_student_policies()` stamps the standard student-scoped shape;
 use it rather than hand-writing four policies and getting one wrong.
 

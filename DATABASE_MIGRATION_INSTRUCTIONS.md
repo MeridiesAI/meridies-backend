@@ -105,6 +105,13 @@ select count(*) from pg_tables
  where schemaname = 'public' and rowsecurity = false;        -- expect 0
 ```
 
+On Option B the first query returns nothing, because the SQL editor doesn't record versions. Run the
+read-only check instead; it looks for every table the 24 files create and for the FAFSA column change:
+
+```bash
+node --env-file=.env scripts/verify-v10.mjs      # ends with "All checks passed."
+```
+
 Then Supabase dashboard > Advisors > Security: there should be no new "RLS disabled" or
 "policy missing" warnings.
 
