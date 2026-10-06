@@ -428,3 +428,79 @@ export const toListSchool = (college: Row, list: Row, needRating: number | null)
     regularDeadline: regular == null ? null : String(regular),
   };
 };
+
+// ---- Official data (College Scorecard, IPEDS) ---------------------------------------
+
+/** Older than this, official figures are flagged rather than served as current. */
+export const STALE_AFTER_DAYS = 395; // ~13 months: one yearly release plus a month's grace
+
+export function freshness(verifiedAt: unknown, dataYear: unknown, now = Date.now()) {
+  const at = typeof verifiedAt === "string" ? Date.parse(verifiedAt) : NaN;
+  return {
+    dataYear: dataYear == null ? null : String(dataYear),
+    verifiedAt: Number.isFinite(at) ? new Date(at).toISOString() : null,
+    // No date at all is stale too: we can't say it's current.
+    stale: !Number.isFinite(at) || now - at > STALE_AFTER_DAYS * 86_400_000,
+  };
+}
+
+const numOrNull = (v: unknown) => (v == null ? null : Number(v));
+
+export const toOfficialStats = (r: Row, now = Date.now()) => ({
+  admitRate: numOrNull(r.admit_rate),
+  openAdmissions: r.open_admissions == null ? null : Boolean(r.open_admissions),
+  satRange: r.sat_total_25 != null && r.sat_total_75 != null ? { p25: Number(r.sat_total_25), p75: Number(r.sat_total_75) } : null,
+  satEbrw: r.sat_ebrw_25 != null && r.sat_ebrw_75 != null ? { p25: Number(r.sat_ebrw_25), p75: Number(r.sat_ebrw_75) } : null,
+  satMath: r.sat_math_25 != null && r.sat_math_75 != null ? { p25: Number(r.sat_math_25), p75: Number(r.sat_math_75) } : null,
+  actRange: r.act_25 != null && r.act_75 != null ? { p25: Number(r.act_25), p75: Number(r.act_75) } : null,
+  undergradEnrollment: numOrNull(r.undergrad_enrollment),
+  control: (r.control as string | null) ?? null,
+  locale: numOrNull(r.locale),
+  hbcu: r.hbcu === true,
+  hsi: r.hsi === true,
+  tribal: r.tribal === true,
+  womenOnly: r.women_only === true,
+  menOnly: r.men_only === true,
+  religiousAffiliation: numOrNull(r.religious_affiliation),
+  costOfAttendance: numOrNull(r.cost_of_attendance),
+  tuitionInState: numOrNull(r.tuition_in_state),
+  tuitionOutOfState: numOrNull(r.tuition_out_of_state),
+  avgNetPrice: numOrNull(r.avg_net_price),
+  netPriceByIncome: (r.net_price_by_income as Record<string, number> | null) ?? {},
+  priceCalculatorUrl: (r.price_calculator_url as string | null) ?? null,
+  pellRate: numOrNull(r.pell_rate),
+  federalLoanRate: numOrNull(r.federal_loan_rate),
+  medianDebt: numOrNull(r.median_debt),
+  gradRate: numOrNull(r.grad_rate),
+  medianEarnings10yr: numOrNull(r.median_earnings_10yr),
+  provenance: "sourced" as const,
+  sourceUrl: String(r.source_url ?? ""),
+  ...freshness(r.source_verified_at, r.data_year, now),
+});
+
+export const toAdmissionFactors = (r: Row, now = Date.now()) => ({
+  gpa: (r.gpa as string | null) ?? null,
+  classRank: (r.class_rank as string | null) ?? null,
+  record: (r.record as string | null) ?? null,
+  collegePrep: (r.college_prep as string | null) ?? null,
+  recommendations: (r.recommendations as string | null) ?? null,
+  competencies: (r.competencies as string | null) ?? null,
+  testScores: (r.test_scores as string | null) ?? null,
+  englishProficiency: (r.english_proficiency as string | null) ?? null,
+  workExperience: (r.work_experience as string | null) ?? null,
+  essay: (r.essay as string | null) ?? null,
+  legacy: (r.legacy as string | null) ?? null,
+  testPolicy: (r.test_policy as string | null) ?? null,
+  provenance: "sourced" as const,
+  sourceUrl: String(r.source_url ?? ""),
+  ...freshness(r.source_verified_at, r.data_year, now),
+});
+
+export const toFieldOfStudy = (r: Row) => ({
+  cipCode: String(r.cip_code),
+  title: String(r.title),
+  credentialLevel: Number(r.credential_level),
+  awards: numOrNull(r.awards),
+  earnings4yr: numOrNull(r.earnings_4yr),
+  medianDebt: numOrNull(r.median_debt),
+});

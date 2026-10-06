@@ -5,12 +5,16 @@
  * Railway cron service (see AGENTS.md, "Scheduled jobs"):
  *   curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
  *     "$API_URL/internal/accountability/sweep"
+ *
+ * and monthly, the College Scorecard catalog refresh:
+ *     "$API_URL/internal/ingest/scorecard"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
+import { startScorecardIngest } from "../lib/ingest/run.js";
 import { runScheduledSweep } from "../lib/sweepSchedule.js";
 
 /**
@@ -56,6 +60,30 @@ export default async function internalRoutes(app: FastifyInstance) {
         });
       }
       return outcome;
+    }
+  );
+
+  /**
+   * Refresh the catalog from College Scorecard. The load takes minutes, longer
+   * than a cron's HTTP call should wait, so this starts it under its lease and
+   * answers 202; the run records itself in ingest_runs.
+   */
+  app.post(
+    "/ingest/scorecard",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startScorecardIngest(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "An ingest is already running" });
+        const reason =
+          r.reason === "no-key"
+            ? "Set SCORECARD_API_KEY to load the catalog"
+            : r.reason === "no-service-role"
+              ? "The ingest needs the service role key"
+              : "The ingest could not take its lease";
+        return reply.code(503).send({ started: false, reason });
+      }
+      return reply.code(202).send({ started: true });
     }
   );
 }

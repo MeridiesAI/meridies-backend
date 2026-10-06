@@ -50,6 +50,11 @@ const envSchema = z.object({
   CRON_SECRET: blankIsUnset(z.string().min(32, "CRON_SECRET must be at least 32 characters").optional()),
   SWEEP_INTERVAL_MINUTES: blankIsUnset(z.coerce.number().int().min(5).max(1440).optional()),
 
+  // College Scorecard (api.data.gov key, free). Optional: unset, the catalog
+  // ingest (POST /internal/ingest/scorecard, scripts/ingest/scorecard.ts)
+  // answers 503 and the catalog stays as it is.
+  SCORECARD_API_KEY: blankIsUnset(z.string().min(8).optional()),
+
   // Google / Microsoft OAuth (lib/oauth.ts). All optional: a provider whose
   // client id + secret are unset answers 503 on /integrations/:provider/*, and
   // nothing else in the API depends on it. The redirect URI registered with
@@ -97,6 +102,7 @@ export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
 export const hasResend = Boolean(env.RESEND_API_KEY);
 export const hasCronSecret = Boolean(env.CRON_SECRET);
+export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
 export const hasTwilio = Boolean(
   env.TWILIO_ACCOUNT_SID &&
     env.TWILIO_AUTH_TOKEN &&
