@@ -56,6 +56,11 @@ const meetingBody = z
     deadlineId: z.string().uuid().nullable().optional(),
     /** Create the event, with a Meet/Teams link, on the connected calendar. */
     createConference: z.boolean().optional(),
+    /**
+     * Every student invited (Demo booker's multi-select). The primary
+     * `studentId` is always one of them whether listed or not.
+     */
+    attendeeIds: z.array(z.string().uuid()).max(30).optional(),
   })
   .strict();
 
@@ -88,7 +93,11 @@ export default async function meetingRoutes(app: FastifyInstance) {
       // want that student's — and resolveStudentId is what proves they may.
       if (q.studentId || request.profile.role === "student") {
         const student = await resolveStudentId(request, q.studentId, "view");
-        builder = builder.eq("student_id", student);
+        // Their own meetings and the ones they were invited to.
+        const invited = await invitedMeetingIds(request, student);
+        builder = invited.length
+          ? builder.or(`student_id.eq.${student},id.in.(${invited.join(",")})`)
+          : builder.eq("student_id", student);
       } else {
         builder = builder.eq("counselor_id", request.auth.userId);
       }
@@ -101,7 +110,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
         .order("starts_at", { ascending: true })
         .limit(q.limit ?? 100);
       if (error) throw fromPostgrest(error);
-      return (data ?? []).map((r) => toMeeting(r as Row));
+      return withAttendees(request, (data ?? []) as Row[]);
     }
   );
 
@@ -117,7 +126,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That meeting doesn't exist");
-      return toMeeting(data as Row);
+      return (await withAttendees(request, [data as Row]))[0];
     }
   );
 
@@ -130,6 +139,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
       const body = meetingBody.parse(request.body);
       const student = await resolveStudentId(request, body.studentId, "edit");
       const mode = body.mode ?? "google-meet";
+      const invitees = await checkAttendees(request, student, body.attendeeIds);
 
       let calendar: { provider: SuiteProvider; eventId: string; joinUrl: string } | null = null;
       if (body.createConference) {
@@ -173,7 +183,17 @@ export default async function meetingRoutes(app: FastifyInstance) {
         }
         throw fromPostgrest(error);
       }
-      return reply.code(201).send(toMeeting(data as Row));
+      const saved = data as Row;
+      if (invitees.length > 0) {
+        const { error: aErr } = await request.db
+          .from("meeting_attendees")
+          .upsert(
+            invitees.map((id) => ({ meeting_id: saved.id, student_id: id })),
+            { onConflict: "meeting_id,student_id", ignoreDuplicates: true }
+          );
+        if (aErr) throw fromPostgrest(aErr);
+      }
+      return reply.code(201).send((await withAttendees(request, [saved]))[0]);
     }
   );
 
@@ -188,6 +208,10 @@ export default async function meetingRoutes(app: FastifyInstance) {
 
       const existing = await loadMeeting(request, id);
       await resolveStudentId(request, String(existing.student_id), "edit");
+      const invitees =
+        patch.attendeeIds === undefined
+          ? null
+          : await checkAttendees(request, String(existing.student_id), patch.attendeeIds);
 
       const calendarValues: Record<string, unknown> = {};
       await syncCalendar(request, existing, patch, calendarValues);
@@ -209,6 +233,12 @@ export default async function meetingRoutes(app: FastifyInstance) {
       if (existing.calendar_event_id && !("calendar_event_id" in calendarValues)) delete values.join_url;
       Object.assign(values, calendarValues);
 
+      // Only the invitees changed: nothing to write on the meeting row itself.
+      if (Object.keys(values).length === 0) {
+        if (invitees) await replaceAttendees(request, id, String(existing.student_id), invitees);
+        return (await withAttendees(request, [existing]))[0];
+      }
+
       const { data, error } = await request.db
         .from("meetings")
         .update(values)
@@ -216,7 +246,8 @@ export default async function meetingRoutes(app: FastifyInstance) {
         .select("*")
         .single();
       if (error) throw fromPostgrest(error);
-      return toMeeting(data as Row);
+      if (invitees) await replaceAttendees(request, id, String(existing.student_id), invitees);
+      return (await withAttendees(request, [data as Row]))[0];
     }
   );
 
@@ -240,6 +271,77 @@ export default async function meetingRoutes(app: FastifyInstance) {
       return { deleted: true };
     }
   );
+}
+
+/** Meetings a student is invited to without being the primary attendee. */
+async function invitedMeetingIds(request: FastifyRequest, studentId: string): Promise<string[]> {
+  const { data, error } = await request.db
+    .from("meeting_attendees")
+    .select("meeting_id")
+    .eq("student_id", studentId)
+    .limit(2000);
+  if (error) throw fromPostgrest(error);
+  return (data ?? []).map((r) => String((r as Row).meeting_id));
+}
+
+/**
+ * The extra students on a booking, each one the counselor may edit. The
+ * primary is dropped from the list: the database adds it on its own.
+ */
+async function checkAttendees(
+  request: FastifyRequest,
+  primary: string,
+  ids: string[] | undefined
+): Promise<string[]> {
+  const extra = [...new Set(ids ?? [])].filter((id) => id !== primary);
+  for (const id of extra) await resolveStudentId(request, id, "edit");
+  return extra;
+}
+
+async function replaceAttendees(
+  request: FastifyRequest,
+  meetingId: string,
+  primary: string,
+  extra: string[]
+): Promise<void> {
+  const keep = [primary, ...extra];
+  const { error: dErr } = await request.db
+    .from("meeting_attendees")
+    .delete()
+    .eq("meeting_id", meetingId)
+    .not("student_id", "in", `(${keep.join(",")})`);
+  if (dErr) throw fromPostgrest(dErr);
+  if (extra.length === 0) return;
+  const { error } = await request.db
+    .from("meeting_attendees")
+    .upsert(
+      extra.map((id) => ({ meeting_id: meetingId, student_id: id })),
+      { onConflict: "meeting_id,student_id", ignoreDuplicates: true }
+    );
+  if (error) throw fromPostgrest(error);
+}
+
+/** Meetings with `attendeeIds`: the primary first, then everyone else invited. */
+async function withAttendees(request: FastifyRequest, rows: Row[]) {
+  const byMeeting = new Map<string, string[]>();
+  if (rows.length > 0) {
+    const { data, error } = await request.db
+      .from("meeting_attendees")
+      .select("meeting_id, student_id")
+      .in("meeting_id", rows.map((r) => String(r.id)))
+      .limit(5000);
+    if (error) throw fromPostgrest(error);
+    for (const a of (data ?? []) as Row[]) {
+      const list = byMeeting.get(String(a.meeting_id)) ?? [];
+      list.push(String(a.student_id));
+      byMeeting.set(String(a.meeting_id), list);
+    }
+  }
+  return rows.map((r) => {
+    const primary = String(r.student_id);
+    const others = (byMeeting.get(String(r.id)) ?? []).filter((id) => id !== primary);
+    return { ...toMeeting(r), attendeeIds: [primary, ...others] };
+  });
 }
 
 /** The stored meeting — its real student_id, never the one a client claimed. */

@@ -1,3 +1,10 @@
+> **Superseded, kept for history.** This v6 plan was never executed. The
+> Demo v10 sync replaced it: `meridies-app` and `meridies-backend` now follow
+> Demo v10 (which supersedes v6–v9 wherever they conflict). For the current
+> state read each repo's `AGENTS.md`, and for the schema
+> `meridies-backend/DATABASE_MIGRATION_INSTRUCTIONS.md`. Nothing below has been
+> updated since; where it disagrees with those, they win.
+
 # STEPS: bring meridies-app and meridies-backend up to Demo v6
 
 The demo (`meridies-demo`) moved to v6. The production frontend (`meridies-app`) and the API (`meridies-backend`) sit at roughly v5 data parity, with pre-v5 visuals in several places. The demo stays hardcoded; the app and backend get the schema, routes, types and screens to show the same content from real data.

@@ -330,6 +330,8 @@ export const toFolder = (r: Row) => ({
   kind: str(r.kind) as "custom" | "student",
   color: nstr(r.color),
   isSystem: Boolean(r.is_system),
+  /** A practice folder a feature files into (v10 sync: calendar-files-axis). */
+  systemKey: nstr(r.system_key) as "practice-templates" | "policy-research" | null,
   sortOrder: num(r.sort_order) ?? 0,
   createdAt: nstr(r.created_at),
 });

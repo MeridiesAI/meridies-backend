@@ -13,6 +13,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { runStructured, streamChat, type ChatTurn } from "../lib/anthropic.js";
 import {
+  buildRosterContext,
   buildStudentContext,
   buildSystemPrompt,
   chatToolCatalog,
@@ -58,11 +59,16 @@ function toConversation(r: Row) {
 }
 
 function toMessage(r: Row) {
+  const trace = Array.isArray(r.trace) ? (r.trace as Row[]) : [];
   return {
     id: s(r.id),
     role: s(r.role) as "user" | "assistant" | "system",
     content: s(r.content),
     citations: (r.citations as unknown[]) ?? [],
+    /** The reasoning steps shown while it was written, replayed from history. */
+    trace: trace.map((t) => ({ label: s(t.label) })).filter((t) => t.label),
+    /** The record sections the answer was grounded in. */
+    sources: Array.isArray(r.sources) ? (r.sources as unknown[]).map(s) : [],
     createdAt: s(r.created_at),
   };
 }
@@ -129,7 +135,7 @@ export default async function chatRoutes(app: FastifyInstance) {
 
     const { data: messages, error: mErr } = await request.db
       .from("ai_messages")
-      .select("id, role, content, citations, created_at")
+      .select("id, role, content, citations, trace, sources, created_at")
       .eq("conversation_id", id)
       .order("created_at")
       .limit(500);
@@ -230,16 +236,26 @@ export default async function chatRoutes(app: FastifyInstance) {
         try {
           let studentName: string | null = null;
           let studentContext: string | null = null;
+          let rosterContext: string | null = null;
+          let sources: string[] = [];
           if (studentId) {
-            studentContext = await buildStudentContext(request, studentId);
+            const built = await buildStudentContext(request, studentId);
+            studentContext = built?.text ?? null;
+            sources = built?.sources ?? [];
             const { data: p } = await request.db
               .from("profiles")
               .select("full_name")
               .eq("id", studentId)
               .maybeSingle();
             studentName = p?.full_name ?? null;
+          } else {
+            const built = await buildRosterContext(request);
+            rosterContext = built?.text ?? null;
+            sources = built?.sources ?? [];
           }
-          const system = buildSystemPrompt(tool, studentContext, studentName);
+          const system = buildSystemPrompt(tool, studentContext, studentName, rosterContext);
+          const trace: { label: string }[] = [];
+          if (sources.length > 0) send("sources", { sources });
 
           // 1) Grounded reasoning plan, shown as the assistant "thinking".
           send("status", { phase: "thinking" });
@@ -256,7 +272,10 @@ export default async function chatRoutes(app: FastifyInstance) {
               toolName: "plan",
               maxTokens: 400,
             });
-            for (const step of plan.steps) send("reasoning", { step });
+            for (const step of plan.steps) {
+              trace.push({ label: String(step).slice(0, 200) });
+              send("reasoning", { step });
+            }
           } catch {
             // Reasoning is a nicety, never fatal to the answer.
           }
@@ -280,6 +299,8 @@ export default async function chatRoutes(app: FastifyInstance) {
               owner_id: request.auth.userId,
               role: "assistant",
               content: text,
+              trace,
+              sources: sources.slice(0, 20),
             })
             .select("id")
             .single();

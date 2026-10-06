@@ -38,7 +38,13 @@ export type AiModule =
   // Must stay in step with the ai_runs.module CHECK constraint; an unknown
   // value fails the audit insert, not the request, so it would go unnoticed.
   | "document-tracker" | "essay-review" | "link-digest"
-  | "parent-alert" | "file-filing";
+  | "parent-alert" | "file-filing"
+  // v10 sync (overview): Mass invite's sort.
+  | "mass-invite"
+  // v10 sync (management-pipeline): AxIS drafting an email template.
+  | "email-template"
+  // v10 sync (colleges-events): Colleges › Search & research.
+  | "college-research";
 
 type RunOptions<T> = {
   request: FastifyRequest;

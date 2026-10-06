@@ -832,9 +832,251 @@ function policySql(p: DemoPolicyUpdate): string {
   );
 }
 
+// ---- v10: profile facts, Build College Lists, CDS, programs ------------------
+//
+//   npx tsx scripts/seed/generate-catalog.ts --v10 \
+//     > supabase/migrations/20261005040004_seed_college_v10.sql
+//
+// Same rules as the catalog seed. The new tables are keyed on college_id, so
+// ON CONFLICT DO NOTHING keeps a hand-corrected row; `colleges.aka` is set
+// only where it is still empty. Left out on purpose:
+//   * the CDS "last checked" date — the demo's is set after its own fictional
+//     "today", and a check date is a claim that someone checked;
+//   * the webinar tips — the demo writes them from a template, they are not
+//     real sessions (college_webinar_tips starts empty);
+//   * the Events Hub listings — authored against the demo's "today".
+
+type DemoCollegeV10 = DemoCollege & {
+  address: string;
+  founded: number;
+  setting: string;
+  overview: string;
+  studentFacultyRatio: string;
+  graduationRate4yr: number;
+  graduationRate6yr: number;
+  retentionRate: number;
+  roomAndBoard: number;
+  netPriceByIncome: { band: string; price: number }[];
+  satRange: string;
+  actRange: string;
+  gpaRange: string;
+  commonApp: boolean;
+  popularMajors: string[];
+  admittedProfile: { label: string; value: number }[];
+  studentLife: {
+    undergrads: number;
+    totalStudents: number;
+    fullTimeUndergradPct: number;
+    retentionPct: number;
+    gender: { femalePct: number; malePct: number };
+    ethnicity: { group: string; pct: number }[];
+    source: string;
+  };
+  admissionRequirements: {
+    essay: string;
+    testing: string;
+    subjectTests: string;
+    interview: string;
+    note: string;
+  };
+};
+
+type DemoListSchool = {
+  id: string;
+  name: string;
+  initials: string;
+  color: string;
+  city: string;
+  state: string;
+  lat: number;
+  lng: number;
+  undergrads: number;
+  setting: string;
+  testing: string;
+  admit: number;
+  satMid: number;
+  gpaMid: number;
+  need: number;
+  largestGroup: number;
+  fields: string[];
+  rd: string;
+  website: string;
+  collegeId?: string;
+};
+
+const LIST_TESTING: Record<string, string> = {
+  "Test required": "required",
+  "Test optional": "optional",
+  "Test blind": "blind",
+  "Test flexible": "flexible",
+};
+
+function v10CollegeSql(c: DemoCollegeV10, extras: Record<string, unknown>): string[] {
+  const ref = collegeRef(c.id);
+  const out: string[] = [`-- ${c.name}`];
+
+  if (c.aka?.length) {
+    out.push(
+      `update public.colleges set aka = ${textArr(c.aka).raw}\nwhere slug = ${lit(c.id)} and aka = '{}'::text[];`,
+    );
+  }
+
+  assertNoRosterNames(c.overview, `${c.name} overview`);
+  out.push(
+    insert(
+      "college_profile_facts",
+      {
+        college_id: ref,
+        address: c.address,
+        founded: c.founded,
+        campus_setting: c.setting,
+        overview: c.overview,
+        student_faculty_ratio: c.studentFacultyRatio,
+        graduation_rate_4yr: c.graduationRate4yr,
+        graduation_rate_6yr: c.graduationRate6yr,
+        retention_rate: c.retentionRate,
+        room_and_board_cents: cents(c.roomAndBoard),
+        sat_range: c.satRange,
+        act_range: c.actRange,
+        gpa_range: c.gpaRange,
+        common_app: c.commonApp,
+        popular_majors: textArr(c.popularMajors),
+        student_life: jsonb(c.studentLife),
+        admission_requirements: jsonb(c.admissionRequirements),
+        net_price_by_income: jsonb(c.netPriceByIncome.map((r) => ({ band: r.band, priceCents: cents(r.price) }))),
+        source_note: DATA_SOURCE_NOTE,
+        provenance: "sourced",
+      },
+      "(college_id)",
+    ),
+  );
+
+  out.push(
+    insert(
+      "college_admitted_profiles",
+      {
+        college_id: ref,
+        axes: jsonb(c.admittedProfile),
+        rating_kind: "meridies-curated",
+        note: ADMITTED_POLYGON_NOTE,
+      },
+      "(college_id)",
+    ),
+  );
+
+  const cdsFor = extras.cdsFor as (id: string, website: string, name: string) => {
+    url: string;
+    year: string;
+    released: string;
+  };
+  const cds = cdsFor(c.id, c.website, c.name);
+  // The fallback is a search link the UI can build itself, not a fact.
+  if (cds.url.startsWith("https://") && !cds.url.includes("google.com/search")) {
+    out.push(
+      insert(
+        "college_cds_editions",
+        {
+          college_id: ref,
+          edition: cds.year,
+          url: cds.url,
+          released_label: cds.released,
+          provenance: "sourced",
+        },
+        "(college_id, edition)",
+      ),
+    );
+  }
+
+  const programsFor = extras.programsFor as (id: string) => { combined: string[]; special: string[] } | null;
+  const programs = programsFor(c.id);
+  if (programs) {
+    for (const kind of ["combined", "special"] as const) {
+      programs[kind].forEach((name, i) => {
+        out.push(
+          insert(
+            "college_programs",
+            { college_id: ref, kind, name, sort_order: i, provenance: "curated" },
+            "(college_id, kind, lower(name))",
+          ),
+        );
+      });
+    }
+  }
+  return out;
+}
+
+/** The filter and fit inputs, for a profiled school or a catalog one. */
+function listProfileSql(s: DemoListSchool): string {
+  return insert(
+    "college_list_profiles",
+    {
+      college_id: collegeRef(s.collegeId ?? s.id),
+      latitude: s.lat,
+      longitude: s.lng,
+      campus_setting: s.setting,
+      field_areas: textArr(s.fields),
+      sat_mid: Math.round(s.satMid),
+      gpa_mid: Math.round(s.gpaMid * 100) / 100,
+      largest_group_pct: s.largestGroup,
+      provenance: "estimated",
+    },
+    "(college_id)",
+  );
+}
+
+/** A Northeast catalog school: only what the list builder reads. */
+function catalogSchoolSql(s: DemoListSchool): string[] {
+  return [
+    `-- ${s.name}`,
+    insert(
+      "colleges",
+      {
+        slug: s.id,
+        name: s.name,
+        initials: s.initials,
+        brand_color: s.color,
+        city: s.city,
+        state: s.state,
+        country: "US",
+        size: s.undergrads,
+        acceptance_rate: ratio(s.admit),
+        test_policy: need(LIST_TESTING[s.testing], `testing ${s.testing}`),
+        deadlines: jsonb(s.rd ? { "Regular Decision": s.rd } : {}),
+        website: s.website,
+      },
+      "(slug)",
+    ),
+    // The Meridies need-based rating the Financial aid filter reads. Curated,
+    // with no label or rationale because the fixture states none.
+    insert(
+      "college_aid_ratings",
+      { college_id: collegeRef(s.id), kind: "need-based", rating: s.need, rating_kind: "meridies-curated" },
+      "(college_id, kind)",
+    ),
+  ];
+}
+
+async function v10Sql(): Promise<[string, string[]][]> {
+  const extras = await load("collegeExtras.ts");
+  const listBuilder = await load("listBuilder.ts");
+  const schools = listBuilder.LIST_SCHOOLS as DemoListSchool[];
+  const profiled = COLLEGES as DemoCollegeV10[];
+  return [
+    ["Profile facts, the curated admitted-student shape, CDS editions and programs", profiled.flatMap((c) => v10CollegeSql(c, extras))],
+    ["Build College Lists catalog schools (no profile)", schools.filter((s) => !s.collegeId).flatMap(catalogSchoolSql)],
+    ["Build College Lists filter and fit inputs (estimated)", schools.map(listProfileSql)],
+  ];
+}
+
+const DATA_SOURCE_NOTE = collegeData.DATA_SOURCE_NOTE as string;
+const ADMITTED_POLYGON_NOTE = collegeData.ADMITTED_POLYGON_NOTE as string;
+
 // ---- Emit ----------------------------------------------------------------------
 
-const sections: [string, string[]][] = [
+// A function so that `--v10` runs without the fixtures the original catalog
+// read (the demo dropped COMBINED_PROGRAMS and POC_PROGRAMS from llmTools.ts in
+// v8; the 20260923 seed was cut before that).
+const sections = (): [string, string[]][] => [
   ["Colleges, majors, CDS factors, requirements, aid profiles and the curated aid ratings", COLLEGES.flatMap(collegeSql)],
   ["High schools and their published rank bands", HIGH_SCHOOLS.flatMap(highSchoolSql)],
   ["Combined BA/MD and BS/MD programs", COMBINED.map(combinedSql)],
@@ -874,8 +1116,31 @@ const header = `-- -------------------------------------------------------------
 -- ---------------------------------------------------------------------------
 `;
 
-const body = sections
+const V10 = process.argv.includes("--v10");
+
+const v10Header = `-- ---------------------------------------------------------------------------
+-- Colleges v10 seed. GENERATED by scripts/seed/generate-catalog.ts --v10 from
+-- the meridies-demo fixtures (collegeData.ts, collegeExtras.ts,
+-- listBuilder.ts) — edit the script, not this file, and regenerate.
+--
+-- Idempotent and never overwrites: new rows are ON CONFLICT DO NOTHING, and
+-- colleges.aka is written only where it is still empty.
+--
+-- Labelled as what it is: college_admitted_profiles and the catalog schools'
+-- need-based college_aid_ratings are 'meridies-curated'; college_programs is
+-- provenance 'curated'; college_list_profiles (coordinates, fields taught,
+-- rounded score midpoints) is 'estimated' and never displayed as a published
+-- figure. source_verified_at is null everywhere.
+--
+-- NOT here: CDS check dates, webinar tips and Events Hub listings. The demo
+-- authors those against its own fictional "today".
+-- ---------------------------------------------------------------------------
+`;
+
+const chosen = V10 ? await v10Sql() : sections();
+
+const body = chosen
   .map(([title, stmts]) => `-- ===========================================================================\n-- ${title}\n-- ===========================================================================\n\n${stmts.join("\n\n")}`)
   .join("\n\n");
 
-process.stdout.write(`${header}\n${body}\n`);
+process.stdout.write(`${V10 ? v10Header : header}\n${body}\n`);

@@ -42,7 +42,8 @@ export type ChatTool = {
 };
 
 const BASE_CHAT_SYSTEM = [
-  "You are Meridies, the assistant for an independent college counselor.",
+  "You are AxIS (Adaptive Experience Intelligence System), the Meridies assistant",
+  "for an independent college counselor.",
   "You are talking TO the counselor, about their student — never to the student.",
   "",
   "Ground every claim in the student context provided. Be specific: cite the",
@@ -166,9 +167,10 @@ export function chatToolCatalog() {
 export async function buildStudentContext(
   request: FastifyRequest,
   studentId: string
-): Promise<string | null> {
+): Promise<{ text: string; sources: string[] } | null> {
   const db = request.db;
-  const [profile, academics, activities, awards, essays, colleges, notes, polygon, deadlines] =
+  const today = new Date().toISOString();
+  const [profile, academics, activities, awards, essays, colleges, notes, polygon, deadlines, meetings] =
     await Promise.all([
       db
         .from("profiles")
@@ -216,11 +218,28 @@ export async function buildStudentContext(
         .eq("student_id", studentId)
         .order("due_date")
         .limit(20),
+      db
+        .from("meetings")
+        .select("title, starts_at, status, agenda")
+        .eq("student_id", studentId)
+        .gte("starts_at", today)
+        .neq("status", "cancelled")
+        .order("starts_at")
+        .limit(8),
     ]);
 
   if (!profile.data) return null;
 
-  return JSON.stringify(
+  // What the answer was grounded in, named the way the AxIS trace names it.
+  const has = (rows: unknown) => Array.isArray(rows) && rows.length > 0;
+  const sources = ["Student profile"];
+  if (has(activities.data) || has(awards.data)) sources.push("Activities and awards");
+  if (has(essays.data)) sources.push("Essays");
+  if (has(colleges.data)) sources.push("College list");
+  if (has(notes.data)) sources.push("Meeting notes");
+  if (has(deadlines.data) || has(meetings.data)) sources.push("Calendar");
+
+  const text = JSON.stringify(
     {
       student: profile.data,
       academics: academics.data,
@@ -231,10 +250,95 @@ export async function buildStudentContext(
       meetingNotes: notes.data,
       profileStrength: polygon.data,
       deadlines: deadlines.data,
+      upcomingMeetings: meetings.data,
     },
     null,
     1
   ).slice(0, 60_000);
+  return { text, sources };
+}
+
+/**
+ * "Across the roster" (a chat with no student): the counselor's students and
+ * what is due soon, so a question like "who is behind this week?" is
+ * answered from the record rather than from nothing. Same RLS-bound client,
+ * same cap. Names and dates only — no essays or notes for every student.
+ */
+export async function buildRosterContext(
+  request: FastifyRequest
+): Promise<{ text: string; sources: string[] } | null> {
+  if (request.profile.role !== "counselor") return null;
+  const db = request.db;
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const horizon = new Date(now.getTime() + 21 * 86_400_000).toISOString().slice(0, 10);
+
+  const [roster, deadlines, meetings, tasks] = await Promise.all([
+    db
+      .from("profiles")
+      .select("id, full_name, grad_year, high_school")
+      .eq("counselor_id", request.auth.userId)
+      .eq("role", "student")
+      .order("full_name")
+      .limit(300),
+    db
+      .from("deadlines")
+      .select("student_id, title, school, type, due_date, level")
+      .eq("done", false)
+      .lte("due_date", horizon)
+      .order("due_date")
+      .limit(150),
+    db
+      .from("meetings")
+      .select("student_id, title, starts_at")
+      .eq("counselor_id", request.auth.userId)
+      .eq("status", "scheduled")
+      .gte("starts_at", now.toISOString())
+      .lte("starts_at", `${horizon}T23:59:59Z`)
+      .order("starts_at")
+      .limit(60),
+    db
+      .from("deliverables")
+      .select("student_id, title, status, due_date, last_activity_at")
+      .neq("status", "complete")
+      .lte("due_date", horizon)
+      .order("due_date")
+      .limit(150),
+  ]);
+  if (roster.error) return null;
+
+  const names = new Map(
+    ((roster.data ?? []) as Record<string, unknown>[]).map((r) => [String(r.id), String(r.full_name ?? "")])
+  );
+  const who = (id: unknown) => names.get(String(id)) ?? "Student";
+  const label = <T extends Record<string, unknown>>(rows: T[] | null) =>
+    // RLS can return rows for students the counselor sees but does not hold
+    // (a firm colleague's); the roster question is about their own.
+    (rows ?? [])
+      .filter((r) => names.has(String(r.student_id)))
+      .map(({ student_id, ...rest }) => ({ student: who(student_id), ...rest }));
+
+  const sources = ["Roster"];
+  if ((deadlines.data ?? []).length || (meetings.data ?? []).length || (tasks.data ?? []).length) {
+    sources.push("Calendar");
+  }
+
+  const text = JSON.stringify(
+    {
+      today,
+      students: ((roster.data ?? []) as Record<string, unknown>[]).map((r) => ({
+        name: r.full_name,
+        gradYear: r.grad_year,
+        highSchool: r.high_school,
+      })),
+      deadlinesNext3Weeks: label(deadlines.data as Record<string, unknown>[] | null),
+      meetingsNext3Weeks: label(meetings.data as Record<string, unknown>[] | null),
+      openTasksDueSoon: label(tasks.data as Record<string, unknown>[] | null),
+    },
+    null,
+    1
+  ).slice(0, 60_000);
+  return { text, sources };
 }
 
 /**
@@ -245,9 +349,18 @@ export async function buildStudentContext(
 export function buildSystemPrompt(
   tool: ChatTool,
   studentContext: string | null,
-  studentName: string | null
+  studentName: string | null,
+  rosterContext: string | null = null
 ): string {
   const parts = [BASE_CHAT_SYSTEM, "", `Active tool: ${tool.label}. ${tool.guidance}`];
+  if (!studentContext && rosterContext) {
+    parts.push(
+      "",
+      "--- THE COUNSELOR'S ROSTER, NEXT THREE WEEKS (JSON) ---",
+      rosterContext,
+      "--- END ROSTER ---"
+    );
+  }
   if (studentContext) {
     parts.push(
       "",
