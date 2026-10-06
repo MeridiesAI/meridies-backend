@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
-import { hasAnthropic, hasServiceRole } from "../env.js";
+import { hasServiceRole } from "../env.js";
+import { anthropicKeyAccepted } from "../lib/anthropic.js";
 import { anonClient, serviceClient } from "../lib/supabase.js";
 
 const PROBE_TIMEOUT_MS = 2000;
@@ -50,12 +51,15 @@ async function databaseReachable(log: FastifyInstance["log"]): Promise<boolean> 
 
 export default async function healthRoutes(app: FastifyInstance) {
   app.get("/health", async (_request, reply) => {
-    const database = await databaseReachable(app.log);
+    const [database, anthropic] = await Promise.all([databaseReachable(app.log), anthropicKeyAccepted()]);
     // Config presence and reachability only — never values, URLs or error text.
+    // `anthropic` is whether the key is accepted, not merely set. A bad key
+    // doesn't fail the probe (the API still serves everything but AI), so the
+    // status code stays tied to the database alone.
     return reply.code(database ? 200 : 503).send({
       status: database ? "ok" : "degraded",
       database,
-      anthropic: hasAnthropic,
+      anthropic,
       serviceRole: hasServiceRole,
     });
   });

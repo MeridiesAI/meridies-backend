@@ -31,6 +31,40 @@ function anthropic(): Anthropic {
   return client;
 }
 
+const KEY_CHECK_TTL_MS = 10 * 60_000;
+const KEY_CHECK_TIMEOUT_MS = 3000;
+let keyCheck: { at: number; ok: boolean } | null = null;
+let keyCheckInFlight: Promise<boolean> | null = null;
+
+/**
+ * Whether Anthropic accepts the configured key — for /health, which used to
+ * report `anthropic: true` from the key's mere presence while every chat
+ * failed with an invalid key. One cheap models.list call, cached ten minutes.
+ * Only an auth refusal (401/403) reads as false; a timeout or outage keeps the
+ * last answer, because a flaky network isn't a bad key.
+ */
+export async function anthropicKeyAccepted(): Promise<boolean> {
+  if (!hasAnthropic) return false;
+  if (keyCheck && Date.now() - keyCheck.at < KEY_CHECK_TTL_MS) return keyCheck.ok;
+  if (!keyCheckInFlight) {
+    keyCheckInFlight = anthropic()
+      .models.list({ limit: 1 }, { timeout: KEY_CHECK_TIMEOUT_MS, maxRetries: 0 })
+      .then(() => true)
+      .catch((err: unknown) => {
+        const refused = err instanceof Anthropic.APIError && (err.status === 401 || err.status === 403);
+        return refused ? false : (keyCheck?.ok ?? true);
+      })
+      .then((ok) => {
+        keyCheck = { at: Date.now(), ok };
+        return ok;
+      })
+      .finally(() => {
+        keyCheckInFlight = null;
+      });
+  }
+  return keyCheckInFlight;
+}
+
 export type AiModule =
   | "profile-summary" | "narrative-coherence" | "family-report" | "school-reframing"
   | "college-list" | "college-fit" | "concierge" | "scholarship-match" | "award-appeal"
@@ -252,7 +286,10 @@ export async function streamChat(opts: {
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });
     request.log.error({ module: "chat", err }, "AI chat stream failed");
-    throw err;
+    // Same contract as runStructured: our own HttpErrors pass through, a
+    // provider error (e.g. "API key is invalid.") never reaches the counselor.
+    if (err && typeof err === "object" && "statusCode" in err) throw err;
+    throw unavailable("AxIS is unavailable right now. Try again shortly.");
   }
 }
 

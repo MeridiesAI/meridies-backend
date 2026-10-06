@@ -17,6 +17,17 @@ export const tooManyRequests = (m = "Too many requests — slow down") => new Ht
 export const unavailable = (m: string) => new HttpError(503, m);
 
 /**
+ * The message a user may see for `err`. Only an HttpError's message was written
+ * for a person; anything else (a provider SDK error, a fetch TypeError) can
+ * carry the provider's name, its error shape or a key hint, so it becomes the
+ * fallback. Use this wherever an error leaves outside the central handler — an
+ * SSE frame, a stored status row.
+ */
+export function publicMessage(err: unknown, fallback: string): string {
+  return err instanceof HttpError ? err.message : fallback;
+}
+
+/**
  * Turn a PostgREST error into something safe to return. RLS denials surface as
  * empty results or 42501; either way the client is told "not found", never
  * "exists but you can't see it".

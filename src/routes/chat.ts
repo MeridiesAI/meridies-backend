@@ -20,7 +20,7 @@ import {
   getChatTool,
   REASONING_SCHEMA,
 } from "../lib/chat.js";
-import { fromPostgrest, notFound } from "../lib/errors.js";
+import { fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
@@ -307,8 +307,8 @@ export default async function chatRoutes(app: FastifyInstance) {
 
           send("done", { messageId: saved?.id ?? null });
         } catch (err) {
-          const message = err instanceof Error ? err.message : "The assistant hit an error.";
-          send("error", { message: message.slice(0, 300) });
+          request.log.error({ err }, "chat: message failed");
+          send("error", { message: publicMessage(err, "AxIS hit an error. Try again.").slice(0, 300) });
         } finally {
           sse.end();
         }
