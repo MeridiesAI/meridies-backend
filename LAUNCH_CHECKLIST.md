@@ -4,9 +4,8 @@ What is left to take the v10 backend and app live. Work top to bottom: each sect
 above it are done. Database steps are in `DATABASE_MIGRATION_INSTRUCTIONS.md`; this file links to it
 rather than repeating it.
 
-**State on 2026-10-06:** the v10 code is deployed (`main` on Railway and Vercel, PR #14 in both repos)
-but the database is still at `20260923000005`. None of the 35 tables the v10 migrations create
-exist, so meetings, AxIS chats, Files, invitations and Financial aid fail until P0 is done.
+**State on 2026-10-06:** the v10 code is deployed (`main` on Railway and Vercel, PR #14 in both repos),
+and the 24 v10 migrations were applied to production the same day.
 
 ---
 
@@ -18,15 +17,20 @@ exist, so meetings, AxIS chats, Files, invitations and Financial aid fail until 
   tables `20261005030002` deletes from, had 0 rows, so the migration deletes nothing. Their (empty)
   exports are kept outside the repo.
 - [x] **Where the database is** (§2). `student_red_flags` exists; no v10 table does.
-- [ ] **Apply the 24 migrations** (§3). Use Option B, the SQL editor, unless someone has the database
-  password for `supabase db push`. Paste each file whole, in the table's order, and stop at the first
-  error.
-- [ ] **Verify** (§4):
+- [x] **Apply the 24 migrations** (§3). Done 2026-10-06 through the Supabase Management API
+  (`POST /v1/projects/{ref}/database/query`), one transaction per file, each version recorded in
+  `supabase_migrations.schema_migrations`. All 24 applied without errors. The earlier migrations are
+  recorded under dashboard timestamps rather than their file names, so `supabase db push` would try
+  to re-run them: don't use it against this project until that is reconciled.
+- [x] **Verify** (§4). Done 2026-10-06:
   - `node --env-file=.env scripts/verify-v10.mjs` prints `All checks passed.` (Use this rather than
     the "24 rows in `schema_migrations`" query: the SQL editor doesn't record versions, so that query
     returns 0 on Option B.)
   - The RLS query returns `0`.
-  - Dashboard > Advisors > Security shows no new warnings.
+  - Dashboard > Advisors > Security shows no new warnings. The remaining warnings are expected:
+    security-definer RPCs that signed-in users call by design (each scopes to `auth.uid()`),
+    service-role-only tables with no policies, and leaked-password protection (P1). A stray
+    `public.test` table predates v10. Check what it is and drop it if it's unused.
 
 ### Railway variables
 
