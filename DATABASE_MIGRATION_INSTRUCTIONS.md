@@ -33,14 +33,14 @@ The newest version should be `20260923000005`. If you have been pasting migratio
 editor by hand, this table may be empty or behind; in that case check that
 `public.student_red_flags` (the view from `20260923000005`) exists and continue.
 
-## 3. Apply the 23 new migrations, in this order
+## 3. Apply the 24 new migrations, in this order
 
 Option A, Supabase CLI (records each version, recommended):
 
 ```bash
 cd meridies-backend
 supabase link --project-ref kerstlpuvpmstiavxblv
-supabase db push        # shows the 23 pending files; confirm
+supabase db push        # shows the 24 pending files; confirm
 ```
 
 Option B, SQL editor: open each file below from `supabase/migrations/`, paste it whole and run it,
@@ -59,18 +59,19 @@ one at a time, in this order. Stop at the first error and send it over.
 | 9 | `20261005030001_student_page_profile_and_polygon.sql` | Student personal details, hidden polygon axes, 10-axis cap |
 | 10 | `20261005030002_financial_aid_fafsa_and_scholarship_matching.sql` | FAFSA narrowed to status and due date (v8 rule), family financials, scholarship matching, 6 scholarships seeded |
 | 11 | `20261005030003_student_communication.sql` | Composer preferences, `student_messages` |
-| 12 | `20261005040001_college_profile_v10.sql` | College profile facts, admitted profile, Common Data Set editions, programs |
-| 13 | `20261005040002_college_webinar_tips.sql` | Supplemental advice from webinars (starts empty) |
-| 14 | `20261005040003_events_hub.sql` | Events Hub listings and saves (starts empty); allows the `college-research` AI label |
-| 15 | `20261005040004_seed_college_v10.sql` | Catalog seed for the profiled schools and the Build College Lists schools (generated, idempotent) |
-| 16 | `20261005050001_contact_pipeline.sql` | Contact Pipeline stages and contacts |
-| 17 | `20261005050002_pipeline_payments.sql` | Payment Tracker packages, invoices, payments (cents; balances derived) |
-| 18 | `20261005050003_management.sql` | Consultant tasks with subtasks, consultant summaries, staff email blasts |
-| 19 | `20261005050004_email_templates.sql` | Per-consultant email templates; allows the `email-template` AI label |
-| 20 | `20261005060001_calendar_event_types_and_practice_events.sql` | Calendar event types, type assignments, practice events |
-| 21 | `20261005060002_meeting_attendees.sql` | Meetings with several students (existing meetings backfilled) |
-| 22 | `20261005060003_practice_folders.sql` | "Practice templates" and "Policy & research" folders (backfilled per counselor) |
-| 23 | `20261005060004_axis_message_trace.sql` | AxIS chats keep their reasoning steps and sources |
+| 12 | `20261005030004_student_private_note.sql` | The counselor's private notes box on the student page (counselor-only) |
+| 13 | `20261005040001_college_profile_v10.sql` | College profile facts, admitted profile, Common Data Set editions, programs |
+| 14 | `20261005040002_college_webinar_tips.sql` | Supplemental advice from webinars (starts empty) |
+| 15 | `20261005040003_events_hub.sql` | Events Hub listings and saves (starts empty); allows the `college-research` AI label |
+| 16 | `20261005040004_seed_college_v10.sql` | Catalog seed for the profiled schools and the Build College Lists schools (generated, idempotent) |
+| 17 | `20261005050001_contact_pipeline.sql` | Contact Pipeline stages and contacts |
+| 18 | `20261005050002_pipeline_payments.sql` | Payment Tracker packages, invoices, payments (cents; balances derived) |
+| 19 | `20261005050003_management.sql` | Consultant tasks with subtasks, consultant summaries, staff email blasts |
+| 20 | `20261005050004_email_templates.sql` | Per-consultant email templates; allows the `email-template` AI label |
+| 21 | `20261005060001_calendar_event_types_and_practice_events.sql` | Calendar event types, type assignments, practice events |
+| 22 | `20261005060002_meeting_attendees.sql` | Meetings with several students (existing meetings backfilled) |
+| 23 | `20261005060003_practice_folders.sql` | "Practice templates" and "Policy & research" folders (backfilled per counselor) |
+| 24 | `20261005060004_axis_message_trace.sql` | AxIS chats keep their reasoning steps and sources |
 
 Every new table ships with RLS enabled and its policies in the same file.
 
@@ -98,7 +99,7 @@ due date only. It:
 
 ```sql
 select version from supabase_migrations.schema_migrations
- where version like '20261005%' order by version;            -- 23 rows (CLI path only)
+ where version like '20261005%' order by version;            -- 24 rows (CLI path only)
 
 select count(*) from pg_tables
  where schemaname = 'public' and rowsecurity = false;        -- expect 0
@@ -128,5 +129,5 @@ Then Supabase dashboard > Advisors > Security: there should be no new "RLS disab
 ## 6. If something fails
 
 A failure leaves the earlier files applied and stops there. Send the file name and the error text.
-Files 4, 14 and 19 rebuild the `ai_runs` module check by reading the current list back and adding
+Files 4, 15 and 20 rebuild the `ai_runs` module check by reading the current list back and adding
 their label, so running any of them a second time is harmless.
