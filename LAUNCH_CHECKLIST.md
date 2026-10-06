@@ -5,7 +5,7 @@ above it are done. Database steps are in `DATABASE_MIGRATION_INSTRUCTIONS.md`; t
 rather than repeating it.
 
 **State on 2026-10-06:** the v10 code is deployed (`main` on Railway and Vercel, PR #14 in both repos),
-and the 24 v10 migrations were applied to production the same day.
+the 24 v10 migrations are applied, and P0 is done apart from the two open items under Email and auth.
 
 ---
 
@@ -34,46 +34,51 @@ and the 24 v10 migrations were applied to production the same day.
 
 ### Railway variables
 
-- [ ] `NODE_ENV=production`
-- [ ] `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (both crons answer 503 without
+- [x] `NODE_ENV=production`
+- [x] `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (both crons answer 503 without
   the service-role key)
-- [ ] `ANTHROPIC_API_KEY` (AxIS and the essay tools answer 503 without it)
-- [ ] `CORS_ORIGIN` includes `https://app.meridiesai.com`
-- [ ] `APP_URL=https://app.meridiesai.com`
-- [ ] `RESEND_API_KEY` and `INVITE_FROM_EMAIL` are set
-- [ ] `CRON_SECRET` is at least 32 characters (`openssl rand -base64 48`); the API refuses to boot
+- [x] `ANTHROPIC_API_KEY` (AxIS and the essay tools answer 503 without it)
+- [x] `CORS_ORIGIN` includes `https://app.meridiesai.com`
+- [x] `APP_URL=https://app.meridiesai.com`
+- [x] `RESEND_API_KEY` and `INVITE_FROM_EMAIL` are set
+- [x] `CRON_SECRET` is at least 32 characters (`openssl rand -base64 48`); the API refuses to boot
   with a shorter one
-- [ ] The stale `DATABASE_URL` and `JWT_SECRET` are removed
+- [x] The stale `DATABASE_URL` and `JWT_SECRET` are removed
 
 ### Railway crons
 
-- [ ] **Accountability sweep**: `POST /internal/accountability/sweep`, every 15 minutes, with
+- [x] **Accountability sweep** (done 2026-10-06 as `SWEEP_INTERVAL_MINUTES=15`, no cron service): `POST /internal/accountability/sweep`, every 15 minutes, with
   `Authorization: Bearer $CRON_SECRET`. Or set `SWEEP_INTERVAL_MINUTES` instead; one is enough
   (`AGENTS.md`, Scheduled jobs).
-- [ ] **Message dispatch** (new in v10): `POST /communication/internal/dispatch`, every 5 to 15
+- [x] **Message dispatch** (new in v10; done 2026-10-06 as the `dispatch-cron` service, `curlimages/curl`,
+  every 10 minutes, `CRON_SECRET` as a reference to `${{meridies-backend.CRON_SECRET}}`): `POST /communication/internal/dispatch`, every 5 to 15
   minutes, same header. It has no in-process alternative. Without it, scheduled messages and those
   held for quiet hours never send.
 
 ### Vercel variables (meridies-app)
 
-- [ ] `NEXT_PUBLIC_API_URL=https://meridies-backend-production.up.railway.app` (no trailing slash)
-- [ ] `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- [x] `NEXT_PUBLIC_API_URL=https://meridies-backend-production.up.railway.app` (set with a trailing slash;
+  `lib/api.ts` strips it)
+- [x] `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
 ### Email and auth
 
-- [ ] **Resend**: the sending domain is verified, and `INVITE_FROM_EMAIL` uses it. Until then, invites
+- [x] **Resend**: the sending domain is verified, and `INVITE_FROM_EMAIL` uses it. Until then, invites
   to anyone but the Resend account owner fail.
-- [ ] **Supabase Auth SMTP**: Auth > SMTP Settings points at Resend (`smtp.resend.com`, port 465,
+- [x] **Supabase Auth SMTP**: Auth > SMTP Settings points at Resend (`smtp.resend.com`, port 465,
   user `resend`, the API key as password) with a sender on the verified domain. Supabase's built-in
   mailer only delivers to the project's team members and is rate limited, so signup confirmations
   to real counselors never arrive without this.
-- [ ] **Supabase Auth URLs**: the Site URL is `https://app.meridiesai.com`. The redirect allow-list
+- [x] **Supabase Auth URLs**: the Site URL is `https://app.meridiesai.com`. The redirect allow-list
   includes `https://app.meridiesai.com/**` and `http://localhost:3000/**`, which covers
   `/auth/callback` and `/join/*`.
-- [ ] **Google sign-in**: Auth > Providers > Google is enabled with a client id and secret. Its
+- [x] **Google sign-in**: Auth > Providers > Google is enabled with a client id and secret. Its
   redirect URI in Google Cloud is `https://kerstlpuvpmstiavxblv.supabase.co/auth/v1/callback`.
   This is a different redirect from the Files integration below, and can be the same Google client.
-- [ ] **Merge the app's signup fix** (`fix/signup-email-confirmation`): confirmation links go through
+- [ ] **Remove the redirect entry `https://*meridiesai.com`.** With no dot after `*` it also matches
+  look-alike domains such as `fakemeridiesai.com`, which could receive login links.
+  `https://app.meridiesai.com/**` already covers the app.
+- [ ] **Merge the app's signup fix** (meridies-app #16, in review) (`fix/signup-email-confirmation`): confirmation links go through
   `/auth/callback`. Without it, an email signup lands on the Site URL and is never signed in.
 
 ---
@@ -101,7 +106,8 @@ and the 24 v10 migrations were applied to production the same day.
   - set `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET`
   - register `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/microsoft`
   - leave `MICROSOFT_TENANT=common`
-- [ ] **Leaked-password protection**: Supabase Auth > Passwords.
+- [ ] **Leaked-password protection**: Supabase Auth > Attack Protection. Needs the Supabase Pro plan;
+  the project is on Free, which also has no daily backups. The upgrade is pending a team decision.
 
 ---
 
@@ -152,4 +158,6 @@ Run against app.meridiesai.com and Railway once P0 and P1 are done.
   abandoned before deleting.
 - [ ] Mark the backend section of `context/TODO.md` (and `context/BEFORE_LIVE.md`) as superseded by
   this file
+- [ ] Railway: the `Postgres` service in the backend project is unused since `DATABASE_URL` was
+  removed. Ask the workspace owner before deleting it.
 - [ ] Optional: seed Events Hub listings and webinar tips, or accept their empty states
