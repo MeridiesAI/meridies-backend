@@ -208,7 +208,11 @@ export async function buildBehindList(
       .from("deliverables")
       .select("*")
       .in("student_id", ids)
-      .neq("status", "complete"),
+      .neq("status", "complete")
+      // A to-do the student added for themselves (SV Demo v2) is theirs, not
+      // an assignment: it never makes them look stalled to the counselor or
+      // their parents.
+      .neq("source", "student"),
     request.db
       .from("red_flags")
       .select("student_id, status")

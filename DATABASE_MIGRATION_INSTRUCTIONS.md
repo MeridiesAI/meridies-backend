@@ -131,3 +131,38 @@ Then Supabase dashboard > Advisors > Security: there should be no new "RLS disab
 A failure leaves the earlier files applied and stops there. Send the file name and the error text.
 Files 4, 15 and 20 rebuild the `ai_runs` module check by reading the current list back and adding
 their label, so running any of them a second time is harmless.
+
+---
+
+# Student view (SV Demo v2): five more migrations
+
+Apply these after the 24 above, in this order, the same way (`supabase db push`, or paste each file
+whole into the SQL editor). None deletes data. They were applied after every earlier file on a local
+Postgres with Supabase's auth/storage stubs and exercised as a counselor, their student and a second
+student.
+
+| # | File | What it does |
+|---|---|---|
+| 25 | `20261010000001_student_view_preferences.sql` | `student_preferences` (banner preset or uploaded image, theme, the student's own text/email reminder channels); creates the private **`student-banners`** Storage bucket (5 MB, png/jpeg/webp) and its `storage.objects` policies |
+| 26 | `20261010000002_student_view_polygon_read_only.sql` | Strength profile read-only for the student: axis insert/update/delete and history insert become counselor-only (`private.counselor_can_edit_student`) |
+| 27 | `20261010000003_student_view_tasks.sql` | `deliverables.source` (`counselor` / `student`) and `created_by`; students may add, edit and delete only their own tasks, and only record progress on assigned ones (policies + two column-guard triggers); stage inserts/deletes and task document links become counselor-only |
+| 28 | `20261010000004_student_view_files_scope.sql` | Restrictive policies: a student's documents and links must be about themselves and sit unfiled or in their own student folder; students create no folders |
+| 29 | `20261010000005_profile_updates.sql` | Profile Update (AxIS): `profile_update_threads`, `profile_update_messages`, `profile_updates`; allows the `profile-update` AI audit label (additive) |
+
+Data changed in place: `20261010000003` adds `deliverables.source` with default `counselor` (every
+existing task was assigned by a counselor) and copies `assigned_by` into the new `created_by`.
+
+Checks:
+
+```sql
+select id, public from storage.buckets where id = 'student-banners';      -- 1 row, public = false
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;  -- expect 0
+select pg_get_constraintdef(oid) from pg_constraint
+ where conname = 'ai_runs_module_check';                                   -- includes profile-update
+```
+
+Note: `20261005*`'s "no new storage buckets" no longer holds; `student-banners` is the one this set adds,
+from SQL, so nothing needs creating in the dashboard. No new environment variables.
+
+The app changes with it: `polygon` writes, `DELETE /tasks/:id/documents/:documentId` and the legacy
+`/polygon/axes` writes are counselor-only in code too, so a student client that used them gets 403.
