@@ -431,8 +431,12 @@ matched as (
       else null
     end::smallint as tier,
     case when qp.q = '' then 0
-         else greatest(similarity(b.search_name, qp.q), word_similarity(qp.q, b.search_name),
-                       similarity(b.search_aka, qp.q), word_similarity(qp.q, b.search_aka)) end::real as sim,
+         -- The whole-name match leads and the best word match adds to it, so
+         -- "univ of michgan" puts the University of Michigan above schools
+         -- that only share the word "michigan" (taking the single best signal
+         -- let Michigan Tech's alias win).
+         else greatest(similarity(b.search_name, qp.q), similarity(b.search_aka, qp.q))
+              + 0.5 * greatest(word_similarity(qp.q, b.search_name), word_similarity(qp.q, b.search_aka)) end::real as sim,
     case when qp.near_lat is null or b.lat is null then null
          else 3959 * 2 * asin(sqrt(
            power(sin(radians(b.lat - qp.near_lat) / 2), 2) +
