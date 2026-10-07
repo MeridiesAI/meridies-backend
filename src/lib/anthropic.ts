@@ -83,7 +83,9 @@ export type AiModule =
   | "college-research"
   // BACKEND_TODO §5: words -> search filters, cited web research, resource
   // Q&A, list builder explanations.
-  | "college-search" | "web-research" | "resource-qa" | "list-explain";
+  | "college-search" | "web-research" | "resource-qa" | "list-explain"
+  // SV Demo v2 (student view): Profile Update, AxIS collecting a student's news.
+  | "profile-update";
 
 type RunOptions<T> = {
   request: FastifyRequest;

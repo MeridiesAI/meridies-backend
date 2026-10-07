@@ -58,6 +58,9 @@ import managementRoutes from "./routes/management.js";
 import pipelineRoutes from "./routes/pipeline.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
+// SV Demo v2: the student view
+import meRoutes from "./routes/me.js";
+import profileUpdateRoutes from "./routes/profileUpdates.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -146,6 +149,10 @@ export function buildApp() {
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
+  // SV Demo v2 routes: the student view. profileUpdateRoutes sits at the root
+  // because it also serves the counselor's /students/:id/profile-updates.
+  app.register(meRoutes, { prefix: "/me" });
+  app.register(profileUpdateRoutes);
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
   app.register(resourceRoutes, { prefix: "/resources" });
   app.register(searchRoutes, { prefix: "/search" });

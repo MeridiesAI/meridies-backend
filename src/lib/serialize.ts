@@ -293,6 +293,12 @@ export const toTask = (
   deadlineId: nstr(r.deadline_id),
   assignedBy: nstr(r.assigned_by),
   assignedAt: nstr(r.assigned_at),
+  /**
+   * SV Demo v2: "counselor" = assigned (the student only records progress);
+   * "student" = the student added it for themselves (theirs to edit/delete).
+   */
+  source: (r.source === "student" ? "student" : "counselor") as "counselor" | "student",
+  createdBy: nstr(r.created_by),
   notifyEmail: Boolean(r.notify_email),
   notifySms: Boolean(r.notify_sms),
   notifiedAt: nstr(r.notified_at),
