@@ -14,12 +14,13 @@
  * worse than one that says it's queued. A text is only ever `sent` after a 2xx
  * from Twilio carrying a message SID.
  *
- * Without `RESEND_API_KEY` the send is skipped (and logged) — useful in local
- * dev. Until a domain is verified in Resend, `INVITE_FROM_EMAIL` must stay on
+ * Without `RESEND_API_KEY` the send is skipped (and logged). In local dev,
+ * `DEV_MAIL_URL` sends everything to a Mailpit catcher instead (never in
+ * production), so an invite can be opened and accepted without mailing anyone. Until a domain is verified in Resend, `INVITE_FROM_EMAIL` must stay on
  * the shared `onboarding@resend.dev`, which only delivers to the account owner.
  */
 
-import { env, hasResend, hasTwilio } from "../env.js";
+import { devMailUrl, env, hasResend, hasTwilio } from "../env.js";
 import { serviceClient } from "./supabase.js";
 
 type Logger = {
@@ -80,6 +81,32 @@ async function recordDelivery(
   return (data?.id as string | undefined) ?? null;
 }
 
+/** Mailpit's send API (local development only, see `DEV_MAIL_URL`). */
+async function sendToDevMail(
+  base: string,
+  m: { to: string; subject: string; html: string; text: string }
+): Promise<{ providerId: string | null; sent: boolean; errorText: string | null }> {
+  const from = /^(.*?)\s*<([^>]+)>$/.exec(env.INVITE_FROM_EMAIL);
+  try {
+    const res = await fetch(new URL("/api/v1/send", base), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        From: from ? { Name: from[1], Email: from[2] } : { Email: env.INVITE_FROM_EMAIL },
+        To: [{ Email: m.to }],
+        Subject: m.subject,
+        HTML: m.html,
+        Text: m.text,
+      }),
+    });
+    const payload = (await res.json().catch(() => ({}))) as { ID?: string };
+    if (res.ok && payload.ID) return { providerId: `dev-mail:${payload.ID}`, sent: true, errorText: null };
+    return { providerId: null, sent: false, errorText: `Dev mail returned ${res.status}` };
+  } catch (err) {
+    return { providerId: null, sent: false, errorText: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** The one place an email actually leaves this process. */
 export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
   const { to, subject, html, text, template, logger } = args;
@@ -88,7 +115,10 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
   let sent = false;
   let errorText: string | null = null;
 
-  if (!hasResend) {
+  if (devMailUrl) {
+    ({ providerId, sent, errorText } = await sendToDevMail(devMailUrl, { to, subject, html, text }));
+    if (!sent) logger?.error({ template, err: errorText }, "dev mail send failed");
+  } else if (!hasResend) {
     errorText = "RESEND_API_KEY unset";
     logger?.warn({ template }, "RESEND_API_KEY unset — email skipped (logged only).");
   } else {
