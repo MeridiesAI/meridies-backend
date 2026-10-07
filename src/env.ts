@@ -50,6 +50,13 @@ const envSchema = z.object({
   CRON_SECRET: blankIsUnset(z.string().min(32, "CRON_SECRET must be at least 32 characters").optional()),
   SWEEP_INTERVAL_MINUTES: blankIsUnset(z.coerce.number().int().min(5).max(1440).optional()),
 
+  // Delivery webhooks (routes/webhooks.ts). RESEND_WEBHOOK_SECRET is the
+  // signing secret Resend shows for the endpoint (whsec_...); unset, the Resend
+  // webhook answers 503. PUBLIC_API_URL is this API's public origin: Twilio is
+  // told to report status there, and its signature is computed over that URL.
+  RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
+  PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
+
   // College Scorecard (api.data.gov key, free). Optional: unset, the catalog
   // ingest (POST /internal/ingest/scorecard, scripts/ingest/scorecard.ts)
   // answers 503 and the catalog stays as it is.

@@ -66,6 +66,7 @@ src/
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
+│   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   └── errors.ts, chat.ts
 ├── routes/
@@ -95,6 +96,8 @@ src/
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
+│   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
 └── supabase/migrations/   # the schema — this repo owns it
@@ -582,6 +585,48 @@ into a prompt must filter on them (see `routes/tasks.ts`).
 - Never commit `.env` — keep `.env.example` current
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
+
+## Teams, guardians, delivery status, data rights, monitoring
+
+- **Firm teams.** `profiles.firm_id` can't be updated by clients, so firms
+  change through SECURITY DEFINER functions: `create_firm`,
+  `accept_firm_invitation` (the invite's email must match the account; seats
+  are enforced), `set_firm_member_role` (the owner's seat never changes),
+  `remove_firm_member` (the owner can't leave). Routes: `/firms`,
+  `/firms/mine/{members,invites}`, `/firms/join`. Invitation tokens are stored
+  as sha256 only; the app page for the link is `/join-firm/<token>`.
+- **Guardians.** A student may add a guardian, but one they add starts with
+  `alerts_enabled = false`, and only the counselor side changes or removes a
+  guardian (`private.can_manage_guardians`). Otherwise a student could redirect
+  the parent alerts their counselor sends.
+- **Delivery status.** `POST /webhooks/resend` (Svix signature,
+  `RESEND_WEBHOOK_SECRET`) and `POST /webhooks/twilio/status`
+  (`X-Twilio-Signature`, `TWILIO_AUTH_TOKEN` over `PUBLIC_API_URL`) move
+  `message_deliveries` to delivered / bounced / failed; a status never moves
+  backwards. With `PUBLIC_API_URL` set, every SMS asks Twilio to report there.
+- **Data rights.** `GET /account/export` (self) and
+  `GET /account/students/:id/export` (counselor) read through the caller's RLS
+  client, so an export holds exactly what that person can already see.
+  `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
+  user; a counselor with an active roster or an owned firm is refused.
+- **Monitoring.** Every scheduled job writes `job_heartbeats`.
+  `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
+  when one hasn't run cleanly within twice its interval. Point an uptime monitor
+  at `/health` (public) and `/internal/status` (with the bearer header).
+
+## Tests and CI
+
+- `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
+  rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
+  mapping (against a recorded real Scorecard response in `test/fixtures`), the
+  essay guardrails, the link guard, payments, class rank, proposals, webhook
+  signatures, heartbeats.
+- `npm run test:integration`: persona suites (`test/integration`) against a
+  local Supabase and a running API, as real counselor and student accounts.
+- `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
+  tests; then a throwaway Supabase with every migration, an RLS-on-every-table
+  check, the fixtures, and the persona suites. AI calls are not exercised in CI
+  (they cost money); their pure parts are unit-tested.
 
 ## Environment
 

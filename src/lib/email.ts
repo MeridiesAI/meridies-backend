@@ -191,6 +191,8 @@ async function postToTwilio(
   const form = new URLSearchParams({ To: to, Body: body });
   if (env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", env.TWILIO_MESSAGING_SERVICE_SID);
   else form.set("From", env.TWILIO_FROM_NUMBER as string);
+  // Delivered / undelivered come back to routes/webhooks.ts.
+  if (env.PUBLIC_API_URL) form.set("StatusCallback", `${env.PUBLIC_API_URL.replace(/\/+$/, "")}/webhooks/twilio/status`);
 
   let res: Response;
   try {

@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Typecheck, build, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  integration:
+    name: Migrations + RLS persona suite (local Supabase)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - run: npm ci
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      # A throwaway Supabase project with this repo's migrations, in order.
+      - name: Start Supabase with every migration
+        run: |
+          mkdir -p "$RUNNER_TEMP/sb" && cd "$RUNNER_TEMP/sb"
+          supabase init --force
+          cp "$GITHUB_WORKSPACE"/supabase/migrations/*.sql supabase/migrations/
+          supabase start -x studio,imgproxy,inbucket,edge-runtime,logflare,vector,supavisor
+          supabase status -o env \
+            | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|DB_URL)=' \
+            | sed -e 's/^API_URL=/SUPABASE_URL=/' -e 's/^ANON_KEY=/SUPABASE_ANON_KEY=/' -e 's/^SERVICE_ROLE_KEY=/SUPABASE_SERVICE_ROLE_KEY=/' \
+            | tr -d '"' >> "$GITHUB_ENV"
+
+      - name: Every public table has RLS
+        run: test "$(psql "$DB_URL" -tAc "select count(*) from pg_tables where schemaname='public' and rowsecurity=false")" = "0"
+
+      - name: Load the catalog fixtures
+        run: |
+          npx tsx scripts/ingest/scorecard.ts --fixture test/fixtures/scorecard-two-schools.json
+          npx tsx scripts/ingest/ipeds-admissions.ts --year 2023 --csv test/fixtures/adm-sample.csv
+          npx tsx scripts/ingest/curated-csv.ts --dataset policies --file scripts/ingest/data/css-profile-2027-28.csv
+
+      - name: Start the API
+        env:
+          PORT: "4100"
+          NODE_ENV: development
+          CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
+          RESEND_WEBHOOK_SECRET: whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==
+          PUBLIC_API_URL: http://127.0.0.1:4100
+          TWILIO_AUTH_TOKEN: local-twilio-test-token-123
+        run: |
+          npx tsx src/index.ts > api.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done
+          cat api.log; exit 1
+
+      - name: Persona suite
+        env:
+          API_URL: http://127.0.0.1:4100
+          CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
+        run: npm run test:integration
+
+      - if: failure()
+        run: cat api.log || true
