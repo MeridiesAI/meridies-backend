@@ -80,7 +80,9 @@ export type AiModule =
   // v10 sync (management-pipeline): AxIS drafting an email template.
   | "email-template"
   // v10 sync (colleges-events): Colleges › Search & research.
-  | "college-research";
+  | "college-research"
+  // SV Demo v2 (student view): Profile Update, AxIS collecting a student's news.
+  | "profile-update";
 
 type RunOptions<T> = {
   request: FastifyRequest;

@@ -246,8 +246,11 @@ export default async function recordRoutes(app: FastifyInstance) {
     const query = z.object({ studentId: z.string().uuid().optional() }).parse(request.query);
     const student = await resolveStudentId(request, query.studentId, "view");
 
-    // Seed the six defaults on first read so a fresh student still has a shape.
-    await request.db.rpc("ensure_default_polygon_axes", { p_student: student });
+    // Seed the defaults on first read so a fresh student still has a shape.
+    // Counselor only: the polygon is read-only for the student (RLS refuses it).
+    if (request.profile.role === "counselor") {
+      await request.db.rpc("ensure_default_polygon_axes", { p_student: student });
+    }
 
     const { data, error } = await request.db
       .from("student_polygon_axes")
@@ -315,7 +318,7 @@ export default async function recordRoutes(app: FastifyInstance) {
   /** Add a custom axis, or overwrite an existing one by key. */
   app.put(
     "/polygon/axes",
-    { preHandler: [app.authenticate, limit("polygon:put", 120, 60)] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("polygon:put", 120, 60)] },
     async (request) => {
       const b = axisBody.parse(request.body);
       const student = await resolveStudentId(request, b.studentId, "edit");
@@ -348,7 +351,7 @@ export default async function recordRoutes(app: FastifyInstance) {
   /** Set (or clear) the counselor's manual score for one axis. */
   app.patch(
     "/polygon/axes/:id",
-    { preHandler: [app.authenticate, limit("polygon:patch", 240, 60)] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("polygon:patch", 240, 60)] },
     async (request) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const b = z
@@ -392,7 +395,7 @@ export default async function recordRoutes(app: FastifyInstance) {
   /** Custom axes only — the six defaults stay put. */
   app.delete(
     "/polygon/axes/:id",
-    { preHandler: [app.authenticate, limit("polygon:delete", 60, 60)] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("polygon:delete", 60, 60)] },
     async (request) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
