@@ -46,6 +46,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/sb" && cd "$RUNNER_TEMP/sb"
           supabase init --force
+          mkdir -p supabase/migrations
           cp "$GITHUB_WORKSPACE"/supabase/migrations/*.sql supabase/migrations/
           supabase start -x studio,imgproxy,inbucket,edge-runtime,logflare,vector,supavisor
           supabase status -o env \
