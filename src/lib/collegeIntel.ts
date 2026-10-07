@@ -51,9 +51,14 @@ export const NL_SEARCH_SYSTEM = [
 /** The model's tool input -> the query-string shape searchQuery validates. */
 export function nlFiltersToQuery(input: Record<string, unknown>): Record<string, string> {
   const out: Record<string, string> = {};
+  // Each item is cleaned before joining, so a comma inside one ("computer, science")
+  // can't split it into two.
+  const clean = (k: string, x: string) => (k === "majors" ? x.replace(/[^\p{L}\p{N} ]/gu, " ").replace(/\s+/g, " ").trim() : x.trim());
   const list = (k: string) => {
     const v = input[k];
-    if (Array.isArray(v) && v.length) out[k] = v.map(String).join(",");
+    if (!Array.isArray(v)) return;
+    const items = v.map((x) => clean(k, String(x))).filter(Boolean);
+    if (items.length) out[k] = items.join(",");
   };
   for (const k of ["states", "control", "testPolicy", "setting", "majors", "superscore"]) list(k);
   for (const k of ["admitMin", "admitMax", "enrollmentMin", "enrollmentMax", "netPriceMax"]) {
@@ -63,8 +68,6 @@ export function nlFiltersToQuery(input: Record<string, unknown>): Record<string,
   if (typeof input.band === "string" && input.band) out.band = input.band;
   if (typeof input.sort === "string" && input.sort) out.sort = input.sort;
   if (typeof input.q === "string" && input.q.trim()) out.q = input.q.trim();
-  // Commas inside a major would split it; keep majors as words.
-  if (out.majors) out.majors = out.majors.split(",").map((m) => m.replace(/[^\p{L}\p{N} ]/gu, " ").trim()).filter(Boolean).join(",");
   return out;
 }
 

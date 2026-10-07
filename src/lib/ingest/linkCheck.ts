@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { checkLink, type LinkCheck } from "../links.js";
+import { beat } from "../heartbeat.js";
 import { serviceClient } from "../supabase.js";
 
 type Log = { info: (o: object, m?: string) => void; error: (o: object, m?: string) => void };
@@ -60,6 +61,7 @@ export async function runLinkCheck(svc: SupabaseClient, log: Log, check: Check =
       .eq("id", (run as { id: string }).id);
   }
   log.info({ ...counts, errors: errors.length }, "resource link check finished");
+  await beat("resources-link-check", true);
   return counts;
 }
 

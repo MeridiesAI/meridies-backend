@@ -18,7 +18,9 @@ import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
+import accountRoutes from "./routes/account.js";
 import collegeIntelRoutes from "./routes/collegeIntel.js";
+import webhookRoutes from "./routes/webhooks.js";
 import resourceRoutes from "./routes/resources.js";
 import searchRoutes from "./routes/search.js";
 import settingsRoutes from "./routes/settings.js";
@@ -157,6 +159,8 @@ export function buildApp() {
   app.register(resourceRoutes, { prefix: "/resources" });
   app.register(searchRoutes, { prefix: "/search" });
   app.register(settingsRoutes, { prefix: "/settings" });
+  app.register(accountRoutes, { prefix: "/account" });
+  app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
   startSweepInterval(app);
 
