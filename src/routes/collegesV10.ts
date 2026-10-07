@@ -42,7 +42,11 @@ import {
   LOCATION_TYPES,
   SCHOOL_SIZES,
   buildList,
+  decodeCursor,
+  encodeCursor,
   roundsFrom,
+  searchFilters,
+  searchQuery,
   safeIlikeTerm,
   schoolIn,
   searchRank,
@@ -55,8 +59,10 @@ import {
   toFieldOfStudy,
   toListSchool,
   toOfficialStats,
+  toSearchStats,
   toProfileFacts,
   toWebinarTip,
+  type Fit,
   type ListCriteria,
   type ListSchool,
 } from "../lib/collegesV10.js";
@@ -200,73 +206,79 @@ export default async function collegeV10Routes(app: FastifyInstance) {
 
   // ---- Search & research --------------------------------------------------------
 
-  app.get("/search", { preHandler: [app.authenticate, limit("colleges:search", 240, 60)] }, async (request) => {
-    const q = z
-      .object({ q: z.string().trim().max(120), limit: z.coerce.number().int().min(1).max(100).optional() })
-      .parse(request.query);
+  app.get("/search", { preHandler: [app.authenticate, limit("colleges:search", 240, 60)] }, async (request, reply) => {
+    const q = searchQuery.parse(request.query);
     const term = safeIlikeTerm(q.q);
-    if (!term) return [];
-    // The database narrows on the longest word ("john" for "St. John's"), which
-    // survives punctuation in the stored name; searchRank then ranks on the whole query.
-    const word = term.split(" ").sort((a, b) => b.length - a.length)[0];
+    const filters = searchFilters(q);
+    // Unchanged from before: no words and no filters is no search.
+    if (!term && Object.keys(filters).length === 0) return [];
 
-    const ors = [`name.ilike.%${word}%`, `city.ilike.%${word}%`];
-    if (term.length === 2) ors.push(`state.ilike.${term}`);
-    const [direct, aliased, majors] = await Promise.all([
-      request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).or(ors.join(",")).limit(300),
-      // Aliases ("MIT", "UT Austin") are few; match them here rather than in SQL.
-      request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).neq("aka", "{}").limit(2000),
-      term.length >= 3
-        ? request.db.from("college_profile_facts").select("college_id, popular_majors").limit(2000)
-        : Promise.resolve({ data: [] as Row[], error: null }),
-    ]);
-    if (direct.error) throw fromPostgrest(direct.error);
-    if (aliased.error) throw fromPostgrest(aliased.error);
-    if (majors.error) throw fromPostgrest(majors.error);
-
-    const byMajor = new Map(
-      ((majors.data ?? []) as Row[]).map((r) => [String(r.college_id), (r.popular_majors as string[] | null) ?? []])
-    );
-    const majorIds = [...byMajor]
-      .filter(([, list]) => list.some((m) => safeIlikeTerm(m).toLowerCase().includes(term.toLowerCase())))
-      .map(([id]) => id);
-    const extra = majorIds.length
-      ? await request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", majorIds.slice(0, 200))
-      : { data: [] as Row[], error: null };
-    if (extra.error) throw fromPostgrest(extra.error);
-
-    const seen = new Map<string, Row>();
-    for (const r of [
-      ...((direct.data ?? []) as unknown as Row[]),
-      ...((aliased.data ?? []) as unknown as Row[]),
-      ...((extra.data ?? []) as unknown as Row[]),
-    ]) {
-      seen.set(String(r.id), r);
+    if (q.studentId || q.fit) {
+      if (!q.studentId) throw badRequest("fit needs studentId");
+      if (request.profile.role !== "counselor") throw badRequest("Only counselors can rank schools for a student");
+      const { numbers } = await studentNumbers(request, q.studentId);
+      filters.student = { sat: numbers.sat, gpa: numbers.gpaUnweighted };
     }
-    const ranked = [...seen.values()]
-      .map((r) => {
-        const card = toCollegeCard(r);
-        const rank = searchRank(
-          card.name,
-          card.aka,
-          [card.city ?? "", card.state ?? "", ...(byMajor.get(card.id) ?? [])],
-          q.q
-        );
-        return { card, rank };
-      })
-      .filter((x) => x.rank >= 0)
-      .sort((a, b) => a.rank - b.rank || a.card.name.localeCompare(b.card.name))
-      .slice(0, q.limit ?? 48);
 
-    if (!ranked.length) return [];
-    const { data: withFacts, error: factsError } = await request.db
-      .from("college_profile_facts")
-      .select("college_id")
-      .in("college_id", ranked.map((x) => x.card.id));
-    if (factsError) throw fromPostgrest(factsError);
-    const profiled = new Set(((withFacts ?? []) as Row[]).map((r) => String(r.college_id)));
-    const extras = await cardExtras(request, ranked.map((x) => x.card.id));
-    return ranked.map(({ card }) => ({ ...card, ...extras.get(card.id)!, profiled: profiled.has(card.id) }));
+    const offset = q.cursor ? decodeCursor(q.cursor) : 0;
+    const pageSize = q.limit ?? 48;
+    const { data, error } = await request.db.rpc("search_colleges", {
+      p_q: term,
+      p_filters: filters,
+      p_sort: q.sort ?? null,
+      p_limit: pageSize,
+      p_offset: offset,
+    });
+    if (error) throw fromPostgrest(error);
+    const hits = (data ?? []) as Row[];
+    const total = hits.length ? Number(hits[0].total_count) : 0;
+    reply.header("X-Total-Count", String(total));
+    if (offset + hits.length < total) reply.header("X-Next-Cursor", encodeCursor(offset + hits.length));
+    if (!hits.length) return [];
+
+    const ids = hits.map((h) => String(h.college_id));
+    const [cards, withFacts, stats] = await Promise.all([
+      request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", ids),
+      request.db.from("college_profile_facts").select("college_id").in("college_id", ids),
+      request.db
+        .from("college_stats")
+        .select("college_id, admit_rate, sat_total_25, sat_total_75, act_25, act_75, avg_net_price, net_price_by_income, undergrad_enrollment, source_verified_at, data_year")
+        .in("college_id", ids),
+    ]);
+    for (const r of [cards, withFacts, stats]) if (r.error) throw fromPostgrest(r.error);
+    const byId = new Map(((cards.data ?? []) as unknown as Row[]).map((r) => [String(r.id), r]));
+    const profiled = new Set(((withFacts.data ?? []) as Row[]).map((r) => String(r.college_id)));
+    const statsById = new Map(((stats.data ?? []) as Row[]).map((r) => [String(r.college_id), r]));
+    const extras = await cardExtras(request, ids);
+
+    return hits
+      .filter((h) => byId.has(String(h.college_id)))
+      .map((h) => {
+        const id = String(h.college_id);
+        const card = toCollegeCard(byId.get(id)!);
+        const st = statsById.get(id);
+        return {
+          ...card,
+          ...extras.get(id)!,
+          profiled: profiled.has(id),
+          // How it matched: 0 exact, 1 name prefix, 2 word prefix, 3 close spelling, 4 text, 5 major, 6 browse.
+          matchTier: Number(h.match_tier),
+          miles: h.miles == null ? null : Number(h.miles),
+          // A Meridies estimate from the student's numbers against the school's
+          // published ranges, never a published figure.
+          fit: (h.fit as Fit | null) ?? null,
+          odds: h.odds == null ? null : Number(h.odds),
+          fitSource: h.fit == null ? null : ("meridies-estimate" as const),
+          official: st ? toSearchStats(st) : null,
+        };
+      });
+  });
+
+  /** Filter values and how many schools have each, for the search panel. */
+  app.get("/filters", { preHandler: [app.authenticate, limit("colleges:filters", 60, 60)] }, async (request) => {
+    const { data, error } = await request.db.rpc("college_search_facets");
+    if (error) throw fromPostgrest(error);
+    return data;
   });
 
   /**
@@ -275,24 +287,35 @@ export default async function collegeV10Routes(app: FastifyInstance) {
    * catalog rather than an empty page.
    */
   app.get("/recommended", { preHandler: [...counselor, limit("colleges:recommended", 60, 60)] }, async (request) => {
-    const [students, lists, profiled] = await Promise.all([
+    const [students, profiled] = await Promise.all([
       request.db.from("profiles").select("id, full_name").eq("role", "student").eq("counselor_id", request.auth.userId).limit(2000),
-      request.db.from("student_colleges").select("student_id, college_id, name").limit(5000),
       request.db.from("college_profile_facts").select("college_id").limit(500),
     ]);
     if (students.error) throw fromPostgrest(students.error);
-    if (lists.error) throw fromPostgrest(lists.error);
     if (profiled.error) throw fromPostgrest(profiled.error);
 
     const names = new Map(((students.data ?? []) as Row[]).map((s) => [String(s.id), String(s.full_name ?? "")]));
-    const listRows = ((lists.data ?? []) as Row[]).filter((r) => names.has(String(r.student_id)));
+    // Only this roster's lists, by student id, rather than every list RLS lets through.
+    const rosterIds = [...names.keys()];
+    const listRows: Row[] = [];
+    for (let i = 0; i < rosterIds.length; i += 200) {
+      const { data, error } = await request.db
+        .from("student_colleges")
+        .select("student_id, college_id, name")
+        .in("student_id", rosterIds.slice(i, i + 200))
+        .limit(5000);
+      if (error) throw fromPostgrest(error);
+      listRows.push(...((data ?? []) as Row[]));
+    }
 
-    // Rows a counselor typed by hand carry no college_id: match them by name or alias.
-    const { data: catalog, error } = await request.db.from("colleges").select("id, name, aka").limit(5000);
-    if (error) throw fromPostgrest(error);
+    // Rows a counselor typed by hand carry no college_id: match just those names
+    // in Postgres (exact name or alias first, then close spelling).
+    const typed = [...new Set(listRows.filter((r) => !r.college_id && r.name).map((r) => String(r.name)))].slice(0, 500);
     const byName = new Map<string, string>();
-    for (const c of (catalog ?? []) as Row[]) {
-      for (const n of [String(c.name), ...(((c.aka as string[] | null) ?? []))]) byName.set(n.toLowerCase(), String(c.id));
+    if (typed.length) {
+      const { data: matches, error } = await request.db.rpc("match_college_names", { p_names: typed });
+      if (error) throw fromPostgrest(error);
+      for (const m of (matches ?? []) as Row[]) if (m.college_id) byName.set(String(m.name).toLowerCase(), String(m.college_id));
     }
 
     const byCollege = new Map<string, { id: string; name: string }[]>();

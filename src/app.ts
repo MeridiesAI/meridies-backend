@@ -89,7 +89,8 @@ export function buildApp() {
     ignoreTrailingSlash: true,
   });
 
-  app.register(cors, { origin: corsOrigins, credentials: true });
+  // Paged lists (GET /colleges/search) carry their total and next cursor in headers.
+  app.register(cors, { origin: corsOrigins, credentials: true, exposedHeaders: ["X-Total-Count", "X-Next-Cursor"] });
   app.register(rateLimitPlugin);
   app.register(supabaseAuth);
 

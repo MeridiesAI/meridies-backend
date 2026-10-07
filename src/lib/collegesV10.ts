@@ -7,6 +7,8 @@
  * or a student's own record, and nothing is filled in when a row is missing.
  */
 
+import { z } from "zod";
+
 type Row = Record<string, unknown>;
 
 const str = (v: unknown): string => (v == null ? "" : String(v));
@@ -503,4 +505,90 @@ export const toFieldOfStudy = (r: Row) => ({
   awards: numOrNull(r.awards),
   earnings4yr: numOrNull(r.earnings_4yr),
   medianDebt: numOrNull(r.median_debt),
+});
+
+// ---- Search query (GET /colleges/search) --------------------------------------------
+
+const csvOf = <T extends z.ZodTypeAny>(item: T, max: number) =>
+  z
+    .string()
+    .trim()
+    .max(2000)
+    .transform((v) => v.split(",").map((x) => x.trim()).filter(Boolean))
+    .pipe(z.array(item).max(max));
+
+const truthy = z.enum(["true", "false", "1", "0"]).transform((v) => v === "true" || v === "1");
+
+export const NET_PRICE_BANDS = ["0-30000", "30001-48000", "48001-75000", "75001-110000", "110001-plus"] as const;
+
+export const searchQuery = z
+  .object({
+    q: z.string().trim().max(120).default(""),
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+    cursor: z.string().trim().max(40).optional(),
+    sort: z.enum(["relevance", "name", "admit-rate", "net-price", "enrollment", "distance"]).optional(),
+    states: csvOf(z.string().regex(/^[A-Za-z]{2}$/).transform((s) => s.toUpperCase()), 60).optional(),
+    control: csvOf(z.enum(["public", "private", "private-for-profit"]), 3).optional(),
+    testPolicy: csvOf(z.enum(["required", "optional", "blind", "recommended"]), 4).optional(),
+    setting: csvOf(z.enum(["city", "suburb", "town", "rural"]), 4).optional(),
+    majors: csvOf(z.string().min(2).max(80), 10).optional(),
+    admitMin: z.coerce.number().min(0).max(1).optional(),
+    admitMax: z.coerce.number().min(0).max(1).optional(),
+    enrollmentMin: z.coerce.number().int().min(0).optional(),
+    enrollmentMax: z.coerce.number().int().min(0).optional(),
+    netPriceMax: z.coerce.number().int().min(0).max(200_000).optional(),
+    band: z.enum(NET_PRICE_BANDS).optional(),
+    hbcu: truthy.optional(),
+    hsi: truthy.optional(),
+    womenOnly: truthy.optional(),
+    religious: truthy.optional(),
+    lat: z.coerce.number().min(-90).max(90).optional(),
+    lng: z.coerce.number().min(-180).max(180).optional(),
+    miles: z.coerce.number().min(1).max(3000).optional(),
+    studentId: z.string().uuid().optional(),
+    fit: csvOf(z.enum(["reach", "target", "likely"]), 3).optional(),
+  })
+  .strict()
+  .refine((v) => (v.lat === undefined) === (v.lng === undefined), { message: "lat and lng go together" });
+
+export type SearchQuery = z.infer<typeof searchQuery>;
+
+/** The query string -> search_colleges' p_filters. Only keys that were given. */
+export function searchFilters(q: SearchQuery): Record<string, unknown> {
+  const f: Record<string, unknown> = {};
+  if (q.states?.length) f.states = q.states;
+  if (q.control?.length) f.control = q.control;
+  if (q.testPolicy?.length) f.testPolicy = q.testPolicy;
+  if (q.setting?.length) f.setting = q.setting;
+  if (q.majors?.length) f.majors = q.majors.map((m) => (/^\d{4}$/.test(m) ? m : safeIlikeTerm(m))).filter(Boolean);
+  if (q.admitMin !== undefined || q.admitMax !== undefined) f.admitRate = { min: q.admitMin ?? 0, max: q.admitMax ?? 1 };
+  if (q.enrollmentMin !== undefined || q.enrollmentMax !== undefined) {
+    f.enrollment = { min: q.enrollmentMin ?? 0, max: q.enrollmentMax ?? 2_147_483_647 };
+  }
+  if (q.netPriceMax !== undefined) f.netPrice = { max: q.netPriceMax, band: q.band ?? "" };
+  if (q.hbcu) f.hbcu = true;
+  if (q.hsi) f.hsi = true;
+  if (q.womenOnly) f.womenOnly = true;
+  if (q.religious) f.religious = true;
+  if (q.lat !== undefined && q.lng !== undefined) f.near = { lat: q.lat, lng: q.lng, miles: q.miles ?? 100 };
+  if (q.fit?.length) f.fit = q.fit;
+  return f;
+}
+
+/** Opaque page cursors: the offset, base64url. */
+export const encodeCursor = (offset: number) => Buffer.from(`o:${offset}`).toString("base64url");
+export function decodeCursor(cursor: string): number {
+  const m = /^o:(\d{1,5})$/.exec(Buffer.from(cursor, "base64url").toString("utf8"));
+  return m ? Math.min(Number(m[1]), 10_000) : 0;
+}
+
+/** The few official figures a search card shows. */
+export const toSearchStats = (r: Row, now = Date.now()) => ({
+  admitRate: numOrNull(r.admit_rate),
+  satRange: r.sat_total_25 != null && r.sat_total_75 != null ? { p25: Number(r.sat_total_25), p75: Number(r.sat_total_75) } : null,
+  actRange: r.act_25 != null && r.act_75 != null ? { p25: Number(r.act_25), p75: Number(r.act_75) } : null,
+  avgNetPrice: numOrNull(r.avg_net_price),
+  netPriceByIncome: (r.net_price_by_income as Record<string, number> | null) ?? {},
+  undergradEnrollment: numOrNull(r.undergrad_enrollment),
+  ...freshness(r.source_verified_at, r.data_year, now),
 });

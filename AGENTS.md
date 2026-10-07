@@ -58,7 +58,8 @@ src/
 │   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
-│   ├── collegesV10.ts     # Colleges search ranking, decision rounds, list builder
+│   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), run.ts (lease)
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
@@ -83,7 +84,7 @@ src/
 │   ├── studentPage.ts     # /student-page info card, polygon, private note
 │   ├── studentAid.ts      # /student-aid  Financial aid page, scholarship matching
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
-│   ├── collegesV10.ts     # /colleges     search & research, profile extras, list builder
+│   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
 │   ├── collegeAi.ts       # /ai           college research, Build College Lists bar
 │   ├── events.ts          # /events       Events Hub
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
@@ -294,6 +295,37 @@ future preference of this shape — an absent row is a default, an errored query
 is not. `loadSettings()` and the throttle read in `alertBlockedReason()` throw on
 error for the same reason: a defaulted `enabled: true` would switch alerts back
 on for a counselor who turned them off.
+
+## College catalog and search
+
+The catalog is every operating US college that mainly awards associate's,
+bachelor's or graduate degrees, from the U.S. Department of Education:
+
+- **College Scorecard** (`lib/ingest/scorecard.ts`), upserted on the IPEDS
+  `unitid`: facts on `colleges`, figures in `college_stats`, majors in
+  `college_fields_of_study`. Load once with `npx tsx scripts/ingest/scorecard.ts`;
+  refresh monthly with a Railway cron on `POST /internal/ingest/scorecard`
+  (`CRON_SECRET`, answers 202, runs under the `scorecard-ingest` lease). Needs
+  `SCORECARD_API_KEY` (free, api.data.gov).
+- **IPEDS Admissions** (`lib/ingest/ipeds.ts`), yearly:
+  `npx tsx scripts/ingest/ipeds-admissions.ts --year <YYYY>` fills
+  `college_admission_factors` (what a school weighs; test policy).
+
+Rules: a row Meridies curated (`catalog_source = 'meridies'`) keeps its name,
+slug, aliases, colours, deadlines and test policy; official data fills facts
+only and never touches ratings or profile copy. Official figures carry
+`source_verified_at`, and the API flags them `stale` after 13 months rather than
+serving them as current. Every load is an `ingest_runs` row.
+
+Search runs in Postgres, not in memory: `public.search_colleges(q, filters,
+sort, limit, offset)` ranks exact name/alias > name prefix > word prefix >
+close spelling (pg_trgm) > full text > bachelor's major, filters (state,
+distance, size, control, admit rate, test policy, net price at an income band,
+majors, HBCU/HSI/women's/religious, setting, fit) and pages. Fit
+(reach/target/likely) is `studentOdds` in SQL and is labelled a Meridies
+estimate. `GET /colleges/search` keeps its array response; the total and next
+cursor are the `X-Total-Count` / `X-Next-Cursor` headers. No embeddings: the AI
+rule is Anthropic only.
 
 ## Scheduled jobs
 
