@@ -62,8 +62,14 @@ const contactInfo = z
   .partial()
   .strict();
 
+/** "New contact" and friends are what an unsaved form says, not a family's name. */
+const PLACEHOLDER_NAME = /^(new contact|new student|untitled( contact)?|unnamed|name|student name)$/i;
+const contactName = shortText(200).refine((n) => n.length > 0 && !PLACEHOLDER_NAME.test(n), {
+  message: "Give the contact a name first",
+});
+
 const contactFields = {
-  studentName: shortText(200),
+  studentName: contactName,
   gradYear: z.number().int().min(2000).max(2100).nullable(),
   studentEmail: optionalEmail,
   studentPhone: shortText(40),
@@ -360,7 +366,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     const b = z
       .object({ stageId: uuid, ...contactFields })
       .partial()
-      .required({ stageId: true })
+      .required({ stageId: true, studentName: true })
       .strict()
       .parse(request.body);
     const ws = await loadWorkspace(request);

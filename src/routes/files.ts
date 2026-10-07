@@ -22,7 +22,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { runStructured } from "../lib/anthropic.js";
-import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, normalizeLink } from "../lib/links.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -693,9 +693,8 @@ async function readLink(request: FastifyRequest, row: Row) {
   try {
     page = await fetchReadablePage(String(row.url));
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Couldn't read that link";
-    request.log.warn({ url: row.url, err: message }, "link read failed");
-    return fail(message);
+    request.log.warn({ url: row.url, err }, "link read failed");
+    return fail(publicMessage(err, "Couldn't read that link"));
   }
 
   if (page.text.length < 200) {
@@ -765,9 +764,8 @@ async function readLink(request: FastifyRequest, row: Row) {
       },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Couldn't summarize that page";
-    request.log.error({ url: row.url, err: message }, "link digest failed");
-    return fail(message);
+    request.log.error({ url: row.url, err }, "link digest failed");
+    return fail(publicMessage(err, "Couldn't summarize that page"));
   }
 
   // Outside the catch: a write failure here is a database problem, and marking

@@ -17,6 +17,15 @@ export const tooManyRequests = (m = "Too many requests — slow down") => new Ht
 export const unavailable = (m: string) => new HttpError(503, m);
 
 /**
+ * What a client may be told about a failure. Our own HttpErrors carry text we
+ * wrote for users; anything else (a provider SDK, fetch, Postgres) can carry a
+ * key hint, a URL or a stack detail, so it is logged by the caller and replaced.
+ */
+export function publicMessage(err: unknown, fallback: string): string {
+  return err instanceof HttpError ? err.message : fallback;
+}
+
+/**
  * Turn a PostgREST error into something safe to return. RLS denials surface as
  * empty results or 42501; either way the client is told "not found", never
  * "exists but you can't see it".

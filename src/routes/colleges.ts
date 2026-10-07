@@ -15,6 +15,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { rankPercentile } from "../lib/classRank.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
+import { escapeIlike } from "../lib/collegesV10.js";
 import { limit } from "../lib/limits.js";
 import {
   toAidBandRating,
@@ -54,7 +55,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
     let builder = request.db
       .from("colleges")
       .select("id, name, slug, initials, brand_color, city, state, control, size, acceptance_rate, test_policy, website");
-    if (q.search) builder = builder.ilike("name", `%${q.search}%`);
+    if (q.search) builder = builder.ilike("name", `%${escapeIlike(q.search)}%`);
     if (q.state) builder = builder.eq("state", q.state.toUpperCase());
 
     const { data, error } = await builder.order("name").limit(q.limit ?? 50);
@@ -162,8 +163,8 @@ export default async function collegeRoutes(app: FastifyInstance) {
       .select("*")
       .eq("college_id", id)
       .eq("is_active", true);
-    if (q.search) builder = builder.ilike("name", `%${q.search}%`);
-    if (q.discipline) builder = builder.ilike("discipline", q.discipline);
+    if (q.search) builder = builder.ilike("name", `%${escapeIlike(q.search)}%`);
+    if (q.discipline) builder = builder.ilike("discipline", escapeIlike(q.discipline));
     if (q.admissionModel) builder = builder.eq("admission_model", q.admissionModel);
 
     const { data, error } = await builder.order("name").limit(300);
@@ -224,7 +225,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
 
     let builder = request.db.from("high_schools").select("*");
     if (q.ceeb) builder = builder.eq("ceeb_code", q.ceeb);
-    if (q.search) builder = builder.ilike("name", `%${q.search}%`);
+    if (q.search) builder = builder.ilike("name", `%${escapeIlike(q.search)}%`);
 
     const { data, error } = await builder.order("name").limit(50);
     if (error) throw fromPostgrest(error);

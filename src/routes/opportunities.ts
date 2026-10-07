@@ -10,6 +10,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { escapeIlike } from "../lib/collegesV10.js";
 import { limit } from "../lib/limits.js";
 
 export default async function opportunityRoutes(app: FastifyInstance) {
@@ -26,7 +27,7 @@ export default async function opportunityRoutes(app: FastifyInstance) {
     let builder = request.db.from("opportunities").select("*").eq("is_active", true);
     if (q.category) builder = builder.eq("category", q.category);
     if (q.gradeLevel) builder = builder.contains("grade_levels", [q.gradeLevel]);
-    if (q.search) builder = builder.ilike("name", `%${q.search}%`);
+    if (q.search) builder = builder.ilike("name", `%${escapeIlike(q.search)}%`);
 
     const { data, error } = await builder
       .order("deadline", { ascending: true, nullsFirst: false })
