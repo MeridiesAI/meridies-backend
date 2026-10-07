@@ -1,0 +1,407 @@
+{
+ "metadata": {
+  "page": 0,
+  "total": 2,
+  "per_page": 20
+ },
+ "results": [
+  {
+   "latest.admissions.admission_rate.overall": 0.5795,
+   "latest.admissions.test_requirements": 5,
+   "latest.admissions.sat_scores.25th_percentile.critical_reading": 420,
+   "latest.admissions.sat_scores.75th_percentile.critical_reading": 530,
+   "latest.admissions.sat_scores.25th_percentile.math": 390,
+   "latest.admissions.sat_scores.75th_percentile.math": 510,
+   "latest.admissions.act_scores.25th_percentile.cumulative": 14,
+   "latest.admissions.act_scores.75th_percentile.cumulative": 19,
+   "latest.student.size": 6124,
+   "latest.cost.attendance.academic_year": 27153,
+   "latest.cost.tuition.in_state": 10024,
+   "latest.cost.tuition.out_of_state": 18634,
+   "latest.cost.avg_net_price.overall": 17621,
+   "latest.cost.net_price.public.by_income_level.0-30000": 16500,
+   "latest.cost.net_price.private.by_income_level.0-30000": null,
+   "latest.cost.net_price.public.by_income_level.30001-48000": 16387,
+   "latest.cost.net_price.private.by_income_level.30001-48000": null,
+   "latest.cost.net_price.public.by_income_level.48001-75000": 19622,
+   "latest.cost.net_price.private.by_income_level.48001-75000": null,
+   "latest.cost.net_price.public.by_income_level.75001-110000": 21680,
+   "latest.cost.net_price.private.by_income_level.75001-110000": null,
+   "latest.cost.net_price.public.by_income_level.110001-plus": 20364,
+   "latest.cost.net_price.private.by_income_level.110001-plus": null,
+   "latest.aid.pell_grant_rate": 0.6298,
+   "latest.aid.federal_loan_rate": 0.7454,
+   "latest.aid.median_debt.completers.overall": 31000,
+   "latest.completion.consumer_rate": 0.3053,
+   "latest.earnings.10_yrs_after_entry.median": 40628,
+   "latest.programs.cip_4_digit": [
+    {
+     "code": "0109",
+     "title": "Animal Sciences.",
+     "credential": {
+      "level": 3
+     },
+     "counts": {
+      "ipeds_awards2": 18
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0110",
+     "title": "Food Science and Technology.",
+     "credential": {
+      "level": 3
+     },
+     "counts": {
+      "ipeds_awards2": 8
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0110",
+     "title": "Food Science and Technology.",
+     "credential": {
+      "level": 5
+     },
+     "counts": {
+      "ipeds_awards2": 6
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0110",
+     "title": "Food Science and Technology.",
+     "credential": {
+      "level": 6
+     },
+     "counts": {
+      "ipeds_awards2": 2
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0199",
+     "title": "Agricultural/Animal/Plant/Veterinary Science and Related Fields, Other.",
+     "credential": {
+      "level": 3
+     },
+     "counts": {
+      "ipeds_awards2": 2
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0199",
+     "title": "Agricultural/Animal/Plant/Veterinary Science and Related Fields, Other.",
+     "credential": {
+      "level": 5
+     },
+     "counts": {
+      "ipeds_awards2": 2
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    }
+   ],
+   "school.name": "Alabama A & M University",
+   "school.alias": "AAMU",
+   "school.city": "Normal",
+   "school.state": "AL",
+   "school.zip": "35762",
+   "school.school_url": "www.aamu.edu/",
+   "school.ownership": 1,
+   "school.locale": 12,
+   "school.carnegie_size_setting": 14,
+   "school.religious_affiliation": null,
+   "school.women_only": 0,
+   "school.men_only": 0,
+   "school.online_only": 0,
+   "school.open_admissions_policy": 2,
+   "school.price_calculator_url": "www.aamu.edu/admissions-aid/tuition-fees/net-price-calculator.html",
+   "school.degrees_awarded.predominant": 3,
+   "school.minority_serving.historically_black": 1,
+   "school.minority_serving.hispanic": 0,
+   "school.minority_serving.tribal": 0,
+   "id": 100654,
+   "ope8_id": "00100200",
+   "location.lat": 34.783368,
+   "location.lon": -86.568502
+  },
+  {
+   "latest.admissions.admission_rate.overall": 0.1098,
+   "latest.admissions.test_requirements": 3,
+   "latest.admissions.sat_scores.25th_percentile.critical_reading": null,
+   "latest.admissions.sat_scores.75th_percentile.critical_reading": null,
+   "latest.admissions.sat_scores.25th_percentile.math": null,
+   "latest.admissions.sat_scores.75th_percentile.math": null,
+   "latest.admissions.act_scores.25th_percentile.cumulative": null,
+   "latest.admissions.act_scores.75th_percentile.cumulative": null,
+   "latest.student.size": 33068,
+   "latest.cost.attendance.academic_year": 45619,
+   "latest.cost.tuition.in_state": 16347,
+   "latest.cost.tuition.out_of_state": 50547,
+   "latest.cost.avg_net_price.overall": 13481,
+   "latest.cost.net_price.public.by_income_level.0-30000": 5311,
+   "latest.cost.net_price.private.by_income_level.0-30000": null,
+   "latest.cost.net_price.public.by_income_level.30001-48000": 6501,
+   "latest.cost.net_price.private.by_income_level.30001-48000": null,
+   "latest.cost.net_price.public.by_income_level.48001-75000": 9693,
+   "latest.cost.net_price.private.by_income_level.48001-75000": null,
+   "latest.cost.net_price.public.by_income_level.75001-110000": 15074,
+   "latest.cost.net_price.private.by_income_level.75001-110000": null,
+   "latest.cost.net_price.public.by_income_level.110001-plus": 34529,
+   "latest.cost.net_price.private.by_income_level.110001-plus": null,
+   "latest.aid.pell_grant_rate": 0.2864,
+   "latest.aid.federal_loan_rate": 0.1683,
+   "latest.aid.median_debt.completers.overall": 13000,
+   "latest.completion.consumer_rate": 0.9428,
+   "latest.earnings.10_yrs_after_entry.median": 92446,
+   "latest.programs.cip_4_digit": [
+    {
+     "code": "0101",
+     "title": "Agricultural Business and Management.",
+     "credential": {
+      "level": 5
+     },
+     "counts": {
+      "ipeds_awards2": 0
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0101",
+     "title": "Agricultural Business and Management.",
+     "credential": {
+      "level": 6
+     },
+     "counts": {
+      "ipeds_awards2": 0
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0111",
+     "title": "Plant Sciences.",
+     "credential": {
+      "level": 5
+     },
+     "counts": {
+      "ipeds_awards2": 2
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0199",
+     "title": "Agricultural/Animal/Plant/Veterinary Science and Related Fields, Other.",
+     "credential": {
+      "level": 5
+     },
+     "counts": {
+      "ipeds_awards2": 0
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0199",
+     "title": "Agricultural/Animal/Plant/Veterinary Science and Related Fields, Other.",
+     "credential": {
+      "level": 6
+     },
+     "counts": {
+      "ipeds_awards2": 0
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": null
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": null
+        }
+       }
+      }
+     }
+    },
+    {
+     "code": "0301",
+     "title": "Natural Resources Conservation and Research.",
+     "credential": {
+      "level": 3
+     },
+     "counts": {
+      "ipeds_awards2": 464
+     },
+     "earnings": {
+      "4_yr": {
+       "overall_median_earnings": 78624
+      }
+     },
+     "debt": {
+      "staff_grad_plus": {
+       "all": {
+        "eval_inst": {
+         "median": 12817
+        }
+       }
+      }
+     }
+    }
+   ],
+   "school.name": "University of California-Berkeley",
+   "school.alias": "UC Berkeley",
+   "school.city": "Berkeley",
+   "school.state": "CA",
+   "school.zip": "94720",
+   "school.school_url": "www.berkeley.edu/",
+   "school.ownership": 1,
+   "school.locale": 12,
+   "school.carnegie_size_setting": 16,
+   "school.religious_affiliation": null,
+   "school.women_only": 0,
+   "school.men_only": 0,
+   "school.online_only": 0,
+   "school.open_admissions_policy": 2,
+   "school.price_calculator_url": "https://financialaid.berkeley.edu/how-aid-works/estimate-your-financial-aid/",
+   "school.degrees_awarded.predominant": 3,
+   "school.minority_serving.historically_black": 0,
+   "school.minority_serving.hispanic": 0,
+   "school.minority_serving.tribal": 0,
+   "id": 110635,
+   "ope8_id": "00131200",
+   "location.lat": 37.871918,
+   "location.lon": -122.260463
+  }
+ ]
+}

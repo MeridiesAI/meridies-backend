@@ -11,6 +11,9 @@
  *   DELETE /resources/pins/:pinId
  *   POST   /resources/:id/deadline                    put its closing date on a
  *                                                     student's deadlines
+ *   POST   /resources/ask                             a question answered from the
+ *                                                     library and the official sites
+ *                                                     it points to, with citations
  *
  * The library rows are Meridies'; a practice can't edit them (RLS). Students
  * read the library rows meant for them and what is pinned to them.
@@ -18,6 +21,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { researchDomains, runWebResearch } from "../lib/anthropic.js";
 import { escapeIlike, safeIlikeTerm } from "../lib/collegesV10.js";
 import { loadWorkspace } from "../lib/crm.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
@@ -225,5 +229,49 @@ export default async function resourceRoutes(app: FastifyInstance) {
       .single();
     if (e2) throw fromPostgrest(e2);
     return reply.code(201).send({ deadlineId: String((data as Row).id), dueDate: r.closesOn });
+  });
+
+  /**
+   * "Which form do I need for Cal Grant?" Answered by cited web research over
+   * the library's own sites, with the library rows given as context; the
+   * answer says which library resources it rests on.
+   */
+  app.post("/ask", { preHandler: [...counselor, limit("resources:ask", 10, 60)] }, async (request) => {
+    const b = z
+      .object({ question: z.string().trim().min(5).max(500), state: z.string().regex(/^[A-Za-z]{2}$/).optional() })
+      .strict()
+      .parse(request.body);
+    let builder = request.db.from("library_resources").select(COLUMNS).neq("link_status", "broken");
+    if (b.state) builder = builder.or(`state_scope.is.null,state_scope.eq.${b.state.toUpperCase()}`);
+    const { data, error } = await builder.limit(200);
+    if (error) throw fromPostgrest(error);
+    const rows = ((data ?? []) as unknown as Row[]).map(toResource);
+    const context = rows
+      .map((r) => `- ${r.title} | ${r.url} | ${r.description}${r.closesOn ? ` | closes ${r.closesOn}` : ""}${r.opensOn ? ` | opens ${r.opensOn}` : ""}`)
+      .join("\n");
+    const result = await runWebResearch({
+      request,
+      module: "resource-qa",
+      question: b.question,
+      context: `Meridies resource library${b.state ? ` (${b.state.toUpperCase()} and nationwide)` : ""}:\n${context}`,
+      // The library's sites (link-only ones excluded: we don't read them) plus the official allow-list.
+      domains: researchDomains(rows.filter((r) => !r.linkOnly).map((r) => r.url)),
+      maxSearches: 4,
+    });
+    const host = (u: string) => {
+      try {
+        return new URL(u).hostname.replace(/^www\./, "");
+      } catch {
+        return "";
+      }
+    };
+    const citedHosts = new Set(result.sources.map((s) => host(s.url)));
+    return {
+      answer: result.parts.map((p) => ({ text: p.text, cited: p.citations.length > 0, citations: p.citations })),
+      sources: result.sources,
+      // Library resources on the sites the answer cites.
+      resources: rows.filter((r) => citedHosts.has(host(r.url))).slice(0, 8),
+      note: result.refused ? "That question couldn't be answered." : null,
+    };
   });
 }

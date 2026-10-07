@@ -642,3 +642,57 @@ export const toMajorAdmitRate = (r: Row) => ({
   eligibilityIndex: numOrNull(r.eligibility_index),
   sourceUrl: String(r.source_url ?? ""),
 });
+
+// ---- List builder candidates from the whole catalog --------------------------------------
+
+/** IPEDS locale -> the builder's location types. */
+export function settingFromLocale(locale: number | null): (typeof LOCATION_TYPES)[number] | null {
+  if (locale == null) return null;
+  if (locale === 11) return "Major city";
+  if (locale === 12 || locale === 13) return "Small city";
+  if (locale >= 21 && locale <= 23) return "Suburban";
+  if (locale >= 31 && locale <= 33) return "College town";
+  if (locale >= 41 && locale <= 43) return "Rural";
+  return null;
+}
+
+/** A catalog school (official figures, no curated list profile) in the builder's shape. */
+export function listSchoolFromCatalog(
+  college: Row,
+  stats: Row,
+  testPolicy: string | null,
+  needRating: number | null,
+  programTitles: string[]
+): ListSchool | null {
+  const lat = nnum(stats.latitude);
+  const lng = nnum(stats.longitude);
+  if (lat == null || lng == null) return null;
+  const admit = nnum(stats.admit_rate);
+  const s25 = nnum(stats.sat_total_25);
+  const s75 = nnum(stats.sat_total_75);
+  const fields = [...new Set(programTitles.map(fieldFor).filter((f): f is Field => f !== null))];
+  const deadlines = (college.deadlines ?? {}) as Record<string, unknown>;
+  const regular = Object.entries(deadlines).find(([plan]) => /regular/i.test(plan))?.[1] ?? null;
+  return {
+    collegeId: str(college.id),
+    slug: str(college.slug),
+    name: str(college.name),
+    initials: nstr(college.initials),
+    brandColor: nstr(college.brand_color),
+    city: nstr(college.city),
+    state: nstr(college.state),
+    website: nstr(college.website),
+    lat,
+    lng,
+    undergrads: nnum(stats.undergrad_enrollment),
+    setting: settingFromLocale(nnum(stats.locale)),
+    testPolicy,
+    admit: admit == null ? null : Math.round(admit * 1000) / 10,
+    satMid: s25 != null && s75 != null ? (s25 + s75) / 2 : null,
+    gpaMid: null,
+    needRating,
+    largestGroupPct: null,
+    fields,
+    regularDeadline: regular == null ? null : String(regular),
+  };
+}

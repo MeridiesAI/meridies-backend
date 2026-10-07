@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { env } from "../../env.js";
+import { beat } from "../heartbeat.js";
 import { serviceClient } from "../supabase.js";
 import { runScorecardIngest, scorecardFetcher, type IngestOutcome } from "./scorecard.js";
 
@@ -41,8 +42,9 @@ export async function startScorecardIngest(
   if (!acquired) return { started: false, reason: "locked" };
 
   const done = runScorecardIngest(svc, scorecardFetcher(env.SCORECARD_API_KEY), log, { trigger, ...opts })
-    .then((outcome) => {
+    .then(async (outcome) => {
       log.info({ ...outcome, errors: outcome.errors.length }, "scorecard ingest: finished");
+      await beat("scorecard-ingest", outcome.status !== "failed", outcome.errors[0], log as never);
       return outcome;
     })
     .catch((err: unknown) => {

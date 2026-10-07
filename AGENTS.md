@@ -68,6 +68,8 @@ src/
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
+│   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
+│   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   └── errors.ts, chat.ts
@@ -95,8 +97,11 @@ src/
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
-│   ├── resources.ts       # /resources    resource library, pins to students/colleges, resource -> deadline
+│   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
+│   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
+│   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
@@ -463,6 +468,33 @@ conditional `scheduled -> queued` update before it is sent, so overlapping
 runs can't send it twice; one inside its counselor's quiet hours is moved to
 the next window. There is no in-process interval for this one.
 
+## AI inside the search
+
+The model never writes a result list and never changes the catalog.
+
+- `POST /colleges/search/ai`: FAST_MODEL fills the §3 filters through a forced
+  tool; the output goes through the same `searchQuery` validation as any query
+  string, the real search runs, and the response shows the filters that ran
+  (and the parts of the request no filter could express) so the counselor can
+  edit them.
+- `POST /colleges/research` and `POST /resources/ask`: `runWebResearch`
+  (`lib/anthropic.ts`) on `RESEARCH_MODEL` (`claude-opus-5-5`, with the
+  server-side refusal fallback) and web search/fetch limited to
+  `RESEARCH_DOMAINS` plus the school's own site. Each answer part carries its
+  citations; a part with none is connective text, not a sourced claim. The
+  research uses the `web_search_20250305` / `web_fetch_20250910` tools on
+  purpose: the `_20260209` versions route results through code execution and
+  return empty citation lists.
+- Where a cited source disagrees with the catalog, a `catalog_change_proposals`
+  row is written (allowed fields and values only, source URL must be one the
+  answer cited). Only a `catalog_editors` member (Meridies staff, added with
+  service_role) can approve, and approval is what changes the catalog.
+- `GET /colleges/:id/student-summary`: counselor bullets from catalog facts and
+  the student's record only. No model; every bullet names its basis.
+- `POST /colleges/list-builder` draws candidates from the whole catalog
+  (`catalogListCandidates`) and, with `explain: true`, adds one AxIS line per
+  school shown. The order is always the fit model's.
+
 ## Anthropic / AI rules
 
 **All product AI goes through Anthropic.** No other providers unless the team
@@ -470,6 +502,8 @@ explicitly decides otherwise.
 
 - **Speed first** — counselors use these live, in session with a family
 - **Default model:** `claude-haiku-4-5` (`FAST_MODEL` in `lib/anthropic.ts`)
+- **Research** (`RESEARCH_MODEL`, `claude-opus-5-5`) only for cited web research
+  (`runWebResearch`): a counselor acts on those answers.
 - **Sonnet** (`DEEP_MODEL`) only where Haiku's quality genuinely isn't enough —
   currently narrative coherence, college lists, and the concierge, wherever
   they are asked from: `routes/ai.ts`, the AxIS chat tools in `lib/chat.ts`,
@@ -599,6 +633,48 @@ into a prompt must filter on them (see `routes/tasks.ts`).
 - Never commit `.env` — keep `.env.example` current
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
+
+## Teams, guardians, delivery status, data rights, monitoring
+
+- **Firm teams.** `profiles.firm_id` can't be updated by clients, so firms
+  change through SECURITY DEFINER functions: `create_firm`,
+  `accept_firm_invitation` (the invite's email must match the account; seats
+  are enforced), `set_firm_member_role` (the owner's seat never changes),
+  `remove_firm_member` (the owner can't leave). Routes: `/firms`,
+  `/firms/mine/{members,invites}`, `/firms/join`. Invitation tokens are stored
+  as sha256 only; the app page for the link is `/join-firm/<token>`.
+- **Guardians.** A student may add a guardian, but one they add starts with
+  `alerts_enabled = false`, and only the counselor side changes or removes a
+  guardian (`private.can_manage_guardians`). Otherwise a student could redirect
+  the parent alerts their counselor sends.
+- **Delivery status.** `POST /webhooks/resend` (Svix signature,
+  `RESEND_WEBHOOK_SECRET`) and `POST /webhooks/twilio/status`
+  (`X-Twilio-Signature`, `TWILIO_AUTH_TOKEN` over `PUBLIC_API_URL`) move
+  `message_deliveries` to delivered / bounced / failed; a status never moves
+  backwards. With `PUBLIC_API_URL` set, every SMS asks Twilio to report there.
+- **Data rights.** `GET /account/export` (self) and
+  `GET /account/students/:id/export` (counselor) read through the caller's RLS
+  client, so an export holds exactly what that person can already see.
+  `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
+  user; a counselor with an active roster or an owned firm is refused.
+- **Monitoring.** Every scheduled job writes `job_heartbeats`.
+  `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
+  when one hasn't run cleanly within twice its interval. Point an uptime monitor
+  at `/health` (public) and `/internal/status` (with the bearer header).
+
+## Tests and CI
+
+- `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
+  rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
+  mapping (against a recorded real Scorecard response in `test/fixtures`), the
+  essay guardrails, the link guard, payments, class rank, proposals, webhook
+  signatures, heartbeats.
+- `npm run test:integration`: persona suites (`test/integration`) against a
+  local Supabase and a running API, as real counselor and student accounts.
+- `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
+  tests; then a throwaway Supabase with every migration, an RLS-on-every-table
+  check, the fixtures, and the persona suites. AI calls are not exercised in CI
+  (they cost money); their pure parts are unit-tested.
 
 ## Environment
 
