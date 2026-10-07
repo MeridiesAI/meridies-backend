@@ -739,3 +739,9 @@ Railway runs `npm run start` (plain `node dist/index.js`). Migrations are **no
 longer applied on deploy** — Prisma owned that, and it's gone. Apply schema
 changes to Supabase deliberately, and commit the SQL under
 `supabase/migrations/` in the same PR.
+
+**Commit in steps on big changes.** A large PR lands as many commits, each a
+coherent step that builds on its own (a migration with its route, one screen,
+one fix). A PR the size of the v10 sync (around 20k lines) carries at least 25
+to 40 commits, never one. Squash merge still gives `main` one commit; the steps
+are for whoever reviews the PR.
