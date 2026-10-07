@@ -80,7 +80,10 @@ export type AiModule =
   // v10 sync (management-pipeline): AxIS drafting an email template.
   | "email-template"
   // v10 sync (colleges-events): Colleges › Search & research.
-  | "college-research";
+  | "college-research"
+  // BACKEND_TODO §5: words -> search filters, cited web research, resource
+  // Q&A, list builder explanations.
+  | "college-search" | "web-research" | "resource-qa" | "list-explain";
 
 type RunOptions<T> = {
   request: FastifyRequest;
@@ -392,3 +395,182 @@ export const NO_PROSE_SYSTEM = [
   "",
   "If asked to write prose, refuse in one bullet and give advice instead.",
 ].join("\n");
+
+// ---- Web research with citations -----------------------------------------------------
+
+/**
+ * Research answers use the most capable current model: a counselor acts on
+ * them. Everything else stays on FAST_MODEL.
+ */
+export const RESEARCH_MODEL = "claude-opus-5-5";
+
+/**
+ * Where research may look. Plain hostnames (subdomains included); the tools
+ * take no wildcards, so a question about one school also adds that school's
+ * own site (see researchDomains).
+ */
+export const RESEARCH_DOMAINS = [
+  "collegeboard.org",
+  "act.org",
+  "commonapp.org",
+  "universityofcalifornia.edu",
+  "ucop.edu",
+  "calstate.edu",
+  "studentaid.gov",
+  "ed.gov",
+  "csac.ca.gov",
+  "fairtest.org",
+  "collegescorecard.ed.gov",
+] as const;
+
+/** The allow-list plus the schools' own sites, as bare hostnames (max 64). */
+export function researchDomains(extraSites: (string | null | undefined)[] = []): string[] {
+  const hosts = extraSites
+    .map((s) => {
+      try {
+        return s ? new URL(/^https?:\/\//.test(s) ? s : `https://${s}`).hostname.replace(/^www\./, "").toLowerCase() : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter((h): h is string => !!h && h.includes(".") && /^[a-z0-9.-]+$/.test(h));
+  return [...new Set([...RESEARCH_DOMAINS, ...hosts])].slice(0, 64);
+}
+
+export type Cited = { url: string; title: string | null; citedText: string };
+export type ResearchPart = { text: string; citations: Cited[] };
+export type ResearchResult = {
+  /** The answer in order; a part with no citations is connective text, not a claim. */
+  parts: ResearchPart[];
+  /** Every distinct source cited. */
+  sources: { url: string; title: string | null }[];
+  runId: string | null;
+  refused: boolean;
+};
+
+const RESEARCH_SYSTEM = [
+  "You research US college admissions and financial aid facts for a college counselor.",
+  "Use web search and web fetch, and answer only from what you find on the allowed official sites.",
+  "Every factual claim must rest on a source you retrieved. If you can't find it on an allowed site, say you couldn't confirm it instead of answering from memory.",
+  "Name the admission cycle or aid year a fact belongs to whenever the source does.",
+  "Be brief: a few short sentences or bullets for the counselor. Never write essay prose for a student.",
+].join("\n");
+
+/**
+ * One cited research answer. Same audit and quota discipline as runStructured:
+ * a daily-call gate, an ai_runs row, output-token accounting. A refusal or a
+ * pause is handled here; the caller gets parts with their citations.
+ */
+export async function runWebResearch(opts: {
+  request: FastifyRequest;
+  module: AiModule;
+  question: string;
+  /** Facts or catalog rows the answer should be read against (not instructions). */
+  context?: string;
+  domains: string[];
+  studentId?: string | null;
+  maxSearches?: number;
+}): Promise<ResearchResult> {
+  const { request, module } = opts;
+  const actorId = request.auth.userId;
+  await assertAiAllowed(request, module);
+  await enforceQuota(actorId, "ai_calls", "day", DAILY_AI_CALL_LIMIT, "You've hit today's AI limit. It resets at midnight.");
+
+  const svc = serviceClient();
+  const startedAt = Date.now();
+  let runId: string | null = null;
+  if (svc) {
+    const { data } = await svc
+      .from("ai_runs")
+      .insert({
+        actor_id: actorId,
+        student_id: opts.studentId ?? null,
+        module,
+        model: RESEARCH_MODEL,
+        status: "running",
+        input: { promptChars: opts.question.length + (opts.context?.length ?? 0), domains: opts.domains.length },
+      })
+      .select("id")
+      .single();
+    runId = data?.id ?? null;
+  }
+  const finish = async (status: "succeeded" | "failed" | "blocked", extra: Record<string, unknown>) => {
+    if (!svc || !runId) return;
+    await svc
+      .from("ai_runs")
+      .update({ status, latency_ms: Date.now() - startedAt, completed_at: new Date().toISOString(), ...extra })
+      .eq("id", runId);
+  };
+
+  const userText = opts.context
+    ? `${opts.question}\n\n<catalog_facts>\n${opts.context}\n</catalog_facts>\nThe catalog facts are what Meridies has on file; check them against the sources and say where a source disagrees.`
+    : opts.question;
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: userText }];
+
+  try {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let response: Anthropic.Beta.BetaMessage | null = null;
+    // Server tools can pause a long turn; resume it a few times at most.
+    for (let turn = 0; turn < 4; turn++) {
+      response = await anthropic().beta.messages.create(
+        {
+          model: RESEARCH_MODEL,
+          max_tokens: 16000,
+          betas: ["server-side-fallback-2026-07-01"],
+          fallbacks: "default",
+          output_config: { effort: "medium" },
+          system: RESEARCH_SYSTEM,
+          // The basic tool versions on purpose: the _20260209 ones filter results
+          // through code execution, and the answer then comes back with empty
+          // citation lists (checked 10/7). "A link for every claim" needs the
+          // per-sentence web_search_result_location citations these give.
+          tools: [
+            { type: "web_search_20250305", name: "web_search", allowed_domains: opts.domains, max_uses: opts.maxSearches ?? 5 },
+            { type: "web_fetch_20250910", name: "web_fetch", allowed_domains: opts.domains, max_uses: 3, citations: { enabled: true }, max_content_tokens: 20000 },
+          ],
+          messages,
+        },
+        { timeout: 180_000 }
+      );
+      inputTokens += response.usage.input_tokens;
+      outputTokens += response.usage.output_tokens;
+      if (response.stop_reason !== "pause_turn") break;
+      messages.push({ role: "assistant", content: response.content });
+    }
+    if (!response) throw new Error("no response");
+
+    if (response.stop_reason === "refusal") {
+      await finish("blocked", { input_tokens: inputTokens, output_tokens: outputTokens, error: "refusal" });
+      return { parts: [], sources: [], runId, refused: true };
+    }
+
+    const parts: ResearchPart[] = [];
+    for (const block of response.content) {
+      if (block.type !== "text" || !block.text.trim()) continue;
+      const citations: Cited[] = [];
+      for (const c of block.citations ?? []) {
+        if (c.type === "web_search_result_location") {
+          citations.push({ url: c.url, title: c.title ?? null, citedText: c.cited_text });
+        } else if (c.type === "char_location" || c.type === "page_location" || c.type === "content_block_location") {
+          const title = "document_title" in c ? (c.document_title ?? null) : null;
+          // Fetched pages cite as documents; their URL is in the title when the API gives no other.
+          if (title && /^https?:\/\//.test(title)) citations.push({ url: title, title, citedText: c.cited_text });
+        }
+      }
+      parts.push({ text: block.text, citations });
+    }
+    const seen = new Map<string, string | null>();
+    for (const p of parts) for (const c of p.citations) if (!seen.has(c.url)) seen.set(c.url, c.title);
+
+    await finish("succeeded", { input_tokens: inputTokens, output_tokens: outputTokens });
+    await enforceQuota(actorId, "ai_output_tokens", "month", 5_000_000, "Monthly AI usage limit reached.", outputTokens).catch(() => undefined);
+    return { parts, sources: [...seen].map(([url, title]) => ({ url, title })), runId, refused: false };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown error";
+    await finish("failed", { error: message.slice(0, 500) });
+    request.log.error({ module, err }, "AI research failed");
+    if (err instanceof HttpError) throw err;
+    throw unavailable("Research is unavailable right now. Try again shortly.");
+  }
+}
