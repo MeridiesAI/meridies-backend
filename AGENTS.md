@@ -621,6 +621,12 @@ Every route answers 503 with the missing setting when a provider is unset.
 
 ### Documents and AI context
 
+Files live in the private `student-documents` Storage bucket
+(`20261011000001`). An object is readable by its uploader or by anyone who can
+see the `documents` row pointing at it, so Storage is never more generous than
+the file list; uploads go under a student the caller can edit, a folder they
+can see, their own id, or `unfiled`.
+
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document
 into a prompt must filter on them (see `routes/tasks.ts`).
