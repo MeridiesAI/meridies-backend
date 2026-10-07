@@ -119,7 +119,10 @@ begin
   if p_name is null or length(btrim(p_name)) not between 1 and 200 then
     raise exception 'Give the firm a name' using errcode = '22023';
   end if;
-  insert into public.firms (name, owner_id) values (btrim(p_name), v_me) returning id into v_firm;
+  -- Billing is parked, so nothing sells seats yet; a firm starts with room for
+  -- a small team (firms.seats defaults to 1, which the owner fills). When billing
+  -- returns, the subscription sets seats instead.
+  insert into public.firms (name, owner_id, plan, seats) values (btrim(p_name), v_me, 'practice', 10) returning id into v_firm;
   insert into public.firm_members (firm_id, profile_id, seat_role, invited_by) values (v_firm, v_me, 'owner', v_me);
   update public.profiles set firm_id = v_firm where id = v_me;
   return v_firm;
