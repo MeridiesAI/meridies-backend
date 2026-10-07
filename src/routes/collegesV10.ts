@@ -55,9 +55,12 @@ import {
   toCdsEdition,
   toCollegeCard,
   toAdmissionFactors,
+  toApplicationRequirements,
+  toCollegePolicies,
   toCollegeProgram,
   toFieldOfStudy,
   toListSchool,
+  toMajorAdmitRate,
   toOfficialStats,
   toSearchStats,
   toProfileFacts,
@@ -416,7 +419,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   app.get("/:id/extras", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const counselorView = request.profile.role === "counselor";
-    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors] = await Promise.all([
+    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, policies, requirements, majorAdmits] = await Promise.all([
       request.db.from("colleges").select("id, name, website, deadlines").eq("id", id).maybeSingle(),
       request.db.from("college_profile_facts").select("*").eq("college_id", id).maybeSingle(),
       request.db.from("college_admitted_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -451,10 +454,21 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         .eq("credential_level", 3)
         .order("awards", { ascending: false, nullsFirst: false })
         .limit(150),
+      request.db.from("college_policies").select("*").eq("college_id", id).maybeSingle(),
+      request.db.from("college_application_requirements").select("*").eq("college_id", id).order("cycle", { ascending: false }).limit(1),
+      request.db
+        .from("college_major_admit_rates")
+        .select("*")
+        .eq("college_id", id)
+        .order("entry_year", { ascending: false })
+        .order("major")
+        .limit(300),
     ]);
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
-    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors]) if (r.error) throw fromPostgrest(r.error);
+    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, policies, requirements, majorAdmits]) {
+      if (r.error) throw fromPostgrest(r.error);
+    }
     const supplementRows = (supplements.data ?? []) as Row[];
     const latestCycle = supplementRows[0]?.admission_cycle ?? null;
 
@@ -471,6 +485,11 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         admissionFactors: factors.data ? toAdmissionFactors(factors.data as Row) : null,
         majors: ((majors.data ?? []) as Row[]).map(toFieldOfStudy),
       },
+      // Curated by Meridies from College Board, Common App, UC/CSU and the
+      // schools' own pages, each field with its source.
+      policies: policies.data ? toCollegePolicies(policies.data as Row) : null,
+      applicationRequirements: ((requirements.data ?? []) as Row[])[0] ? toApplicationRequirements((requirements.data as Row[])[0]) : null,
+      majorAdmitRates: ((majorAdmits.data ?? []) as Row[]).map(toMajorAdmitRate),
       facts: facts.data ? toProfileFacts(facts.data as Row) : null,
       campusSetting:
         ((facts.data as Row | null)?.campus_setting as string | undefined) ??

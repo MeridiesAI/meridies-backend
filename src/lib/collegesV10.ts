@@ -547,6 +547,9 @@ export const searchQuery = z
     miles: z.coerce.number().min(1).max(3000).optional(),
     studentId: z.string().uuid().optional(),
     fit: csvOf(z.enum(["reach", "target", "likely"]), 3).optional(),
+    superscore: csvOf(z.enum(["sat", "act", "both", "none"]), 4).optional(),
+    cssProfile: truthy.optional(),
+    stars: truthy.optional(),
   })
   .strict()
   .refine((v) => (v.lat === undefined) === (v.lng === undefined), { message: "lat and lng go together" });
@@ -572,6 +575,9 @@ export function searchFilters(q: SearchQuery): Record<string, unknown> {
   if (q.religious) f.religious = true;
   if (q.lat !== undefined && q.lng !== undefined) f.near = { lat: q.lat, lng: q.lng, miles: q.miles ?? 100 };
   if (q.fit?.length) f.fit = q.fit;
+  if (q.superscore?.length) f.superscore = q.superscore;
+  if (q.cssProfile !== undefined) f.cssProfile = q.cssProfile;
+  if (q.stars !== undefined) f.stars = q.stars;
   return f;
 }
 
@@ -591,4 +597,48 @@ export const toSearchStats = (r: Row, now = Date.now()) => ({
   netPriceByIncome: (r.net_price_by_income as Record<string, number> | null) ?? {},
   undergradEnrollment: numOrNull(r.undergrad_enrollment),
   ...freshness(r.source_verified_at, r.data_year, now),
+});
+
+// ---- Curated per-school data (college_policies, requirements, major admit rates) --------
+
+export const toCollegePolicies = (r: Row) => ({
+  superscore: (r.superscore as string | null) ?? null,
+  selfReportScores: r.self_report_scores == null ? null : Boolean(r.self_report_scores),
+  cssProfileRequired: r.css_profile_required == null ? null : Boolean(r.css_profile_required),
+  starsRequired: r.stars_required == null ? null : Boolean(r.stars_required),
+  fairtestStatus: (r.fairtest_status as string | null) ?? null,
+  // Per field: where it came from and when it was checked.
+  sources: (r.sources as Record<string, { url: string; checkedAt: string }> | null) ?? {},
+  provenance: "curated" as const,
+});
+
+export const toApplicationRequirements = (r: Row, now = Date.now()) => ({
+  cycle: String(r.cycle),
+  platforms: (r.platforms as string[] | null) ?? [],
+  applicationFeeCents: numOrNull(r.application_fee_cents),
+  feeWaiver: r.fee_waiver == null ? null : Boolean(r.fee_waiver),
+  personalEssayRequired: r.personal_essay_required == null ? null : Boolean(r.personal_essay_required),
+  supplementCount: numOrNull(r.supplement_count),
+  teacherRecs: numOrNull(r.teacher_recs),
+  counselorRec: r.counselor_rec == null ? null : Boolean(r.counselor_rec),
+  testing: (r.testing as string | null) ?? null,
+  portfolio: (r.portfolio as string | null) ?? null,
+  starsRequired: r.stars_required == null ? null : Boolean(r.stars_required),
+  sourceUrl: String(r.source_url ?? ""),
+  ...freshness(r.source_verified_at, r.cycle, now),
+});
+
+export const toMajorAdmitRate = (r: Row) => ({
+  system: String(r.system),
+  major: String(r.major),
+  cipCode: (r.cip_code as string | null) ?? null,
+  entryYear: Number(r.entry_year),
+  residency: String(r.residency),
+  applicants: numOrNull(r.applicants),
+  admits: numOrNull(r.admits),
+  admitRate: numOrNull(r.admit_rate),
+  impacted: r.impacted == null ? null : Boolean(r.impacted),
+  openMajor: r.open_major == null ? null : Boolean(r.open_major),
+  eligibilityIndex: numOrNull(r.eligibility_index),
+  sourceUrl: String(r.source_url ?? ""),
 });

@@ -59,7 +59,7 @@ src/
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
-│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), run.ts (lease)
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), linkCheck.ts, run.ts
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
@@ -91,6 +91,7 @@ src/
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
+│   ├── resources.ts       # /resources    resource library, pins to students/colleges, resource -> deadline
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
@@ -326,6 +327,42 @@ majors, HBCU/HSI/women's/religious, setting, fit) and pages. Fit
 estimate. `GET /colleges/search` keeps its array response; the total and next
 cursor are the `X-Total-Count` / `X-Next-Cursor` headers. No embeddings: the AI
 rule is Anthropic only.
+
+### Resource library and curated datasets
+
+`library_resources` is the Meridies library (null owner, seeded in
+`20261007000004`, read-only to practices) plus each practice's own rows.
+Students read the rows meant for them and what is pinned to them. Sites whose
+terms forbid scraping (Chegg, CollegeXpress, BigFuture, LinkedIn) are
+`link_only`: linked, never read. A weekly cron on `POST /internal/resources/link-check`
+asks each link whether it still answers (`lib/links.ts checkLink`, SSRF-safe,
+HEAD, body never read) and flags it `ok` / `broken` (404/410 twice, or gone
+from DNS) / `blocked` (the site refuses robots); nothing is deleted.
+
+Curated facts live on the school, each with a source: `college_policies`
+(superscore, self-reported scores, CSS Profile, STARS, FairTest),
+`college_application_requirements` (per cycle) and `college_major_admit_rates`
+(UC/CSU by major, SJSU's eligibility index). They are loaded from CSVs the team
+compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
+<policies|requirements|major-admit-rates> --file <csv> [--dry-run]`. A file with
+one bad row loads nothing. Checked-in files and their sources are listed in
+`scripts/ingest/data/README.md`.
+
+### Catalog data: yearly refresh
+
+| When | Source | Who | How |
+|---|---|---|---|
+| Monthly (cron) | College Scorecard | automatic | `POST /internal/ingest/scorecard` |
+| Weekly (cron) | Library links | automatic | `POST /internal/resources/link-check` |
+| When NCES publishes (usually late summer) | IPEDS Admissions (`ADM<year>.zip`) | engineer | `scripts/ingest/ipeds-admissions.ts --year <year>` |
+| August | Common App requirements grid (new cycle) | counselor team compiles, engineer loads | `curated-csv.ts --dataset requirements` |
+| August–October | UC application, Cal State Apply (dates, requirements) | counselor team | `requirements`, and update the library rows' `opens_on`/`closes_on`/`cycle` in a migration |
+| September | CSS Profile participating list (College Board) | counselor team | `policies` (`css_profile_required`) |
+| Summer (UC Information Center, CSU impaction matrix, SJSU eligibility index) | admit rates by major, impacted and open majors | counselor team | `major-admit-rates` |
+| Rolling | FairTest list, school superscore/self-report pages | counselor team | `policies` |
+
+Dated library rows (Common App, UC, Cal State Apply, FAFSA, CSS Profile, Cal
+Grant, Dream Act) carry the current cycle; roll them forward each August.
 
 ## Scheduled jobs
 

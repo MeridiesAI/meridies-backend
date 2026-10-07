@@ -8,12 +8,15 @@
  *
  * and monthly, the College Scorecard catalog refresh:
  *     "$API_URL/internal/ingest/scorecard"
+ * and weekly, the resource library's link check:
+ *     "$API_URL/internal/resources/link-check"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
+import { startLinkCheck } from "../lib/ingest/linkCheck.js";
 import { startScorecardIngest } from "../lib/ingest/run.js";
 import { runScheduledSweep } from "../lib/sweepSchedule.js";
 
@@ -82,6 +85,20 @@ export default async function internalRoutes(app: FastifyInstance) {
               ? "The ingest needs the service role key"
               : "The ingest could not take its lease";
         return reply.code(503).send({ started: false, reason });
+      }
+      return reply.code(202).send({ started: true });
+    }
+  );
+
+  /** Weekly: flag library links that stopped answering. 202; recorded in ingest_runs. */
+  app.post(
+    "/resources/link-check",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startLinkCheck(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "A link check is already running" });
+        return reply.code(503).send({ started: false, reason: "The link check needs the service role key and its lease" });
       }
       return reply.code(202).send({ started: true });
     }
