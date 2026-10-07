@@ -21,6 +21,7 @@ import { z } from "zod";
 import { inQuietHours, loadSettings, nextSendWindow } from "../lib/accountability.js";
 import { runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
+import { beat } from "../lib/heartbeat.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
@@ -477,8 +478,14 @@ export default async function communicationRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const svc = serviceClient();
       if (!svc) return reply.code(503).send({ ran: false, reason: "Scheduled sends need the service role key" });
-      const tally = await dispatchDueMessages(svc, request.log);
-      return { ran: true, ...tally };
+      try {
+        const tally = await dispatchDueMessages(svc, request.log);
+        await beat("message-dispatch", true, undefined, request.log);
+        return { ran: true, ...tally };
+      } catch (err) {
+        await beat("message-dispatch", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
     }
   );
 }

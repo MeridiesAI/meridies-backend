@@ -25,6 +25,10 @@ const envSchema = z.object({
   // "Display Name <address@domain>". Until a domain is verified in Resend, the
   // only deliverable default is Resend's shared onboarding address.
   INVITE_FROM_EMAIL: z.string().default("Meridies <onboarding@resend.dev>"),
+  // Local development only: send every email to a Mailpit catcher (the local
+  // Supabase stack runs one at http://127.0.0.1:54324) instead of Resend, so
+  // invites can be opened without mailing anyone. Ignored in production.
+  DEV_MAIL_URL: blankIsUnset(z.string().url().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 
@@ -49,6 +53,13 @@ const envSchema = z.object({
   // in-process on every replica — a lease row keeps runs from overlapping.
   CRON_SECRET: blankIsUnset(z.string().min(32, "CRON_SECRET must be at least 32 characters").optional()),
   SWEEP_INTERVAL_MINUTES: blankIsUnset(z.coerce.number().int().min(5).max(1440).optional()),
+
+  // Delivery webhooks (routes/webhooks.ts). RESEND_WEBHOOK_SECRET is the
+  // signing secret Resend shows for the endpoint (whsec_...); unset, the Resend
+  // webhook answers 503. PUBLIC_API_URL is this API's public origin: Twilio is
+  // told to report status there, and its signature is computed over that URL.
+  RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
+  PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
 
   // College Scorecard (api.data.gov key, free). Optional: unset, the catalog
   // ingest (POST /internal/ingest/scorecard, scripts/ingest/scorecard.ts)
@@ -101,6 +112,7 @@ export const corsOrigins = env.CORS_ORIGIN.split(",")
 export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
 export const hasResend = Boolean(env.RESEND_API_KEY);
+export const devMailUrl = env.NODE_ENV === "production" ? undefined : env.DEV_MAIL_URL;
 export const hasCronSecret = Boolean(env.CRON_SECRET);
 export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
 export const hasTwilio = Boolean(

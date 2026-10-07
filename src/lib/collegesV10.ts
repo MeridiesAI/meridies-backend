@@ -547,6 +547,9 @@ export const searchQuery = z
     miles: z.coerce.number().min(1).max(3000).optional(),
     studentId: z.string().uuid().optional(),
     fit: csvOf(z.enum(["reach", "target", "likely"]), 3).optional(),
+    superscore: csvOf(z.enum(["sat", "act", "both", "none"]), 4).optional(),
+    cssProfile: truthy.optional(),
+    stars: truthy.optional(),
   })
   .strict()
   .refine((v) => (v.lat === undefined) === (v.lng === undefined), { message: "lat and lng go together" });
@@ -572,6 +575,9 @@ export function searchFilters(q: SearchQuery): Record<string, unknown> {
   if (q.religious) f.religious = true;
   if (q.lat !== undefined && q.lng !== undefined) f.near = { lat: q.lat, lng: q.lng, miles: q.miles ?? 100 };
   if (q.fit?.length) f.fit = q.fit;
+  if (q.superscore?.length) f.superscore = q.superscore;
+  if (q.cssProfile !== undefined) f.cssProfile = q.cssProfile;
+  if (q.stars !== undefined) f.stars = q.stars;
   return f;
 }
 
@@ -592,3 +598,101 @@ export const toSearchStats = (r: Row, now = Date.now()) => ({
   undergradEnrollment: numOrNull(r.undergrad_enrollment),
   ...freshness(r.source_verified_at, r.data_year, now),
 });
+
+// ---- Curated per-school data (college_policies, requirements, major admit rates) --------
+
+export const toCollegePolicies = (r: Row) => ({
+  superscore: (r.superscore as string | null) ?? null,
+  selfReportScores: r.self_report_scores == null ? null : Boolean(r.self_report_scores),
+  cssProfileRequired: r.css_profile_required == null ? null : Boolean(r.css_profile_required),
+  starsRequired: r.stars_required == null ? null : Boolean(r.stars_required),
+  fairtestStatus: (r.fairtest_status as string | null) ?? null,
+  // Per field: where it came from and when it was checked.
+  sources: (r.sources as Record<string, { url: string; checkedAt: string }> | null) ?? {},
+  provenance: "curated" as const,
+});
+
+export const toApplicationRequirements = (r: Row, now = Date.now()) => ({
+  cycle: String(r.cycle),
+  platforms: (r.platforms as string[] | null) ?? [],
+  applicationFeeCents: numOrNull(r.application_fee_cents),
+  feeWaiver: r.fee_waiver == null ? null : Boolean(r.fee_waiver),
+  personalEssayRequired: r.personal_essay_required == null ? null : Boolean(r.personal_essay_required),
+  supplementCount: numOrNull(r.supplement_count),
+  teacherRecs: numOrNull(r.teacher_recs),
+  counselorRec: r.counselor_rec == null ? null : Boolean(r.counselor_rec),
+  testing: (r.testing as string | null) ?? null,
+  portfolio: (r.portfolio as string | null) ?? null,
+  starsRequired: r.stars_required == null ? null : Boolean(r.stars_required),
+  sourceUrl: String(r.source_url ?? ""),
+  ...freshness(r.source_verified_at, r.cycle, now),
+});
+
+export const toMajorAdmitRate = (r: Row) => ({
+  system: String(r.system),
+  major: String(r.major),
+  cipCode: (r.cip_code as string | null) ?? null,
+  entryYear: Number(r.entry_year),
+  residency: String(r.residency),
+  applicants: numOrNull(r.applicants),
+  admits: numOrNull(r.admits),
+  admitRate: numOrNull(r.admit_rate),
+  impacted: r.impacted == null ? null : Boolean(r.impacted),
+  openMajor: r.open_major == null ? null : Boolean(r.open_major),
+  eligibilityIndex: numOrNull(r.eligibility_index),
+  sourceUrl: String(r.source_url ?? ""),
+});
+
+// ---- List builder candidates from the whole catalog --------------------------------------
+
+/** IPEDS locale -> the builder's location types. */
+export function settingFromLocale(locale: number | null): (typeof LOCATION_TYPES)[number] | null {
+  if (locale == null) return null;
+  if (locale === 11) return "Major city";
+  if (locale === 12 || locale === 13) return "Small city";
+  if (locale >= 21 && locale <= 23) return "Suburban";
+  if (locale >= 31 && locale <= 33) return "College town";
+  if (locale >= 41 && locale <= 43) return "Rural";
+  return null;
+}
+
+/** A catalog school (official figures, no curated list profile) in the builder's shape. */
+export function listSchoolFromCatalog(
+  college: Row,
+  stats: Row,
+  testPolicy: string | null,
+  needRating: number | null,
+  programTitles: string[]
+): ListSchool | null {
+  const lat = nnum(stats.latitude);
+  const lng = nnum(stats.longitude);
+  if (lat == null || lng == null) return null;
+  const admit = nnum(stats.admit_rate);
+  const s25 = nnum(stats.sat_total_25);
+  const s75 = nnum(stats.sat_total_75);
+  const fields = [...new Set(programTitles.map(fieldFor).filter((f): f is Field => f !== null))];
+  const deadlines = (college.deadlines ?? {}) as Record<string, unknown>;
+  const regular = Object.entries(deadlines).find(([plan]) => /regular/i.test(plan))?.[1] ?? null;
+  return {
+    collegeId: str(college.id),
+    slug: str(college.slug),
+    name: str(college.name),
+    initials: nstr(college.initials),
+    brandColor: nstr(college.brand_color),
+    city: nstr(college.city),
+    state: nstr(college.state),
+    website: nstr(college.website),
+    lat,
+    lng,
+    undergrads: nnum(stats.undergrad_enrollment),
+    setting: settingFromLocale(nnum(stats.locale)),
+    testPolicy,
+    admit: admit == null ? null : Math.round(admit * 1000) / 10,
+    satMid: s25 != null && s75 != null ? (s25 + s75) / 2 : null,
+    gpaMid: null,
+    needRating,
+    largestGroupPct: null,
+    fields,
+    regularDeadline: regular == null ? null : String(regular),
+  };
+}

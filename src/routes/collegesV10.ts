@@ -28,6 +28,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { enforceNoProse, runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -47,6 +48,7 @@ import {
   roundsFrom,
   searchFilters,
   searchQuery,
+  type SearchQuery,
   safeIlikeTerm,
   schoolIn,
   searchRank,
@@ -55,9 +57,13 @@ import {
   toCdsEdition,
   toCollegeCard,
   toAdmissionFactors,
+  toApplicationRequirements,
+  toCollegePolicies,
   toCollegeProgram,
   toFieldOfStudy,
   toListSchool,
+  listSchoolFromCatalog,
+  toMajorAdmitRate,
   toOfficialStats,
   toSearchStats,
   toProfileFacts,
@@ -121,6 +127,46 @@ export async function loadListSchools(request: FastifyRequest): Promise<ListScho
   return listRows
     .filter((l) => byId.has(String(l.college_id)))
     .map((l) => toListSchool(byId.get(String(l.college_id))!, l, need.get(String(l.college_id)) ?? null));
+}
+
+/**
+ * Schools from the whole catalog that fit the builder's hard criteria (distance,
+ * majors, test-optional), through the search RPC, in the builder's shape. The
+ * curated list-profile schools come from loadListSchools; these add the rest.
+ */
+export async function catalogListCandidates(request: FastifyRequest, c: ListCriteria, have: Set<string>): Promise<ListSchool[]> {
+  const filters: Record<string, unknown> = {};
+  const majors = c.majors.map((m) => safeIlikeTerm(m)).filter(Boolean);
+  if (majors.length) filters.majors = majors;
+  if (c.origin) filters.near = { lat: c.origin.lat, lng: c.origin.lng, miles: c.miles };
+  if (c.testOptional === "Yes") filters.testPolicy = ["optional", "blind"];
+  if (!Object.keys(filters).length) return [];
+  const { data, error } = await request.db.rpc("search_colleges", { p_q: "", p_filters: filters, p_sort: "enrollment", p_limit: 100, p_offset: 0 });
+  if (error) throw fromPostgrest(error);
+  const ids = ((data ?? []) as Row[]).map((r) => String(r.college_id)).filter((id) => !have.has(id));
+  if (!ids.length) return [];
+  const [colleges, stats, factors, ratings, programs] = await Promise.all([
+    request.db.from("colleges").select(COLLEGE_CARD_COLUMNS + ", brand_color").in("id", ids),
+    request.db.from("college_stats").select("college_id, latitude, longitude, locale, undergrad_enrollment, admit_rate, sat_total_25, sat_total_75").in("college_id", ids),
+    request.db.from("college_admission_factors").select("college_id, test_policy").in("college_id", ids),
+    request.db.from("college_aid_ratings").select("college_id, rating").eq("kind", "need-based").in("college_id", ids),
+    request.db.from("college_fields_of_study").select("college_id, title").eq("credential_level", 3).in("college_id", ids).limit(20000),
+  ]);
+  for (const r of [colleges, stats, factors, ratings, programs]) if (r.error) throw fromPostgrest(r.error);
+  const by = <T,>(rows: unknown, f: (r: Row) => T) => new Map(((rows ?? []) as Row[]).map((r) => [String(r.college_id ?? r.id), f(r)]));
+  const statsBy = by(stats.data, (r) => r);
+  const policyBy = by(factors.data, (r) => (r.test_policy as string | null) ?? null);
+  const needBy = by(ratings.data, (r) => Number(r.rating));
+  const titles = new Map<string, string[]>();
+  for (const p of (programs.data ?? []) as Row[]) titles.set(String(p.college_id), [...(titles.get(String(p.college_id)) ?? []), String(p.title)]);
+  return ((colleges.data ?? []) as unknown as Row[])
+    .map((c2) => {
+      const id = String(c2.id);
+      const st = statsBy.get(id);
+      if (!st) return null;
+      return listSchoolFromCatalog(c2, st, policyBy.get(id) ?? ((c2.test_policy as string | null) ?? null), needBy.get(id) ?? null, titles.get(id) ?? []);
+    })
+    .filter((x): x is ListSchool => x !== null);
 }
 
 /** The student's own numbers the fit model reads: SAT (superscore, else the sum) and unweighted GPA. */
@@ -207,6 +253,128 @@ async function cardExtras(request: FastifyRequest, ids: string[]) {
   return out;
 }
 
+/** One search: the RPC, then the cards. Shared by GET /colleges/search and the AI search. */
+export async function runSearch(request: FastifyRequest, q: SearchQuery) {
+  const term = safeIlikeTerm(q.q);
+  const filters = searchFilters(q);
+  // Unchanged from before: no words and no filters is no search.
+  if (!term && Object.keys(filters).length === 0) return { total: 0, nextCursor: null, results: [] };
+
+  if (q.studentId || q.fit) {
+    if (!q.studentId) throw badRequest("fit needs studentId");
+    if (request.profile.role !== "counselor") throw badRequest("Only counselors can rank schools for a student");
+    const { numbers } = await studentNumbers(request, q.studentId);
+    filters.student = { sat: numbers.sat, gpa: numbers.gpaUnweighted };
+  }
+
+  const offset = q.cursor ? decodeCursor(q.cursor) : 0;
+  const pageSize = q.limit ?? 48;
+  const { data, error } = await request.db.rpc("search_colleges", {
+    p_q: term,
+    p_filters: filters,
+    p_sort: q.sort ?? null,
+    p_limit: pageSize,
+    p_offset: offset,
+  });
+  if (error) throw fromPostgrest(error);
+  const hits = (data ?? []) as Row[];
+  const total = hits.length ? Number(hits[0].total_count) : 0;
+  const nextCursor = offset + hits.length < total ? encodeCursor(offset + hits.length) : null;
+  if (!hits.length) return { total, nextCursor, results: [] };
+
+  const ids = hits.map((h) => String(h.college_id));
+  const [cards, withFacts, stats] = await Promise.all([
+    request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", ids),
+    request.db.from("college_profile_facts").select("college_id").in("college_id", ids),
+    request.db
+      .from("college_stats")
+      .select("college_id, admit_rate, sat_total_25, sat_total_75, act_25, act_75, avg_net_price, net_price_by_income, undergrad_enrollment, source_verified_at, data_year")
+      .in("college_id", ids),
+  ]);
+  for (const r of [cards, withFacts, stats]) if (r.error) throw fromPostgrest(r.error);
+  const byId = new Map(((cards.data ?? []) as unknown as Row[]).map((r) => [String(r.id), r]));
+  const profiled = new Set(((withFacts.data ?? []) as Row[]).map((r) => String(r.college_id)));
+  const statsById = new Map(((stats.data ?? []) as Row[]).map((r) => [String(r.college_id), r]));
+  const extras = await cardExtras(request, ids);
+
+  const results = hits
+    .filter((h) => byId.has(String(h.college_id)))
+    .map((h) => {
+      const id = String(h.college_id);
+      const card = toCollegeCard(byId.get(id)!);
+      const st = statsById.get(id);
+      return {
+        ...card,
+        ...extras.get(id)!,
+        profiled: profiled.has(id),
+        // How it matched: 0 exact, 1 name prefix, 2 word prefix, 3 close spelling, 4 text, 5 major, 6 browse.
+        matchTier: Number(h.match_tier),
+        miles: h.miles == null ? null : Number(h.miles),
+        // A Meridies estimate from the student's numbers against the school's
+        // published ranges, never a published figure.
+        fit: (h.fit as Fit | null) ?? null,
+        odds: h.odds == null ? null : Number(h.odds),
+        fitSource: h.fit == null ? null : ("meridies-estimate" as const),
+        official: st ? toSearchStats(st) : null,
+      };
+    });
+  return { total, nextCursor, results };
+}
+
+/**
+ * One short line per pick, saying why it sits in its tier, from the facts the
+ * fit model used. Bullets for the counselor (the essay guardrail's filter),
+ * never a ranking: the order is the fit model's.
+ */
+async function explainPicks(
+  request: FastifyRequest,
+  studentId: string,
+  student: Awaited<ReturnType<typeof studentNumbers>>,
+  picks: { school: ListSchool; fit: Fit; odds: number | null; miles: number | null }[]
+): Promise<Map<string, string>> {
+  if (!picks.length) return new Map();
+  const facts = picks
+    .map(
+      (p) =>
+        `${p.school.collegeId} | ${p.school.name} | tier ${p.fit} | admit ${p.school.admit ?? "?"}% | SAT mid ${p.school.satMid ?? "?"} | ` +
+        `test ${p.school.testPolicy ?? "?"} | ${sizeLabel(p.school.undergrads) ?? "?"} | ${p.school.setting ?? "?"}${p.miles != null ? ` | ${p.miles} mi` : ""}`
+    )
+    .join("\n");
+  const out = await runStructured<{ reasons: { collegeId: string; reason: string }[] }>({
+    request,
+    module: "list-explain",
+    studentId,
+    system:
+      "For each school, write one short reason (under 25 words) a counselor can read, why it sits in its tier, using only the facts given. No praise, no facts that aren't listed.",
+    prompt: `Student: SAT ${student.numbers.sat ?? "none"}, unweighted GPA ${student.numbers.gpaUnweighted ?? "none"}, majors ${student.intendedMajors.join(", ") || "undecided"}.\n${facts}`,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        reasons: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: { collegeId: { type: "string" }, reason: { type: "string", maxLength: 200 } },
+            required: ["collegeId", "reason"],
+          },
+        },
+      },
+      required: ["reasons"],
+    },
+    toolName: "explain_tiers",
+    maxTokens: 1500,
+  });
+  const ids = new Set(picks.map((p) => p.school.collegeId));
+  const why = new Map<string, string>();
+  for (const r of out.reasons ?? []) {
+    const [ok] = enforceNoProse([String(r.reason ?? "")]);
+    if (ok && ids.has(String(r.collegeId))) why.set(String(r.collegeId), ok);
+  }
+  return why;
+}
+
 const PER_TIER_MAX = 12;
 
 export default async function collegeV10Routes(app: FastifyInstance) {
@@ -215,71 +383,10 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   // ---- Search & research --------------------------------------------------------
 
   app.get("/search", { preHandler: [app.authenticate, limit("colleges:search", 240, 60)] }, async (request, reply) => {
-    const q = searchQuery.parse(request.query);
-    const term = safeIlikeTerm(q.q);
-    const filters = searchFilters(q);
-    // Unchanged from before: no words and no filters is no search.
-    if (!term && Object.keys(filters).length === 0) return [];
-
-    if (q.studentId || q.fit) {
-      if (!q.studentId) throw badRequest("fit needs studentId");
-      if (request.profile.role !== "counselor") throw badRequest("Only counselors can rank schools for a student");
-      const { numbers } = await studentNumbers(request, q.studentId);
-      filters.student = { sat: numbers.sat, gpa: numbers.gpaUnweighted };
-    }
-
-    const offset = q.cursor ? decodeCursor(q.cursor) : 0;
-    const pageSize = q.limit ?? 48;
-    const { data, error } = await request.db.rpc("search_colleges", {
-      p_q: term,
-      p_filters: filters,
-      p_sort: q.sort ?? null,
-      p_limit: pageSize,
-      p_offset: offset,
-    });
-    if (error) throw fromPostgrest(error);
-    const hits = (data ?? []) as Row[];
-    const total = hits.length ? Number(hits[0].total_count) : 0;
-    reply.header("X-Total-Count", String(total));
-    if (offset + hits.length < total) reply.header("X-Next-Cursor", encodeCursor(offset + hits.length));
-    if (!hits.length) return [];
-
-    const ids = hits.map((h) => String(h.college_id));
-    const [cards, withFacts, stats] = await Promise.all([
-      request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", ids),
-      request.db.from("college_profile_facts").select("college_id").in("college_id", ids),
-      request.db
-        .from("college_stats")
-        .select("college_id, admit_rate, sat_total_25, sat_total_75, act_25, act_75, avg_net_price, net_price_by_income, undergrad_enrollment, source_verified_at, data_year")
-        .in("college_id", ids),
-    ]);
-    for (const r of [cards, withFacts, stats]) if (r.error) throw fromPostgrest(r.error);
-    const byId = new Map(((cards.data ?? []) as unknown as Row[]).map((r) => [String(r.id), r]));
-    const profiled = new Set(((withFacts.data ?? []) as Row[]).map((r) => String(r.college_id)));
-    const statsById = new Map(((stats.data ?? []) as Row[]).map((r) => [String(r.college_id), r]));
-    const extras = await cardExtras(request, ids);
-
-    return hits
-      .filter((h) => byId.has(String(h.college_id)))
-      .map((h) => {
-        const id = String(h.college_id);
-        const card = toCollegeCard(byId.get(id)!);
-        const st = statsById.get(id);
-        return {
-          ...card,
-          ...extras.get(id)!,
-          profiled: profiled.has(id),
-          // How it matched: 0 exact, 1 name prefix, 2 word prefix, 3 close spelling, 4 text, 5 major, 6 browse.
-          matchTier: Number(h.match_tier),
-          miles: h.miles == null ? null : Number(h.miles),
-          // A Meridies estimate from the student's numbers against the school's
-          // published ranges, never a published figure.
-          fit: (h.fit as Fit | null) ?? null,
-          odds: h.odds == null ? null : Number(h.odds),
-          fitSource: h.fit == null ? null : ("meridies-estimate" as const),
-          official: st ? toSearchStats(st) : null,
-        };
-      });
+    const out = await runSearch(request, searchQuery.parse(request.query));
+    reply.header("X-Total-Count", String(out.total));
+    if (out.nextCursor) reply.header("X-Next-Cursor", out.nextCursor);
+    return out.results;
   });
 
   /** Filter values and how many schools have each, for the search panel. */
@@ -424,7 +531,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   app.get("/:id/extras", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const counselorView = request.profile.role === "counselor";
-    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors] = await Promise.all([
+    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, policies, requirements, majorAdmits] = await Promise.all([
       request.db.from("colleges").select("id, name, website, deadlines").eq("id", id).maybeSingle(),
       request.db.from("college_profile_facts").select("*").eq("college_id", id).maybeSingle(),
       request.db.from("college_admitted_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -459,10 +566,21 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         .eq("credential_level", 3)
         .order("awards", { ascending: false, nullsFirst: false })
         .limit(150),
+      request.db.from("college_policies").select("*").eq("college_id", id).maybeSingle(),
+      request.db.from("college_application_requirements").select("*").eq("college_id", id).order("cycle", { ascending: false }).limit(1),
+      request.db
+        .from("college_major_admit_rates")
+        .select("*")
+        .eq("college_id", id)
+        .order("entry_year", { ascending: false })
+        .order("major")
+        .limit(300),
     ]);
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
-    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors]) if (r.error) throw fromPostgrest(r.error);
+    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, policies, requirements, majorAdmits]) {
+      if (r.error) throw fromPostgrest(r.error);
+    }
     const supplementRows = (supplements.data ?? []) as Row[];
     const latestCycle = supplementRows[0]?.admission_cycle ?? null;
 
@@ -479,6 +597,11 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         admissionFactors: factors.data ? toAdmissionFactors(factors.data as Row) : null,
         majors: ((majors.data ?? []) as Row[]).map(toFieldOfStudy),
       },
+      // Curated by Meridies from College Board, Common App, UC/CSU and the
+      // schools' own pages, each field with its source.
+      policies: policies.data ? toCollegePolicies(policies.data as Row) : null,
+      applicationRequirements: ((requirements.data ?? []) as Row[])[0] ? toApplicationRequirements((requirements.data as Row[])[0]) : null,
+      majorAdmitRates: ((majorAdmits.data ?? []) as Row[]).map(toMajorAdmitRate),
       facts: facts.data ? toProfileFacts(facts.data as Row) : null,
       campusSetting:
         ((facts.data as Row | null)?.campus_setting as string | undefined) ??
@@ -680,12 +803,19 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         perTier: z.number().int().min(1).max(PER_TIER_MAX).optional(),
         offset: z.number().int().min(0).max(1000).optional(),
         exclude: z.array(z.string().uuid()).max(200).optional(),
+        // One AxIS line per school shown, from its facts. The order stays the fit model's.
+        explain: z.boolean().optional(),
       })
       .strict()
       .parse(request.body);
     await resolveStudentId(request, b.studentId, "view");
 
-    const [student, schools] = await Promise.all([studentNumbers(request, b.studentId), loadListSchools(request)]);
+    const [student, curated] = await Promise.all([studentNumbers(request, b.studentId), loadListSchools(request)]);
+    // The curated list-profile schools, plus the rest of the catalog that fits the hard criteria.
+    const schools = [
+      ...curated,
+      ...(await catalogListCandidates(request, b.criteria as ListCriteria, new Set(curated.map((s) => s.collegeId)))),
+    ];
     const excluded = new Set(b.exclude ?? []);
     const { picks, relaxed } = buildList(
       student.numbers,
@@ -721,6 +851,12 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       };
     });
 
+    let why = new Map<string, string>();
+    if (b.explain) {
+      const shown = picks.filter((p) => tiers.some((t) => t.schools.some((x) => x.collegeId === p.school.collegeId)));
+      why = await explainPicks(request, b.studentId, student, shown);
+    }
+
     return {
       student: { id: b.studentId, fullName: student.fullName },
       matched: picks.length,
@@ -730,7 +866,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
           ? `Aid is read from the Meridies need-based rating (${AID_FLOOR[b.criteria.aid]} or higher).`
           : null,
       distanceApplied: b.criteria.origin !== null,
-      tiers,
+      tiers: tiers.map((t) => ({ ...t, schools: t.schools.map((x) => ({ ...x, why: why.get(x.collegeId) ?? null })) })),
     };
   });
 }
