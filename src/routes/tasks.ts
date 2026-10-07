@@ -7,6 +7,14 @@
  * only route here that sends anything — the notification goes out over the
  * existing `message_deliveries` path, not a second outbound mechanism.
  *
+ * The student's To-Do (SV Demo v2): a student sees their counselor's tasks
+ * and may only record progress on them (status, words, percent, ticking a
+ * step done). A student may add tasks for themselves (`source: "student"`);
+ * those are theirs to rename, re-date and delete, and the counselor sees
+ * them beside their own. RLS and two column-guard triggers
+ * (20261010000003) enforce the same split, so a direct PostgREST write
+ * can't get round it.
+ *
  * The tracker answers a question `progress_events` and `draft_quality_checks`
  * cannot: does this work do what the assignment asked for? Stall detection is
  * imported from lib/accountability rather than re-derived, so "behind" means
@@ -90,6 +98,15 @@ const createTaskBody = z
     notifySms: z.boolean().optional(),
     /** Mirror each stage into the Deadline Command Center. On by default. */
     syncDeadlines: z.boolean().optional(),
+  })
+  .strict();
+
+/** What a student may add for themselves: a to-do, not an assignment. */
+const studentTaskBody = z
+  .object({
+    title: z.string().trim().min(1).max(300),
+    instructions: z.string().trim().max(2000).nullable().optional(),
+    dueDate: z.string().date().nullable().optional(),
   })
   .strict();
 
@@ -234,6 +251,11 @@ export default async function taskRoutes(app: FastifyInstance) {
         throw badRequest("That stage doesn't belong to that task");
       }
     },
+    beforeDelete: async (request) => {
+      if (request.profile.role === "student") {
+        throw forbidden("Only your counselor can change a task's stages");
+      }
+    },
     afterWrite: async (request, studentId, row, action) => {
       if (action === "update" && row.done) {
         await request.db
@@ -262,10 +284,13 @@ export default async function taskRoutes(app: FastifyInstance) {
         studentId: z.string().uuid().optional(),
         status: z.string().trim().max(20).optional(),
         includeComplete: z.enum(["true", "false"]).optional(),
+        /** SV Demo v2: only the counselor's assignments, or only the student's own. */
+        source: z.enum(["counselor", "student"]).optional(),
       })
       .parse(request.query);
 
     let builder = request.db.from("deliverables").select("*");
+    if (q.source) builder = builder.eq("source", q.source);
 
     if (q.studentId || request.profile.role === "student") {
       const student = await resolveStudentId(request, q.studentId, "view");
@@ -308,9 +333,47 @@ export default async function taskRoutes(app: FastifyInstance) {
   app.post(
     "/",
     {
-      preHandler: [app.authenticate, requireRole("counselor"), limit("tasks:create", 60, 60)],
+      preHandler: [app.authenticate, limit("tasks:create", 60, 60)],
     },
     async (request, reply) => {
+      // A student adds a to-do for themselves. Always their own record, never
+      // an assignment: no stages, documents or notifications, and it is
+      // marked as theirs so the counselor can tell it from what they assigned.
+      if (request.profile.role === "student") {
+        const sb = studentTaskBody.parse(request.body);
+        const studentId = request.auth.userId;
+        const { data, error } = await request.db
+          .from("deliverables")
+          .insert({
+            student_id: studentId,
+            kind: "custom",
+            title: sb.title,
+            instructions: sb.instructions ?? null,
+            due_date: sb.dueDate ?? null,
+            status: "not-started",
+            source: "student",
+            created_by: studentId,
+            notify_email: false,
+            notify_sms: false,
+          })
+          .select("*")
+          .single();
+        if (error) throw fromPostgrest(error);
+
+        await request.db.from("progress_events").insert({
+          student_id: studentId,
+          deliverable_id: data.id as string,
+          entity_type: "deliverable",
+          entity_id: data.id as string,
+          event: "created",
+          actor_id: studentId,
+          metadata: { source: "student" },
+        });
+
+        const [dto] = await hydrate(request, [data as Row]);
+        return reply.code(201).send(dto);
+      }
+
       const b = createTaskBody.parse(request.body);
       await resolveStudentId(request, b.studentId, "edit");
 
@@ -351,6 +414,8 @@ export default async function taskRoutes(app: FastifyInstance) {
           target_words: b.targetWords ?? null,
           due_date: dueDate,
           status: "not-started",
+          source: "counselor",
+          created_by: request.auth.userId,
           assigned_by: request.auth.userId,
           assigned_at: new Date().toISOString(),
           notify_email: b.notifyEmail ?? true,
@@ -466,7 +531,7 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("deliverables")
-        .select("student_id")
+        .select("student_id, source")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That task isn't on file");
@@ -474,10 +539,19 @@ export default async function taskRoutes(app: FastifyInstance) {
       await resolveStudentId(request, studentId, "edit");
 
       if (request.profile.role === "student") {
-        const allowed = new Set(["status", "currentWords", "progressPct"]);
+        // On their own to-do a student changes anything a to-do has; on an
+        // assignment, only their progress.
+        const allowed =
+          existing.source === "student"
+            ? new Set(["title", "instructions", "status", "dueDate", "progressPct"])
+            : new Set(["status", "currentWords", "progressPct"]);
         const attempted = Object.keys(b).filter((k) => !allowed.has(k));
         if (attempted.length > 0) {
-          throw forbidden("Only your counselor can change the assignment itself");
+          throw forbidden(
+            existing.source === "student"
+              ? "That can't be changed on your own task"
+              : "Only your counselor can change the assignment itself"
+          );
         }
       }
 
@@ -518,17 +592,21 @@ export default async function taskRoutes(app: FastifyInstance) {
   app.delete(
     "/:id",
     {
-      preHandler: [app.authenticate, requireRole("counselor"), limit("tasks:delete", 60, 60)],
+      preHandler: [app.authenticate, limit("tasks:delete", 60, 60)],
     },
     async (request) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const { data: existing } = await request.db
         .from("deliverables")
-        .select("student_id")
+        .select("student_id, source")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That task isn't on file");
       await resolveStudentId(request, existing.student_id as string, "edit");
+      // A student deletes only what they added themselves.
+      if (request.profile.role === "student" && existing.source !== "student") {
+        throw forbidden("Only your counselor can remove a task they assigned");
+      }
 
       const { error } = await request.db.from("deliverables").delete().eq("id", id);
       if (error) throw fromPostgrest(error);
@@ -600,7 +678,7 @@ export default async function taskRoutes(app: FastifyInstance) {
 
   app.delete(
     "/:id/documents/:documentId",
-    { preHandler: [app.authenticate, limit("tasks:detach", 120, 60)] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("tasks:detach", 120, 60)] },
     async (request) => {
       const p = z
         .object({ id: z.string().uuid(), documentId: z.string().uuid() })

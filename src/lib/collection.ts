@@ -73,6 +73,12 @@ export type CollectionOptions<T extends ZodTypeAny> = {
     values: Record<string, unknown>,
     action: "insert" | "update"
   ) => Promise<void>;
+  /**
+   * Called after authorization and before a delete lands, with the row's
+   * student. The place to narrow who may delete (e.g. a student may tick a
+   * task's step done but not remove it). Throw to reject.
+   */
+  beforeDelete?: (request: FastifyRequest, studentId: string, id: string) => Promise<void>;
   /** Called after a successful insert/update, e.g. to log progress events. */
   afterWrite?: (
     request: FastifyRequest,
@@ -190,6 +196,7 @@ export function registerCollection<T extends ZodTypeAny>(
       if (!existing) throw notFound();
 
       await resolveStudentId(request, existing.student_id as string, "edit");
+      await opts.beforeDelete?.(request, existing.student_id as string, id);
 
       const { error } = await request.db.from(table).delete().eq("id", id);
       if (error) throw fromPostgrest(error);

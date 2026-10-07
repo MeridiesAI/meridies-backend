@@ -9,6 +9,12 @@
  * `available_to_llm` is honoured by whatever reads documents into a prompt (see
  * routes/tasks.ts). It is a data-handling switch, not a display preference.
  *
+ * A student's Files is "My documents" (SV Demo v2): their own student folder
+ * and nothing else. They upload into it and paste links into it; they never
+ * see or file into the counselor's drive, practice folders or another
+ * student's folder. `assertFileableFolder` is that rule in code; restrictive
+ * RLS policies (20261010000004) are the same rule in the database.
+ *
  * Upload links go through lib/links.ts, which is the only place in this API
  * that fetches a user-supplied address and is written accordingly.
  */
@@ -83,6 +89,24 @@ export async function assertOwnFolder(request: FastifyRequest, folderId: string)
   return data as Row;
 }
 
+/**
+ * A folder the caller may file into. A counselor: any folder in their own
+ * drive. A student: only their own student folder ("My documents").
+ */
+export async function assertFileableFolder(request: FastifyRequest, folderId: string): Promise<Row> {
+  if (request.profile.role !== "student") return assertOwnFolder(request, folderId);
+  const { data, error } = await request.db
+    .from("folders")
+    .select("*")
+    .eq("id", folderId)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  if (!data || data.kind !== "student" || data.student_id !== request.auth.userId) {
+    throw notFound("That folder isn't on file");
+  }
+  return data as Row;
+}
+
 /** The system folder a student's uploads land in when nothing else is chosen. */
 export async function studentFolderId(
   request: FastifyRequest,
@@ -105,7 +129,11 @@ export default async function fileRoutes(app: FastifyInstance) {
     const q = z.object({ studentId: z.string().uuid().optional() }).parse(request.query);
 
     let builder = request.db.from("folders").select("*");
-    if (q.studentId) {
+    if (request.profile.role === "student") {
+      // "My documents": the student's own folder, whatever they asked for.
+      const student = await resolveStudentId(request, q.studentId, "view");
+      builder = builder.eq("student_id", student).eq("kind", "student");
+    } else if (q.studentId) {
       await resolveStudentId(request, q.studentId, "view");
       builder = builder.eq("student_id", q.studentId);
     } else {
@@ -325,7 +353,12 @@ export default async function fileRoutes(app: FastifyInstance) {
       }
 
       let folderId = b.folderId ?? null;
-      if (folderId) await assertOwnFolder(request, folderId);
+      if (folderId) {
+        const folder = await assertFileableFolder(request, folderId);
+        if (folder.kind === "student" && studentId && folder.student_id !== studentId) {
+          throw badRequest("That folder belongs to a different student");
+        }
+      }
       // Filed into the student's own folder by default — that folder exists for
       // every roster student, so an upload never lands nowhere.
       else if (studentId) folderId = await studentFolderId(request, studentId);
@@ -397,7 +430,7 @@ export default async function fileRoutes(app: FastifyInstance) {
         throw notFound("That document isn't on file");
       }
 
-      const target = b.folderId ? await assertOwnFolder(request, b.folderId) : null;
+      const target = b.folderId ? await assertFileableFolder(request, b.folderId) : null;
 
       const update: Row = {};
       if (b.folderId !== undefined) update.folder_id = b.folderId;
@@ -461,9 +494,9 @@ export default async function fileRoutes(app: FastifyInstance) {
       .parse(request.query);
 
     let builder = request.db.from("document_links").select("*");
-    if (q.studentId) {
-      await resolveStudentId(request, q.studentId, "view");
-      builder = builder.eq("student_id", q.studentId);
+    if (q.studentId || request.profile.role === "student") {
+      const student = await resolveStudentId(request, q.studentId, "view");
+      builder = builder.eq("student_id", student);
     }
     if (q.folderId) builder = builder.eq("folder_id", q.folderId);
     if (q.status) builder = builder.eq("status", q.status);
@@ -488,7 +521,6 @@ export default async function fileRoutes(app: FastifyInstance) {
     {
       preHandler: [
         app.authenticate,
-        requireRole("counselor"),
         limit("links:create", 30, 60, "You're adding links very fast."),
       ],
     },
@@ -506,15 +538,29 @@ export default async function fileRoutes(app: FastifyInstance) {
         .parse(request.body);
 
       const { url, domain } = await normalizeLink(b.url);
-      if (b.studentId) await resolveStudentId(request, b.studentId, "edit");
-      if (b.folderId) await assertOwnFolder(request, b.folderId);
+      // A student's link is always about themselves and lands in My documents.
+      const isStudent = request.profile.role === "student";
+      const studentId = isStudent
+        ? await resolveStudentId(request, b.studentId ?? undefined, "edit")
+        : b.studentId
+          ? await resolveStudentId(request, b.studentId, "edit")
+          : null;
+      let folderId = b.folderId ?? null;
+      if (folderId) {
+        const folder = await assertFileableFolder(request, folderId);
+        if (folder.kind === "student" && studentId && folder.student_id !== studentId) {
+          throw badRequest("That folder belongs to a different student");
+        }
+      } else if (isStudent && studentId) {
+        folderId = await studentFolderId(request, studentId);
+      }
 
       const { data, error } = await request.db
         .from("document_links")
         .insert({
           owner_id: request.auth.userId,
-          student_id: b.studentId ?? null,
-          folder_id: b.folderId ?? null,
+          student_id: studentId,
+          folder_id: folderId,
           url,
           domain,
           title: b.title ?? null,
@@ -538,7 +584,6 @@ export default async function fileRoutes(app: FastifyInstance) {
     {
       preHandler: [
         app.authenticate,
-        requireRole("counselor"),
         limit("links:read", 30, 60, "You're re-reading links very fast."),
       ],
     },
@@ -581,8 +626,11 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (!existing || existing.owner_id !== request.auth.userId) {
         throw notFound("That link isn't on file");
       }
-      if (b.folderId) await assertOwnFolder(request, b.folderId);
+      if (b.folderId) await assertFileableFolder(request, b.folderId);
       if (b.studentId) await resolveStudentId(request, b.studentId, "edit");
+      if (request.profile.role === "student" && b.studentId === null) {
+        throw badRequest("Your links stay in My documents");
+      }
 
       const update: Row = {};
       if (b.title !== undefined) update.title = b.title;
