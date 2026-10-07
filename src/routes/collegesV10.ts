@@ -177,12 +177,13 @@ async function cardExtras(request: FastifyRequest, ids: string[]) {
     }
   >();
   if (!ids.length) return out;
-  const [facts, ratings, lists] = await Promise.all([
+  const [facts, ratings, lists, stats] = await Promise.all([
     request.db.from("college_profile_facts").select("college_id, net_price_by_income").in("college_id", ids),
     request.db.from("college_aid_ratings").select("college_id, kind, rating").in("college_id", ids),
     request.db.from("college_list_profiles").select("college_id, sat_mid").in("college_id", ids),
+    request.db.from("college_stats").select("college_id, sat_total_25, sat_total_75").in("college_id", ids),
   ]);
-  for (const r of [facts, ratings, lists]) if (r.error) throw fromPostgrest(r.error);
+  for (const r of [facts, ratings, lists, stats]) if (r.error) throw fromPostgrest(r.error);
   for (const id of ids) out.set(id, { netPrice: null, needRating: null, meritRating: null, satMid: null });
   for (const f of (facts.data ?? []) as Row[]) {
     const bands = Array.isArray(f.net_price_by_income) ? (f.net_price_by_income as { band: string; priceCents: number }[]) : [];
@@ -193,8 +194,15 @@ async function cardExtras(request: FastifyRequest, ids: string[]) {
     if (r.kind === "need-based") e.needRating = Number(r.rating);
     if (r.kind === "merit-based") e.meritRating = Number(r.rating);
   }
+  // The middle of the official SAT range (College Scorecard) where a school
+  // has no curated list profile: before, every school outside the 40 curated
+  // ones showed "SAT middle: —".
+  for (const st of (stats.data ?? []) as Row[]) {
+    if (st.sat_total_25 == null || st.sat_total_75 == null) continue;
+    out.get(String(st.college_id))!.satMid = Math.round((Number(st.sat_total_25) + Number(st.sat_total_75)) / 2);
+  }
   for (const l of (lists.data ?? []) as Row[]) {
-    out.get(String(l.college_id))!.satMid = l.sat_mid == null ? null : Number(l.sat_mid);
+    if (l.sat_mid != null) out.get(String(l.college_id))!.satMid = Number(l.sat_mid);
   }
   return out;
 }
