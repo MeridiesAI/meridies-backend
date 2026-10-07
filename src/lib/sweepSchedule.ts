@@ -25,6 +25,7 @@ import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { env } from "../env.js";
 import { runEscalationSweep } from "./accountability.js";
+import { beat } from "./heartbeat.js";
 import { serviceClient } from "./supabase.js";
 
 const LEASE_NAME = "accountability-sweep";
@@ -178,6 +179,7 @@ export async function runScheduledSweep(
   };
   log.info(summary, `accountability sweep (${trigger}) finished`);
   await recordSweepAudit(log, { actorId: null, trigger, ...summary });
+  await beat("accountability-sweep", true, undefined, log);
   return { ran: true, ...summary };
 }
 

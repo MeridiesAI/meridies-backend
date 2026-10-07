@@ -5,12 +5,21 @@
  * Railway cron service (see AGENTS.md, "Scheduled jobs"):
  *   curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
  *     "$API_URL/internal/accountability/sweep"
+ *
+ * and monthly, the College Scorecard catalog refresh:
+ *     "$API_URL/internal/ingest/scorecard"
+ * and weekly, the resource library's link check:
+ *     "$API_URL/internal/resources/link-check"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
+import { isStale } from "../lib/heartbeat.js";
+import { startLinkCheck } from "../lib/ingest/linkCheck.js";
+import { serviceClient } from "../lib/supabase.js";
+import { startScorecardIngest } from "../lib/ingest/run.js";
 import { runScheduledSweep } from "../lib/sweepSchedule.js";
 
 /**
@@ -58,4 +67,63 @@ export default async function internalRoutes(app: FastifyInstance) {
       return outcome;
     }
   );
+
+  /**
+   * Refresh the catalog from College Scorecard. The load takes minutes, longer
+   * than a cron's HTTP call should wait, so this starts it under its lease and
+   * answers 202; the run records itself in ingest_runs.
+   */
+  app.post(
+    "/ingest/scorecard",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startScorecardIngest(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "An ingest is already running" });
+        const reason =
+          r.reason === "no-key"
+            ? "Set SCORECARD_API_KEY to load the catalog"
+            : r.reason === "no-service-role"
+              ? "The ingest needs the service role key"
+              : "The ingest could not take its lease";
+        return reply.code(503).send({ started: false, reason });
+      }
+      return reply.code(202).send({ started: true });
+    }
+  );
+
+  /** Weekly: flag library links that stopped answering. 202; recorded in ingest_runs. */
+  app.post(
+    "/resources/link-check",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startLinkCheck(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "A link check is already running" });
+        return reply.code(503).send({ started: false, reason: "The link check needs the service role key and its lease" });
+      }
+      return reply.code(202).send({ started: true });
+    }
+  );
+
+  /**
+   * For a monitor (an uptime check with a keyword match on "all-ok"): every
+   * scheduled job's last clean run, and whether it's overdue. 503 when any is,
+   * so a plain status-code monitor alerts too.
+   */
+  app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (_request, reply) => {
+    const svc = serviceClient();
+    if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });
+    const { data, error } = await svc.from("job_heartbeats").select("job, last_ok_at, last_error_at, expected_every");
+    if (error) return reply.code(503).send({ status: "degraded", reason: "heartbeats unreadable" });
+    const jobs = ((data ?? []) as { job: string; last_ok_at: string | null; last_error_at: string | null; expected_every: string }[]).map((j) => ({
+      job: j.job,
+      lastOkAt: j.last_ok_at,
+      lastErrorAt: j.last_error_at,
+      // Not yet run at all reads as overdue only once something should have run.
+      overdue: isStale(j.last_ok_at, j.expected_every),
+    }));
+    const overdue = jobs.filter((j) => j.overdue).map((j) => j.job);
+    return reply.code(overdue.length ? 503 : 200).send({ status: overdue.length ? "overdue" : "all-ok", overdue, jobs });
+  });
 }

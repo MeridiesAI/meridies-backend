@@ -253,3 +253,68 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
 
   throw badRequest("That link redirects too many times");
 }
+
+export type LinkCheck = {
+  /** ok: answers 2xx. broken: 404/410, or the name no longer resolves. blocked: the site refuses or drops robots (401/403/429, no answer) or errs (5xx), so we can't say. */
+  status: "ok" | "broken" | "blocked";
+  code: number | null;
+  finalUrl: string | null;
+};
+
+/**
+ * Does this link still answer? The resource library's weekly check. Same
+ * per-hop validation as fetchReadablePage, but HEAD (GET when a site refuses
+ * HEAD) and the body is never read. A site that blocks robots is "blocked",
+ * not "broken": nothing is deleted on the strength of a 403.
+ */
+export async function checkLink(rawUrl: string): Promise<LinkCheck> {
+  let current: URL;
+  try {
+    current = await validateUrl(rawUrl);
+  } catch {
+    return { status: "broken", code: null, finalUrl: null };
+  }
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    let res: Response | null = null;
+    for (const method of ["HEAD", "GET"] as const) {
+      try {
+        res = await fetch(current.toString(), {
+          method,
+          redirect: "manual",
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+          // The conventional crawler form, still naming us: several government
+          // sites (CSAC) refuse a bare bot string and answer this one.
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; Meridies-LinkCheck/1.0; +https://meridiesai.com)",
+            Accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+          },
+        });
+      } catch {
+        res = null;
+      }
+      await res?.body?.cancel().catch(() => undefined);
+      // Some servers answer HEAD with 403/405/501 and GET with 200.
+      if (res && method === "HEAD" && [403, 405, 501].includes(res.status)) continue;
+      break;
+    }
+    // The name resolved and the address is public, but nothing answered: sites
+    // like studentaid.gov drop automated requests. We can't say it's gone.
+    if (!res) return { status: "blocked", code: null, finalUrl: current.toString() };
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location || hop === MAX_REDIRECTS) return { status: "broken", code: res.status, finalUrl: current.toString() };
+      try {
+        current = await validateUrl(new URL(location, current).toString());
+      } catch {
+        return { status: "broken", code: res.status, finalUrl: current.toString() };
+      }
+      continue;
+    }
+    if (res.ok) return { status: "ok", code: res.status, finalUrl: current.toString() };
+    if (res.status === 404 || res.status === 410) return { status: "broken", code: res.status, finalUrl: current.toString() };
+    return { status: "blocked", code: res.status, finalUrl: current.toString() };
+  }
+  return { status: "broken", code: null, finalUrl: current.toString() };
+}

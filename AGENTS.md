@@ -60,13 +60,16 @@ src/
 │   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
-│   ├── collegesV10.ts     # Colleges search ranking, decision rounds, list builder
+│   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), linkCheck.ts, run.ts
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
+│   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
+│   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   └── errors.ts, chat.ts
@@ -87,14 +90,18 @@ src/
 │   ├── studentPage.ts     # /student-page info card, polygon, private note
 │   ├── studentAid.ts      # /student-aid  Financial aid page, scholarship matching
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
-│   ├── collegesV10.ts     # /colleges     search & research, profile extras, list builder
+│   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
 │   ├── collegeAi.ts       # /ai           college research, Build College Lists bar
 │   ├── events.ts          # /events       Events Hub
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
+│   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
+│   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
+│   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
@@ -343,6 +350,73 @@ is not. `loadSettings()` and the throttle read in `alertBlockedReason()` throw o
 error for the same reason: a defaulted `enabled: true` would switch alerts back
 on for a counselor who turned them off.
 
+## College catalog and search
+
+The catalog is every operating US college that mainly awards associate's,
+bachelor's or graduate degrees, from the U.S. Department of Education:
+
+- **College Scorecard** (`lib/ingest/scorecard.ts`), upserted on the IPEDS
+  `unitid`: facts on `colleges`, figures in `college_stats`, majors in
+  `college_fields_of_study`. Load once with `npx tsx scripts/ingest/scorecard.ts`;
+  refresh monthly with a Railway cron on `POST /internal/ingest/scorecard`
+  (`CRON_SECRET`, answers 202, runs under the `scorecard-ingest` lease). Needs
+  `SCORECARD_API_KEY` (free, api.data.gov).
+- **IPEDS Admissions** (`lib/ingest/ipeds.ts`), yearly:
+  `npx tsx scripts/ingest/ipeds-admissions.ts --year <YYYY>` fills
+  `college_admission_factors` (what a school weighs; test policy).
+
+Rules: a row Meridies curated (`catalog_source = 'meridies'`) keeps its name,
+slug, aliases, colours, deadlines and test policy; official data fills facts
+only and never touches ratings or profile copy. Official figures carry
+`source_verified_at`, and the API flags them `stale` after 13 months rather than
+serving them as current. Every load is an `ingest_runs` row.
+
+Search runs in Postgres, not in memory: `public.search_colleges(q, filters,
+sort, limit, offset)` ranks exact name/alias > name prefix > word prefix >
+close spelling (pg_trgm) > full text > bachelor's major, filters (state,
+distance, size, control, admit rate, test policy, net price at an income band,
+majors, HBCU/HSI/women's/religious, setting, fit) and pages. Fit
+(reach/target/likely) is `studentOdds` in SQL and is labelled a Meridies
+estimate. `GET /colleges/search` keeps its array response; the total and next
+cursor are the `X-Total-Count` / `X-Next-Cursor` headers. No embeddings: the AI
+rule is Anthropic only.
+
+### Resource library and curated datasets
+
+`library_resources` is the Meridies library (null owner, seeded in
+`20261007000004`, read-only to practices) plus each practice's own rows.
+Students read the rows meant for them and what is pinned to them. Sites whose
+terms forbid scraping (Chegg, CollegeXpress, BigFuture, LinkedIn) are
+`link_only`: linked, never read. A weekly cron on `POST /internal/resources/link-check`
+asks each link whether it still answers (`lib/links.ts checkLink`, SSRF-safe,
+HEAD, body never read) and flags it `ok` / `broken` (404/410 twice, or gone
+from DNS) / `blocked` (the site refuses robots); nothing is deleted.
+
+Curated facts live on the school, each with a source: `college_policies`
+(superscore, self-reported scores, CSS Profile, STARS, FairTest),
+`college_application_requirements` (per cycle) and `college_major_admit_rates`
+(UC/CSU by major, SJSU's eligibility index). They are loaded from CSVs the team
+compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
+<policies|requirements|major-admit-rates> --file <csv> [--dry-run]`. A file with
+one bad row loads nothing. Checked-in files and their sources are listed in
+`scripts/ingest/data/README.md`.
+
+### Catalog data: yearly refresh
+
+| When | Source | Who | How |
+|---|---|---|---|
+| Monthly (cron) | College Scorecard | automatic | `POST /internal/ingest/scorecard` |
+| Weekly (cron) | Library links | automatic | `POST /internal/resources/link-check` |
+| When NCES publishes (usually late summer) | IPEDS Admissions (`ADM<year>.zip`) | engineer | `scripts/ingest/ipeds-admissions.ts --year <year>` |
+| August | Common App requirements grid (new cycle) | counselor team compiles, engineer loads | `curated-csv.ts --dataset requirements` |
+| August–October | UC application, Cal State Apply (dates, requirements) | counselor team | `requirements`, and update the library rows' `opens_on`/`closes_on`/`cycle` in a migration |
+| September | CSS Profile participating list (College Board) | counselor team | `policies` (`css_profile_required`) |
+| Summer (UC Information Center, CSU impaction matrix, SJSU eligibility index) | admit rates by major, impacted and open majors | counselor team | `major-admit-rates` |
+| Rolling | FairTest list, school superscore/self-report pages | counselor team | `policies` |
+
+Dated library rows (Common App, UC, Cal State Apply, FAFSA, CSS Profile, Cal
+Grant, Dream Act) carry the current cycle; roll them forward each August.
+
 ## Scheduled jobs
 
 The escalation sweep (`runEscalationSweep` in `lib/accountability.ts`) turns red
@@ -394,6 +468,33 @@ conditional `scheduled -> queued` update before it is sent, so overlapping
 runs can't send it twice; one inside its counselor's quiet hours is moved to
 the next window. There is no in-process interval for this one.
 
+## AI inside the search
+
+The model never writes a result list and never changes the catalog.
+
+- `POST /colleges/search/ai`: FAST_MODEL fills the §3 filters through a forced
+  tool; the output goes through the same `searchQuery` validation as any query
+  string, the real search runs, and the response shows the filters that ran
+  (and the parts of the request no filter could express) so the counselor can
+  edit them.
+- `POST /colleges/research` and `POST /resources/ask`: `runWebResearch`
+  (`lib/anthropic.ts`) on `RESEARCH_MODEL` (`claude-opus-5-5`, with the
+  server-side refusal fallback) and web search/fetch limited to
+  `RESEARCH_DOMAINS` plus the school's own site. Each answer part carries its
+  citations; a part with none is connective text, not a sourced claim. The
+  research uses the `web_search_20250305` / `web_fetch_20250910` tools on
+  purpose: the `_20260209` versions route results through code execution and
+  return empty citation lists.
+- Where a cited source disagrees with the catalog, a `catalog_change_proposals`
+  row is written (allowed fields and values only, source URL must be one the
+  answer cited). Only a `catalog_editors` member (Meridies staff, added with
+  service_role) can approve, and approval is what changes the catalog.
+- `GET /colleges/:id/student-summary`: counselor bullets from catalog facts and
+  the student's record only. No model; every bullet names its basis.
+- `POST /colleges/list-builder` draws candidates from the whole catalog
+  (`catalogListCandidates`) and, with `explain: true`, adds one AxIS line per
+  school shown. The order is always the fit model's.
+
 ## Anthropic / AI rules
 
 **All product AI goes through Anthropic.** No other providers unless the team
@@ -401,6 +502,8 @@ explicitly decides otherwise.
 
 - **Speed first** — counselors use these live, in session with a family
 - **Default model:** `claude-haiku-4-5` (`FAST_MODEL` in `lib/anthropic.ts`)
+- **Research** (`RESEARCH_MODEL`, `claude-opus-5-5`) only for cited web research
+  (`runWebResearch`): a counselor acts on those answers.
 - **Sonnet** (`DEEP_MODEL`) only where Haiku's quality genuinely isn't enough —
   currently narrative coherence, college lists, and the concierge, wherever
   they are asked from: `routes/ai.ts`, the AxIS chat tools in `lib/chat.ts`,
@@ -530,6 +633,48 @@ into a prompt must filter on them (see `routes/tasks.ts`).
 - Never commit `.env` — keep `.env.example` current
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
+
+## Teams, guardians, delivery status, data rights, monitoring
+
+- **Firm teams.** `profiles.firm_id` can't be updated by clients, so firms
+  change through SECURITY DEFINER functions: `create_firm`,
+  `accept_firm_invitation` (the invite's email must match the account; seats
+  are enforced), `set_firm_member_role` (the owner's seat never changes),
+  `remove_firm_member` (the owner can't leave). Routes: `/firms`,
+  `/firms/mine/{members,invites}`, `/firms/join`. Invitation tokens are stored
+  as sha256 only; the app page for the link is `/join-firm/<token>`.
+- **Guardians.** A student may add a guardian, but one they add starts with
+  `alerts_enabled = false`, and only the counselor side changes or removes a
+  guardian (`private.can_manage_guardians`). Otherwise a student could redirect
+  the parent alerts their counselor sends.
+- **Delivery status.** `POST /webhooks/resend` (Svix signature,
+  `RESEND_WEBHOOK_SECRET`) and `POST /webhooks/twilio/status`
+  (`X-Twilio-Signature`, `TWILIO_AUTH_TOKEN` over `PUBLIC_API_URL`) move
+  `message_deliveries` to delivered / bounced / failed; a status never moves
+  backwards. With `PUBLIC_API_URL` set, every SMS asks Twilio to report there.
+- **Data rights.** `GET /account/export` (self) and
+  `GET /account/students/:id/export` (counselor) read through the caller's RLS
+  client, so an export holds exactly what that person can already see.
+  `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
+  user; a counselor with an active roster or an owned firm is refused.
+- **Monitoring.** Every scheduled job writes `job_heartbeats`.
+  `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
+  when one hasn't run cleanly within twice its interval. Point an uptime monitor
+  at `/health` (public) and `/internal/status` (with the bearer header).
+
+## Tests and CI
+
+- `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
+  rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
+  mapping (against a recorded real Scorecard response in `test/fixtures`), the
+  essay guardrails, the link guard, payments, class rank, proposals, webhook
+  signatures, heartbeats.
+- `npm run test:integration`: persona suites (`test/integration`) against a
+  local Supabase and a running API, as real counselor and student accounts.
+- `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
+  tests; then a throwaway Supabase with every migration, an RLS-on-every-table
+  check, the fixtures, and the persona suites. AI calls are not exercised in CI
+  (they cost money); their pure parts are unit-tested.
 
 ## Environment
 
