@@ -15,7 +15,9 @@ Demo v10 product shows: My Work Queue, pins, admission outcomes and alumni,
 referrals, Mass invite, the student page's four sections (College list,
 Application, Financial aid, Communication), Colleges search and Build College
 Lists, Events Hub, Contact Pipeline with its Payment Tracker, Management, email
-templates and the Calendar feed. `meridies-demo` is the source of truth for
+templates and the Calendar feed. SV Demo v2 adds the signed-in student's own
+view: overview and preferences, a read-only strength profile, their To-Do,
+My documents and Profile Update (see "The student view" below). `meridies-demo` is the source of truth for
 what these look like and do; this repo makes them real.
 
 ## Architecture — this is now the shipped state, not a target
@@ -66,6 +68,8 @@ src/
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
+│   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
+│   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
@@ -93,6 +97,8 @@ src/
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
+│   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
 │   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
@@ -246,13 +252,55 @@ forget it.
   not deleted, so its history keeps its parent. `ensure_default_polygon_axes`
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
-  a module label (`mass-invite`, `college-research`, `email-template`) read
+  a module label (`mass-invite`, `college-research`, `email-template`,
+  `profile-update`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
   request, so it would go unnoticed.
 - **Essay word counts are the database's** (`essays_set_word_count`, also on
   `essay_versions`); routes don't accept a client's count.
+
+### The student view (SV Demo v2)
+
+A signed-in student sees their own record, and "me" is always the JWT: the
+`/me` routes take no student id, and everywhere else `resolveStudentId`
+refuses another student's. The rules, each enforced in route code *and* in
+the database (`20261010*`):
+
+- **The strength profile is read-only for the student.** They read their
+  polygon and its recorded history (`GET /me/polygon`, `/me/polygon/years`,
+  or `/student-page/:id/polygon*` with their own id); every axis write is
+  counselor-only (`requireRole("counselor")`, and RLS through
+  `private.counselor_can_edit_student`). A student's read derives today's
+  scores in memory (`loadPolygon(..., { persist: false })`) and writes
+  nothing, so it never touches the history.
+- **Counselor tasks are not the student's to edit.** On a task with
+  `source = 'counselor'` the student records progress only (status, words,
+  percent, ticking a step done); renaming, re-dating, re-scoping or deleting
+  it is refused by the route and by `deliverables_guard_student_edits`. Stage
+  inserts/deletes and task document links are counselor-only.
+- **Self-added tasks are visible to the counselor.** `POST /tasks` from a
+  student writes `source = 'student'`, `created_by` = the student; those rows
+  are theirs to edit and delete, show on the counselor's `GET /tasks?studentId`
+  (filter with `source`), and never count as stalled work in the
+  accountability sweep.
+- **Profile updates are filed into the sheets.** Profile Update (AxIS, Haiku,
+  `ai_runs` module `profile-update`) asks one question at a time; the server,
+  not the model, decides when a record is complete, re-validates every field
+  (the description is capped at 150 characters) and files it as a row of
+  `activities` or `awards` (`source = 'ai'`) plus a `profile_updates` log row
+  the counselor reads at `GET /students/:id/profile-updates`. It never writes
+  essay prose.
+- **Files is "My documents".** A student lists, uploads into and pastes links
+  into their own student folder only (`assertFileableFolder`, restrictive RLS).
+- **Preferences are the student's, alerts are not.** `student_preferences`
+  (banner, theme, the student's own text/email reminder channels) is
+  student-written and counselor-readable; `student_alert_prefs` stays
+  counselor-written. The banner image lives in the private `student-banners`
+  bucket under `<student id>/`, uploaded through a signed URL minted on the
+  student's own token.
+- **Settings is the display name and the theme**, nothing else (`PATCH /me/settings`).
 
 ### Aid generosity is three ratings, not one
 
@@ -391,7 +439,7 @@ explicitly decides otherwise.
   and the Application page's Coherence, Recommended column and Activities
   Build (`routes/applicationAi.ts`). Everything the v10 sync added beyond
   those (college research, the Build College Lists bar, Mass invite, email
-  templates, the composer's drafts) runs on Haiku
+  templates, the composer's drafts) runs on Haiku, and so does Profile Update
 - **Opus** effectively never on a hot path, and never without documenting why
 - Every model must support image and file attachments
 - Never enable `thinking` / `effort` on models that don't support them
