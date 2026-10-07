@@ -1,7 +1,8 @@
 import { user, call, check, API } from "./harness.mjs";
 
 const h = await (await fetch(API + "/health")).json();
-check("health reports a working key", h.anthropic === true && h.database === true, JSON.stringify(h));
+// With a key configured the check must say it works; without one (CI), it must say false, not true.
+check("health reports whether the key works", h.database === true && h.anthropic === Boolean(process.env.ANTHROPIC_API_KEY), JSON.stringify(h));
 
 const c = await user("counselor-a");
 const me = await call(c.token, "GET", "/auth/me");
