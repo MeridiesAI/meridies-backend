@@ -152,9 +152,9 @@ export function cleanReview(value: unknown): ReviewResult {
   };
 }
 
-/** The findings the counselor reads: what AxIS noticed, then what it read off the file. */
+/** The findings the counselor reads: what AxIS read off the file first, then what it noticed. */
 export function checkFindings(r: ReviewResult): string[] {
-  return [...r.findings, ...r.facts.map((f) => `${f.label}: ${f.value}`)].slice(0, 14);
+  return [...r.facts.map((f) => `${f.label}: ${f.value}`), ...r.findings].slice(0, 14);
 }
 
 /**

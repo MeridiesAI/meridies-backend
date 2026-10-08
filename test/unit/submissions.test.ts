@@ -40,7 +40,7 @@ test("model output is trimmed, capped and filtered before anyone reads it", () =
   assert.ok(!r.findings.some((f) => f.startsWith("One. Two.")));
   assert.deepEqual(r.facts, [{ label: "Weighted GPA", value: "4.21" }]);
   assert.equal(r.studentFix, null, "an accepted file carries no fix");
-  assert.deepEqual(checkFindings(r).slice(-1), ["Weighted GPA: 4.21"]);
+  assert.deepEqual(checkFindings(r)[0], "Weighted GPA: 4.21", "figures come first");
 });
 
 test("a needs-fix verdict tells the student what to do, and an unknown verdict is refused", () => {
