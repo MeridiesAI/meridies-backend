@@ -168,8 +168,10 @@ export default async function inviteRoutes(app: FastifyInstance) {
   );
 
   /**
-   * The "Building profile" cards on Overview: students created from New
-   * student, until they have joined and their intake is in.
+   * The "Building profile" cards on Overview: every student this counselor
+   * invited (New student, the onboarding invite step, Mass invite), until they
+   * have joined and their intake is in. A family invitation is the parent's
+   * link, not a student, so it stays off.
    */
   app.get(
     "/building",
@@ -179,7 +181,8 @@ export default async function inviteRoutes(app: FastifyInstance) {
         .from("invitations")
         .select(INVITATION_COLUMNS)
         .eq("counselor_id", request.auth.userId)
-        .eq("source", "intake")
+        .in("source", ["intake", "single", "mass"])
+        .eq("audience", "student")
         .is("dismissed_at", null)
         .in("status", ["pending", "accepted"])
         .order("created_at", { ascending: false })
