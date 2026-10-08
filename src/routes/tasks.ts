@@ -42,10 +42,11 @@ import {
   taskAssignmentSms,
   type TaskNotification,
 } from "../lib/email.js";
-import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
+import { startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 
 type Row = Record<string, unknown>;
@@ -699,6 +700,152 @@ export default async function taskRoutes(app: FastifyInstance) {
         .eq("document_id", p.documentId);
       if (error) throw fromPostgrest(error);
       return { deleted: true };
+    }
+  );
+
+  // ---- Handing a file in ------------------------------------------------------
+  //
+  // The student (or the counselor, on their behalf) hands in a file already in
+  // the student's documents against a task. The task moves to "review", AxIS
+  // checks the file (lib/submissionReview.ts) and moves it on, and the counselor
+  // hears about it. A student may only add or remove `submission` rows on their
+  // own tasks; RLS (20261012000001) enforces the same.
+
+  async function loadTaskForSubmission(request: FastifyRequest, id: string): Promise<Row> {
+    const { data: task, error } = await request.db
+      .from("deliverables")
+      .select("id, student_id, status")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw fromPostgrest(error);
+    if (!task) throw notFound("That task isn't on file");
+    await resolveStudentId(request, task.student_id as string, "edit");
+    return task as Row;
+  }
+
+  async function freshTask(request: FastifyRequest, id: string) {
+    const { data } = await request.db.from("deliverables").select("*").eq("id", id).maybeSingle();
+    if (!data) throw notFound("That task isn't on file");
+    const [dto] = await hydrate(request, [data as Row]);
+    return dto;
+  }
+
+  app.post(
+    "/:id/submissions",
+    { preHandler: [app.authenticate, limit("tasks:submit", 30, 60)] },
+    async (request, reply) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const { documentId } = z.object({ documentId: z.string().uuid() }).strict().parse(request.body);
+      const task = await loadTaskForSubmission(request, id);
+      const studentId = String(task.student_id);
+
+      const { data: doc, error: docError } = await request.db
+        .from("documents")
+        .select("id, student_id")
+        .eq("id", documentId)
+        .maybeSingle();
+      if (docError) throw fromPostgrest(docError);
+      if (!doc || doc.student_id !== studentId) throw badRequest("That file isn't in this student's documents");
+
+      const { data: existing } = await request.db
+        .from("deliverable_documents")
+        .select("role")
+        .eq("deliverable_id", id)
+        .eq("document_id", documentId)
+        .maybeSingle();
+      if (existing && existing.role !== "submission") {
+        throw conflict("That file is already on this task as reference material");
+      }
+      if (!existing) {
+        const { error } = await request.db.from("deliverable_documents").insert({
+          deliverable_id: id,
+          document_id: documentId,
+          student_id: studentId,
+          role: "submission",
+          added_by: request.auth.userId,
+        });
+        if (error) throw fromPostgrest(error);
+      }
+
+      const now = new Date().toISOString();
+      const { error: taskError } = await request.db
+        .from("deliverables")
+        .update({ status: "review", last_activity_at: now })
+        .eq("id", id);
+      if (taskError) throw fromPostgrest(taskError);
+      await request.db.from("progress_events").insert({
+        student_id: studentId,
+        deliverable_id: id,
+        entity_type: "deliverable",
+        entity_id: id,
+        event: "uploaded",
+        actor_id: request.auth.userId,
+        metadata: { documentId, handedIn: true },
+      });
+
+      const review = await startSubmissionReview(request, { taskId: id, documentId });
+      return reply.code(201).send({ task: await freshTask(request, id), review });
+    }
+  );
+
+  app.delete(
+    "/:id/submissions/:documentId",
+    { preHandler: [app.authenticate, limit("tasks:unsubmit", 60, 60)] },
+    async (request) => {
+      const p = z.object({ id: z.string().uuid(), documentId: z.string().uuid() }).parse(request.params);
+      const task = await loadTaskForSubmission(request, p.id);
+
+      const { data: removed, error } = await request.db
+        .from("deliverable_documents")
+        .delete()
+        .eq("deliverable_id", p.id)
+        .eq("document_id", p.documentId)
+        .eq("role", "submission")
+        .select("document_id");
+      if (error) throw fromPostgrest(error);
+      if (!removed?.length) throw notFound("That file isn't handed in on this task");
+
+      // Nothing left to check: a task waiting on a check goes back to the student.
+      const { count } = await request.db
+        .from("deliverable_documents")
+        .select("document_id", { count: "exact", head: true })
+        .eq("deliverable_id", p.id)
+        .eq("role", "submission");
+      if ((count ?? 0) === 0 && task.status === "review") {
+        await request.db.from("deliverables").update({ status: "in-progress" }).eq("id", p.id);
+      }
+      return freshTask(request, p.id);
+    }
+  );
+
+  /** The counselor asks AxIS to check the latest handed-in file again. */
+  app.post(
+    "/:id/review",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRole("counselor"),
+        limit("ai:submission-review", 20, 60, "You're running checks very fast."),
+      ],
+    },
+    async (request) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const b = z.object({ documentId: z.string().uuid().optional() }).strict().parse(request.body ?? {});
+      await loadTaskForSubmission(request, id);
+
+      let builder = request.db
+        .from("deliverable_documents")
+        .select("document_id, created_at")
+        .eq("deliverable_id", id)
+        .eq("role", "submission");
+      if (b.documentId) builder = builder.eq("document_id", b.documentId);
+      const { data: subs, error } = await builder.order("created_at", { ascending: false }).limit(1);
+      if (error) throw fromPostgrest(error);
+      const latest = subs?.[0];
+      if (!latest) throw badRequest("Nothing has been handed in on this task yet");
+
+      const review = await startSubmissionReview(request, { taskId: id, documentId: String(latest.document_id) });
+      return { task: await freshTask(request, id), review };
     }
   );
 
