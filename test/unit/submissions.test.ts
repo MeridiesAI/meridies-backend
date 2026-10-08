@@ -27,7 +27,10 @@ test("model output is trimmed, capped and filtered before anyone reads it", () =
     verdict: "accepted",
     note: "  This   is the\\ntranscript.  " + "x".repeat(300),
     findings: ["Two pages, both present.", "One. Two. Three sentences would be a paragraph.", "x".repeat(300)],
-    facts: [{ label: " Weighted GPA ", value: " 4.21 " }, { label: "", value: "dropped" }],
+    weightedGpa: " 4.21 ",
+    unweightedGpa: "",
+    classRank: null,
+    testScores: [],
     studentFix: "Upload something else.",
   });
   assert.equal(r.note.length, 200);
@@ -52,13 +55,13 @@ test("a list the model sent as JSON text is read back as a list", () => {
     verdict: "needs-fix",
     note: "This is a grocery list, not a resume.",
     findings: '["No name, experience or activities", "One page, five lines"]',
-    facts: "[]",
+    testScores: "[]",
     studentFix: "Upload your resume.",
   });
   assert.deepEqual(r.findings, ["No name, experience or activities", "One page, five lines"]);
   assert.deepEqual(r.facts, []);
-  assert.deepEqual(cleanReview({ verdict: "accepted", note: "ok", findings: "Single finding", facts: [] }).findings, ["Single finding"]);
-  assert.deepEqual(cleanReview({ verdict: "accepted", note: "ok", findings: "[not json", facts: "nonsense" }).facts, []);
+  assert.deepEqual(cleanReview({ verdict: "accepted", note: "ok", findings: "Single finding" }).findings, ["Single finding"]);
+  assert.deepEqual(cleanReview({ verdict: "accepted", note: "ok", findings: "[not json", testScores: 7 }).facts, []);
 });
 
 test("findings wrapped in <item> markup come out as separate bullets", () => {
@@ -69,4 +72,27 @@ test("findings wrapped in <item> markup come out as separate bullets", () => {
     facts: [],
   });
   assert.deepEqual(r.findings, ["Official transcript.", "Name matches."]);
+});
+
+test("printed figures become facts the counselor reads; missing or garbled ones don't", () => {
+  const r = cleanReview({
+    verdict: "accepted",
+    note: "ok",
+    findings: [],
+    weightedGpa: "4.12",
+    unweightedGpa: null,
+    classRank: "24 of 410",
+    testScores: ["SAT 1450"],
+  });
+  assert.deepEqual(checkFindings(r), ["Weighted GPA: 4.12", "Class rank: 24 of 410", "Test score: SAT 1450"]);
+  // What the model leaked when it garbled a tool call: no figure, verdict intact.
+  const garbled = cleanReview({
+    verdict: "accepted",
+    note: "ok",
+    findings: [],
+    weightedGpa: '\n  <parameter name="weightedGpa">4.12',
+    testScores: ['<parameter name="item">SAT'],
+  });
+  assert.equal(garbled.verdict, "accepted");
+  assert.deepEqual(garbled.facts, []);
 });

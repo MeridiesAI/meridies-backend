@@ -110,32 +110,36 @@ function splitItems(items: string[]): string[] {
     .filter(Boolean);
 }
 
+/** A figure as printed, or null. Markup the model leaked into a value is not a figure. */
+const printed = z
+  .preprocess((v) => (typeof v === "string" && v.trim() && !/[<>]/.test(v) ? v : null), z.string().nullable())
+  .optional()
+  .catch(null);
+
 /** Model output is untrusted: re-validated, trimmed and filtered here. */
 export function cleanReview(value: unknown): ReviewResult {
   const parsed = z
     .object({
       verdict: z.enum(["accepted", "needs-fix"]),
       note: z.string(),
-      findings: z.preprocess(listFrom, z.array(z.string())).default([]),
-      // A fact that isn't a label and a value is dropped, not fatal: the
-      // verdict still stands without it.
-      facts: z
-        .preprocess((v) => {
-          const list = listFrom(v);
-          if (!Array.isArray(list)) return [];
-          return list.filter(
-            (f): f is { label: string; value: string } =>
-              typeof f === "object" && f !== null &&
-              typeof (f as Row).label === "string" && typeof (f as Row).value === "string"
-          );
-        }, z.array(z.object({ label: z.string(), value: z.string() })))
-        .default([]),
-      studentFix: z.string().nullable().optional(),
+      findings: z.preprocess(listFrom, z.array(z.string())).catch([]).default([]),
+      // Flat on purpose: the model garbles nested objects in a tool call
+      // often enough to lose them, and a lost figure must not lose the verdict.
+      weightedGpa: printed,
+      unweightedGpa: printed,
+      classRank: printed,
+      testScores: z.preprocess(listFrom, z.array(z.string())).catch([]).default([]),
+      studentFix: z.string().nullable().optional().catch(null),
     })
     .parse(value);
-  const facts = parsed.facts
-    .map((f) => ({ label: oneLine(f.label, 60), value: oneLine(f.value, 80) }))
-    .filter((f) => f.label && f.value)
+  const facts = [
+    { label: "Weighted GPA", value: parsed.weightedGpa ?? "" },
+    { label: "Unweighted GPA", value: parsed.unweightedGpa ?? "" },
+    { label: "Class rank", value: parsed.classRank ?? "" },
+    ...parsed.testScores.filter((t) => !/[<>]/.test(t)).map((t) => ({ label: "Test score", value: t })),
+  ]
+    .map((f) => ({ label: f.label, value: oneLine(f.value, 80) }))
+    .filter((f) => f.value)
     .slice(0, 8);
   const fix = parsed.studentFix ? oneLine(parsed.studentFix, 240) : "";
   return {
@@ -291,7 +295,7 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
       "Never rewrite, draft, continue or quote the student's work at length. Never produce prose they could paste anywhere.",
       "note: ONE plain line for the counselor, at most 200 characters.",
       "findings: up to 6 short bullets on what you checked or what is wrong, each a separate list item with no markup.",
-      "facts: up to 8 label/value pairs copied exactly as printed in the document when it states them (for example a GPA, class rank, a test score, a graduation date). Never infer or compute a value. Leave facts empty for essays and resumes unless a figure is printed.",
+      "weightedGpa, unweightedGpa, classRank, testScores: copied exactly as printed on the document (classRank like \"24 of 410\", each test score like \"SAT 1450\"); null or empty when not printed. Never infer or compute a value.",
       "studentFix: when the verdict is needs-fix, one plain sentence telling the student what to upload instead. Otherwise null.",
     ].join("\n"),
     prompt: [
@@ -312,18 +316,13 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
         verdict: { type: "string", enum: ["accepted", "needs-fix"] },
         note: { type: "string", maxLength: 200 },
         findings: { type: "array", maxItems: 6, items: { type: "string", maxLength: 240 } },
-        facts: {
-          type: "array",
-          maxItems: 8,
-          items: {
-            type: "object",
-            properties: { label: { type: "string", maxLength: 60 }, value: { type: "string", maxLength: 80 } },
-            required: ["label", "value"],
-          },
-        },
+        weightedGpa: { type: ["string", "null"], maxLength: 40 },
+        unweightedGpa: { type: ["string", "null"], maxLength: 40 },
+        classRank: { type: ["string", "null"], maxLength: 60 },
+        testScores: { type: "array", maxItems: 6, items: { type: "string", maxLength: 80 } },
         studentFix: { type: ["string", "null"], maxLength: 240 },
       },
-      required: ["verdict", "note", "findings", "facts", "studentFix"],
+      required: ["verdict", "note", "findings", "weightedGpa", "unweightedGpa", "classRank", "testScores", "studentFix"],
     },
     validate: cleanReview,
   });
