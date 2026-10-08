@@ -141,6 +141,13 @@ export default async function firmRoutes(app: FastifyInstance) {
       .eq("firm_id", firmId)
       .order("joined_at");
     if (error) throw fromPostgrest(error);
+    // Caseload sizes come from firm_consultants(), which counts across the firm
+    // without exposing anyone's students (RLS hides those rows from a peer).
+    const { data: counts, error: countError } = await request.db.rpc("firm_consultants");
+    if (countError) throw fromPostgrest(countError);
+    const studentsOf = new Map(
+      ((counts ?? []) as Record<string, unknown>[]).map((c) => [String(c.profile_id), Number(c.student_count ?? 0)])
+    );
     return ((data ?? []) as Record<string, unknown>[]).map((m) => {
       const p = (m.profile ?? {}) as Record<string, unknown>;
       return {
@@ -149,6 +156,7 @@ export default async function firmRoutes(app: FastifyInstance) {
         joinedAt: String(m.joined_at),
         fullName: (p.full_name as string | null) ?? null,
         email: (p.email as string | null) ?? null,
+        studentCount: studentsOf.get(String(m.profile_id)) ?? null,
       };
     });
   });
