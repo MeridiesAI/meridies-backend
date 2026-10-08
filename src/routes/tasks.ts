@@ -794,6 +794,10 @@ export default async function taskRoutes(app: FastifyInstance) {
     async (request) => {
       const p = z.object({ id: z.string().uuid(), documentId: z.string().uuid() }).parse(request.params);
       const task = await loadTaskForSubmission(request, p.id);
+      // A finished task keeps the file it was finished with; the counselor reopens it first.
+      if (request.profile.role === "student" && task.status === "complete") {
+        throw conflict("This one is done. Ask your counselor to reopen it to change the file.");
+      }
 
       const { data: removed, error } = await request.db
         .from("deliverable_documents")

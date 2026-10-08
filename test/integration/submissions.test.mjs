@@ -126,6 +126,8 @@ if (ai) {
   check("…reads the GPA off the file", done?.tracker?.findings?.some((f) => f.includes("4.12")), JSON.stringify(done?.tracker?.findings));
   const ticked = await sql(`select e->>'provided' from invitations i, jsonb_array_elements(i.intake_requests) e where i.token='${inviteToken}' and e->>'id'='tr'`);
   check("the counselor's Transcript request ticks", ticked === "true", ticked);
+  const locked = await call(s.token, "DELETE", `/tasks/${transcript.id}/submissions/${doc.id}`);
+  check("a finished task keeps its file", locked.status === 409, `status ${locked.status}`);
   const note = await sql(`select title from notifications where recipient_id='${c.id}' and student_id='${s.id}' order by created_at desc limit 1`);
   check("the counselor is notified", note.includes("Transcript") && note.includes("accepted"), note);
 

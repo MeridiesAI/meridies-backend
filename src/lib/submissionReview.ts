@@ -293,7 +293,7 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
       "Only say needs-fix for a real problem the student can act on: the wrong document, unreadable, plainly cut off, another person's, or missing something the counselor explicitly asked for.",
       "Do not grade the student's achievements, writing quality or effort. A weak but genuine transcript is accepted.",
       "Never rewrite, draft, continue or quote the student's work at length. Never produce prose they could paste anywhere.",
-      "note: ONE plain line for the counselor, at most 200 characters.",
+      "note: ONE plain line, at most 200 characters, that both the student and the counselor read. Describe the file, not the person: \"This is a beach packing list, not a resume.\" or \"Official transcript through grade 10, complete and readable.\" Never write \"the student\".",
       "findings: up to 6 short bullets on what you checked or what is wrong, each a separate list item with no markup.",
       "weightedGpa, unweightedGpa, classRank, testScores: copied exactly as printed on the document (classRank like \"24 of 410\", each test score like \"SAT 1450\"); null or empty when not printed. Never infer or compute a value.",
       "studentFix: when the verdict is needs-fix, one plain sentence telling the student what to upload instead. Otherwise null.",
@@ -330,6 +330,19 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
 }
 
 async function record(svc: Svc, task: Row, documentId: string, result: ReviewResult): Promise<void> {
+  // The task moves first and the verdict is written last: a client polling for
+  // the verdict then never sees "accepted" on a task still waiting on a check.
+  // Re-read the status: the counselor may have moved the task while AxIS read.
+  const { data: fresh } = await svc.from("deliverables").select("status").eq("id", String(task.id)).maybeSingle();
+  const next = nextTaskStatus(String(fresh?.status ?? task.status), result.verdict);
+  if (next) {
+    const update: Row = { status: next, last_activity_at: new Date().toISOString() };
+    if (next === "complete") update.progress_pct = 100;
+    const { error: taskError } = await svc.from("deliverables").update(update).eq("id", String(task.id));
+    if (taskError) throw new Error(`task update: ${taskError.message}`);
+    task.status = next;
+  }
+
   const { error } = await svc.from("deliverable_tracker_checks").insert({
     student_id: task.student_id,
     deliverable_id: task.id,
@@ -342,16 +355,6 @@ async function record(svc: Svc, task: Row, documentId: string, result: ReviewRes
     checked_by: null,
   });
   if (error) throw new Error(`tracker check insert: ${error.message}`);
-
-  // Re-read: the counselor may have moved the task while AxIS was reading.
-  const { data: fresh } = await svc.from("deliverables").select("status").eq("id", String(task.id)).maybeSingle();
-  const next = nextTaskStatus(String(fresh?.status ?? task.status), result.verdict);
-  if (!next) return;
-  const update: Row = { status: next, last_activity_at: new Date().toISOString() };
-  if (next === "complete") update.progress_pct = 100;
-  const { error: taskError } = await svc.from("deliverables").update(update).eq("id", String(task.id));
-  if (taskError) throw new Error(`task update: ${taskError.message}`);
-  task.status = next;
 }
 
 async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Outcome): Promise<void> {
