@@ -29,9 +29,10 @@
 
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
-import { hasAnthropic } from "../env.js";
+import { env, hasAnthropic } from "../env.js";
 import { enforceNoProse, runStructured, type AiAttachment } from "./anthropic.js";
 import { readDocumentText } from "./documentText.js";
+import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
 
@@ -357,50 +358,112 @@ async function record(svc: Svc, task: Row, documentId: string, result: ReviewRes
   if (error) throw new Error(`tracker check insert: ${error.message}`);
 }
 
+/**
+ * One bell notification and one email per person who needs to act. The
+ * counselor hears about every hand-in the student makes (never about their
+ * own "Check again"); the student hears only when AxIS hands it back, with
+ * what to upload instead. Email goes to the address on the profile, the way
+ * task assignments do, and every send is a `message_deliveries` row; a failed
+ * email never undoes the notification or the verdict.
+ */
 async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Outcome): Promise<void> {
   const studentId = String(task.student_id);
-  const { data: student } = await svc.from("profiles").select("full_name, counselor_id").eq("id", studentId).maybeSingle();
+  const { data: student } = await svc
+    .from("profiles")
+    .select("full_name, email, counselor_id")
+    .eq("id", studentId)
+    .maybeSingle();
   const name = String(student?.full_name ?? "").trim() || "Your student";
   const counselorId = (student?.counselor_id as string | null) ?? null;
   const title = String(task.title);
+  const reviewed = outcome.status === "reviewed" ? outcome.result : null;
   const rows: Row[] = [];
+  const emails: Parameters<typeof sendEmail>[0][] = [];
 
-  // The counselor hears about what the student did, not about their own clicks.
   if (counselorId && request.profile.role === "student") {
-    const reviewed = outcome.status === "reviewed" ? outcome.result : null;
+    const heading = reviewed
+      ? reviewed.verdict === "accepted"
+        ? `${name} handed in ${title}: AxIS accepted it`
+        : `${name} handed in ${title}: AxIS flagged it`
+      : `${name} handed in ${title}`;
+    const body = reviewed ? `AxIS: ${reviewed.note}` : outcome.status === "skipped" ? outcome.reason : null;
+    const href = `/dashboard/counselor/students/${studentId}`;
     rows.push({
       recipient_id: counselorId,
       student_id: studentId,
       kind: "ai",
       urgency: reviewed?.verdict === "needs-fix" ? "high" : "normal",
-      title: oneLine(
-        reviewed
-          ? reviewed.verdict === "accepted"
-            ? `${name} handed in ${title}: AxIS accepted it`
-            : `${name} handed in ${title}: AxIS flagged it`
-          : `${name} handed in ${title}`,
-        200
-      ),
-      body: reviewed ? `AxIS: ${reviewed.note}` : outcome.status === "skipped" ? outcome.reason : null,
-      href: `/dashboard/counselor/students/${studentId}`,
+      title: oneLine(heading, 200),
+      body,
+      href,
       action_items: reviewed ? reviewed.findings.slice(0, 3) : [],
       created_by: request.auth.userId,
     });
+    const { data: counselor } = await svc.from("profiles").select("email").eq("id", counselorId).maybeSingle();
+    const to = (counselor?.email as string | null) ?? null;
+    if (to) {
+      const template = {
+        heading: oneLine(heading, 200),
+        paragraphs: [body ?? "Open the student's page to see the file."],
+        bullets: reviewed ? checkFindings(reviewed).slice(0, 5) : [],
+        cta: { label: `Open ${name}'s page`, url: `${env.APP_URL}${href}` },
+      };
+      emails.push({
+        to,
+        subject: oneLine(heading, 150),
+        html: brandedEmail(template),
+        text: brandedText(template),
+        template: "submission-review-counselor",
+        student_id: studentId,
+        deliverable_id: String(task.id),
+        recipient_id: counselorId,
+        recipient_kind: "counselor",
+        logger: request.log,
+      });
+    }
   }
-  if (outcome.status === "reviewed" && outcome.result.verdict === "needs-fix") {
+
+  if (reviewed?.verdict === "needs-fix") {
+    const fix = reviewed.studentFix ?? reviewed.note;
     rows.push({
       recipient_id: studentId,
       student_id: studentId,
       kind: "ai",
       urgency: "high",
       title: oneLine(`Check your ${title}`, 200),
-      body: outcome.result.studentFix ?? outcome.result.note,
+      body: fix,
       href: "/dashboard/student",
       action_items: [],
       created_by: request.auth.userId,
     });
+    const to = (student?.email as string | null) ?? null;
+    if (to) {
+      const template = {
+        heading: oneLine(`Check your ${title}`, 200),
+        paragraphs: [reviewed.note, fix === reviewed.note ? "" : fix],
+        cta: { label: "Upload it again", url: `${env.APP_URL}/dashboard/student` },
+        footnote: "AxIS checks what you hand in against what your counselor asked for. Your counselor sees this too.",
+      };
+      emails.push({
+        to,
+        subject: oneLine(`Check your ${title}`, 150),
+        html: brandedEmail(template),
+        text: brandedText(template),
+        template: "submission-review-student",
+        student_id: studentId,
+        deliverable_id: String(task.id),
+        recipient_id: studentId,
+        recipient_kind: "student",
+        logger: request.log,
+      });
+    }
   }
-  if (rows.length === 0) return;
-  const { error } = await svc.from("notifications").insert(rows);
-  if (error) throw new Error(`notification insert: ${error.message}`);
+
+  if (rows.length > 0) {
+    const { error } = await svc.from("notifications").insert(rows);
+    if (error) request.log.error({ err: error }, "submission notification insert failed");
+  }
+  for (const email of emails) {
+    await sendEmail(email).catch((err) => request.log.error({ err }, "submission email failed"));
+  }
 }

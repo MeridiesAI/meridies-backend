@@ -141,6 +141,10 @@ if (ai) {
     `${flagged?.tracker?.verdict} ${flagged?.status} ${flagged?.tracker?.note}`);
   const studentNote = await sql(`select title from notifications where recipient_id='${s.id}' order by created_at desc limit 1`);
   check("the student is told to check their Resume", studentNote.includes("Resume"), studentNote);
+  const studentMail = await sql(`select count(*) from message_deliveries where template='submission-review-student' and student_id='${s.id}'`);
+  check("the student is emailed what to fix", studentMail === "1", studentMail);
+  const counselorMail = await sql(`select count(*) from message_deliveries where template='submission-review-counselor' and recipient_id='${c.id}'`);
+  check("the counselor is emailed each hand-in", Number(counselorMail) >= 2, counselorMail);
   const stillOpen = await sql(`select e->>'provided' from invitations i, jsonb_array_elements(i.intake_requests) e where i.token='${inviteToken}' and e->>'id'='rs'`);
   check("the Resume request stays open", stillOpen === "false", stillOpen);
 

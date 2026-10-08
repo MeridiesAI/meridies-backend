@@ -326,7 +326,9 @@ the database (`20261010*`):
   writing them anywhere. Accepted: an `on-track` check and the task complete.
   Needs a fix: `below-the-brief`, the task back to `in-progress`, and the
   student is told what to upload instead. The counselor gets one
-  notification per hand-in. `POST /tasks/:id/review` re-runs it (counselor).
+  notification and one email per hand-in; the student gets both when AxIS
+  hands it back (profile email, like task assignments; each send is a
+  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (counselor).
   Tracker verdicts are counselor and service-role writes only; a student
   could write one through PostgREST before this migration.
 - **Preferences are the student's, alerts are not.** `student_preferences`
