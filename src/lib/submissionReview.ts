@@ -242,11 +242,13 @@ export async function startSubmissionReview(
 }
 
 async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, studentId: string): Promise<Prepared> {
-  if (!hasAnthropic) return { status: "skipped", reason: "AxIS isn't set up on this server yet." };
+  // The practice's and the file's own switches first: they are the reason a
+  // counselor can act on.
   if (doc.available_to_llm === false) return { status: "skipped", reason: "This file is kept out of AI, so AxIS didn't read it." };
   if (!(await documentReadingAllowed(svc, studentId))) {
     return { status: "skipped", reason: "Automatic document reading is off for this practice." };
   }
+  if (!hasAnthropic) return { status: "skipped", reason: "AxIS isn't set up on this server yet." };
   if (!doc.storage_path) return { status: "skipped", reason: "AxIS reads uploaded files; this one is a link." };
 
   const filename = String(doc.filename ?? "file");
