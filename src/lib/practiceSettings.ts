@@ -55,7 +55,7 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
 ]);
 
 /** Modules that read uploaded documents on their own: "Auto-parse uploaded documents". */
-const DOCUMENT_MODULES: ReadonlySet<AiModule> = new Set<AiModule>(["file-filing", "document-tracker"]);
+const DOCUMENT_MODULES: ReadonlySet<AiModule> = new Set<AiModule>(["file-filing", "document-tracker", "submission-review"]);
 
 /**
  * Throws when the caller's practice has switched this kind of AI off. Only
