@@ -185,8 +185,8 @@ async function hydrate(
     request.db
       .from("deliverable_documents")
       .select(
-        "deliverable_id, document_id, role, note, " +
-          "document:documents(id, filename, title, mime_type, size_bytes, kind, available_to_llm)"
+        "deliverable_id, document_id, role, note, created_at, " +
+          "document:documents(id, filename, title, mime_type, size_bytes, kind, available_to_llm, bucket, storage_path)"
       )
       .in("deliverable_id", ids),
     request.db.from("deliverable_tracker_latest").select("*").in("deliverable_id", ids),
