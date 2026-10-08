@@ -72,6 +72,7 @@ src/
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
+│   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
@@ -262,7 +263,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`) read
+  `profile-update`, `submission-review`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -303,6 +304,31 @@ the database (`20261010*`):
   essay prose.
 - **Files is "My documents".** A student lists, uploads into and pastes links
   into their own student folder only (`assertFileableFolder`, restrictive RLS).
+- **What the counselor asks for is the student's To-Do** (`20261012000001`).
+  The New student page's intake requests ("Transcript", "Resume") become
+  counselor tasks of kind `document` when the student joins (a trigger on
+  `profiles.counselor_id`, because `accept_invitation` links the student after
+  it marks the invitation accepted), and a request added later becomes one
+  too. Each task carries `intake_invitation_id` / `intake_request_id`, and two
+  triggers keep them in step: the task completing ticks the request on the
+  counselor's Overview card, the counselor ticking or unticking the request
+  completes or reopens the task. Tasks are never deleted when a request is.
+- **The student hands a file in, AxIS checks it.** `POST /tasks/:id/submissions`
+  (`{ documentId }`, a file already in the student's documents) adds a
+  `submission` row, the only `deliverable_documents` row a student may write,
+  and moves the task to `review`. `lib/submissionReview.ts` then answers the
+  quick refusals at once (AI document reading off for the student's practice,
+  kept out of AI, a format it can't open, over 10 MB) and reads the file
+  after the response (PDFs and images as attachments, .docx/.txt as text);
+  the client polls `GET /tasks/:id`. AxIS (`submission-review`, Haiku) decides
+  only whether this is what was asked for and usable, never grades or
+  rewrites it, and copies printed facts (a GPA) into the findings without
+  writing them anywhere. Accepted: an `on-track` check and the task complete.
+  Needs a fix: `below-the-brief`, the task back to `in-progress`, and the
+  student is told what to upload instead. The counselor gets one
+  notification per hand-in. `POST /tasks/:id/review` re-runs it (counselor).
+  Tracker verdicts are counselor and service-role writes only; a student
+  could write one through PostgREST before this migration.
 - **Preferences are the student's, alerts are not.** `student_preferences`
   (banner, theme, the student's own text/email reminder channels) is
   student-written and counselor-readable; `student_alert_prefs` stays
