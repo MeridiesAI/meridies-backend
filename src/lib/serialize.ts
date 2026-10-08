@@ -267,6 +267,10 @@ export const toTaskDocument = (r: Row) => {
     sizeBytes: doc ? nnum(doc.size_bytes) : null,
     kind: doc ? str(doc.kind) : null,
     availableToLlm: doc ? Boolean(doc.available_to_llm) : null,
+    /** Where the file is, so whoever can see it can open it (Storage RLS decides). */
+    bucket: doc ? nstr(doc.bucket) : null,
+    storagePath: doc ? nstr(doc.storage_path) : null,
+    addedAt: nstr(r.created_at),
   };
 };
 

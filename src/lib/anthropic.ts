@@ -85,7 +85,19 @@ export type AiModule =
   // Q&A, list builder explanations.
   | "college-search" | "web-research" | "resource-qa" | "list-explain"
   // SV Demo v2 (student view): Profile Update, AxIS collecting a student's news.
-  | "profile-update";
+  | "profile-update"
+  // A file the student handed in against a task, checked against what was asked.
+  | "submission-review";
+
+/**
+ * A file the model reads directly: a PDF as a document block, an image as an
+ * image block. Base64 of the stored bytes; the caller checks type and size.
+ */
+export type AiAttachment = {
+  mediaType: "application/pdf" | "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  data: string;
+  title?: string;
+};
 
 type RunOptions<T> = {
   request: FastifyRequest;
@@ -98,9 +110,26 @@ type RunOptions<T> = {
   toolName: string;
   model?: string;
   maxTokens?: number;
+  /** Files the model reads alongside the prompt (see AiAttachment). */
+  attachments?: AiAttachment[];
   /** Last line of defence over model output before it is stored or returned. */
   validate?: (value: unknown) => T;
 };
+
+function userContent(prompt: string, attachments: AiAttachment[] | undefined): Anthropic.MessageParam["content"] {
+  if (!attachments?.length) return prompt;
+  const blocks: Anthropic.ContentBlockParam[] = attachments.map((a) =>
+    a.mediaType === "application/pdf"
+      ? {
+          type: "document" as const,
+          source: { type: "base64" as const, media_type: "application/pdf" as const, data: a.data },
+          ...(a.title ? { title: a.title.slice(0, 200) } : {}),
+        }
+      : { type: "image" as const, source: { type: "base64" as const, media_type: a.mediaType, data: a.data } }
+  );
+  blocks.push({ type: "text", text: prompt });
+  return blocks;
+}
 
 /** Per-counselor daily ceiling. Generous for real use, fatal for a scraper. */
 const DAILY_AI_CALL_LIMIT = 300;
@@ -135,7 +164,7 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
         model,
         status: "running",
         // Never store the whole prompt: it contains the student's record.
-        input: { promptChars: opts.prompt.length },
+        input: { promptChars: opts.prompt.length, attachments: opts.attachments?.length ?? 0 },
       })
       .select("id")
       .single();
@@ -163,7 +192,7 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
       model,
       max_tokens: opts.maxTokens ?? 2048,
       system: opts.system,
-      messages: [{ role: "user", content: opts.prompt }],
+      messages: [{ role: "user", content: userContent(opts.prompt, opts.attachments) }],
       tools: [
         {
           name: opts.toolName,
