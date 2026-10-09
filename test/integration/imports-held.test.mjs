@@ -106,4 +106,59 @@ await sql(`update public.roster_imports set status = 'undone' where id = '${impX
 const undoneApply = JSON.parse(await sql(`select public.apply_held_item('${itemX}', '${c.id}')`));
 check("apply on an undone import returns not-requested", undoneApply.status === "not-requested" && undoneApply.current === "undone", JSON.stringify(undoneApply));
 check("nothing was written for the undone import", (await academics(studentX.id)) === null
-  && (await sql(`select match_status from public.import_items where id = '${itemX}'`)) === "applying");
+  && (await sql(`select match_status from public.import_items where id = '${itemX}'`)) === "awaiting_counselor");
+
+// Fix round 1: request is refused while the import is still processing.
+const impY = await makeImport(c, { status: "importing" });
+const invY = await invite(`proc-${tag}@test.local`);
+const itemY = await addItem(impY, { status: "new_invite", invitationId: invY.id, name: "Proc Case" });
+await addChange(impY, itemY, { target: "student_academics", field: "act_composite", value: 29, oldValue: null, decision: "auto" });
+const studentY = await user("held-proc", "student");
+await rest(studentY.token, "POST", "/rest/v1/rpc/accept_invitation", { p_token: invY.token });
+const reqY = await rest(c.token, "POST", "/rest/v1/rpc/request_held_apply", { p_item: itemY, p_decisions: {} });
+check("request is refused while the import is still processing", reqY.status >= 400 && /still being processed/.test(JSON.stringify(reqY.body)), `status ${reqY.status} ${JSON.stringify(reqY.body)}`);
+const badNull = await rest(c.token, "POST", "/rest/v1/rpc/request_held_apply", { p_item: itemY, p_decisions: { x: null } });
+check("a null decision is invalid", badNull.status === 400 || badNull.status === 422 || /decision/i.test(JSON.stringify(badNull.body)), JSON.stringify(badNull.body));
+
+// (a) Resend: held data follows the email to the new invitation.
+const invA = await invite(`resend-${tag}@test.local`);
+const impR = await makeImport(c);
+const itemR = await addItem(impR, { status: "new_invite", invitationId: invA.id, name: "Resend Case" });
+await addChange(impR, itemR, { target: "student_academics", field: "act_composite", value: 28, oldValue: null, decision: "auto" });
+await sql(`update public.roster_imports set status = 'committed' where id = '${impR}'`);
+await sql(`update public.invitations set status = 'revoked' where id = '${invA.id}'`);
+const invB = await invite(`resend-${tag}@test.local`);
+await sql(`select public.expire_import_holds()`);
+check("a resend keeps the held data alive", (await sql(`select match_status from public.import_items where id = '${itemR}'`)) === "new_invite");
+const studentR = await user("held-resend", "student");
+await rest(studentR.token, "POST", "/rest/v1/rpc/accept_invitation", { p_token: invB.token });
+const rs = await sql(`select match_status || ',' || (invitation_id = '${invB.id}')::text from public.import_items where id = '${itemR}'`);
+check("accepting the new invite picks up the held data", rs === "awaiting_counselor,true", rs);
+
+// (b) Legacy row tied to a revoked invite, accepted through a resend.
+const invLA = await invite(`legresend-${tag}@test.local`);
+const impL = await sql(`with i as (insert into public.roster_imports (counselor_id, filename, source, status) values ('${c.id}', 'old2.csv', 'csv', 'complete') returning id) select id from i`);
+await sql(`insert into public.roster_import_rows (import_id, counselor_id, row_number, full_name, email, gpa_weighted, status, invitation_id)
+  values ('${impL}', '${c.id}', 2, 'Pat Kim', 'legresend-${tag}@test.local', 3.5, 'invited', '${invLA.id}')`);
+await sql(`update public.invitations set status = 'revoked' where id = '${invLA.id}'`);
+const invLB = await invite(`legresend-${tag}@test.local`);
+const studentL = await user("held-legresend", "student");
+await rest(studentL.token, "POST", "/rest/v1/rpc/accept_invitation", { p_token: invLB.token });
+check("a legacy row from a revoked invite is carried into the queue", (await sql(`select count(*) from public.import_items where student_id = '${studentL.id}' and match_status = 'awaiting_counselor'`)) === "1");
+
+// (c) Omitted decisions take the queue's defaults.
+const invD = await invite(`defaults-${tag}@test.local`);
+const impD = await makeImport(c);
+const itemD = await addItem(impD, { status: "new_invite", invitationId: invD.id, name: "Defaults" });
+await addChange(impD, itemD, { target: "student_academics", field: "sat_superscore", value: 1400, oldValue: null, decision: "auto" });
+await addChange(impD, itemD, { target: "test_scores", field: "*", op: "insert_row", value: { exam: "AP Chemistry", kind: "ap", score: "4" }, decision: "auto" });
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impD}'`);
+await sql(`select public.commit_import('${impD}', '${c.id}')`);
+const studentD = await user("held-defaults", "student");
+await rest(studentD.token, "POST", "/rest/v1/rpc/accept_invitation", { p_token: invD.token });
+await sql(`insert into public.student_academics (student_id, sat_superscore) values ('${studentD.id}', 1500)`);
+const reqD = await rest(c.token, "POST", "/rest/v1/rpc/request_held_apply", { p_item: itemD, p_decisions: {} });
+check("omitted decisions are accepted", reqD.status === 204 || reqD.status === 200, JSON.stringify(reqD.body));
+const outD = JSON.parse(await sql(`select public.apply_held_item('${itemD}', '${c.id}')`));
+check("defaults: the stored SAT is kept, the new row is added", outD.applied === 1 && (await academics(studentD.id)).sat_superscore === 1500
+  && (await sql(`select count(*) from public.test_scores where student_id = '${studentD.id}' and source = 'import'`)) === "1", JSON.stringify(outD));

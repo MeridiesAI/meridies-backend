@@ -12,10 +12,21 @@ as $$
 declare
   r public.roster_import_rows;
   v_item uuid;
+  v_inv public.invitations;
 begin
+  select * into v_inv from public.invitations where id = p_invitation;
+  if not found then
+    return;
+  end if;
+  -- Rows tied to this invitation, or to an earlier pending/revoked one that was
+  -- resent to the same address by the same counselor.
   for r in
-    select * from public.roster_import_rows
-    where invitation_id = p_invitation and status = 'invited'
+    select rr.* from public.roster_import_rows rr
+    join public.invitations i on i.id = rr.invitation_id
+    where rr.status = 'invited'
+      and (i.id = v_inv.id
+           or (i.counselor_id = v_inv.counselor_id and lower(i.email) = lower(v_inv.email)
+               and i.status in ('pending','revoked')))
   loop
     if exists (select 1 from public.import_items where legacy_row_id = r.id) then
       continue;
@@ -111,10 +122,14 @@ begin
    where id = v_user;
 
   -- NEW: imported data for this invitation waits for the counselor (§5.8).
-  update public.import_items
+  update public.import_items it
      set match_status = 'awaiting_counselor', student_id = v_user,
-         held_until = now() + interval '30 days'
-   where invitation_id = v_inv.id and match_status = 'new_invite';
+         held_until = now() + interval '30 days', invitation_id = v_inv.id
+    from public.invitations i
+   where i.id = it.invitation_id and it.match_status = 'new_invite'
+     and (i.id = v_inv.id
+          or (i.counselor_id = v_inv.counselor_id and lower(i.email) = lower(v_inv.email)
+              and i.status in ('pending','revoked')));
 
   -- NEW: the old roster flow's staged values join the same queue.
   perform private.import_hold_legacy_rows(v_inv.id, v_user);
@@ -183,6 +198,7 @@ declare
   v_me uuid := (select auth.uid());
   v public.import_items;
   k text;
+  v_import_status text;
 begin
   if v_me is null then
     raise exception 'Not authenticated' using errcode = '28000';
@@ -201,14 +217,23 @@ begin
     raise exception 'Decisions are required' using errcode = '22023';
   end if;
   for k in select jsonb_object_keys(p_decisions) loop
-    if p_decisions ->> k not in ('accept','keep_old','reject') then
+    if coalesce(p_decisions ->> k, '') not in ('accept','keep_old','reject') then
       raise exception 'Unknown decision %', p_decisions ->> k using errcode = '22023';
     end if;
   end loop;
 
+  select status into v_import_status from public.roster_imports where id = v.import_id for share;
+  if v_import_status not in ('committed','complete') then
+    raise exception 'That import is still being processed. Try again shortly.' using errcode = '55000';
+  end if;
+
+  -- Anything the counselor didn't decide gets the queue's default.
   update public.import_changes ch
-     set decision = p_decisions ->> ch.id::text
-   where ch.item_id = p_item and ch.state = 'staged' and p_decisions ? ch.id::text;
+     set decision = coalesce(p_decisions ->> ch.id::text,
+           case when ch.op = 'insert_row' then 'accept'
+                when private.import_current_value(ch.target_table, ch.field, v.student_id) is null then 'accept'
+                else 'keep_old' end)
+   where ch.item_id = p_item and ch.state = 'staged';
 
   update public.import_items
      set match_status = 'applying', job_actor = v_me, job_requested_at = now(), job_error = null
@@ -244,10 +269,6 @@ begin
   if not found then
     raise exception 'No such item' using errcode = 'P0002';
   end if;
-  if v_import_status not in ('committed','complete') then
-    return jsonb_build_object('status', 'not-requested', 'current', v_import_status);
-  end if;
-
   select * into it from public.import_items where id = p_item for update skip locked;
   if not found then
     if exists (select 1 from public.import_items where id = p_item) then
@@ -261,6 +282,13 @@ begin
   -- A job claimed by someone else is not this caller's to run.
   if it.job_actor is distinct from p_actor then
     return jsonb_build_object('status', 'not-requested', 'current', it.match_status);
+  end if;
+  if v_import_status not in ('committed','complete') then
+    update public.import_items
+       set match_status = 'awaiting_counselor',
+           job_error = jsonb_build_object('message', 'The import changed before this could be applied')
+     where id = p_item;
+    return jsonb_build_object('status', 'not-requested', 'current', v_import_status);
   end if;
   if not private.can_manage_import(it.import_id, p_actor)
      or not private.import_can_write_student(it.import_id, it.student_id, p_actor) then
@@ -351,6 +379,10 @@ begin
      where it.invitation_id = i.id
        and it.match_status = 'new_invite'
        and (i.status = 'revoked' or (i.status = 'pending' and i.expires_at < now()))
+       and not exists (
+         select 1 from public.invitations o
+          where o.counselor_id = i.counselor_id and lower(o.email) = lower(i.email)
+            and o.status = 'pending' and o.expires_at >= now())
     returning it.id
   ), del as (
     delete from public.import_changes ch using gone where ch.item_id = gone.id and ch.state = 'staged'
