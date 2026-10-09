@@ -66,3 +66,37 @@ check("GPA 92 with the scale changed to 100 passes", problems.length === 0, JSON
 await addChange(imp, item, { target: "student_personal_details", field: "birthday", value: "1975-01-01", studentId: s.id });
 problems = JSON.parse(await sql(`select private.import_validate('${imp}', null)`));
 check("a 1975 birthday is reported", problems.some((p) => /birthday/i.test(p.message)), JSON.stringify(problems));
+
+// ---- Task 4: compare-and-set and inserts ------------------------------------
+const s2 = await studentOf(c, "imp-apply");
+const set = async (field, expected, value, target = "student_academics") =>
+  (await sql(`select private.import_set_field('${target}', '${field}', '${s2.id}', ${lit(expected)}, ${lit(value)})`)) === "t";
+
+check("filling an empty field succeeds", await set("sat_superscore", null, 1400));
+check("compare-and-set with the right old value succeeds", await set("sat_superscore", 1400, 1450));
+check("compare-and-set with a stale old value changes nothing", !(await set("sat_superscore", 1400, 1500)));
+check("the value is the last good write", (await sql(`select sat_superscore from public.student_academics where student_id = '${s2.id}'`)) === "1450");
+check("3.8 matches a stored 3.800", (await set("gpa_weighted", null, 3.8)) && (await set("gpa_weighted", 3.8, 3.9)));
+check("majors replace as an array", await set("intended_majors", null, ["Biology"], "student_personal_details"));
+check("majors compare-and-set", await set("intended_majors", ["Biology"], ["Biology", "Chemistry"], "student_personal_details"));
+check("birthday is set as a date", (await set("birthday", null, "2008-04-01", "student_personal_details")) &&
+  (await sql(`select birthday from public.student_personal_details where student_id = '${s2.id}'`)) === "2008-04-01");
+check("clearing back to empty works (undo path)", await set("sat_superscore", 1450, null));
+
+const row = { exam: "AP Biology", kind: "ap", score: "5", taken_on: "2025-05-10" };
+const rid = await sql(`select private.import_insert_row('test_scores', '${s2.id}', ${lit(row)})`);
+check("a test score row is inserted", /^[0-9a-f-]{36}$/.test(rid), rid);
+check("it is marked as imported", (await sql(`select source from public.test_scores where id = '${rid}'`)) === "import");
+const dup = await sql(`select coalesce(private.import_insert_row('test_scores', '${s2.id}', ${lit(row)})::text, 'null')`);
+check("the same exam on the same date is a duplicate", dup === "null");
+const undated = await sql(`select coalesce(private.import_insert_row('test_scores', '${s2.id}', ${lit({ exam: "AP Biology", kind: "ap", score: "5" })})::text, 'null')`);
+check("an undated row with the same exam and score is a duplicate", undated === "null");
+const snap = JSON.parse(await sql(`select private.import_row_snapshot('test_scores', '${rid}')`));
+check("snapshot carries the importable columns", snap.exam === "AP Biology" && snap.taken_on === "2025-05-10", JSON.stringify(snap));
+const course = await sql(`select private.import_insert_row('courses', '${s2.id}', ${lit({ name: "AP Chemistry", type: "ap", school_year: "2024-25" })})`);
+check("a course is inserted", /^[0-9a-f-]{36}$/.test(course));
+const courseDup = await sql(`select coalesce(private.import_insert_row('courses', '${s2.id}', ${lit({ name: "ap chemistry", school_year: "2024-25" })})::text, 'null')`);
+check("same course name and year (any case) is a duplicate", courseDup === "null");
+const act = await sql(`select private.import_insert_row('activities', '${s2.id}', ${lit({ name: "Robotics", grade_levels: ["11", "12"] })})`);
+check("an activity is inserted with grade levels", (await sql(`select array_to_string(grade_levels, ',') from public.activities where id = '${act}'`)) === "11,12");
+check("a row is deleted by id", (await sql(`select private.import_delete_row('activities', '${act}')`)) === "t");
