@@ -30,7 +30,7 @@ const updateMeSchema = z
   .strict();
 
 /** Confirm an OAuth sign-up's role, exactly once. */
-const confirmRoleSchema = z.object({ role: z.enum(["student", "counselor"]) });
+const confirmRoleSchema = z.object({ role: z.enum(["student", "counselor"]) }).strict();
 
 export default async function authRoutes(app: FastifyInstance) {
   app.get("/me", { preHandler: app.authenticate }, async (request) => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
+import { DEFAULT_SETTINGS, inQuietHours, nextSendWindow } from "../../src/lib/accountability.js";
 import { rankPercentile } from "../../src/lib/classRank.js";
 import { acceptProposals, incomeBand, nlFiltersToQuery, studentCollegeSummary } from "../../src/lib/collegeIntel.js";
 import { searchQuery } from "../../src/lib/collegesV10.js";
@@ -103,4 +104,18 @@ test("heartbeats go stale after twice their interval", () => {
   assert.equal(isStale("2026-10-07T11:40:00Z", "00:15:00", now), false);
   assert.equal(isStale("2026-10-07T11:20:00Z", "00:15:00", now), true);
   assert.equal(isStale(null, "7 days", now), true);
+});
+
+test("a held alert resumes after quiet hours in the counselor's timezone, not the server's", () => {
+  const ny = { ...DEFAULT_SETTINGS, quiet_hours_start: 21, quiet_hours_end: 8, timezone: "America/New_York" };
+  // 22:00 in New York (02:00 UTC, October, EDT): next send is 09:00 New York = 13:00 UTC.
+  const held = new Date("2026-10-09T02:00:00Z");
+  const at = nextSendWindow(ny, held);
+  assert.equal(at, "2026-10-09T13:00:00.000Z");
+  assert.equal(inQuietHours(ny, new Date(at)), false);
+  // Re-held at that hour on a later run, it still lands outside quiet hours.
+  assert.equal(inQuietHours(ny, new Date(nextSendWindow(ny, new Date(at)))), false);
+  // A half-hour zone gets the local top of the hour.
+  const kolkata = { ...ny, timezone: "Asia/Kolkata" };
+  assert.equal(nextSendWindow(kolkata, new Date("2026-10-09T00:00:00Z")), "2026-10-09T03:30:00.000Z");
 });
