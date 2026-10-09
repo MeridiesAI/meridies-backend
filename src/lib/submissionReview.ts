@@ -162,9 +162,17 @@ export function checkFindings(r: ReviewResult): string[] {
  * The task status a verdict moves to. Never downgrades a task the counselor
  * already closed, and only reopens one that is waiting on a check.
  */
-export function nextTaskStatus(current: string, verdict: ReviewVerdict): string | null {
+export function nextTaskStatus(current: string, verdict: ReviewVerdict, advisory = false): string | null {
+  // A request from New student: the counselor receives it or sends it back.
+  // AxIS's verdict is advice on the card, never a move.
+  if (advisory) return null;
   if (verdict === "accepted") return current === "complete" ? null : "complete";
   return current === "review" ? "in-progress" : null;
+}
+
+/** A request from the New student page: the student's Submit sends it, the counselor receives it. */
+export function isIntakeRequest(task: Row): boolean {
+  return typeof task.intake_request_id === "string" && task.intake_request_id.length > 0;
 }
 
 /** Whether the student's practice lets AI read uploaded documents (Settings › Data & privacy). */
@@ -346,7 +354,7 @@ async function record(svc: Svc, task: Row, documentId: string, result: ReviewRes
   // the verdict then never sees "accepted" on a task still waiting on a check.
   // Re-read the status: the counselor may have moved the task while AxIS read.
   const { data: fresh } = await svc.from("deliverables").select("status").eq("id", String(task.id)).maybeSingle();
-  const next = nextTaskStatus(String(fresh?.status ?? task.status), result.verdict);
+  const next = nextTaskStatus(String(fresh?.status ?? task.status), result.verdict, isIntakeRequest(task));
   if (next) {
     const update: Row = { status: next, last_activity_at: new Date().toISOString() };
     if (next === "complete") update.progress_pct = 100;
@@ -390,8 +398,12 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
   const reviewed = outcome.status === "reviewed" ? outcome.result : null;
   const rows: Row[] = [];
   const emails: Parameters<typeof sendEmail>[0][] = [];
+  // A Submit from New student tells the counselor once, for every item
+  // (lib/newStudentIntake.ts); AxIS's verdict waits on the card, and only the
+  // counselor sends an item back.
+  const advisory = isIntakeRequest(task);
 
-  if (counselorId && request.profile.role === "student") {
+  if (counselorId && request.profile.role === "student" && !advisory) {
     const heading = reviewed
       ? reviewed.verdict === "accepted"
         ? `${name} handed in ${title}: AxIS accepted it`
@@ -434,7 +446,7 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
     }
   }
 
-  if (reviewed?.verdict === "needs-fix") {
+  if (reviewed?.verdict === "needs-fix" && !advisory) {
     const fix = reviewed.studentFix ?? reviewed.note;
     rows.push({
       recipient_id: studentId,

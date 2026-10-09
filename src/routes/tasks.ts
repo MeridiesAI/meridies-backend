@@ -169,7 +169,7 @@ async function settingsFor(
 }
 
 /** Load a task's children in one round trip each, never per task. */
-async function hydrate(
+export async function hydrate(
   request: FastifyRequest,
   tasks: Row[]
 ): Promise<ReturnType<typeof toTask>[]> {
@@ -714,7 +714,7 @@ export default async function taskRoutes(app: FastifyInstance) {
   async function loadTaskForSubmission(request: FastifyRequest, id: string): Promise<Row> {
     const { data: task, error } = await request.db
       .from("deliverables")
-      .select("id, student_id, status")
+      .select("id, student_id, status, intake_request_id")
       .eq("id", id)
       .maybeSingle();
     if (error) throw fromPostgrest(error);
@@ -738,6 +738,9 @@ export default async function taskRoutes(app: FastifyInstance) {
       const { documentId } = z.object({ documentId: z.string().uuid() }).strict().parse(request.body);
       const task = await loadTaskForSubmission(request, id);
       const studentId = String(task.student_id);
+      if (task.intake_request_id && request.profile.role === "student" && task.status === "review") {
+        throw conflict("This is with your counselor now.");
+      }
 
       const { data: doc, error: docError } = await request.db
         .from("documents")
@@ -765,6 +768,12 @@ export default async function taskRoutes(app: FastifyInstance) {
           added_by: request.auth.userId,
         });
         if (error) throw fromPostgrest(error);
+      }
+
+      // A request from New student goes in with the student's Submit, all at
+      // once (POST /me/intake/submit): until then the file is only attached.
+      if (task.intake_request_id && request.profile.role === "student") {
+        return reply.code(201).send({ task: await freshTask(request, id), review: null });
       }
 
       const now = new Date().toISOString();
@@ -797,6 +806,9 @@ export default async function taskRoutes(app: FastifyInstance) {
       // A finished task keeps the file it was finished with; the counselor reopens it first.
       if (request.profile.role === "student" && task.status === "complete") {
         throw conflict("This one is done. Ask your counselor to reopen it to change the file.");
+      }
+      if (request.profile.role === "student" && task.intake_request_id && task.status === "review") {
+        throw conflict("This is with your counselor now.");
       }
 
       const { data: removed, error } = await request.db

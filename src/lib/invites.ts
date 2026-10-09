@@ -47,7 +47,8 @@ export type CreateInvitationInput = {
 
 export const INVITATION_COLUMNS =
   "id, email, status, created_at, expires_at, accepted_at, accepted_by, full_name, grade_level, " +
-  "grad_year, timezone, note, audience, source, intake_requests, requested_at, dismissed_at";
+  "grad_year, timezone, note, audience, source, intake_requests, requested_at, dismissed_at, " +
+  "submitted_at, confirmed_at";
 
 /**
  * Supersede any still-pending invite to the same address (the newest link is
@@ -175,6 +176,10 @@ export function toInvitationDetail(r: Row, referredBy: ReferredBy | null = null)
     })),
     requestedAt: r.requested_at ? String(r.requested_at) : null,
     dismissedAt: r.dismissed_at ? String(r.dismissed_at) : null,
+    /** The student pressed Submit on what was asked for (new-student onboarding). */
+    submittedAt: r.submitted_at ? String(r.submitted_at) : null,
+    /** The counselor confirmed: no longer "Building profile". */
+    confirmedAt: r.confirmed_at ? String(r.confirmed_at) : null,
     referredBy,
   };
 }

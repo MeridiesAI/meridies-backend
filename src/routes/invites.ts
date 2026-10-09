@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
+import { canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
   addressStatuses,
@@ -66,10 +67,103 @@ const inviteSchema = z
   .strict();
 
 const patchInviteSchema = z
-  .object({ ...basicsShape, dismissed: z.boolean().optional() })
+  .object({
+    ...basicsShape,
+    dismissed: z.boolean().optional(),
+    /** New-student onboarding: tick one request received, or untick it. */
+    receive: z.object({ requestId: z.string().trim().min(1).max(100), received: z.boolean() }).strict().optional(),
+    /** Hand one item back to the student with what to change. */
+    sendBack: z
+      .object({ requestId: z.string().trim().min(1).max(100), note: z.string().trim().min(1).max(500) })
+      .strict()
+      .optional(),
+    /** Everything received: the card becomes a student. */
+    confirmed: z.literal(true).optional(),
+  })
   .strict();
 
 const idParam = z.object({ id: z.string().uuid() });
+
+/**
+ * New-student onboarding, the counselor's side: receive an item, send one
+ * back, or confirm the student. One at a time, on an invitation of theirs
+ * the student has accepted.
+ */
+async function onboardingStep(
+  request: FastifyRequest,
+  id: string,
+  body: z.infer<typeof patchInviteSchema>
+) {
+  const { data, error } = await request.db
+    .from("invitations")
+    .select(INVITATION_COLUMNS)
+    .eq("id", id)
+    .eq("counselor_id", request.auth.userId)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  if (!data) throw notFound("No invitation of yours matches that");
+  const row = data as unknown as Record<string, unknown>;
+  const inv = toInvitationDetail(row);
+  if (inv.status !== "accepted" || !inv.acceptedBy) throw conflict("They haven't joined yet.");
+  if (inv.confirmedAt) throw conflict("This student is already confirmed.");
+
+  const step = body.receive ?? body.sendBack;
+  if (step) {
+    const req = inv.intakeRequests.find((q) => q.id === step.requestId);
+    if (!req) throw notFound("That request isn't on this invitation");
+    const { data: task, error: taskError } = await request.db
+      .from("deliverables")
+      .select("id, status, title")
+      .eq("intake_invitation_id", id)
+      .eq("intake_request_id", step.requestId)
+      .maybeSingle();
+    if (taskError) throw fromPostgrest(taskError);
+
+    if (body.receive) {
+      // `provided` drives the task through the 20261012000001 trigger.
+      const requests = (Array.isArray(row.intake_requests) ? (row.intake_requests as Record<string, unknown>[]) : []).map(
+        (q) => (String(q.id) === step.requestId ? { ...q, provided: body.receive!.received } : q)
+      );
+      const { error: updateError } = await request.db.from("invitations").update({ intake_requests: requests }).eq("id", id);
+      if (updateError) throw fromPostgrest(updateError);
+      if (task) {
+        if (body.receive.received) {
+          await request.db.from("deliverables").update({ sent_back_note: null }).eq("id", String(task.id));
+        } else if (inv.submittedAt) {
+          // Unticked after the student sent it: it is waiting on the counselor again.
+          await request.db.from("deliverables").update({ status: "review" }).eq("id", String(task.id));
+        }
+      }
+    } else if (body.sendBack) {
+      if (!task) throw conflict("There is nothing from the student on this yet.");
+      if (req.provided) {
+        const requests = (row.intake_requests as Record<string, unknown>[]).map((q) =>
+          String(q.id) === step.requestId ? { ...q, provided: false } : q
+        );
+        const { error: updateError } = await request.db.from("invitations").update({ intake_requests: requests }).eq("id", id);
+        if (updateError) throw fromPostgrest(updateError);
+      }
+      await sendItemBack(request, { id, acceptedBy: inv.acceptedBy }, String(task.id), String(task.title), body.sendBack.note);
+    }
+  } else if (body.confirmed) {
+    if (!canConfirm({ status: inv.status, requests: inv.intakeRequests })) {
+      throw conflict("Check off everything you asked for first.");
+    }
+    const { error: updateError } = await request.db
+      .from("invitations")
+      .update({ confirmed_at: new Date().toISOString() })
+      .eq("id", id);
+    if (updateError) throw fromPostgrest(updateError);
+  }
+
+  const { data: fresh, error: freshError } = await request.db
+    .from("invitations")
+    .select(INVITATION_COLUMNS)
+    .eq("id", id)
+    .maybeSingle();
+  if (freshError) throw fromPostgrest(freshError);
+  return toInvitationDetail(fresh as unknown as Record<string, unknown>);
+}
 
 const sortSchema = z.object({ text: z.string().max(20_000) }).strict();
 const checkSchema = z
@@ -169,9 +263,10 @@ export default async function inviteRoutes(app: FastifyInstance) {
 
   /**
    * The "Building profile" cards on Overview: every student this counselor
-   * invited (New student, the onboarding invite step, Mass invite), until they
-   * have joined and their intake is in. A family invitation is the parent's
-   * link, not a student, so it stays off.
+   * invited (New student, the onboarding invite step, Mass invite), until the
+   * counselor confirms them (new-student onboarding). Each request carries
+   * where it stands: the student's file or answer, AxIS's read as advice. A
+   * family invitation is the parent's link, not a student, so it stays off.
    */
   app.get(
     "/building",
@@ -184,27 +279,38 @@ export default async function inviteRoutes(app: FastifyInstance) {
         .in("source", ["intake", "single", "mass"])
         .eq("audience", "student")
         .is("dismissed_at", null)
+        .is("confirmed_at", null)
         .in("status", ["pending", "accepted"])
         .order("created_at", { ascending: false })
         .limit(100);
       if (error) throw fromPostgrest(error);
       const rows = (data ?? []) as unknown as Record<string, unknown>[];
+      const items = await intakeItemsByInvitation(
+        request,
+        rows.filter((r) => r.status === "accepted").map((r) => String(r.id))
+      );
 
-      const joined = rows.map((r) => r.accepted_by).filter((v): v is string => typeof v === "string");
-      const intakeIn = new Set<string>();
-      if (joined.length) {
-        const { data: responses, error: responsesError } = await request.db
-          .from("intake_responses")
-          .select("student_id, submitted_at")
-          .in("student_id", joined)
-          .not("submitted_at", "is", null);
-        if (responsesError) throw fromPostgrest(responsesError);
-        for (const r of responses ?? []) intakeIn.add(String(r.student_id));
-      }
-
-      return rows
-        .filter((r) => !(typeof r.accepted_by === "string" && intakeIn.has(r.accepted_by)))
-        .map((r) => ({ ...toInvitationDetail(r), studentId: r.accepted_by ? String(r.accepted_by) : null }));
+      return rows.map((r) => {
+        const detail = toInvitationDetail(r);
+        const byRequest = items.get(detail.id);
+        return {
+          ...detail,
+          studentId: r.accepted_by ? String(r.accepted_by) : null,
+          intakeItems: detail.intakeRequests.map((q) => {
+            const item = byRequest?.get(q.id) ?? null;
+            return {
+              requestId: q.id,
+              taskId: item?.taskId ?? null,
+              status: itemStatus(item ? { status: item.taskStatus, sentBackNote: item.sentBackNote } : null, q.provided),
+              answer: item?.answer ?? null,
+              sentBackNote: item?.sentBackNote ?? null,
+              files: item?.files ?? [],
+              axis: item?.axis ?? null,
+            };
+          }),
+          canConfirm: canConfirm({ status: detail.status, requests: detail.intakeRequests }),
+        };
+      });
     }
   );
 
@@ -215,6 +321,9 @@ export default async function inviteRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       const body = patchInviteSchema.parse(request.body);
+      if (body.receive || body.sendBack || body.confirmed) {
+        return onboardingStep(request, id, body);
+      }
       const update: Record<string, unknown> = {};
       if (body.fullName !== undefined) update.full_name = body.fullName;
       if (body.gradeLevel !== undefined) update.grade_level = body.gradeLevel;

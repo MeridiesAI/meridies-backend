@@ -17,6 +17,7 @@ import { z } from "zod";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { assertCanViewStudent, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { COUNSELOR_STEPS, confirmedStudents, openSteps, setupFacts, type SetupLink } from "../lib/studentSetup.js";
 
 type Row = Record<string, unknown>;
 
@@ -76,7 +77,7 @@ const nameOf = (v: unknown): string | null => {
 export function toWorkItem(r: Row, me: string) {
   return {
     id: String(r.id),
-    origin: "work-item" as "work-item" | "family-report" | "meeting",
+    origin: "work-item" as "work-item" | "family-report" | "meeting" | "setup",
     kind: String(r.kind) as (typeof KINDS)[number],
     title: String(r.title),
     detail: r.detail ? String(r.detail) : null,
@@ -98,6 +99,8 @@ export function toWorkItem(r: Row, me: string) {
         : { id: String(r.assigned_by), name: nameOf(r.assigner) },
     familyReportId: r.family_report_id ? String(r.family_report_id) : null,
     meetingId: r.meeting_id ? String(r.meeting_id) : null,
+    /** A setup row: where the step is done ("college-list", "calendar"…). */
+    setupLink: null as SetupLink | null,
     createdAt: String(r.created_at),
   };
 }
@@ -198,6 +201,22 @@ export default async function workItemRoutes(app: FastifyInstance) {
         meetingId: String(row.id),
       });
     }
+    // Setup rows: what is left on a student confirmed from New student. Each
+    // clears itself once the record has it (lib/studentSetup.ts).
+    const confirmed = await confirmedStudents(request);
+    const setupIds = [...confirmed.keys()].filter((id) => !q.studentId || id === q.studentId);
+    const facts = await setupFacts(request, setupIds);
+    for (const id of setupIds) {
+      const f = facts.get(id);
+      if (!f) continue;
+      for (const step of openSteps(COUNSELOR_STEPS, f)) {
+        derived.push({
+          ...base({ id: `${id}:${step.key}`, title: step.title, student_id: id, student: { full_name: confirmed.get(id) }, created_at: now.toISOString() }, "setup", "task"),
+          source: "New student setup",
+          setupLink: step.link,
+        });
+      }
+    }
     return [...items, ...derived];
   });
 
@@ -258,7 +277,11 @@ export default async function workItemRoutes(app: FastifyInstance) {
   });
 }
 
-function base(row: Row, origin: "family-report" | "meeting", kind: "report" | "meeting"): WorkItemDto {
+function base(
+  row: Row,
+  origin: "family-report" | "meeting" | "setup",
+  kind: "report" | "meeting" | "task"
+): WorkItemDto {
   return {
     id: `${origin}:${String(row.id)}`,
     origin,
@@ -278,6 +301,7 @@ function base(row: Row, origin: "family-report" | "meeting", kind: "report" | "m
     assignedBy: null,
     familyReportId: null,
     meetingId: null,
+    setupLink: null,
     createdAt: String(row.created_at),
   };
 }
