@@ -405,12 +405,35 @@ export type SweepSkip = { id: string; reason: string };
 export type SweepResult = { escalated: number; skipped: SweepSkip[] };
 type SweepLog = { error: (obj: unknown, msg?: string) => void };
 
-/** Next moment outside quiet hours, so a held alert has a real send time. */
-export function nextSendWindow(settings: { quiet_hours_end: number | null }): string {
-  const next = new Date();
-  next.setHours((settings.quiet_hours_end ?? 8) + 1, 0, 0, 0);
-  if (next.getTime() < Date.now()) next.setDate(next.getDate() + 1);
-  return next.toISOString();
+/**
+ * Next moment outside quiet hours, so a held alert has a real send time: the
+ * next top of the hour an hour after quiet hours end, in the counselor's own
+ * timezone (the one `inQuietHours` reads), never the server's.
+ */
+export function nextSendWindow(
+  settings: { quiet_hours_end: number | null; timezone: string },
+  now: Date = new Date()
+): string {
+  const target = ((settings.quiet_hours_end ?? 8) + 1) % 24;
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: settings.timezone,
+    hour: "numeric",
+    minute: "numeric",
+    hourCycle: "h23",
+  });
+  const local = (t: number) => {
+    const parts = fmt.formatToParts(new Date(t));
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+    return { hour: get("hour"), minute: get("minute") };
+  };
+  // Quarter-hour steps cover every real UTC offset (…:30, …:45 zones too).
+  const step = 15 * 60_000;
+  const start = Math.ceil(now.getTime() / step) * step;
+  for (let t = start; t <= start + 49 * 3_600_000; t += step) {
+    const { hour, minute } = local(t);
+    if (hour === target && minute === 0) return new Date(t).toISOString();
+  }
+  return new Date(start + 24 * 3_600_000).toISOString();
 }
 
 /**

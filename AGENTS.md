@@ -2,7 +2,7 @@
 
 > **Repo:** `MeridiesAI/meridies-backend` · **Deploy:** Railway API
 >
-> Read the monorepo onboarding doc at `MeridiesAI/context` (`CODEBASE_GUIDE.md`) for cross-repo conventions.
+> Read the monorepo onboarding doc at `MeridiesAI/context` (`README.md`) for cross-repo conventions.
 
 ## What this repo is
 
