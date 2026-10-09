@@ -10,6 +10,8 @@
  *     "$API_URL/internal/ingest/scorecard"
  * and weekly, the resource library's link check:
  *     "$API_URL/internal/resources/link-check"
+ * and every 5–15 minutes, the import pipeline's sweep:
+ *     "$API_URL/internal/imports/sweep"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -17,6 +19,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
 import { isStale } from "../lib/heartbeat.js";
+import { runImportSweep } from "../lib/imports/jobs.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
 import { serviceClient } from "../lib/supabase.js";
 import { startScorecardIngest } from "../lib/ingest/run.js";
@@ -103,6 +106,30 @@ export default async function internalRoutes(app: FastifyInstance) {
         return reply.code(503).send({ started: false, reason: "The link check needs the service role key and its lease" });
       }
       return reply.code(202).send({ started: true });
+    }
+  );
+
+  /**
+   * Every 5–15 minutes: finish import jobs a crash or deploy left waiting,
+   * expire held data (warning 7 days before) and compact changes past the
+   * 30-day undo window.
+   */
+  app.post(
+    "/imports/sweep",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await runImportSweep(request.log);
+      if (!r.ran) {
+        if (r.reason === "locked") return reply.code(409).send({ ran: false, reason: "An import sweep is already running" });
+        const reason =
+          r.reason === "no-worker"
+            ? "Set IMPORT_DATABASE_URL to run import jobs"
+            : r.reason === "no-service-role"
+              ? "The import sweep needs the service role key"
+              : "The import sweep could not take its lease";
+        return reply.code(503).send({ ran: false, reason });
+      }
+      return r;
     }
   );
 

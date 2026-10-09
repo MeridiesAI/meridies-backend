@@ -15,6 +15,15 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: z.string().min(20, "SUPABASE_ANON_KEY is required"),
   // Optional: only needed for work a user may not perform as themselves.
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(20).optional(),
+  // Import pipeline jobs (save, undo, apply held data) run on a direct
+  // Postgres connection that must log in as the restricted `import_worker`
+  // role, through Supabase's SESSION pooler (never the transaction pooler).
+  // Optional: unset, import commit/undo/apply answer 503.
+  IMPORT_DATABASE_URL: blankIsUnset(z.string().url().optional()),
+  // Held-data expiry (30 days) and its 7-day warning emails, run by the
+  // import sweep. Off unless "true": counselors can't act on held data until
+  // the "Ready to apply" page ships.
+  IMPORT_HOLD_EXPIRY_ENABLED: blankIsUnset(z.enum(["true", "false"]).optional()),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
 
@@ -110,6 +119,7 @@ export const corsOrigins = env.CORS_ORIGIN.split(",")
   .filter(Boolean);
 
 export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
+export const hasImportWorker = Boolean(env.IMPORT_DATABASE_URL);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
 export const hasResend = Boolean(env.RESEND_API_KEY);
 export const devMailUrl = env.NODE_ENV === "production" ? undefined : env.DEV_MAIL_URL;

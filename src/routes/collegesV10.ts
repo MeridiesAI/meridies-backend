@@ -33,6 +33,7 @@ import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { findOrCreateChild, practiceFolder } from "../lib/practiceFolders.js";
+import { fourPointGpa, gpaLabel } from "../lib/gpa.js";
 import { toAidBandRating, toAidRating } from "../lib/serialize.js";
 import {
   AID_FLOOR,
@@ -174,7 +175,7 @@ export async function studentNumbers(request: FastifyRequest, studentId: string)
   const [academics, profile] = await Promise.all([
     request.db
       .from("student_academics")
-      .select("gpa_unweighted, sat_superscore, sat_ebrw, sat_math")
+      .select("gpa_unweighted, gpa_scale, sat_superscore, sat_ebrw, sat_math")
       .eq("student_id", studentId)
       .maybeSingle(),
     request.db.from("profiles").select("id, full_name, profile, high_school").eq("id", studentId).maybeSingle(),
@@ -197,7 +198,11 @@ export async function studentNumbers(request: FastifyRequest, studentId: string)
     .map((m) => m.trim())
     .filter((m) => m && m.toLowerCase() !== "undecided");
   return {
-    numbers: { sat, gpaUnweighted: a.gpa_unweighted != null ? Number(a.gpa_unweighted) : null },
+    numbers: {
+      sat,
+      gpaUnweighted: fourPointGpa(a.gpa_unweighted != null ? Number(a.gpa_unweighted) : null, a.gpa_scale as string | null),
+      gpaText: gpaLabel(a.gpa_unweighted != null ? Number(a.gpa_unweighted) : null, a.gpa_scale as string | null),
+    },
     fullName: String((profile.data as Row).full_name ?? ""),
     intendedMajors: [...new Set(majors)],
   };
@@ -346,7 +351,7 @@ async function explainPicks(
     studentId,
     system:
       "For each school, write one short reason (under 25 words) a counselor can read, why it sits in its tier, using only the facts given. No praise, no facts that aren't listed.",
-    prompt: `Student: SAT ${student.numbers.sat ?? "none"}, unweighted GPA ${student.numbers.gpaUnweighted ?? "none"}, majors ${student.intendedMajors.join(", ") || "undecided"}.\n${facts}`,
+    prompt: `Student: SAT ${student.numbers.sat ?? "none"}, unweighted GPA ${student.numbers.gpaText ?? "none"}, majors ${student.intendedMajors.join(", ") || "undecided"}.\n${facts}`,
     schema: {
       type: "object",
       additionalProperties: false,

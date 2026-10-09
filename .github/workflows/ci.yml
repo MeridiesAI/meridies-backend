@@ -57,6 +57,11 @@ jobs:
       - name: Every public table has RLS
         run: test "$(psql "$DB_URL" -tAc "select count(*) from pg_tables where schemaname='public' and rowsecurity=false")" = "0"
 
+      - name: Turn on the import_worker login (CI only)
+        run: |
+          psql "$DB_URL" -c "alter role import_worker login password 'ci-import-worker-pw'"
+          echo "IMPORT_DATABASE_URL=postgresql://import_worker:ci-import-worker-pw@127.0.0.1:54322/postgres" >> "$GITHUB_ENV"
+
       - name: Load the catalog fixtures
         run: |
           npx tsx scripts/ingest/scorecard.ts --fixture test/fixtures/scorecard-two-schools.json

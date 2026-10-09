@@ -149,6 +149,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       extraProfile: {
         gpaWeighted: a?.gpa_weighted ?? undefined,
         gpaUnweighted: a?.gpa_unweighted ?? undefined,
+        gpaScale: a?.gpa_scale ?? undefined,
         rigor: a?.rigor_context ?? undefined,
         sat: a?.sat_superscore ?? undefined,
         act: a?.act_composite ?? undefined,

@@ -18,6 +18,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { rankPercentile, type RankRead } from "./classRank.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "./errors.js";
+import { fourPointGpa } from "./gpa.js";
 import { toRankBand } from "./serialize.js";
 
 type Row = Record<string, unknown>;
@@ -65,6 +66,7 @@ export type StudentInfo = {
   gradYear: string | null;
   gpaWeighted: number | null;
   gpaUnweighted: number | null;
+  gpaScale: string | null;
   /** As entered by the counselor or student, verbatim. */
   classRank: string | null;
   /** Read off the school's own bands; null with a reason when it can't be. */
@@ -109,7 +111,12 @@ export async function loadStudentInfo(db: SupabaseClient, studentId: string): Pr
   const g = ((guardians.data ?? [])[0] ?? null) as Row | null;
 
   const gpaWeighted = n(a.gpa_weighted);
-  const rank = await deriveClassRank(db, s(p.high_school_id), gpaWeighted);
+  const gpaScale = s(a.gpa_scale);
+  const rankGpa = fourPointGpa(gpaWeighted, gpaScale);
+  const rank =
+    gpaWeighted !== null && rankGpa === null
+      ? { read: null, reason: "Class rank needs a GPA on a 4- or 5-point scale" }
+      : await deriveClassRank(db, s(p.high_school_id), rankGpa);
 
   const contact = s(d.contact_email);
   return {
@@ -135,6 +142,7 @@ export async function loadStudentInfo(db: SupabaseClient, studentId: string): Pr
     gradYear: s(p.grad_year),
     gpaWeighted,
     gpaUnweighted: n(a.gpa_unweighted),
+    gpaScale,
     classRank: s(a.class_rank),
     classRankDerived: rank.read,
     classRankUnavailableReason: rank.reason,
@@ -218,8 +226,8 @@ export const infoPatchSchema = z
       .trim()
       .regex(/^(20\d\d)?$/, "Use a four-digit year")
       .nullable(),
-    gpaWeighted: z.number().min(0).max(10).nullable(),
-    gpaUnweighted: z.number().min(0).max(10).nullable(),
+    gpaWeighted: z.number().min(0).max(110).nullable(),
+    gpaUnweighted: z.number().min(0).max(110).nullable(),
     classRank: optionalText(80),
     sat: z.number().int().min(400).max(1600).nullable(),
     act: z.number().int().min(1).max(36).nullable(),
@@ -373,7 +381,7 @@ export async function deriveAxisScores(
   const [academics, courses, activities, awards, essays] = await Promise.all([
     db
       .from("student_academics")
-      .select("gpa_weighted, sat_superscore, act_composite, rigor_count")
+      .select("gpa_weighted, gpa_scale, sat_superscore, act_composite, rigor_count")
       .eq("student_id", studentId)
       .maybeSingle(),
     db.from("courses").select("type").eq("student_id", studentId),
@@ -386,7 +394,7 @@ export async function deriveAxisScores(
   }
 
   const a = (academics.data ?? {}) as Row;
-  const gpa = n(a.gpa_weighted);
+  const gpa = fourPointGpa(n(a.gpa_weighted), s(a.gpa_scale));
   const sat = n(a.sat_superscore);
   const act = n(a.act_composite);
 

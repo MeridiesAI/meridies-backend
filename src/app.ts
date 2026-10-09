@@ -33,6 +33,7 @@ import opportunityRoutes from "./routes/opportunities.js";
 import preferenceRoutes from "./routes/preferences.js";
 import recordRoutes from "./routes/records.js";
 import reportRoutes from "./routes/reports.js";
+import importRoutes from "./routes/imports.js";
 import rosterRoutes from "./routes/roster.js";
 import studentRoutes from "./routes/students.js";
 import taskRoutes from "./routes/tasks.js";
@@ -123,6 +124,7 @@ export function buildApp() {
   app.register(integrationRoutes, { prefix: "/integrations" });
   app.register(reportRoutes, { prefix: "/reports" });
   app.register(rosterRoutes, { prefix: "/roster" });
+  app.register(importRoutes, { prefix: "/imports" });
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });
   // v10 sync routes: foundations

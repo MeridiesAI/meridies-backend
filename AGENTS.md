@@ -72,10 +72,13 @@ src/
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
+│   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
+│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   └── errors.ts, chat.ts
 ├── routes/
+│   ├── imports.ts         # import requests, held-data queue, status, sweep (thin)
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
@@ -511,6 +514,13 @@ conditional `scheduled -> queued` update before it is sent, so overlapping
 runs can't send it twice; one inside its counselor's quiet hours is moved to
 the next window. There is no in-process interval for this one.
 
+**The third cron: import sweep.** `POST /internal/imports/sweep`, same bearer
+token, every 5-15 minutes (see "Import pipeline"):
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
+  "https://<api-host>/internal/imports/sweep"
+```
+
 ## AI inside the search
 
 The model never writes a result list and never changes the catalog.
@@ -671,6 +681,51 @@ can see, their own id, or `unfiled`.
 data-handling switches, not display preferences. Anything that reads a document
 into a prompt must filter on them (see `routes/tasks.ts`).
 
+### Import pipeline (step 1)
+
+Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
+
+- **The browser never writes import data.** It reads `roster_imports`,
+  `import_files`, `import_items`, `import_changes` under
+  `private.can_view_import` (uploader while in the practice, plus firm
+  owners/admins) and *requests* jobs through `request_import_commit`,
+  `request_import_undo`, `request_held_apply`.
+- **Jobs run on `IMPORT_DATABASE_URL` as `import_worker`** (session pooler,
+  never the transaction pooler, never the `postgres` login; the server exits
+  at boot otherwise). `commit_import`, `undo_import` and `apply_held_item` are
+  one transaction each with `statement_timeout = 300s`, lock with SKIP LOCKED,
+  and write their audit row inside the transaction. Commit, undo and apply
+  each require the requester's claim (`p_actor = job_actor`).
+- **Runner hardening.** The pool has an error listener and a 10s connect
+  timeout; a busy job is retried 3 times, 2s apart; job error logs carry only
+  the error code and message, never SQL or row values.
+- **No dynamic SQL.** Writes go through `private.import_set_field` (one
+  compare-and-set UPDATE per field) and `private.import_insert_row` (fixed
+  columns, `source = 'import'`). `import_fields` is the only list of
+  importable fields; `import_changes (target_table, field)` has a foreign key to it.
+- **Apply order.** GPA fields first (GPA <= 10), then scale, then the rest,
+  each with `clock_timestamp()` as `applied_at`; undo runs in exact reverse.
+- **Staging must read `old_value` with `private.import_current_value`** so the
+  compare-and-set matches what the database holds.
+- **Held data never attaches on acceptance**: `accept_invitation` moves it to
+  the counselor's "Ready to apply" queue for 30 days (old roster rows too).
+  Held data follows the student's email across resends. In
+  `request_held_apply`, an omitted decision uses the queue's default, and the
+  request is refused while an import is still processing.
+- **GPA has a scale.** Read GPA through `src/lib/gpa.ts`; fit, odds, class
+  rank and scholarship minimums use `fourPointGpa`, which returns null for
+  non-4/5-point scales.
+- **Imported text is data.** Rows with `source = 'import'` (activities, test
+  scores, courses) must be passed to any model as data, never as instructions.
+- Cron: `POST /internal/imports/sweep` every 5-15 minutes (finishes stuck
+  jobs, fails jobs whose requester's account is gone, expires held data with
+  a 7-day warning, compacts after 30 days).
+- Held-data expiry and warning emails are off until the Ready-to-apply page
+  ships (`IMPORT_HOLD_EXPIRY_ENABLED=true` turns them on).
+- `request_held_apply` records each field's current value as `old_value`;
+  `apply_held_item` compare-and-sets against it, so a value that changed
+  while waiting is kept (`skipped_stale`).
+
 ## Safe coding standards
 
 - TypeScript strict — no `any`
@@ -744,6 +799,8 @@ npm run dev               # http://localhost:4000
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
+| `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
+| `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |

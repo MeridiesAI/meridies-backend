@@ -13,6 +13,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { assertCanEditStudent, assertCanViewStudent, requireRole } from "../lib/guards.js";
+import { fourPointGpa } from "../lib/gpa.js";
 import { limit } from "../lib/limits.js";
 import {
   HOOKS,
@@ -128,7 +129,7 @@ export default async function outcomeRoutes(app: FastifyInstance) {
         request.db.from("profiles").select("full_name, high_school").eq("id", body.studentId).maybeSingle(),
         request.db
           .from("student_academics")
-          .select("gpa_weighted, gpa_unweighted, sat_superscore, act_composite")
+          .select("gpa_weighted, gpa_unweighted, gpa_scale, sat_superscore, act_composite")
           .eq("student_id", body.studentId)
           .maybeSingle(),
       ]);
@@ -138,8 +139,9 @@ export default async function outcomeRoutes(app: FastifyInstance) {
       const a = academics.data as Row | null;
       insert.student_name ??= p?.full_name ?? null;
       insert.high_school_name ??= p?.high_school ?? null;
-      if (body.gpaWeighted === undefined) insert.gpa_weighted = a?.gpa_weighted ?? null;
-      if (body.gpaUnweighted === undefined) insert.gpa_unweighted = a?.gpa_unweighted ?? null;
+      const scale = (a?.gpa_scale as string | null | undefined) ?? null;
+      if (body.gpaWeighted === undefined) insert.gpa_weighted = fourPointGpa(a?.gpa_weighted == null ? null : Number(a.gpa_weighted), scale);
+      if (body.gpaUnweighted === undefined) insert.gpa_unweighted = fourPointGpa(a?.gpa_unweighted == null ? null : Number(a.gpa_unweighted), scale);
       if (body.sat === undefined) insert.sat = a?.sat_superscore ?? null;
       if (body.act === undefined) insert.act = a?.act_composite ?? null;
     }
