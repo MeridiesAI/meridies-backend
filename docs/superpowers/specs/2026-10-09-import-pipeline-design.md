@@ -461,3 +461,74 @@ One spec, delivered as separate PRs in this order, each green on CI before the n
 3. PDF path: extraction, batch splitting, the sweep job.
 4. App (`meridies-app`): Import screen replacing `RosterImportPanel`, review,
    history with Undo, "Ready to apply" queue; `lib/api.ts` wrappers.
+
+## Appendix A. Built to change
+
+Rule: access, retention, the field list, storage and AI calls each live in
+exactly one place.
+
+| Future change | Effort | Where |
+|---|---|---|
+| Firm admins can see imports | Easy, one migration | `private.can_view_import()` |
+| Admins can commit/undo others' imports | Easy–medium | `private.can_manage_import()` + route role check |
+| Change raw-file retention (7 days → 24 h) | Trivial | One setting read by the sweep |
+| Add/remove importable fields or sensitive columns | Easy | `import_fields` rows |
+| Encrypt raw files before storage | Medium | One `importStore` module (upload/download/delete) |
+| Encrypt `import_changes` values | Medium | One changes writer/reader, `tokenCrypto` pattern |
+| Move processing to Edge Functions / another provider | Medium | Behind `extract` / `planParse` / `cleanCells` interfaces |
+| New target (e.g. awards) | Easy | `import_fields` rows + one apply branch; no new table |
+| True end-to-end encryption | Hard, any approach | Product change: the server could no longer parse files |
+| Switch staging model A → B | Hard (several days to a week) | New tables, history migration, rewritten commit/undo/review; avoided by §4.2 |
+
+## Appendix B. Security proposals considered and adapted
+
+| Proposal | Outcome |
+|---|---|
+| HTTPS/TLS in transit | Already true |
+| AES-256 at rest (Supabase) | Already true |
+| Process files in memory in Supabase Edge Functions | Adopted the guarantee, not the runtime: in memory on the Railway backend in a worker thread. AI calls, quotas, `ai_runs` and the Anthropic key already live there; a second runtime would split them. |
+| Send extracted text to Claude over HTTPS | Already true (`lib/anthropic.ts`); PDFs are sent natively, so no PDF library |
+| "Anthropic deletes logs within 28 days" | Not stated as a number; verify our account's terms and set up zero data retention before launch |
+| Column-level encryption with Vault / pgcrypto | Rejected (§6.1); sensitive data is kept out instead (§7.4) |
+| Store raw files in `student-documents` under category folders | Rejected; separate `imports` bucket (§3) |
+
+## Appendix C. The three staging approaches, plainly
+
+Think of a teacher copying grades from a pile of papers into the class
+gradebook, who wants to check before saving and be able to undo.
+
+- **A, sticky notes (chosen).** Each change is a note: "Maya's GPA 3.5 → 3.8".
+  Check the notes, apply the kept ones, undo by reading them backwards, and
+  skip any note whose value someone has changed since. One board for every kind
+  of data. The notes accept anything, so code and a database trigger check
+  every value.
+- **B, a practice gradebook per subject.** Boxes only accept the right kind of
+  value, so mistakes are caught early, but there are 4–5 extra books to keep in
+  sync and every step is built once per book.
+- **C, a photo of the page.** Undo puts the photo back, which also erases
+  anything changed after it was taken. Rejected.
+
+Start with A; once the field list settles, add B's early checking to A's notes
+through `import_fields.value_type` (§4.2).
+
+## Appendix D. Review history
+
+- 2026-10-09: design built section by section with Elvin (inputs, targets,
+  matching, conflicts, access, staging model A).
+- External security review, round 1: held data delivered to whoever accepts
+  the invite → counselor queue; dynamic SQL → per-target fixed SQL +
+  `import_fields` FK; PDFs bypass the sensitive list → SSN value patterns;
+  "minimal data" claim → masked samples; parsing attack surface → worker,
+  caps, no npm `xlsx`; storage write rule + object sweep; invitation spam
+  limits; retention, stored prompt injection, formula injection; review-load
+  grouping, provenance defaults, risk sort; duplicate check when email
+  doesn't match; batch PDFs; overlapping review; held-data conflicts; metrics.
+- Round 2: `'*'` rows and `value_type` on `import_fields`; provenance blind
+  spot accepted; refined SSN rules; column stats with masking; risk formula;
+  birthday-less fallback; reject PDFs over the page cap by name; minimum sends
+  before the bounce pause.
+- Round 3: audit inside the transaction, side effects as retried jobs;
+  validation pass before applying; statement timeout (fixed via service_role,
+  not a function `SET`); `FOR UPDATE` status lock; deleted/reassigned
+  students, "continue without file", template drift; paused-state and
+  pre-expiry messages; Resend idempotency key; test suites.
