@@ -77,7 +77,7 @@ export type PreferencesPatch = z.infer<typeof preferencesPatch>;
 const DEFAULTS = {
   banner_preset: "pattern",
   banner_image_path: null,
-  theme: "system",
+  theme: "light",
   sms_enabled: false,
   sms_phone: null,
   email_enabled: false,
@@ -110,7 +110,7 @@ async function toDto(db: SupabaseClient, r: Row): Promise<StudentPreferences> {
       : "pattern",
     bannerImagePath: path,
     bannerImageUrl: await signedBannerUrl(db, path),
-    theme: (THEMES as readonly string[]).includes(String(r.theme)) ? (r.theme as Theme) : "system",
+    theme: (THEMES as readonly string[]).includes(String(r.theme)) ? (r.theme as Theme) : "light",
     notifications: {
       smsEnabled: r.sms_enabled === true,
       smsPhone: typeof r.sms_phone === "string" ? r.sms_phone : null,
