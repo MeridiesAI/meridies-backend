@@ -235,6 +235,17 @@ export async function startSubmissionReview(
     let outcome: Outcome;
     try {
       const result = await judge();
+      // The student may have taken the file back while AxIS read it: a verdict
+      // on a file no longer handed in must not complete (or reopen) the task.
+      const { data: still, error: stillError } = await svc
+        .from("deliverable_documents")
+        .select("document_id")
+        .eq("deliverable_id", String(reviewed.id))
+        .eq("document_id", args.documentId)
+        .eq("role", "submission")
+        .maybeSingle();
+      if (stillError) throw new Error(`submission re-read: ${stillError.message}`);
+      if (!still) return;
       await record(svc, reviewed, args.documentId, result);
       outcome = { status: "reviewed", result };
     } catch (err) {
