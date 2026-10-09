@@ -5,7 +5,8 @@
  * an HTTP request through PostgREST may last, so they use a direct `pg`
  * connection. That connection must log in as `import_worker`, a role that
  * can execute the job functions and nothing else. A pasted superuser string
- * would bypass every access rule, so it is refused at boot and per job.
+ * would bypass every access rule, so it is refused at boot and before the
+ * first job in each process.
  */
 
 import pg from "pg";
@@ -35,12 +36,20 @@ let verified: Promise<void> | null = null;
 
 export function importPool(): Pool | null {
   if (!env.IMPORT_DATABASE_URL) return null;
-  pool ??= new pg.Pool({
-    connectionString: env.IMPORT_DATABASE_URL,
-    max: 4,
-    idleTimeoutMillis: 30_000,
-    application_name: "meridies-import-worker",
-  });
+  if (!pool) {
+    pool = new pg.Pool({
+      connectionString: env.IMPORT_DATABASE_URL,
+      max: 4,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
+      application_name: "meridies-import-worker",
+    });
+    // An idle client dropped by the pooler must not crash the process.
+    // Log the code and message only, never the connection string.
+    pool.on("error", (err) => {
+      console.error("import worker pool error", { code: (err as { code?: string }).code, message: err.message });
+    });
+  }
   return pool;
 }
 

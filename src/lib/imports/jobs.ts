@@ -37,6 +37,14 @@ const BUSY_ATTEMPTS = 3;
 const BUSY_RETRY_MS = 2000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Code and message only: a pg error's `detail` can contain student data. */
+function errInfo(err: unknown): { code: string | undefined; message: string } {
+  return {
+    code: (err as { code?: string } | null)?.code,
+    message: err instanceof Error ? err.message : String(err),
+  };
+}
+
 export async function runImportJob(
   kind: ImportJobKind,
   id: string,
@@ -51,15 +59,19 @@ export async function runImportJob(
         return rows[0].out as ImportJobOutcome;
       });
       // Busy means another worker holds the lock; the sweep is the backstop.
-      if (out.status !== "busy" || attempt === BUSY_ATTEMPTS) break;
+      if (out.status !== "busy") break;
+      if (attempt === BUSY_ATTEMPTS) {
+        log.info({ kind, id }, "import job still busy; the sweep will retry");
+        break;
+      }
       await sleep(BUSY_RETRY_MS);
     }
     return out;
   } catch (err) {
-    log.error({ err, kind, id }, "import job failed; rolled back");
+    log.error({ ...errInfo(err), kind, id }, "import job failed; rolled back");
     await withWorkerTransaction((c) =>
       c.query("select public.fail_import_job($1, $2, $3)", [kind, id, FAILURE_MESSAGE])
-    ).catch((e: unknown) => log.error({ err: e, kind, id }, "import job: could not record the failure"));
+    ).catch((e: unknown) => log.error({ ...errInfo(e), kind, id }, "import job: could not record the failure"));
     return { status: "failed" };
   }
 }

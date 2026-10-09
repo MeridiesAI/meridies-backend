@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertWorkerRole, WrongWorkerRoleError } from "../../src/lib/imports/db.js";
+import { assertWorkerRole, importPool, WrongWorkerRoleError } from "../../src/lib/imports/db.js";
 
 const fake = (user: string) => ({
   query: async (_sql: string) => ({ rows: [{ current_user: user }] }),
@@ -16,4 +16,8 @@ test("the postgres superuser login is refused", async () => {
 
 test("the service role login is refused", async () => {
   await assert.rejects(assertWorkerRole(fake("service_role")), /import_worker/);
+});
+
+test("without IMPORT_DATABASE_URL there is no import pool", () => {
+  assert.equal(importPool(), null);
 });
