@@ -57,6 +57,27 @@ check("validation problems send the import back to review", out2.status === "rev
 check("nothing was applied", (await academics(s2.id)) === null);
 check("the problems are stored for the review screen", (await importRow(imp2)).job_error.problems.length === 2);
 
+// Skips are rolled back with the rest when validation sends the import back.
+const sA = await studentOf(c, "imp-commit-studentA");
+const sB = await studentOf(c, "imp-commit-studentB");
+await sql(`insert into public.student_academics (student_id, gpa_weighted, gpa_scale) values ('${sB.id}', 3.5, '4.0')`);
+const impR = await makeImport(c);
+const itemA = await addItem(impR, { studentId: sA.id });
+const itemB = await addItem(impR, { studentId: sB.id });
+await addChange(impR, itemA, { target: "student_academics", field: "sat_superscore", value: 1300, studentId: sA.id });
+await addChange(impR, itemB, { target: "student_academics", field: "gpa_weighted", value: 92, studentId: sB.id });
+await sql(`update public.profiles set counselor_id = '${other.id}' where id = '${sA.id}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impR}'`);
+const outR = JSON.parse(await sql(`select public.commit_import('${impR}', '${c.id}')`));
+check("problems send it back to review", outR.status === "review", JSON.stringify(outR));
+check("the reassigned student's item is not left skipped after a rollback to review", (await sql(`select match_status from public.import_items where id = '${itemA}'`)) === "matched_email");
+
+// A different actor can't run someone else's job.
+const impX = await makeImport(c);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impX}'`);
+const outX = JSON.parse(await sql(`select public.commit_import('${impX}', '${other.id}')`));
+check("a different actor gets not-requested", outX.status === "not-requested" && (await importRow(impX)).status === "committing", JSON.stringify(outX));
+
 // A student moved to another counselor is skipped, not a rollback.
 const s3 = await studentOf(c, "imp-commit-student3");
 const imp3 = await makeImport(c);

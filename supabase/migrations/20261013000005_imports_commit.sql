@@ -49,6 +49,7 @@ declare
   v_skipped_items integer := 0;
   v_students integer := 0;
   v_result jsonb;
+  v_cur jsonb;
 begin
   select * into v from public.roster_imports where id = p_import for update skip locked;
   if not found then
@@ -60,6 +61,11 @@ begin
   if v.status <> 'committing' then
     return jsonb_build_object('status', 'not-requested', 'current', v.status);
   end if;
+  -- A job claimed by someone else is not this caller's to run.
+  if v.job_actor is distinct from p_actor then
+    return jsonb_build_object('status', 'not-requested', 'current', v.status);
+  end if;
+
   if not private.can_manage_import(p_import, p_actor) then
     update public.roster_imports
        set status = 'review', job_error = jsonb_build_object('message', 'You no longer have access to this import')
@@ -67,23 +73,30 @@ begin
     return jsonb_build_object('status', 'review');
   end if;
 
-  -- Step 2: students the actor may no longer write are skipped with a reason.
-  update public.import_items i
-     set match_status = 'skipped', skip_reason = 'This student is no longer on your roster'
-   where i.import_id = p_import
-     and i.match_status in ('matched_email','confirmed')
-     and not private.import_can_write_student(p_import, i.student_id, p_actor);
-  get diagnostics v_skipped_items = row_count;
+  -- Steps 2 and 3 share one sub-transaction: if validation finds problems the
+  -- item skips are rolled back too, so nothing at all is changed.
+  begin
+    -- Step 2: students the actor may no longer write are skipped with a reason.
+    update public.import_items i
+       set match_status = 'skipped', skip_reason = 'This student is no longer on your roster'
+     where i.import_id = p_import
+       and i.match_status in ('matched_email','confirmed')
+       and not private.import_can_write_student(p_import, i.student_id, p_actor);
+    get diagnostics v_skipped_items = row_count;
 
-  -- Step 3: one validation pass; any problem sends the import back untouched.
-  v_problems := private.import_validate(p_import, null);
-  if jsonb_array_length(v_problems) > 0 then
+    -- Step 3: one validation pass; any problem sends the import back untouched.
+    v_problems := private.import_validate(p_import, null);
+    if jsonb_array_length(v_problems) > 0 then
+      raise exception 'Import has problems' using errcode = 'IMP01';
+    end if;
+  exception when sqlstate 'IMP01' then
+    v_skipped_items := 0;
     update public.roster_imports
        set status = 'review',
            job_error = jsonb_build_object('message', 'Some values need fixing before saving', 'problems', v_problems)
      where id = p_import;
     return jsonb_build_object('status', 'review', 'problems', v_problems);
-  end if;
+  end;
 
   -- Step 4: apply. A GPA scale is written before the GPA on the same item.
   for c in
@@ -100,10 +113,11 @@ begin
     if c.op = 'set_field' then
       v_ok := private.import_set_field(c.target_table, c.field, c.student_id, c.old_value, c.new_value);
       if v_ok then
+        v_cur := private.import_current_value(c.target_table, c.field, c.student_id);
         update public.import_changes
            set state = 'applied', applied_at = now(),
-               applied_value = private.import_current_value(c.target_table, c.field, c.student_id),
-               new_value_hash = private.import_value_hash(private.import_current_value(c.target_table, c.field, c.student_id))
+               applied_value = v_cur,
+               new_value_hash = private.import_value_hash(v_cur)
          where id = c.id;
         v_applied := v_applied + 1;
       else
@@ -120,10 +134,11 @@ begin
          where id = c.id;
         v_stale := v_stale + 1;
       else
+        v_cur := private.import_row_snapshot(c.target_table, v_row);
         update public.import_changes
            set state = 'applied', applied_at = now(), target_row_id = v_row,
-               applied_value = private.import_row_snapshot(c.target_table, v_row),
-               new_value_hash = private.import_value_hash(private.import_row_snapshot(c.target_table, v_row))
+               applied_value = v_cur,
+               new_value_hash = private.import_value_hash(v_cur)
          where id = c.id;
         v_applied := v_applied + 1;
       end if;
