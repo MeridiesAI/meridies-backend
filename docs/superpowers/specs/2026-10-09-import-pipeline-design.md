@@ -51,11 +51,11 @@ year, high school and intended major in `roster_import_rows`, and
 | Inputs | v1.0: CSV, XLSX. v1.1: PDF. Later: Google Sheets direct. |
 | Targets | `student_academics`, `student_personal_details` (single-row); `test_scores`, `courses`, `activities` (multi-row) |
 | Matching scope | **Only the counselor's own students.** Anyone else is "new"; the invitation flow handles collisions. Prevents learning who has an account by uploading emails. |
-| Matching rules | Email match **and** a fuzzy name match → matched. Email match with a different name, or an email shared by several rows in the file → suggested. No email match → name + birthday + school, or name + grad year + school: suggested. **Suggestions are confirmed by the counselor** (bulk confirm for high confidence). |
+| Matching rules | Email match **and** a fuzzy name match → matched. Email match with a different name → **the counselor must confirm** (shown as "email matches Jane Doe, file says John Doe"); never applied without that confirmation. An email shared by several rows in the file → suggested. No email match → name + birthday + school, or name + grad year + school: suggested. **Suggestions are confirmed by the counselor** (bulk confirm for high confidence). |
 | No match | Has email → invitation; data held until the invitation expires (14 days, the existing `invitations.expires_at`). No email → skipped with reason. |
 | Held data | Never auto-applied on acceptance. Counselor queue ("Jane accepted — apply her imported data?") with a loud warning when the accepting account's name differs from the imported name. Expires 30 days after acceptance; warning email 7 days before. |
 | Conflicts | Empty fields fill. Differing values default by provenance (§5.6); grouped by pattern; sorted by risk, which includes match confidence. |
-| Access | Uploader. Firm owners/admins take over an import only when its uploader has left the firm (§6.4). |
+| Access | The uploader, plus the firm's owners/admins, who can always see, undo and apply held data for their firm's imports (§6.4). A solo counselor's imports are theirs alone. |
 | Storage | New private bucket `imports`, separate from `student-documents`. |
 | Staging model | Change list (`import_changes`, "approach A"). Typed-table guarantees through `import_fields` + validation trigger. |
 | Commit/undo | Background jobs, one real transaction each on a direct Postgres connection; the client polls. No chunking. |
@@ -124,7 +124,7 @@ counselor ─< roster_imports >─ import_templates
   provenance (§5.6).
 - `status`: `draft | profiling | mapping | staging | review | committing |
   committed | undoing | undone | failed | expired`.
-- Add `template_id`, `committed_at`, `undone_at`, `expires_at` (draft expiry),
+- Add `firm_id` (stamped at creation, null for solo counselors), `template_id`, `committed_at`, `undone_at`, `expires_at` (draft expiry),
   `undo_until` (committed_at + 30 days), `compacted_at`, `ai_spend_cents`,
   `job_error jsonb` (validation report from a failed commit).
 
@@ -418,10 +418,13 @@ Every policy (tables and bucket) calls `private.can_view_import(import_id,
 uid)`; commit, undo and applying held data go through
 `private.can_manage_import(import_id, uid)`. Both return true for:
 - the uploader, while they are still a member of the practice; or
-- an owner/admin of the firm the uploader belonged to, **once the uploader has
-  left the firm** (orphaned import).
+- an owner/admin of the firm the import belongs to (always, not only after the
+  uploader leaves). `roster_imports.firm_id` is stamped at creation so the
+  answer doesn't change when the uploader leaves.
 
-Widening to "firm admins always" later is a change to these two functions only.
+Changing who else may see imports later is a change to these two functions
+only. What happens to a departing counselor's students and imports is decided
+by the firm (see the offboarding design, pending).
 
 ### 6.5 Invitations as an abuse channel
 Invitation emails use fixed templates; the student and counselor names are
@@ -508,7 +511,7 @@ recovery).
 | Backend crash mid-job | Transaction rolls back; job lease expires and the job reruns | Progress resumes |
 | Accepting account's name differs | Item held with mismatch flag | Warning; type the name to apply |
 | Held data near expiry / expired | Email + in-app warning at 7 days; wipe; audit | "4 students' held data expires in 7 days" |
-| Uploader left the firm | Firm admins can view, undo and apply | Import appears under "Imports from former team members" |
+| Uploader left the firm | Firm admins keep full access; the firm's offboarding choice decides who takes over (pending design) | Import listed under its students' new counselor |
 
 ## 9. Testing
 
@@ -528,7 +531,7 @@ dependency: `fast-check`.
 | Compare-and-set | A student edit committed between review and commit is never overwritten | integration |
 | Real files | Anonymized exports: Naviance, SCOIR, Cialfo, HubSpot, CollegePlannerPro, CounselMore, GradBetter | integration, `test/fixtures/imports/` |
 | Malicious files | Zip bomb, XML expansion, mismatched magic bytes, formula cells, names-as-headers, SSN in free text | integration |
-| RLS & storage | Two counselors, a firm admin and a student × every table + bucket; orphan takeover only after the uploader leaves; definer functions not callable by `authenticated` | integration (persona) |
+| RLS & storage | Two counselors in a firm, a firm admin, a solo counselor and a student × every table + bucket; admins see firm imports, other counselors don't; definer functions not callable by `authenticated` | integration (persona) |
 | Concurrency | Double commit; commit during undo; acceptance during undo; held apply vs expiry | integration |
 | Load | Commit and undo at 5,000 rows × all fields on the direct connection within the timeout | integration, tagged pre-release |
 | Held data | Pending invite expiry wipes; acceptance → queue only; name-mismatch warning; email at 7 days; wipe at 30 | integration |
@@ -596,7 +599,6 @@ timelines. School customers are out of scope until this is done.
 - Direct Google Sheets import (`lib/suiteApi.ts`, `accessTokenFor`).
 - Tighten `import_fields.value_type` as the field list settles.
 - `field_sources` provenance column if hash-based provenance proves too coarse.
-- Firm admins see all imports (change §6.4's two functions).
 - PDF region highlighting in review.
 - School customers (§10), Contact Pipeline contacts import, spreadsheet export
   with formula escaping.
@@ -622,7 +624,7 @@ exactly one place.
 
 | Future change | Effort | Where |
 |---|---|---|
-| Firm admins see all imports | Easy, one migration | `private.can_view_import()` / `can_manage_import()` |
+| Change who can see imports (e.g. all firm counselors) | Easy, one migration | `private.can_view_import()` / `can_manage_import()` |
 | Change raw-file retention (7 days → 24 h) | Trivial | One setting read by the sweep |
 | Add/remove importable fields or sensitive columns | Easy | `import_fields` rows |
 | Encrypt raw files before storage | Medium | One `importStore` module (upload/download/delete) |
