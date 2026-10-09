@@ -1,7 +1,7 @@
 -- Import pipeline, step 1: the tables.
 -- Spec: docs/superpowers/specs/2026-10-09-import-pipeline-design.md §3–§4.
 -- Additive: roster_imports is extended, not renamed; roster_import_rows stays
--- for history. Policies arrive in 20261013000002; until then RLS denies all.
+-- for history. Policies arrive in 20261014000002; until then RLS denies all.
 
 -- ---------------------------------------------------------------------------
 -- roster_imports, extended

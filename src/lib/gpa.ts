@@ -1,5 +1,5 @@
 /**
- * GPA with its scale (spec §4.1). Since 20261013000001 a 92 on a 100-point
+ * GPA with its scale (spec §4.1). Since 20261014000001 a 92 on a 100-point
  * scale can sit next to a 3.8 on a 4.0 scale, so nothing may compare, chart
  * or rank a GPA without reading `student_academics.gpa_scale`. Fit, odds,
  * class rank and scholarship minimums are 4/5-point models: anything else is
