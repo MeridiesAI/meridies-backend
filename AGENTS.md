@@ -73,7 +73,7 @@ src/
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
-│   ├── imports/           # import pipeline: job runner, sweep, name rule, worker role check
+│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   └── errors.ts, chat.ts
