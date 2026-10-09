@@ -81,10 +81,12 @@ grant execute on function public.import_field_provenance(uuid, text, text) to im
 grant execute on function public.compact_imports() to import_worker, service_role;
 
 -- ---------------------------------------------------------------------------
--- Close cycle copies GPAs into admission_outcomes, whose columns stay ≤ 10.
--- A 100-point GPA (allowed in student_academics since 20261013000001) is
--- recorded as unknown there rather than failing the whole close.
--- Copied from 20261005010003; the only change is the GPA line in the select.
+-- Close cycle copies GPAs into admission_outcomes, a 4/5-point table (§4.1).
+-- Mirrors src/lib/gpa.ts fourPointGpa: a GPA is copied when gpa_scale is
+-- blank and the value is at most 5.5, or when gpa_scale's leading number is 4
+-- or 5. Anything else (10- or 100-point, unparseable) is recorded as unknown
+-- there rather than mixed in or failing the whole close.
+-- Copied from 20261005010003; the only change is the GPA lines in the select.
 -- ---------------------------------------------------------------------------
 create or replace function public.close_admission_cycle(p_cycle text)
 returns jsonb
@@ -142,8 +144,12 @@ begin
       coalesce(sc.round, 'RD'),
       case sc.status when 'accepted' then 'admitted' when 'enrolled' then 'admitted' else sc.status end,
       sc.status = 'enrolled',
-      case when sa.gpa_unweighted <= 10 then sa.gpa_unweighted end,
-      case when sa.gpa_weighted <= 10 then sa.gpa_weighted end,
+      case when (coalesce(sa.gpa_scale, '') ~ '^\s*$' and sa.gpa_unweighted <= 5.5)
+                or substring(sa.gpa_scale from '^\s*([+-]?(?:\d+\.?\d*|\.\d+))')::numeric in (4, 5)
+           then sa.gpa_unweighted end,
+      case when (coalesce(sa.gpa_scale, '') ~ '^\s*$' and sa.gpa_weighted <= 5.5)
+                or substring(sa.gpa_scale from '^\s*([+-]?(?:\d+\.?\d*|\.\d+))')::numeric in (4, 5)
+           then sa.gpa_weighted end,
       sa.sat_superscore, sa.act_composite,
       case when sc.round in ('ED','ED2') or sc.binding then array['ed']::text[] else '{}'::text[] end,
       nullif(btrim(coalesce(p.profile->>'intendedMajor', '')), ''),

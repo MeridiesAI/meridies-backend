@@ -1,5 +1,5 @@
 // Import pipeline step 1, Task 8: provenance survives compaction; deletion removes fingerprints.
-import { check, sql, user, SB } from "./harness.mjs";
+import { check, sql, user, rest, SB } from "./harness.mjs";
 import { makeImport, studentOf, addItem, addChange, changeRow } from "./imports-helpers.mjs";
 
 const c = await user("imp-prov");
@@ -44,6 +44,27 @@ check("held data is not compacted", (await changeRow(heldCh)).new_value === 30);
 await sql(`delete from auth.users where id = '${s.id}'`);
 check("account deletion removes the student's import changes", (await sql(`select count(*) from public.import_changes where id = '${ch}'`)) === "0");
 
-// Close cycle never copies a 100-point GPA into admission_outcomes.
-const fn = await sql(`select pg_get_functiondef('public.close_admission_cycle(text)'::regprocedure)`);
-check("close_admission_cycle guards GPAs over 10", fn.includes("sa.gpa_weighted <= 10") && fn.includes("sa.gpa_unweighted <= 10"));
+// Close cycle copies only 4/5-point GPAs into admission_outcomes (mirrors fourPointGpa).
+const cc = await user("imp-prov-cycle");
+const cases = [
+  { tag: "blank-small", scale: null, gpa: 3.9, want: 3.9 },
+  { tag: "blank-big", scale: null, gpa: 9, want: null },
+  { tag: "five", scale: "5.0 weighted", gpa: 4.8, want: 4.8 },
+  { tag: "ten", scale: "10", gpa: 8.5, want: null },
+  { tag: "hundred", scale: "100", gpa: 92, want: null },
+];
+for (const k of cases) {
+  const st = await studentOf(cc, `imp-cycle-${k.tag}`);
+  k.id = st.id;
+  await sql(`update public.profiles set grad_year = '2031' where id = '${st.id}'`);
+  await sql(`insert into public.student_academics (student_id, gpa_scale, gpa_weighted, gpa_unweighted)
+    values ('${st.id}', ${k.scale === null ? "null" : `'${k.scale}'`}, ${k.gpa}, ${k.gpa})`);
+  await sql(`insert into public.student_colleges (student_id, name, status) values ('${st.id}', 'Cycle U', 'accepted')`);
+}
+const closed = await rest(cc.token, "POST", "/rest/v1/rpc/close_admission_cycle", { p_cycle: "2030-2031" });
+check("close_admission_cycle runs with mixed GPA scales", closed.status === 200, `status ${closed.status} ${JSON.stringify(closed.body)}`);
+for (const k of cases) {
+  const got = await sql(`select coalesce(gpa_weighted::text, 'null') || ',' || coalesce(gpa_unweighted::text, 'null') from public.admission_outcomes where student_id = '${k.id}'`);
+  const [w, u] = got.split(",").map((x) => (x === "null" ? null : Number(x)));
+  check(`close cycle GPA (${k.tag}) is ${k.want ?? "unknown"}`, w === k.want && u === k.want, got);
+}
