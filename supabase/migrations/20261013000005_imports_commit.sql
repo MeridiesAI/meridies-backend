@@ -98,7 +98,8 @@ begin
     return jsonb_build_object('status', 'review', 'problems', v_problems);
   end;
 
-  -- Step 4: apply. A GPA scale is written before the GPA on the same item.
+  -- Step 4: apply. A GPA that fits the 4.0 scale is written before a scale change,
+  -- and a scale change before any other GPA, so each write passes the check.
   for c in
     select ch.id, ch.op, ch.target_table, ch.field, ch.old_value, ch.new_value, it.student_id
     from public.import_changes ch
@@ -107,7 +108,10 @@ begin
       and ch.state = 'staged'
       and ch.decision in ('auto','accept')
       and it.match_status in ('matched_email','confirmed')
-    order by it.id, (ch.field = 'gpa_scale') desc, ch.created_at
+    order by it.id,
+             case when ch.field in ('gpa_weighted','gpa_unweighted') and private.import_num(ch.new_value) <= 10 then 0
+                  when ch.field = 'gpa_scale' then 1 else 2 end,
+             ch.created_at
     for update of ch
   loop
     if c.op = 'set_field' then
@@ -115,7 +119,7 @@ begin
       if v_ok then
         v_cur := private.import_current_value(c.target_table, c.field, c.student_id);
         update public.import_changes
-           set state = 'applied', applied_at = now(),
+           set state = 'applied', applied_at = clock_timestamp(),
                applied_value = v_cur,
                new_value_hash = private.import_value_hash(v_cur)
          where id = c.id;
@@ -136,7 +140,7 @@ begin
       else
         v_cur := private.import_row_snapshot(c.target_table, v_row);
         update public.import_changes
-           set state = 'applied', applied_at = now(), target_row_id = v_row,
+           set state = 'applied', applied_at = clock_timestamp(), target_row_id = v_row,
                applied_value = v_cur,
                new_value_hash = private.import_value_hash(v_cur)
          where id = c.id;

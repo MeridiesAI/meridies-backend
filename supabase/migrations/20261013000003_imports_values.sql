@@ -264,6 +264,8 @@ declare
   v_problems jsonb := '[]'::jsonb;
   v_gpa numeric;
   v_date date;
+  v_f text;
+  v_remain numeric;
 begin
   for c in
     select ch.*, it.student_id as item_student
@@ -305,6 +307,28 @@ begin
           'changeId', c.id, 'sourceRef', c.source_ref,
           'message', format('GPA %s needs a 100-point scale. Set the GPA scale to 100 or fix the value.', v_gpa));
       end if;
+    end if;
+
+    if c.target_table = 'student_academics' and c.field = 'gpa_scale'
+       and coalesce(private.import_str(c.new_value), '') !~ '^\s*100' then
+      -- A move away from the 100 scale must not strand a GPA above 10: check
+      -- the GPA that remains (an accepted new value on this item, else stored).
+      foreach v_f in array array['gpa_weighted','gpa_unweighted'] loop
+        select private.import_num(g.new_value) into v_remain
+        from public.import_changes g
+        where g.item_id = c.item_id and g.target_table = 'student_academics' and g.field = v_f
+          and g.state = 'staged' and g.decision in ('auto','accept')
+        limit 1;
+        if not found then
+          v_remain := private.import_num(private.import_current_value('student_academics', v_f, c.item_student));
+        end if;
+        if v_remain > 10 then
+          v_problems := v_problems || jsonb_build_object(
+            'changeId', c.id, 'sourceRef', c.source_ref,
+            'message', format('GPA %s needs a 100-point scale. Keep the 100 scale or fix the GPA.', v_remain));
+          exit;
+        end if;
+      end loop;
     end if;
 
     if c.target_table = 'student_personal_details' and c.field = 'birthday' then

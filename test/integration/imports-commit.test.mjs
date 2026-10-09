@@ -138,3 +138,25 @@ check("the firm owner's commit applies to the member's student", out7.status ===
 
 const grants = await sql(`select has_function_privilege('authenticated', 'public.commit_import(uuid, uuid)', 'execute')::text || ',' || has_function_privilege('import_worker', 'public.commit_import(uuid, uuid)', 'execute')::text`);
 check("only the worker (not the browser) can run commit_import", grants === "false,true", grants);
+
+// Lowering the scale: GPA 92 on '100' -> 3.8 on '4.0' commits (GPA written before the scale).
+const sL = await studentOf(c, "imp-commit-lower");
+await sql(`insert into public.student_academics (student_id, gpa_weighted, gpa_scale) values ('${sL.id}', 92, '100')`);
+const impL = await makeImport(c);
+const itemL = await addItem(impL, { studentId: sL.id });
+await addChange(impL, itemL, { target: "student_academics", field: "gpa_scale", value: "4.0", studentId: sL.id });
+await addChange(impL, itemL, { target: "student_academics", field: "gpa_weighted", value: 3.8, studentId: sL.id });
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impL}'`);
+const outL = JSON.parse(await sql(`select public.commit_import('${impL}', '${c.id}')`));
+const aL = await academics(sL.id);
+check("lowering the scale with a new GPA commits", outL.status === "committed" && Number(aL.gpa_weighted) === 3.8 && aL.gpa_scale === "4.0", JSON.stringify({ outL, aL }));
+
+// A scale-only move to 4.0 under a stored GPA of 92 is sent back to review.
+const sM = await studentOf(c, "imp-commit-lower-only");
+await sql(`insert into public.student_academics (student_id, gpa_weighted, gpa_scale) values ('${sM.id}', 92, '100')`);
+const impM = await makeImport(c);
+const itemM = await addItem(impM, { studentId: sM.id });
+await addChange(impM, itemM, { target: "student_academics", field: "gpa_scale", value: "4.0", studentId: sM.id });
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impM}'`);
+const outM = JSON.parse(await sql(`select public.commit_import('${impM}', '${c.id}')`));
+check("a scale change that strands the GPA goes to review", outM.status === "review" && /GPA 92(\.0+)? needs a 100-point scale/.test(JSON.stringify(outM.problems)), JSON.stringify(outM));

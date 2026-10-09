@@ -70,25 +70,30 @@ begin
     return jsonb_build_object('status', 'committed');
   end if;
 
-  -- Newest first; a GPA is restored before its scale.
+  -- Exact reverse of application order.
   for c in
     select ch.id, ch.op, ch.target_table, ch.field, ch.old_value, ch.applied_value, ch.target_row_id, it.student_id
     from public.import_changes ch
     join public.import_items it on it.id = ch.item_id
     where ch.import_id = p_import and ch.state = 'applied'
-    order by ch.applied_at desc, (ch.field = 'gpa_scale') asc, ch.created_at desc
+    order by ch.applied_at desc, ch.created_at desc
     for update of ch
   loop
     if c.op = 'set_field' then
-      begin
+      if c.field in ('gpa_scale','gpa_weighted','gpa_unweighted') then
+        begin
+          v_ok := private.import_set_field(c.target_table, c.field, c.student_id, c.applied_value, c.old_value);
+        exception when check_violation then
+          -- e.g. restoring a 4.0 scale under a GPA someone set to 93 since.
+          v_ok := false;
+        end;
+      else
         v_ok := private.import_set_field(c.target_table, c.field, c.student_id, c.applied_value, c.old_value);
-      exception when check_violation then
-        -- e.g. restoring a 4.0 scale under a GPA someone set to 93 since.
-        v_ok := false;
-      end;
+      end if;
+    elsif private.import_row_snapshot(c.target_table, c.target_row_id) is not distinct from c.applied_value then
+      v_ok := private.import_delete_row(c.target_table, c.target_row_id);
     else
-      v_ok := private.import_row_snapshot(c.target_table, c.target_row_id) is not distinct from c.applied_value
-              and private.import_delete_row(c.target_table, c.target_row_id);
+      v_ok := false;
     end if;
     if v_ok then
       update public.import_changes set state = 'undone' where id = c.id;
@@ -106,14 +111,16 @@ begin
                 where it.import_id = p_import and it.match_status = 'new_invite' and it.invitation_id is not null);
   get diagnostics v_revoked = row_count;
 
-  update public.import_items
-     set match_status = 'skipped', skip_reason = 'The import was undone'
-   where import_id = p_import and match_status in ('new_invite','awaiting_counselor');
+  with skipped as (
+    update public.import_items
+       set match_status = 'skipped', skip_reason = 'The import was undone'
+     where import_id = p_import and match_status in ('new_invite','awaiting_counselor','applying')
+    returning id
+  )
   update public.import_changes
-     set state = 'undone'
+     set state = 'undone', new_value = null
    where import_id = p_import and state = 'staged'
-     and item_id in (select it.id from public.import_items it
-                     where it.import_id = p_import and it.skip_reason = 'The import was undone');
+     and item_id in (select id from skipped);
 
   v_result := jsonb_build_object('reverted', v_reverted, 'kept', v_kept, 'invitationsRevoked', v_revoked);
   insert into public.audit_log (actor_id, action, entity_type, entity_id, metadata)

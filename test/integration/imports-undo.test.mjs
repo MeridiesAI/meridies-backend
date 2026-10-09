@@ -92,3 +92,25 @@ const { imp: imp5 } = await committed([{ target: "student_academics", field: "ac
 await sql(`update public.roster_imports set status = 'undoing', job_actor = '${c.id}' where id = '${imp5}'`);
 const o5 = JSON.parse(await sql(`select public.undo_import('${imp5}', '${other.id}')`));
 check("undo by a foreign actor is not-requested and leaves the import undoing", o5.status === "not-requested" && (await importRow(imp5)).status === "undoing", JSON.stringify(o5));
+
+// Undo of a lowering import restores 92 / '100'.
+const s6 = await studentOf(c, "imp-undo-lower");
+await sql(`insert into public.student_academics (student_id, gpa_weighted, gpa_scale) values ('${s6.id}', 92, '100')`);
+const r6 = await committed([
+  { target: "student_academics", field: "gpa_scale", value: "4.0" },
+  { target: "student_academics", field: "gpa_weighted", value: 3.8 },
+], s6.id);
+await sql(`update public.roster_imports set status = 'undoing', job_actor = '${c.id}' where id = '${r6.imp}'`);
+const o6 = JSON.parse(await sql(`select public.undo_import('${r6.imp}', '${c.id}')`));
+const a6 = await academics(s6.id);
+check("undo of a lowering import restores 92 and the 100 scale", o6.status === "undone" && o6.reverted === 2 && Number(a6.gpa_weighted) === 92 && a6.gpa_scale === "100", JSON.stringify({ o6, a6 }));
+
+// An 'applying' held item is skipped by undo and its held data dropped.
+const imp7 = await makeImport(c);
+const item7 = await addItem(imp7, { studentId: s.id });
+const ch7 = await addChange(imp7, item7, { target: "student_academics", field: "sat_superscore", value: 1400, oldValue: null });
+await sql(`update public.import_items set match_status = 'applying' where id = '${item7}'`);
+await sql(`update public.roster_imports set status = 'undoing', job_actor = '${c.id}', undo_until = now() + interval '1 day' where id = '${imp7}'`);
+const o7 = JSON.parse(await sql(`select public.undo_import('${imp7}', '${c.id}')`));
+const c7 = await changeRow(ch7);
+check("undo skips an applying held item and drops its data", o7.status === "undone" && (await sql(`select match_status from public.import_items where id = '${item7}'`)) === "skipped" && c7.state === "undone" && c7.new_value === null, JSON.stringify({ o7, c7 }));
