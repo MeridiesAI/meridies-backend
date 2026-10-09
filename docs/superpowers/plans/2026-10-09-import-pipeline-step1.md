@@ -58,14 +58,14 @@ An integration script passes when every line prints `PASS` and the exit code is 
 ## File Structure
 
 **Create — migrations** (`supabase/migrations/`), each one responsibility:
-- `20261013000001_imports_schema.sql` — tables, columns, `import_fields` seed, GPA widening, `source` on `test_scores`/`courses`, firm stamping, client guard trigger, heartbeat job name, RLS enabled (no policies yet).
-- `20261013000002_imports_access.sql` — `can_view_import`, `can_manage_import`, `import_can_write_student`, table policies and grants, the `imports` bucket and its storage policies, the `import_worker` role.
-- `20261013000003_imports_values.sql` — value checking (`import_value_ok`), hashing, `import_current_value`, the validation trigger, `import_validate`.
-- `20261013000004_imports_apply.sql` — `import_set_field` (compare-and-set), `import_insert_row`, `import_row_snapshot`, `import_delete_row`.
-- `20261013000005_imports_commit.sql` — `request_import_commit`, `commit_import`, `fail_import_job`, `import_jobs_due`.
-- `20261013000006_imports_undo.sql` — `request_import_undo`, `undo_import`.
-- `20261013000007_imports_held.sql` — `accept_invitation` (redefined), `import_hold_legacy_rows`, `import_held_queue`, `request_held_apply`, `apply_held_item`, `expire_import_holds`.
-- `20261013000008_imports_provenance_and_gpa.sql` — `import_field_provenance`, `compact_imports`, `close_admission_cycle` GPA guard.
+- `20261014000001_imports_schema.sql` — tables, columns, `import_fields` seed, GPA widening, `source` on `test_scores`/`courses`, firm stamping, client guard trigger, heartbeat job name, RLS enabled (no policies yet).
+- `20261014000002_imports_access.sql` — `can_view_import`, `can_manage_import`, `import_can_write_student`, table policies and grants, the `imports` bucket and its storage policies, the `import_worker` role.
+- `20261014000003_imports_values.sql` — value checking (`import_value_ok`), hashing, `import_current_value`, the validation trigger, `import_validate`.
+- `20261014000004_imports_apply.sql` — `import_set_field` (compare-and-set), `import_insert_row`, `import_row_snapshot`, `import_delete_row`.
+- `20261014000005_imports_commit.sql` — `request_import_commit`, `commit_import`, `fail_import_job`, `import_jobs_due`.
+- `20261014000006_imports_undo.sql` — `request_import_undo`, `undo_import`.
+- `20261014000007_imports_held.sql` — `accept_invitation` (redefined), `import_hold_legacy_rows`, `import_held_queue`, `request_held_apply`, `apply_held_item`, `expire_import_holds`.
+- `20261014000008_imports_provenance_and_gpa.sql` — `import_field_provenance`, `compact_imports`, `close_admission_cycle` GPA guard.
 
 **Create — backend code:**
 - `src/lib/imports/db.ts` — the `import_worker` pool, role check, one-transaction helper.
@@ -98,7 +98,7 @@ An integration script passes when every line prints `PASS` and the exit code is 
 ### Task 1: Schema migration and shared test fixtures
 
 **Files:**
-- Create: `supabase/migrations/20261013000001_imports_schema.sql`
+- Create: `supabase/migrations/20261014000001_imports_schema.sql`
 - Modify: `test/integration/harness.mjs`
 - Create: `test/integration/imports-helpers.mjs`
 - Test: `test/integration/imports-schema.test.mjs`
@@ -278,13 +278,13 @@ Expected: FAIL lines (the tables don't exist yet; `sql()` throws on the first `i
 
 - [ ] **Step 6: Write the migration**
 
-Create `supabase/migrations/20261013000001_imports_schema.sql`:
+Create `supabase/migrations/20261014000001_imports_schema.sql`:
 
 ```sql
 -- Import pipeline, step 1: the tables.
 -- Spec: docs/superpowers/specs/2026-10-09-import-pipeline-design.md §3–§4.
 -- Additive: roster_imports is extended, not renamed; roster_import_rows stays
--- for history. Policies arrive in 20261013000002; until then RLS denies all.
+-- for history. Policies arrive in 20261014000002; until then RLS denies all.
 
 -- ---------------------------------------------------------------------------
 -- roster_imports, extended
@@ -630,7 +630,7 @@ Expected: every line `PASS`, exit 0.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add supabase/migrations/20261013000001_imports_schema.sql test/integration/harness.mjs test/integration/imports-helpers.mjs test/integration/imports-schema.test.mjs
+git add supabase/migrations/20261014000001_imports_schema.sql test/integration/harness.mjs test/integration/imports-helpers.mjs test/integration/imports-schema.test.mjs
 git commit -m "feat(imports): schema for the change-list import pipeline
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -641,7 +641,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: Access rules, the imports bucket and the import_worker role
 
 **Files:**
-- Create: `supabase/migrations/20261013000002_imports_access.sql`
+- Create: `supabase/migrations/20261014000002_imports_access.sql`
 - Modify: `test/integration/imports-schema.test.mjs` (append RLS/storage checks)
 
 **Interfaces:**
@@ -715,7 +715,7 @@ Expected: Task 1 lines PASS; Task 2 lines FAIL (e.g. "the uploader sees their im
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000002_imports_access.sql`:
+Create `supabase/migrations/20261014000002_imports_access.sql`:
 
 ```sql
 -- Import pipeline, step 1: who can see and run imports (spec §6.3–§6.4), the
@@ -937,7 +937,7 @@ Expected: all PASS (the old `POST /roster/imports` path inserts and reads throug
 - [ ] **Step 6: Commit**
 
 ```bash
-git add supabase/migrations/20261013000002_imports_access.sql test/integration/imports-schema.test.mjs
+git add supabase/migrations/20261014000002_imports_access.sql test/integration/imports-schema.test.mjs
 git commit -m "feat(imports): access functions, policies, imports bucket, import_worker role
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -948,7 +948,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 3: Value checking, current values and the validation trigger
 
 **Files:**
-- Create: `supabase/migrations/20261013000003_imports_values.sql`
+- Create: `supabase/migrations/20261014000003_imports_values.sql`
 - Test: `test/integration/imports-values.test.mjs`
 
 **Interfaces:**
@@ -1035,7 +1035,7 @@ Expected: fails at the first `sql()` call (`function private.import_value_ok(unk
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000003_imports_values.sql`:
+Create `supabase/migrations/20261014000003_imports_values.sql`:
 
 ```sql
 -- Import pipeline, step 1: what a valid imported value is (spec §4.2), the
@@ -1370,7 +1370,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/20261013000003_imports_values.sql test/integration/imports-values.test.mjs
+git add supabase/migrations/20261014000003_imports_values.sql test/integration/imports-values.test.mjs
 git commit -m "feat(imports): value checking, current values, validation pass
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1381,7 +1381,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: Writing to the five targets (compare-and-set, inserts, snapshots)
 
 **Files:**
-- Create: `supabase/migrations/20261013000004_imports_apply.sql`
+- Create: `supabase/migrations/20261014000004_imports_apply.sql`
 - Modify: `test/integration/imports-values.test.mjs` (append)
 
 **Interfaces:**
@@ -1437,7 +1437,7 @@ Expected: Task 3 lines PASS; the Task 4 block fails with `function private.impor
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000004_imports_apply.sql`:
+Create `supabase/migrations/20261014000004_imports_apply.sql`:
 
 ```sql
 -- Import pipeline, step 1: the only code that writes imported values into
@@ -1671,7 +1671,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/20261013000004_imports_apply.sql test/integration/imports-values.test.mjs
+git add supabase/migrations/20261014000004_imports_apply.sql test/integration/imports-values.test.mjs
 git commit -m "feat(imports): compare-and-set writes and deduplicated inserts per target
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1682,7 +1682,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 5: Requesting and running a commit
 
 **Files:**
-- Create: `supabase/migrations/20261013000005_imports_commit.sql`
+- Create: `supabase/migrations/20261014000005_imports_commit.sql`
 - Test: `test/integration/imports-commit.test.mjs`
 
 **Interfaces:**
@@ -1827,7 +1827,7 @@ Expected: FAIL ("the uploader can request a commit" — `request_import_commit` 
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000005_imports_commit.sql`:
+Create `supabase/migrations/20261014000005_imports_commit.sql`:
 
 ```sql
 -- Import pipeline, step 1: saving an import (spec §5.7).
@@ -2045,7 +2045,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/20261013000005_imports_commit.sql test/integration/imports-commit.test.mjs
+git add supabase/migrations/20261014000005_imports_commit.sql test/integration/imports-commit.test.mjs
 git commit -m "feat(imports): all-or-nothing commit with compare-and-set and in-transaction audit
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -2056,7 +2056,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 6: Undo
 
 **Files:**
-- Create: `supabase/migrations/20261013000006_imports_undo.sql`
+- Create: `supabase/migrations/20261014000006_imports_undo.sql`
 - Test: `test/integration/imports-undo.test.mjs`
 
 **Interfaces:**
@@ -2167,7 +2167,7 @@ Expected: FAIL at "the uploader can request undo" (`request_import_undo` doesn't
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000006_imports_undo.sql`:
+Create `supabase/migrations/20261014000006_imports_undo.sql`:
 
 ```sql
 -- Import pipeline, step 1: undo (spec §5.9). Reverts every applied change
@@ -2310,7 +2310,7 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add supabase/migrations/20261013000006_imports_undo.sql test/integration/imports-undo.test.mjs
+git add supabase/migrations/20261014000006_imports_undo.sql test/integration/imports-undo.test.mjs
 git commit -m "feat(imports): 30-day undo that keeps later edits and revokes pending invites
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -2321,7 +2321,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 7: Held data — acceptance routing, the queue, applying, expiry
 
 **Files:**
-- Create: `supabase/migrations/20261013000007_imports_held.sql`
+- Create: `supabase/migrations/20261014000007_imports_held.sql`
 - Test: `test/integration/imports-held.test.mjs`
 
 **Interfaces:**
@@ -2436,7 +2436,7 @@ Expected: FAIL at "the item waits for the counselor for 30 days" (status is stil
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000007_imports_held.sql`. **The `accept_invitation` body is the one in `20261005010002_overview_invitation_intake_and_referrals.sql` with two additions marked `-- NEW`;** copy it exactly as below.
+Create `supabase/migrations/20261014000007_imports_held.sql`. **The `accept_invitation` body is the one in `20261005010002_overview_invitation_intake_and_referrals.sql` with two additions marked `-- NEW`;** copy it exactly as below.
 
 ```sql
 -- Import pipeline, step 1: held data (spec §5.8). Data for an invited student
@@ -2839,7 +2839,7 @@ Expected: all PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add supabase/migrations/20261013000007_imports_held.sql test/integration/imports-held.test.mjs
+git add supabase/migrations/20261014000007_imports_held.sql test/integration/imports-held.test.mjs
 git commit -m "fix(imports): hold imported data for the counselor instead of losing it on acceptance
 
 Old roster rows and new imports both wait in a Ready to apply queue for
@@ -2853,7 +2853,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 8: Provenance, compaction and the Close-cycle GPA guard
 
 **Files:**
-- Create: `supabase/migrations/20261013000008_imports_provenance_and_gpa.sql`
+- Create: `supabase/migrations/20261014000008_imports_provenance_and_gpa.sql`
 - Test: `test/integration/imports-provenance.test.mjs`
 
 **Interfaces:**
@@ -2926,7 +2926,7 @@ Expected: throws at `import_field_provenance` (doesn't exist).
 
 - [ ] **Step 3: Write the migration**
 
-Create `supabase/migrations/20261013000008_imports_provenance_and_gpa.sql`:
+Create `supabase/migrations/20261014000008_imports_provenance_and_gpa.sql`:
 
 ```sql
 -- Import pipeline, step 1: provenance (spec §5.6), compaction (§5.10) and the
@@ -3017,7 +3017,7 @@ Then append the Close-cycle guard: **copy the complete `create or replace functi
 ```sql
 -- ---------------------------------------------------------------------------
 -- Close cycle copies GPAs into admission_outcomes, whose columns stay ≤ 10.
--- A 100-point GPA (allowed in student_academics since 20261013000001) is
+-- A 100-point GPA (allowed in student_academics since 20261014000001) is
 -- recorded as unknown there rather than failing the whole close.
 -- Copied from 20261005010003; the only change is the GPA line in the select.
 -- ---------------------------------------------------------------------------
@@ -3050,7 +3050,7 @@ Expected: all PASS (Task 10's `imports-api.test.mjs` and Task 11's property test
 - [ ] **Step 6: Commit**
 
 ```bash
-git add supabase/migrations/20261013000008_imports_provenance_and_gpa.sql test/integration/imports-provenance.test.mjs
+git add supabase/migrations/20261014000008_imports_provenance_and_gpa.sql test/integration/imports-provenance.test.mjs
 git commit -m "feat(imports): provenance by fingerprint, 30-day compaction, close-cycle GPA guard
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -4248,7 +4248,7 @@ Expected: FAIL — module not found.
 
 ```ts
 /**
- * GPA with its scale (spec §4.1). Since 20261013000001 a 92 on a 100-point
+ * GPA with its scale (spec §4.1). Since 20261014000001 a 92 on a 100-point
  * scale can sit next to a 3.8 on a 4.0 scale, so nothing may compare, chart
  * or rank a GPA without reading `student_academics.gpa_scale`. Fit, odds,
  * class rank and scholarship minimums are 4/5-point models: anything else is
@@ -4511,7 +4511,7 @@ Spec: docs/superpowers/specs/2026-10-09-import-pipeline-design.md (§15 step 1).
 
 ## Migrations / env changes
 
-- [x] Schema migration included: 20261013000001–20261013000008 (NOT applied to production)
+- [x] Schema migration included: 20261014000001–20261014000008 (NOT applied to production)
 - [x] New env var `IMPORT_DATABASE_URL` (added to `.env.example`; set on Railway by the team after creating the import_worker login)
 - New cron: `POST /internal/imports/sweep` every 5–15 min
 
