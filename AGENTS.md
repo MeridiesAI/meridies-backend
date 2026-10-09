@@ -317,6 +317,28 @@ the database (`20261010*`):
   triggers keep them in step: the task completing ticks the request on the
   counselor's Overview card, the counselor ticking or unticking the request
   completes or reopens the task. Tasks are never deleted when a request is.
+- **New students: Submit, receive, confirm** (`20261013000001`,
+  `lib/newStudentIntake.ts`). On a request from New student the student's
+  upload only *attaches* the file (`POST /tasks/:id/submissions` does not
+  move the task), or they type an answer (`PATCH /me/intake/:taskId`,
+  `deliverables.intake_answer`). `POST /me/intake/submit` runs
+  `submit_intake()` (SECURITY DEFINER: every outstanding item needs a file or
+  an answer), moves them all to `review`, has AxIS read the files **as advice
+  only** (`nextTaskStatus(..., advisory)` returns null; no student email) and
+  tells the counselor once. The counselor ticks each item received
+  (`PATCH /invites/:id { receive }`, which sets the request's `provided`) or
+  sends it back with a note (`{ sendBack }`: the task returns to the student,
+  the files come off it, `submitted_at` clears), then confirms (`{ confirmed:
+  true }`, only with every request received). A student never sets an intake
+  task `complete` (the guard trigger). `GET /invites/building` lists
+  invitations with `confirmed_at` null, each request with its status, files,
+  answer and AxIS's read.
+- **Setup steps clear themselves** (`lib/studentSetup.ts`). For a confirmed
+  student, `GET /work-items?includeDerived=true` adds `origin: "setup"` rows
+  (GPA & scores, strength profile, recommend colleges, activities, guardian,
+  first meeting) and `GET /me/setup` the student's four. Nothing is stored:
+  each is a question about the record asked on every read, so whatever fills
+  the data (the counselor, the student, AxIS, an import) clears the step.
 - **The student hands a file in, AxIS checks it.** `POST /tasks/:id/submissions`
   (`{ documentId }`, a file already in the student's documents) adds a
   `submission` row, the only `deliverable_documents` row a student may write,

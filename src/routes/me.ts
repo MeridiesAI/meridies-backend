@@ -12,6 +12,10 @@
  *   GET   /me/polygon                  the strength profile, read-only
  *   GET   /me/polygon/years            its recorded freshman-to-now history
  *   GET   /me/messages                 the texts and emails sent to the student
+ *   GET   /me/intake                   what the counselor asked for on New student
+ *   PATCH /me/intake/:taskId           a typed answer instead of a file
+ *   POST  /me/intake/submit            send every answered item to the counselor
+ *   GET   /me/setup                    "Getting started": what is left once confirmed
  *
  * Everything else the student view shows is an existing route the student
  * may already call for themselves: tasks (/tasks), files (/files/*), the
@@ -39,6 +43,9 @@ import {
   savePreferences,
   THEMES,
 } from "../lib/studentView.js";
+import { loadMyIntake, saveMyAnswer, submitMyIntake } from "../lib/newStudentIntake.js";
+import { STUDENT_STEPS, openSteps, setupFacts } from "../lib/studentSetup.js";
+import { hydrate } from "./tasks.js";
 
 const settingsPatch = z
   .object({
@@ -208,5 +215,60 @@ export default async function meRoutes(app: FastifyInstance) {
     "/polygon/years",
     { preHandler: [...student, limit("me:polygon-years", 120, 60)] },
     async (request) => loadPolygonYears(request.db, request.auth.userId)
+  );
+
+  // New-student onboarding (20261013000001): the red-outlined request card.
+  async function myIntake(request: FastifyRequest) {
+    const intake = await loadMyIntake(request);
+    if (!intake) return null;
+    const { data, error } = await request.db
+      .from("deliverables")
+      .select("*")
+      .eq("student_id", request.auth.userId)
+      .eq("intake_invitation_id", intake.invitationId)
+      .order("created_at");
+    if (error) throw fromPostgrest(error);
+    return { ...intake, tasks: await hydrate(request, (data ?? []) as Record<string, unknown>[]) };
+  }
+
+  app.get(
+    "/intake",
+    { preHandler: [...student, limit("me:intake", 240, 60)] },
+    async (request) => ({ intake: await myIntake(request) })
+  );
+
+  app.patch(
+    "/intake/:taskId",
+    { preHandler: [...student, limit("me:intake-write", 240, 60)] },
+    async (request) => {
+      const { taskId } = z.object({ taskId: z.string().uuid() }).parse(request.params);
+      const { answer } = z
+        .object({ answer: z.string().max(500).nullable() })
+        .strict()
+        .parse(request.body);
+      await saveMyAnswer(request, taskId, answer);
+      return { intake: await myIntake(request) };
+    }
+  );
+
+  app.post(
+    "/intake/submit",
+    { preHandler: [...student, limit("me:intake-submit", 10, 60)] },
+    async (request) => {
+      await submitMyIntake(request);
+      return { intake: await myIntake(request) };
+    }
+  );
+
+  // "Getting started": only once the counselor confirmed this student.
+  app.get(
+    "/setup",
+    { preHandler: [...student, limit("me:setup", 240, 60)] },
+    async (request) => {
+      const intake = await loadMyIntake(request);
+      if (!intake?.confirmedAt) return { steps: [] };
+      const facts = (await setupFacts(request, [request.auth.userId])).get(request.auth.userId);
+      return { steps: facts ? openSteps(STUDENT_STEPS, facts) : [] };
+    }
   );
 }

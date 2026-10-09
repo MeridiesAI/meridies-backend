@@ -303,6 +303,11 @@ export const toTask = (
    */
   source: (r.source === "student" ? "student" : "counselor") as "counselor" | "student",
   createdBy: nstr(r.created_by),
+  /** A request from the New student page: answered by the student's Submit, received by the counselor. */
+  intakeInvitationId: nstr(r.intake_invitation_id),
+  intakeRequestId: nstr(r.intake_request_id),
+  intakeAnswer: nstr(r.intake_answer),
+  sentBackNote: nstr(r.sent_back_note),
   notifyEmail: Boolean(r.notify_email),
   notifySms: Boolean(r.notify_sms),
   notifiedAt: nstr(r.notified_at),

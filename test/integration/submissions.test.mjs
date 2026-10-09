@@ -1,6 +1,7 @@
-// What the counselor asks for becomes the student's To-Do; the student hands a
-// file in; AxIS checks it; the counselor's request ticks. Real accounts on a
-// local Supabase against a running API (see harness.mjs).
+// A counselor assigns a document task; the student hands a file in; AxIS
+// checks it and moves the task. Real accounts on a local Supabase against a
+// running API (see harness.mjs). Requests from the New student page go
+// through the student's Submit instead (new-student.test.mjs).
 //
 // The AxIS steps need ANTHROPIC_API_KEY on the API; without it the review is
 // "skipped" and those checks are reported as skipped, not failed.
@@ -64,11 +65,9 @@ const s = await user("student-sub", "student");
 const other = await user("student-other", "student");
 await sql(`update profiles set full_name='Jordan Lee' where id='${s.id}'`);
 
-// The counselor's requests ride on the invitation (the New student page).
 const inviteToken = `sub-test-${Date.now()}`;
-await sql(`insert into invitations (counselor_id, email, token, source, intake_requests)
-  values ('${c.id}', '${s.email}', '${inviteToken}', 'intake',
-  '[{"id":"tr","label":"Transcript","provided":false},{"id":"rs","label":"Resume","provided":false}]')`);
+await sql(`insert into invitations (counselor_id, email, token, source)
+  values ('${c.id}', '${s.email}', '${inviteToken}', 'single')`);
 const accepted = await fetch(`${SB}/rest/v1/rpc/accept_invitation`, {
   method: "POST",
   headers: { apikey: ANON, Authorization: `Bearer ${s.token}`, "Content-Type": "application/json" },
@@ -76,10 +75,14 @@ const accepted = await fetch(`${SB}/rest/v1/rpc/accept_invitation`, {
 });
 check("student accepts the invitation", accepted.ok, `status ${accepted.status}`);
 
+for (const title of ["Transcript", "Resume"]) {
+  const made = await call(c.token, "POST", "/tasks", { studentId: s.id, kind: "document", title });
+  check(`the counselor assigns ${title}`, made.status === 201, `status ${made.status} ${JSON.stringify(made.body).slice(0, 160)}`);
+}
 const todo = await call(s.token, "GET", "/tasks");
 const transcript = todo.body.find?.((t) => t.title === "Transcript");
 const resume = todo.body.find?.((t) => t.title === "Resume");
-check("each request is on the student's To-Do", Boolean(transcript && resume), JSON.stringify(todo.body).slice(0, 200));
+check("each task is on the student's To-Do", Boolean(transcript && resume), JSON.stringify(todo.body).slice(0, 200));
 check("…as the counselor's document tasks", transcript?.source === "counselor" && transcript?.kind === "document" && transcript?.assignedBy === c.id);
 const counselorView = await call(c.token, "GET", `/tasks?studentId=${s.id}`);
 check("the counselor sees the same tasks", counselorView.body.some?.((t) => t.id === transcript?.id));
@@ -124,8 +127,6 @@ if (ai) {
   check("…accepts a real transcript and completes the task", done?.tracker?.verdict === "on-track" && done?.status === "complete",
     `${done?.tracker?.verdict} ${done?.status} ${done?.tracker?.note}`);
   check("…reads the GPA off the file", done?.tracker?.findings?.some((f) => f.includes("4.12")), JSON.stringify(done?.tracker?.findings));
-  const ticked = await sql(`select e->>'provided' from invitations i, jsonb_array_elements(i.intake_requests) e where i.token='${inviteToken}' and e->>'id'='tr'`);
-  check("the counselor's Transcript request ticks", ticked === "true", ticked);
   const locked = await call(s.token, "DELETE", `/tasks/${transcript.id}/submissions/${doc.id}`);
   check("a finished task keeps its file", locked.status === 409, `status ${locked.status}`);
   const note = await sql(`select title from notifications where recipient_id='${c.id}' and student_id='${s.id}' order by created_at desc limit 1`);
@@ -145,8 +146,6 @@ if (ai) {
   check("the student is emailed what to fix", studentMail === "1", studentMail);
   const counselorMail = await sql(`select count(*) from message_deliveries where template='submission-review-counselor' and recipient_id='${c.id}'`);
   check("the counselor is emailed each hand-in", Number(counselorMail) >= 2, counselorMail);
-  const stillOpen = await sql(`select e->>'provided' from invitations i, jsonb_array_elements(i.intake_requests) e where i.token='${inviteToken}' and e->>'id'='rs'`);
-  check("the Resume request stays open", stillOpen === "false", stillOpen);
 
   // The counselor re-runs the check.
   const rerun = await call(c.token, "POST", `/tasks/${resume.id}/review`, {});
