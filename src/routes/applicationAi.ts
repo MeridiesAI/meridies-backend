@@ -81,7 +81,7 @@ async function studentBrief(request: FastifyRequest, studentId: string): Promise
   const db = request.db;
   const [profile, academics, activities, awards, colleges] = await Promise.all([
     db.from("profiles").select("full_name, grad_year, high_school, hometown, headline, profile").eq("id", studentId).maybeSingle(),
-    db.from("student_academics").select("gpa_unweighted, gpa_weighted, sat_superscore, act_composite, rigor_count, strength_areas, strength_subjects").eq("student_id", studentId).maybeSingle(),
+    db.from("student_academics").select("gpa_unweighted, gpa_weighted, gpa_scale, sat_superscore, act_composite, rigor_count, strength_areas, strength_subjects").eq("student_id", studentId).maybeSingle(),
     db.from("activities").select("organization, name, position, category, hours_per_week, description").eq("student_id", studentId).order("sort_order").limit(30),
     db.from("awards").select("name, level, recognition_levels").eq("student_id", studentId).order("sort_order").limit(30),
     db.from("student_colleges").select("name, round, fit, status").eq("student_id", studentId).order("sort_order").limit(60),

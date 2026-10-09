@@ -182,8 +182,8 @@ export default async function recordRoutes(app: FastifyInstance) {
 
   const academicsBody = z
     .object({
-      gpa_unweighted: z.number().min(0).max(10).nullable(),
-      gpa_weighted: z.number().min(0).max(10).nullable(),
+      gpa_unweighted: z.number().min(0).max(110).nullable(),
+      gpa_weighted: z.number().min(0).max(110).nullable(),
       gpa_scale: trimmed(20).nullable(),
       gpa_band: trimmed(40).nullable(),
       class_rank: trimmed(40).nullable(),

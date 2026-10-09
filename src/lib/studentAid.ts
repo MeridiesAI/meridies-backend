@@ -15,6 +15,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "./errors.js";
+import { fourPointGpa } from "./gpa.js";
 
 type Row = Record<string, unknown>;
 
@@ -449,7 +450,7 @@ async function studentAttrs(db: SupabaseClient, studentId: string, prefs: Schola
   const [profile, details, academics, aid, activities, axes] = await Promise.all([
     db.from("profiles").select("full_name, grad_year, high_school_id").eq("id", studentId).maybeSingle(),
     db.from("student_personal_details").select("gender, intended_majors").eq("student_id", studentId).maybeSingle(),
-    db.from("student_academics").select("gpa_weighted").eq("student_id", studentId).maybeSingle(),
+    db.from("student_academics").select("gpa_weighted, gpa_scale").eq("student_id", studentId).maybeSingle(),
     db.from("student_aid_profiles").select("state_of_residence").eq("student_id", studentId).maybeSingle(),
     db.from("activities").select("name, position, organization, category").eq("student_id", studentId),
     db
@@ -480,7 +481,7 @@ async function studentAttrs(db: SupabaseClient, studentId: string, prefs: Schola
       String(m).toLowerCase()
     ),
     state,
-    gpa: n((academics.data as Row | null)?.gpa_weighted),
+    gpa: fourPointGpa(n((academics.data as Row | null)?.gpa_weighted), s((academics.data as Row | null)?.gpa_scale)),
     grade: Number.isFinite(gradYear) ? 12 - (gradYear - seniorClassYear()) : null,
     gender: s(d.gender),
     activityText: ((activities.data ?? []) as Row[]).map((a) =>

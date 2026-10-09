@@ -41,7 +41,7 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
         db
           .from("student_academics")
           .select(
-            "student_id, gpa_weighted, gpa_unweighted, sat_superscore, act_composite, rigor_context, rigor_count, class_rank, class_rank_value"
+            "student_id, gpa_weighted, gpa_unweighted, gpa_scale, sat_superscore, act_composite, rigor_context, rigor_count, class_rank, class_rank_value"
           )
           .in("student_id", ids),
         db.from("student_polygon_axes").select("*").in("student_id", ids).order("sort_order"),
@@ -98,6 +98,7 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
           studentId: id,
           gpaWeighted: num(a?.gpa_weighted),
           gpaUnweighted: num(a?.gpa_unweighted),
+          gpaScale: (a?.gpa_scale as string | null) ?? null,
           sat: num(a?.sat_superscore),
           act: num(a?.act_composite),
           rigor: a?.rigor_context ? String(a.rigor_context) : null,
