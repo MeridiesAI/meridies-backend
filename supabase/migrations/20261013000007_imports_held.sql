@@ -170,10 +170,12 @@ as $$
           'field', ch.field,
           'op', ch.op,
           'newValue', ch.new_value,
-          'currentValue', case when ch.op = 'set_field'
+          'currentValue', case when ch.op = 'set_field' and w.ok
                                then private.import_current_value(ch.target_table, ch.field, it.student_id) end,
+          -- Without write access the stored value is unknown: keep it by default.
           'defaultDecision', case
              when ch.op = 'insert_row' then 'accept'
+             when not w.ok then 'keep_old'
              when private.import_current_value(ch.target_table, ch.field, it.student_id) is null then 'accept'
              else 'keep_old' end
         ) order by ch.target_table, ch.field)
@@ -183,6 +185,9 @@ as $$
     ) as entry
     from public.import_items it
     join public.profiles p on p.id = it.student_id
+    cross join lateral (
+      select private.import_can_write_student(it.import_id, it.student_id, (select auth.uid())) as ok
+    ) w
     where it.match_status = 'awaiting_counselor'
       and private.can_view_import(it.import_id, (select auth.uid()))
   ) q;
@@ -203,6 +208,12 @@ begin
   if v_me is null then
     raise exception 'Not authenticated' using errcode = '28000';
   end if;
+  -- Same lock order as apply and undo: the import first (shared), then the item.
+  select ri.status into v_import_status
+    from public.roster_imports ri
+    join public.import_items x on x.import_id = ri.id
+   where x.id = p_item
+     for share of ri;
   select * into v from public.import_items where id = p_item for update;
   if not found or not private.can_manage_import(v.import_id, v_me) then
     raise exception 'That held import isn''t yours' using errcode = '42501';
@@ -222,18 +233,25 @@ begin
     end if;
   end loop;
 
-  select status into v_import_status from public.roster_imports where id = v.import_id for share;
   if v_import_status not in ('committed','complete') then
     raise exception 'That import is still being processed. Try again shortly.' using errcode = '55000';
   end if;
 
   -- Anything the counselor didn't decide gets the queue's default.
+  -- The value the counselor decided against is recorded now; apply only
+  -- writes if the record still holds it (same rule as commit).
   update public.import_changes ch
      set decision = coalesce(p_decisions ->> ch.id::text,
            case when ch.op = 'insert_row' then 'accept'
-                when private.import_current_value(ch.target_table, ch.field, v.student_id) is null then 'accept'
-                else 'keep_old' end)
-   where ch.item_id = p_item and ch.state = 'staged';
+                when cur.v is null then 'accept'
+                else 'keep_old' end),
+         old_value = case when ch.op = 'set_field' then cur.v else ch.old_value end
+    from (select x.id,
+                 case when x.op = 'set_field'
+                      then private.import_current_value(x.target_table, x.field, v.student_id) end as v
+            from public.import_changes x
+           where x.item_id = p_item and x.state = 'staged') cur
+   where cur.id = ch.id and ch.item_id = p_item and ch.state = 'staged';
 
   update public.import_items
      set match_status = 'applying', job_actor = v_me, job_requested_at = now(), job_error = null
@@ -251,7 +269,6 @@ declare
   it public.import_items;
   v_problems jsonb;
   c record;
-  v_current jsonb;
   v_after jsonb;
   v_ok boolean;
   v_row uuid;
@@ -283,6 +300,12 @@ begin
   if it.job_actor is distinct from p_actor then
     return jsonb_build_object('status', 'not-requested', 'current', it.match_status);
   end if;
+  if v_import_status = 'undone' then
+    update public.import_items
+       set match_status = 'skipped', skip_reason = 'The import was undone', job_error = null
+     where id = p_item;
+    return jsonb_build_object('status', 'not-requested', 'current', v_import_status);
+  end if;
   if v_import_status not in ('committed','complete') then
     update public.import_items
        set match_status = 'awaiting_counselor',
@@ -309,7 +332,7 @@ begin
   end if;
 
   for c in
-    select ch.id, ch.op, ch.target_table, ch.field, ch.new_value
+    select ch.id, ch.op, ch.target_table, ch.field, ch.old_value, ch.new_value
     from public.import_changes ch
     where ch.item_id = p_item and ch.state = 'staged' and ch.decision in ('auto','accept')
     order by case when ch.field in ('gpa_weighted','gpa_unweighted') and private.import_num(ch.new_value) <= 10 then 0
@@ -318,20 +341,20 @@ begin
     for update of ch
   loop
     if c.op = 'set_field' then
-      -- The counselor decided against what the record holds now.
-      v_current := private.import_current_value(c.target_table, c.field, it.student_id);
-      v_ok := private.import_set_field(c.target_table, c.field, it.student_id, v_current, c.new_value);
+      -- Compare-and-set against the value the counselor was shown when they
+      -- asked for apply (recorded by request_held_apply).
+      v_ok := private.import_set_field(c.target_table, c.field, it.student_id, c.old_value, c.new_value);
       if v_ok then
         v_after := private.import_current_value(c.target_table, c.field, it.student_id);
         update public.import_changes
-           set old_value = v_current, state = 'applied', applied_at = clock_timestamp(),
+           set state = 'applied', applied_at = clock_timestamp(),
                applied_value = v_after,
                new_value_hash = private.import_value_hash(v_after)
          where id = c.id;
         v_applied := v_applied + 1;
       else
         update public.import_changes
-           set state = 'skipped_stale', error = 'Changed while applying; the newer value was kept'
+           set state = 'skipped_stale', error = 'Changed while waiting; the newer value was kept'
          where id = c.id;
         v_stale := v_stale + 1;
       end if;

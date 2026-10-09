@@ -105,8 +105,9 @@ check("nothing was written for the foreign actor", (await academics(studentX.id)
 await sql(`update public.roster_imports set status = 'undone' where id = '${impX}'`);
 const undoneApply = JSON.parse(await sql(`select public.apply_held_item('${itemX}', '${c.id}')`));
 check("apply on an undone import returns not-requested", undoneApply.status === "not-requested" && undoneApply.current === "undone", JSON.stringify(undoneApply));
-check("nothing was written for the undone import", (await academics(studentX.id)) === null
-  && (await sql(`select match_status from public.import_items where id = '${itemX}'`)) === "awaiting_counselor");
+const undoneState = await sql(`select match_status || ',' || coalesce(skip_reason, '') from public.import_items where id = '${itemX}'`);
+check("nothing was written for the undone import", (await academics(studentX.id)) === null, undoneState);
+check("the item of an undone import is skipped, not sent back to the queue", undoneState === "skipped,The import was undone", undoneState);
 
 // Fix round 1: request is refused while the import is still processing.
 const impY = await makeImport(c, { status: "importing" });
@@ -162,3 +163,41 @@ check("omitted decisions are accepted", reqD.status === 204 || reqD.status === 2
 const outD = JSON.parse(await sql(`select public.apply_held_item('${itemD}', '${c.id}')`));
 check("defaults: the stored SAT is kept, the new row is added", outD.applied === 1 && (await academics(studentD.id)).sat_superscore === 1500
   && (await sql(`select count(*) from public.test_scores where student_id = '${studentD.id}' and source = 'import'`)) === "1", JSON.stringify(outD));
+
+// Final review fix 1: apply compare-and-sets against the value at request time.
+const invS = await invite(`stale-${tag}@test.local`);
+const impS = await makeImport(c);
+const itemS = await addItem(impS, { status: "new_invite", invitationId: invS.id, name: "Stale Case" });
+const satS = await addChange(impS, itemS, { target: "student_academics", field: "sat_superscore", value: 1400, oldValue: null, decision: "auto" });
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impS}'`);
+await sql(`select public.commit_import('${impS}', '${c.id}')`);
+const studentS = await user("held-stale", "student");
+await rest(studentS.token, "POST", "/rest/v1/rpc/accept_invitation", { p_token: invS.token });
+const reqS = await rest(c.token, "POST", "/rest/v1/rpc/request_held_apply", { p_item: itemS, p_decisions: { [satS]: "accept" } });
+check("stale case: apply requested while SAT is empty", reqS.status === 204 || reqS.status === 200, `status ${reqS.status} ${JSON.stringify(reqS.body)}`);
+await sql(`insert into public.student_academics (student_id, sat_superscore) values ('${studentS.id}', 1500)`);
+const outS = JSON.parse(await sql(`select public.apply_held_item('${itemS}', '${c.id}')`));
+check("a value set while waiting is kept", (await academics(studentS.id)).sat_superscore === 1500, JSON.stringify(outS));
+const satRow = await sql(`select state || '|' || coalesce(error, '') from public.import_changes where id = '${satS}'`);
+check("the change is skipped_stale with a plain reason", satRow === "skipped_stale|Changed while waiting; the newer value was kept", satRow);
+
+// Final review fix 2: an unrelated counselor can't request apply.
+const invU = await invite(`unrel-${tag}@test.local`);
+const impU = await makeImport(c);
+const itemU = await addItem(impU, { status: "new_invite", invitationId: invU.id, name: "Unrelated Case" });
+await addChange(impU, itemU, { target: "student_academics", field: "act_composite", value: 27, oldValue: null, decision: "auto" });
+await sql(`update public.roster_imports set status = 'committed' where id = '${impU}'`);
+const studentU = await user("held-unrel", "student");
+await rest(studentU.token, "POST", "/rest/v1/rpc/accept_invitation", { p_token: invU.token });
+const reqU = await rest(otherC.token, "POST", "/rest/v1/rpc/request_held_apply", { p_item: itemU, p_decisions: {} });
+check("an unrelated counselor gets 42501 from request_held_apply", reqU.status >= 400 && reqU.body?.code === "42501", `status ${reqU.status} ${JSON.stringify(reqU.body)}`);
+check("the item is still waiting", (await sql(`select match_status from public.import_items where id = '${itemU}'`)) === "awaiting_counselor");
+
+// Final review fix 4: without write access the queue hides the stored value.
+await sql(`insert into public.student_academics (student_id, act_composite) values ('${studentU.id}', 33)`);
+const qOwn = (await rest(c.token, "POST", "/rest/v1/rpc/import_held_queue", {})).body.find((e) => e.itemId === itemU);
+check("with write access the queue shows the stored value", qOwn?.changes[0]?.currentValue === 33, JSON.stringify(qOwn?.changes));
+await sql(`update public.profiles set counselor_id = '${otherC.id}' where id = '${studentU.id}'`);
+const qLost = (await rest(c.token, "POST", "/rest/v1/rpc/import_held_queue", {})).body.find((e) => e.itemId === itemU);
+check("without write access currentValue is null and the default is keep_old",
+  qLost && qLost.changes[0].currentValue === null && qLost.changes[0].defaultDecision === "keep_old", JSON.stringify(qLost?.changes));
