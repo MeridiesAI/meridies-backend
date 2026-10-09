@@ -217,7 +217,7 @@ export default async function meRoutes(app: FastifyInstance) {
     async (request) => loadPolygonYears(request.db, request.auth.userId)
   );
 
-  // New-student onboarding (20261013000001): the red-outlined request card.
+  // New-student onboarding (20261015000001): the red-outlined request card.
   async function myIntake(request: FastifyRequest) {
     const intake = await loadMyIntake(request);
     if (!intake) return null;

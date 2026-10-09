@@ -1,6 +1,6 @@
 /**
  * What is left to set up for a student the counselor confirmed from New
- * student (20261013000001). Two lists, one per side: the counselor's become
+ * student (20261015000001). Two lists, one per side: the counselor's become
  * derived rows in My Work Queue, the student's a "Getting started" group in
  * their To-Do.
  *

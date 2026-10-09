@@ -317,7 +317,7 @@ the database (`20261010*`):
   triggers keep them in step: the task completing ticks the request on the
   counselor's Overview card, the counselor ticking or unticking the request
   completes or reopens the task. Tasks are never deleted when a request is.
-- **New students: Submit, receive, confirm** (`20261013000001`,
+- **New students: Submit, receive, confirm** (`20261015000001`,
   `lib/newStudentIntake.ts`). On a request from New student the student's
   upload only *attaches* the file (`POST /tasks/:id/submissions` does not
   move the task), or they type an answer (`PATCH /me/intake/:taskId`,
