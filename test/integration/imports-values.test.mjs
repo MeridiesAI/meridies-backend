@@ -77,11 +77,21 @@ check("compare-and-set with the right old value succeeds", await set("sat_supers
 check("compare-and-set with a stale old value changes nothing", !(await set("sat_superscore", 1400, 1500)));
 check("the value is the last good write", (await sql(`select sat_superscore from public.student_academics where student_id = '${s2.id}'`)) === "1450");
 check("3.8 matches a stored 3.800", (await set("gpa_weighted", null, 3.8)) && (await set("gpa_weighted", 3.8, 3.9)));
+check("stored gpa_weighted is 3.900", (await sql(`select gpa_weighted from public.student_academics where student_id = '${s2.id}'`)) === "3.900");
 check("majors replace as an array", await set("intended_majors", null, ["Biology"], "student_personal_details"));
 check("majors compare-and-set", await set("intended_majors", ["Biology"], ["Biology", "Chemistry"], "student_personal_details"));
+check("majors with a stale expected value change nothing", !(await set("intended_majors", ["Physics"], ["Math"], "student_personal_details")));
+check("a text field round-trips", (await set("gpa_scale", null, "4.0")) && (await set("gpa_scale", "4.0", "5.0")) &&
+  (await sql(`select gpa_scale from public.student_academics where student_id = '${s2.id}'`)) === "5.0");
+check("a boolean round-trips", (await set("first_gen", null, true, "student_personal_details")) &&
+  (await sql(`select first_gen from public.student_personal_details where student_id = '${s2.id}'`)) === "t");
+let badField = false;
+try { await sql(`select private.import_set_field('student_academics', 'role', '${s2.id}', 'null'::jsonb, '"x"'::jsonb)`); } catch { badField = true; }
+check("an unknown field raises", badField);
 check("birthday is set as a date", (await set("birthday", null, "2008-04-01", "student_personal_details")) &&
   (await sql(`select birthday from public.student_personal_details where student_id = '${s2.id}'`)) === "2008-04-01");
-check("clearing back to empty works (undo path)", await set("sat_superscore", 1450, null));
+check("clearing back to empty works (undo path)", (await set("sat_superscore", 1450, null)) &&
+  (await sql(`select coalesce(sat_superscore::text, 'null') from public.student_academics where student_id = '${s2.id}'`)) === "null");
 
 const row = { exam: "AP Biology", kind: "ap", score: "5", taken_on: "2025-05-10" };
 const rid = await sql(`select private.import_insert_row('test_scores', '${s2.id}', ${lit(row)})`);
@@ -100,3 +110,18 @@ check("same course name and year (any case) is a duplicate", courseDup === "null
 const act = await sql(`select private.import_insert_row('activities', '${s2.id}', ${lit({ name: "Robotics", grade_levels: ["11", "12"] })})`);
 check("an activity is inserted with grade levels", (await sql(`select array_to_string(grade_levels, ',') from public.activities where id = '${act}'`)) === "11,12");
 check("a row is deleted by id", (await sql(`select private.import_delete_row('activities', '${act}')`)) === "t");
+
+// ---- Task 4 fix round: exact-only dedupe, snapshot/delete of gone rows ------
+const ins = (t, r) => sql(`select coalesce(private.import_insert_row('${t}', '${s2.id}', ${lit(r)})::text, 'null')`);
+const isId = (v) => /^[0-9a-f-]{36}$/.test(v);
+check("same exam on a different date inserts", isId(await ins("test_scores", { ...row, taken_on: "2024-05-10" })));
+check("same course name, no year on either side, inserts", isId(await ins("courses", { name: "Calculus" })) && isId(await ins("courses", { name: "Calculus" })));
+check("same course name, different year, inserts", isId(await ins("courses", { name: "AP Chemistry", school_year: "2025-26" })));
+check("same activity name, different position, inserts", isId(await ins("activities", { name: "Debate", position: "Captain" })) && isId(await ins("activities", { name: "Debate", position: "Member" })));
+const a1 = { name: "Chess", position: "Captain", organization: "School", grade_levels: ["10"] };
+check("first Chess row inserts", isId(await ins("activities", a1)));
+check("identical activity is a duplicate", (await ins("activities", a1)) === "null");
+const gone = await sql(`select private.import_insert_row('activities', '${s2.id}', ${lit({ name: "Temp" })})`);
+await sql(`select private.import_delete_row('activities', '${gone}')`);
+check("snapshot of a deleted row is null", (await sql(`select coalesce(private.import_row_snapshot('activities', '${gone}')::text, 'null')`)) === "null");
+check("deleting an already deleted row returns false", (await sql(`select private.import_delete_row('activities', '${gone}')`)) === "f");

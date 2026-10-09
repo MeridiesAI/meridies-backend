@@ -99,7 +99,9 @@ as $$
               then array(select jsonb_array_elements_text(v)) else '{}'::text[] end;
 $$;
 
--- Duplicate keys are final for v1.0 (spec §4.3).
+-- Duplicate keys are final for v1.0 (spec §4.3). Apply-time dedupe is
+-- exact-only; looser matches (same name, missing year, etc.) are suggestions
+-- the counselor confirms at staging, never dropped silently here.
 create or replace function private.import_insert_row(p_target text, p_student uuid, p_row jsonb)
 returns uuid
 language plpgsql
@@ -133,7 +135,9 @@ begin
       select 1 from public.courses c
       where c.student_id = p_student
         and lower(btrim(c.name)) = lower(btrim(p_row ->> 'name'))
-        and c.school_year is not distinct from (p_row ->> 'school_year')
+        and c.school_year is not null
+        and p_row ->> 'school_year' is not null
+        and c.school_year = (p_row ->> 'school_year')
     ) then
       return null;
     end if;
@@ -145,7 +149,10 @@ begin
     if exists (
       select 1 from public.activities a
       where a.student_id = p_student
-        and lower(btrim(coalesce(a.name, ''))) = lower(btrim(p_row ->> 'name'))
+        and lower(btrim(coalesce(a.name, ''))) = lower(btrim(coalesce(p_row ->> 'name', '')))
+        and a.position is not distinct from (p_row ->> 'position')
+        and a.organization is not distinct from (p_row ->> 'organization')
+        and a.grade_levels is not distinct from private.import_text_array(p_row -> 'grade_levels')
     ) then
       return null;
     end if;
