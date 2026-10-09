@@ -68,6 +68,7 @@ create trigger roster_imports_stamp_firm before insert on public.roster_imports
 -- every new-pipeline status and job column moves only through the
 -- SECURITY DEFINER functions (which run as the function owner, not as
 -- `authenticated`).
+-- Deliberately NOT security definer: the guard keys off current_user.
 create or replace function private.roster_imports_guard_client()
 returns trigger
 language plpgsql
@@ -89,7 +90,10 @@ begin
     if new.status not in ('mapping','draft')
        or new.committed_at is not null or new.undo_until is not null or new.undone_at is not null
        or new.compacted_at is not null or new.job_actor is not null or new.job_requested_at is not null
-       or new.job_error is not null or new.job_result is not null then
+       or new.job_error is not null or new.job_result is not null
+       or new.ai_spend_cents <> 0 or new.expires_at is not null
+       or new.permission_confirmed_by is not null or new.permission_confirmed_at is not null
+       or new.template_id is not null or new.source_system <> 'unknown' then
       raise exception 'Import status changes go through the API' using errcode = '42501';
     end if;
     return new;
@@ -104,6 +108,12 @@ begin
      or new.job_requested_at is distinct from old.job_requested_at
      or new.job_error is distinct from old.job_error
      or new.job_result is distinct from old.job_result
+     or new.ai_spend_cents is distinct from old.ai_spend_cents
+     or new.expires_at is distinct from old.expires_at
+     or new.permission_confirmed_by is distinct from old.permission_confirmed_by
+     or new.permission_confirmed_at is distinct from old.permission_confirmed_at
+     or new.template_id is distinct from old.template_id
+     or new.source_system is distinct from old.source_system
      or (new.status is distinct from old.status
          and not (old.status = any (v_old_statuses) and new.status = any (v_old_statuses))) then
     raise exception 'Import status changes go through the API' using errcode = '42501';

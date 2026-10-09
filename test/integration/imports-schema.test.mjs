@@ -1,5 +1,5 @@
 // Import pipeline step 1, Task 1: the schema exists and enforces its shape.
-import { check, sql, user } from "./harness.mjs";
+import { check, sql, user, rest } from "./harness.mjs";
 import { makeImport, studentOf, firmWith, q } from "./imports-helpers.mjs";
 
 const tables = await sql(`select string_agg(tablename, ',' order by tablename) from pg_tables where schemaname = 'public'
@@ -44,3 +44,9 @@ check("a change to a field not in import_fields can't be stored", fk);
 
 const hb = await sql(`select count(*) from public.job_heartbeats where job = 'import-sweep'`);
 check("the import-sweep heartbeat row exists", hb === "1");
+
+// A counselor can't reset server-owned columns through PostgREST.
+const spendImp = await makeImport(c);
+await sql(`update public.roster_imports set ai_spend_cents = 150 where id = '${spendImp}'`);
+const patch = await rest(c.token, "PATCH", `/rest/v1/roster_imports?id=eq.${spendImp}`, { ai_spend_cents: 0 });
+check("a counselor can't reset ai_spend_cents", patch.status >= 400 && (await sql(`select ai_spend_cents from public.roster_imports where id = '${spendImp}'`)) === "150", String(patch.status));
