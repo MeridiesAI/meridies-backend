@@ -73,6 +73,7 @@ src/
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
+│   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
@@ -337,7 +338,18 @@ the database (`20261010*`):
   counselor-written. The banner image lives in the private `student-banners`
   bucket under `<student id>/`, uploaded through a signed URL minted on the
   student's own token.
-- **Settings is the display name and the theme**, nothing else (`PATCH /me/settings`).
+- **Settings is the display name and the theme** (`PATCH /me/settings`). The
+  theme defaults to `light` (`20261013000001`); "Device" (`system`) is a
+  choice, never the default.
+- **The student's reminder channels send.** With texts or email on in
+  `student_preferences`, each open task due tomorrow (counselor's time zone,
+  outside quiet hours) gets one reminder per channel, sent by
+  `lib/studentReminders.ts` on the existing dispatch cron
+  (`/communication/internal/dispatch`) under the `student-reminders` lease.
+  The `message_deliveries` row (template `task-due-reminder:<date>`) is the
+  dedupe record. `GET /me/messages` lists what was sent to the student; RLS
+  `message_deliveries_student_self` (`20261013000002`) returns only rows
+  addressed to them, never their guardians' or the counselor's.
 
 ### Aid generosity is three ratings, not one
 

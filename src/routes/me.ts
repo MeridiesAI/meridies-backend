@@ -11,6 +11,7 @@
  *   PATCH /me/settings                 display name and theme, nothing else
  *   GET   /me/polygon                  the strength profile, read-only
  *   GET   /me/polygon/years            its recorded freshman-to-now history
+ *   GET   /me/messages                 the texts and emails sent to the student
  *
  * Everything else the student view shows is an existing route the student
  * may already call for themselves: tasks (/tasks), files (/files/*), the
@@ -46,6 +47,8 @@ const settingsPatch = z
   })
   .partial()
   .strict();
+
+const messagesQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(30) }).strict();
 
 const bannerUploadBody = z
   .object({
@@ -166,6 +169,39 @@ export default async function meRoutes(app: FastifyInstance) {
     "/polygon",
     { preHandler: [...student, limit("me:polygon", 240, 60)] },
     async (request) => loadPolygon(request.db, request.auth.userId, { persist: false })
+  );
+
+  /**
+   * What Meridies sent the student by text and email, newest first: task
+   * assignments, AxIS's hand-in verdicts, reminders, the counselor's
+   * composer messages. Read on the student's own client; RLS
+   * (`message_deliveries_student_self`) returns only rows addressed to them.
+   */
+  app.get(
+    "/messages",
+    { preHandler: [...student, limit("me:messages", 120, 60)] },
+    async (request) => {
+      const { limit: max } = messagesQuery.parse(request.query);
+      const me = request.auth.userId;
+      const { data, error } = await request.db
+        .from("message_deliveries")
+        .select("id, channel, subject, body, status, sent_at, created_at")
+        .eq("student_id", me)
+        .eq("recipient_kind", "student")
+        .neq("status", "cancelled")
+        .order("created_at", { ascending: false })
+        .limit(max);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => ({
+        id: String(r.id),
+        channel: r.channel === "sms" ? "sms" : "email",
+        subject: typeof r.subject === "string" ? r.subject : null,
+        body: typeof r.body === "string" ? r.body.slice(0, 600) : "",
+        status: String(r.status),
+        sentAt: typeof r.sent_at === "string" ? r.sent_at : null,
+        createdAt: String(r.created_at),
+      }));
+    }
   );
 
   app.get(
