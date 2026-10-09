@@ -51,7 +51,7 @@ year, high school and intended major in `roster_import_rows`, and
 | Inputs | v1.0: CSV, XLSX. v1.1: PDF. Later: Google Sheets direct. |
 | Targets | `student_academics`, `student_personal_details` (single-row); `test_scores`, `courses`, `activities` (multi-row) |
 | Matching scope | **Only the counselor's own students.** Anyone else is "new"; the invitation flow handles collisions. Prevents learning who has an account by uploading emails. |
-| Matching rules | Email match **and** a fuzzy name match → matched. Email match with a different name → **the counselor must confirm** (shown as "email matches Jane Doe, file says John Doe"); never applied without that confirmation. An email shared by several rows in the file → suggested. No email match → name + birthday + school, or name + grad year + school: suggested. **Suggestions are confirmed by the counselor** (bulk confirm for high confidence). |
+| Matching rules | Email match **and** a fuzzy name match → matched. Email match with a different name → **the counselor must confirm** (shown as "email matches Jane Doe, file says John Doe"); never applied without that confirmation. Several rows with the same email **and** the same name are one student with several rows (normal for score and course exports). The same email with **different** names is a shared parent email → suggested. Name matching follows §4.4. No email match → name + birthday + school, or name + grad year + school: suggested. **Suggestions are confirmed by the counselor** (bulk confirm for high confidence). |
 | No match | Has email → invitation; data held until the invitation expires (14 days, the existing `invitations.expires_at`). No email → skipped with reason. |
 | Held data | Never auto-applied on acceptance. Counselor queue ("Jane accepted — apply her imported data?") with a loud warning when the accepting account's name differs from the imported name. Expires 30 days after acceptance; warning email 7 days before. |
 | Conflicts | Empty fields fill. Differing values default by provenance (§5.6); grouped by pattern; sorted by risk, which includes match confidence. |
@@ -167,7 +167,19 @@ error`. Foreign key `(target_table, field)` → `import_fields`.
 **`student_academics`** (changed): `gpa_unweighted` and `gpa_weighted` widen
 from `numeric(4,3) ≤ 10` to `numeric(6,3)`, with a check tied to `gpa_scale`
 (≤ 10 unless the scale is `100`, then ≤ 110 to allow weighted bonuses). Existing
-values are untouched. Screens that assume a 4/5 scale must read `gpa_scale`.
+values are untouched. **Step 1 includes a GPA audit**: every place that sorts,
+filters, charts, compares or sends GPA to the AI must read `gpa_scale` and show
+the scale beside the value. Known readers today: backend `lib/collegeIntel.ts`,
+`lib/collegesV10.ts`, `lib/outcomes.ts`, `lib/serialize.ts`, `lib/studentAid.ts`,
+`lib/studentPage.ts`, `lib/classRank.ts`, `routes/applicationAi.ts`,
+`routes/collegesV10.ts`, `routes/outcomes.ts`, `routes/overviewSummaries.ts`,
+`routes/pipeline.ts`, `routes/records.ts`, `routes/roster.ts`,
+`routes/students.ts`, and SQL in `20260828000003`, `20260918000001`,
+`20261005010003`; app `StudentProfileSelf.tsx`, `AxisPanel.tsx`,
+`AlumniCard.tsx`, `overview/status.ts`, `ContactProfileModal.tsx`,
+`StudentInfoCard.tsx`, `lib/profileDisplay.ts`, `lib/api.ts`. Fit, odds and
+class rank compare against 4-point bands, so they treat a non-4/5 scale as
+"unknown" rather than guessing.
 
 ### 4.2 Type safety on the change list
 
@@ -179,11 +191,12 @@ path: tighten types here as the field list settles, with no table migration.
 
 ### 4.3 Deduplication
 
-**Within the file:** rows that resolve to the same student are merged into one
-item; where they disagree on a value, the change is flagged `conflict_in_file`
-and the counselor picks. Several rows sharing one email but with different
-names (siblings using a parent address) are never merged and never
-auto-matched.
+**Within the file:** rows with the same email and a matching name (§4.4)
+are one student: they merge into one item, and a long-format file (one row per
+test or per course) produces many changes on that item. Where single-row values
+disagree, the change is flagged `conflict_in_file` and the counselor picks.
+Rows sharing one email with names that don't match (siblings using a parent
+address) are never merged and never auto-matched.
 
 **Against existing data**, at staging an `insert_row` is dropped (or shown as
 "already present") when the student already has:
@@ -195,6 +208,24 @@ auto-matched.
   Grades are stored as given (letter, percentage, pass/fail), never converted.
 - Activities: the same normalized name, suggested only; the counselor confirms.
 
+These keys are final for v1.0 and are built in step 1. `courses` has no term
+column; a term in the file is kept in `school_year` as given (e.g. "2025-26
+Fall") and ignored for matching.
+
+### 4.4 Name matching rule
+
+Names are normalized before comparing: lowercase, accents removed (José →
+jose), punctuation and extra spaces removed, "Last, First" split.
+- **Last name** matches if the normalized names are equal, or one is a part of
+  the other's hyphenated or two-part surname (García-López ↔ López).
+- **First name** matches if equal, or equivalent in a fixed nickname table
+  (Robert ↔ Bob/Rob/Bobby, Elizabeth ↔ Liz/Beth, …, kept in code with tests),
+  or equal to the student's preferred name where we have one.
+- A match needs **both**. Initials alone never match, so twins with the same
+  last name and initial stay apart.
+- Anything else is a name mismatch: suggested, and for an email match, the
+  counselor must confirm.
+
 ## 5. Flow
 
 Status in parentheses. Every step is idempotent per file or per item.
@@ -203,11 +234,17 @@ Status in parentheses. Every step is idempotent per file or per item.
 `POST /imports` creates the import. The browser uploads files directly to the
 bucket, then `POST /imports/:id/files` registers each: the backend checks the
 object exists, its size and **magic bytes** (CSV/text vs XLSX zip; PDF in v1.1),
-and computes sha256. Limits per import: 20 files, 5,000 rows per sheet. Existing
+and computes sha256. Limits per import: 20 files and **5,000 rows in total**
+across them (the size the load test covers). Before the first upload the
+counselor ticks "I have permission from the student's family to upload this
+information"; the import stores who ticked it and when, and the terms say the
+same. Existing
 limits stay: `roster:import` 20 per hour **per user**, and the `invites` quota
 of 100 per day per user. Counselor accounts younger than 14 days get half the
 invite quota, and a counselor's first import that would send more than 50
-invitations waits for Meridies staff approval.
+invitations waits for Meridies staff approval. Owner: Elvin until a support
+role exists; target response within one business day; the counselor sees
+"Waiting for a quick check from Meridies (usually within a day)".
 
 ### 5.2 Profile (`profiling`)
 In a worker thread with a memory cap, a timeout and an uncompressed-size limit
@@ -248,8 +285,8 @@ file mapped by a saved template, staging stops: "This file looks different
 from your saved template. Remap?"
 
 ### 5.5 Clean messy cells
-Only flagged cells go to the model, batched, as field name + raw value, with no
-identifying columns. Output must pass the same validation; otherwise the cell is
+Only flagged cells go to the model, **batched by column** (up to 100 cells per
+call), as field name + raw values, with no identifying columns. Output must pass the same validation; otherwise the cell is
 an error the counselor fixes by hand.
 
 ### 5.6 Match and review (`review`)
@@ -289,8 +326,8 @@ confirmation when the import will invite anyone.
 ### 5.7 Commit (`committing` → `committed`)
 `POST /imports/:id/commit` checks ownership and status, sets `committing`, and
 enqueues a commit job. The client polls `GET /imports/:id`. The job runs on a
-**direct Postgres connection** (`DATABASE_URL`, the Supabase pooler in session
-mode), not PostgREST, so no HTTP timeout applies. It calls
+**direct Postgres connection** (`IMPORT_DATABASE_URL`, as `import_worker`
+through the Supabase session pooler, §6.2), not PostgREST, so no HTTP timeout applies. It calls
 `commit_import(p_import, p_actor)` inside one transaction with `SET LOCAL
 statement_timeout = '300s'`:
 1. Lock the import (`FOR UPDATE`); require `committing` and the job's claim.
@@ -336,6 +373,8 @@ p_actor)` on the direct connection in one transaction: lock; require
   rows → `undo_skipped`.
 - `insert_row`: delete the row only if unchanged since insert; else
   `undo_skipped`.
+- Held data that was applied from "Ready to apply" is reverted by the same
+  rules, because its changes belong to this import.
 - Revoke still-pending invitations it created; drop their held data.
 - Audit row inside the transaction.
 Report: "Reverted 412 changes; 9 kept because they were edited since."
@@ -347,6 +386,11 @@ Report: "Reverted 412 changes; 9 kept because they were edited since."
 - After `undo_until`: compact `import_changes` by dropping `old_value` and
   `new_value` and **keeping `new_value_hash`**, field and target. The audit
   summary keeps who, when and counts; student ids are dropped from it.
+- The fingerprint is **personal data**: for fields with few possible values
+  (GPA, SAT) it can be reversed by trying every value. We describe it honestly
+  ("we keep a fingerprint so we can tell whether a value has changed since an
+  import"), list it in the privacy policy, and delete it with the student's
+  account (cascade).
 
 ### 5.11 PDFs (v1.1, behind a flag)
 Designed now so the schema doesn't change later; shipped only after v1.0 and
@@ -372,6 +416,9 @@ only to pilot counselors (§11).
   accurate enough (documented in AGENTS.md if so).
 - Gate: written confirmation of which Anthropic endpoints our zero data
   retention covers, including PDF input.
+- Its own AI cap, per PDF and per import, set from current model pricing before
+  1.1 ships; the $2 spreadsheet cap doesn't apply. A cap reached mid-batch
+  pauses the remaining PDFs; it never half-processes one.
 
 ## 6. Security
 
@@ -404,8 +451,19 @@ needs it, encrypt that field in the app as `tokenCrypto` does.
 - Status transitions are enforced under `FOR UPDATE`; anything else → "already
   in progress". A job claims its import with a conditional status update, so a
   double click or two tabs produce one job.
-- New env var `DATABASE_URL` (Railway, set by the team; `.env.example`
-  updated). The backend's first direct Postgres use; the `pg` package is added.
+- New env var `IMPORT_DATABASE_URL` (Railway, set by the team;
+  `.env.example` updated). The backend's first direct Postgres use; the `pg`
+  package is added. **It never uses the `postgres` login.** It connects as
+  `import_worker`, a role created `NOLOGIN` by the migration with only
+  `EXECUTE` on the three functions and the grants they need on the import
+  tables; the team turns on its login and sets the password by hand, outside
+  git. Anyone pasting the superuser string is refused at startup (the backend
+  checks `current_user = 'import_worker'`).
+- Connection: Supabase's **session pooler** (IPv4, holds a session for the
+  whole transaction), never the transaction pooler, which can't hold locks
+  across statements. The direct host is IPv6-only on our plan unless the IPv4
+  add-on is bought, so step 1 starts by confirming Railway reaches the session
+  pooler.
 
 ### 6.3 Browser privileges
 `authenticated` may: create an import via the API, upload to its own draft path,
@@ -470,9 +528,27 @@ masked too (§5.2).
 | Bare 9 digits, header suggests SSN (`ssn`, `social`, …) | Blocked |
 | Bare 9 digits otherwise (often district student IDs) | Flagged for the counselor; never blocked or silently redacted |
 
-Forced-ignore categories, by header and in the v1.1 extraction schema: SSN,
-financial account numbers, IEP/504 and accommodation notes, disciplinary notes,
-free/reduced-lunch status. Applied to sheet cells, messy cells and (v1.1) PDF
+Imports only ever write fields in `import_fields`; anything else is ignored.
+The categories below are extra protection for values that slip into allowed
+columns (free text, mislabelled columns, PDFs).
+
+**Never stored and never sent onward** (forced `ignore` by header, blocked by
+value pattern where one exists, absent from the v1.1 extraction schema):
+
+| Category | Examples |
+|---|---|
+| Government ID numbers | SSN, driver's license, passport, state ID, immigration (A-)numbers |
+| Financial | Bank, account and card numbers; family income; tax figures |
+| Health and disability | Diagnoses, medications, IEP/504 plans, accommodations |
+| Discipline and legal | Suspensions, discipline notes, criminal records |
+| Economic status | Free/reduced lunch, income-based fee waivers |
+| Beliefs and identity | Religion, sexual orientation, race/ethnicity (no field exists; adding one later is a deliberate decision) |
+| Login secrets | Passwords, security answers |
+
+**Allowed but higher risk** (always shown for review when they would change a
+value; never auto-overwritten): `import_fields.sensitivity` 3 = GPA, test
+scores, class rank; 2 = birthday, home address, phone, gender, citizenship
+status, first-generation status. Everything else is 1. Applied to sheet cells, messy cells and (v1.1) PDF
 text. For PDFs, redaction protects our database, not the model call; the
 disclosure says so.
 
@@ -483,7 +559,8 @@ Add this rule to AGENTS.md.
 
 ### 7.6 Retention promise
 Raw files: ≤ 7 days. Sample cells: until commit. Change values: 30 days, then
-hashes and a counts-only summary. Held data: until the invitation expires (14
+a fingerprint of each imported value (personal data, deleted with the student's
+account, §5.10) and a counts-only summary. Held data: until the invitation expires (14
 days) or 30 days after acceptance. Backups: per the Supabase plan (point-in-time
 recovery).
 
@@ -529,11 +606,11 @@ dependency: `fast-check`.
 | Provenance | Monthly re-import from the same system defaults to accept, before **and after** compaction; different system → keep_old | integration |
 | Undo properties | Random import → edit → import → undo sequences never corrupt data | integration, fast-check |
 | Compare-and-set | A student edit committed between review and commit is never overwritten | integration |
-| Real files | Anonymized exports: Naviance, SCOIR, Cialfo, HubSpot, CollegePlannerPro, CounselMore, GradBetter | integration, `test/fixtures/imports/` |
+| Real files | Anonymized exports, first-customer tools first: CollegePlannerPro, CounselMore, GradBetter, homemade counselor spreadsheets; then HubSpot and school-side Naviance, SCOIR, Cialfo | integration, `test/fixtures/imports/` |
 | Malicious files | Zip bomb, XML expansion, mismatched magic bytes, formula cells, names-as-headers, SSN in free text | integration |
 | RLS & storage | Two counselors in a firm, a firm admin, a solo counselor and a student × every table + bucket; admins see firm imports, other counselors don't; definer functions not callable by `authenticated` | integration (persona) |
 | Concurrency | Double commit; commit during undo; acceptance during undo; held apply vs expiry | integration |
-| Load | Commit and undo at 5,000 rows × all fields on the direct connection within the timeout | integration, tagged pre-release |
+| Load | Commit and undo at the import maximum (5,000 rows in total × all fields) as `import_worker` through the session pooler, within the timeout | integration, tagged pre-release |
 | Held data | Pending invite expiry wipes; acceptance → queue only; name-mismatch warning; email at 7 days; wipe at 30 | integration |
 
 ## 10. Privacy and legal
@@ -548,6 +625,10 @@ families they work with. Needed before launch:
 - A deletion path: account deletion removes import data (cascade, §4.1), and
   the counts-only audit summary keeps no student ids.
 - Breach-notification commitment in the terms.
+- The upload permission checkbox (§5.1) and a matching line in the terms: the
+  counselor confirms they have the family's permission.
+- A lawyer checks whether state student-privacy laws apply to the
+  family/independent-counselor launch too, not only to school deals.
 
 **Schools (later, gated on legal work):** a school sharing student records
 needs a legal basis, usually our signature on a student data privacy agreement
@@ -584,19 +665,27 @@ timelines. School customers are out of scope until this is done.
 
 ## 13. Prerequisites and launch blockers
 
-- **Five real anonymized export files this week, before code beyond PR1.** The
-  mapping design rests on them and they will change it.
+- **Five real anonymized export files this week, before code beyond PR1**,
+  mostly from what our first customers use: CollegePlannerPro, CounselMore,
+  GradBetter and homemade counselor spreadsheets. The mapping design rests on
+  them and they will change it.
 - Supabase Pro with point-in-time recovery, and the Resend paid plan: needed
   now regardless of this feature (the team is handling both).
 - Anthropic zero data retention confirmed in writing, with the endpoints it
   covers.
-- `DATABASE_URL` on Railway (§6.2).
+- `IMPORT_DATABASE_URL` on Railway, logging in as `import_worker` (§6.2).
 - Privacy policy and subprocessor disclosure (§10).
 
 ## 14. Planned follow-ups
 
 - v1.1: PDFs (§5.11).
 - Direct Google Sheets import (`lib/suiteApi.ts`, `accessTokenFor`).
+- Shared starter templates (column names only, no data) for common tools, so a
+  counselor's first import from a known tool needs no AI or mapping work.
+- Caseload transfer when a counselor leaves (separate spec): firm setting for
+  "transfer everything to one person" vs "an admin assigns each student",
+  optional temporary delegation; imports, held data and templates follow the
+  students.
 - Tighten `import_fields.value_type` as the field list settles.
 - `field_sources` provenance column if hash-based provenance proves too coarse.
 - PDF region highlighting in review.
@@ -609,8 +698,9 @@ Separate PRs in this order, each green on CI before the next:
 1. **Bug fix and foundation:** migration (bucket, tables, `import_fields`,
    GPA widening, policies, access functions) + `commit_import` /
    `undo_import` / `apply_held_item` + the job runner on the direct connection
-   + the held-data queue routes. Includes SQL, RLS, concurrency, provenance and
-   load tests.
+   + the held-data queue routes + the `import_worker` role and connection check
+   + the GPA audit (§4.1). Includes SQL, RLS, concurrency, provenance and load
+   tests.
 2. **CSV/XLSX path:** upload, profiling worker, parse plan, staging, cleanup,
    matching, review/commit/undo routes + unit tests against the real files.
 3. **App (`meridies-app`):** Import screen behind the flag, review, history
@@ -698,3 +788,14 @@ through `import_fields.value_type` (§4.2).
   to CSV/XLSX for v1.0 with PDFs in v1.1; first customer named (independent
   counselors); rollout, correction-rate metric, AI cost cap, staging
   rehearsal.
+- Round 5 (Elvin + reviewer): email match with a name mismatch needs counselor
+  confirmation; firm admins always see firm imports (`firm_id` on imports);
+  caseload transfer split into its own spec; same email + same name = one
+  student with many rows; name-matching rule (§4.4); fingerprint treated as
+  personal data and deleted with the account; GPA read audit in step 1;
+  `import_worker` role through the session pooler; 5,000 rows per import in
+  total; dedupe keys final; cleanup batched by column; undo covers applied held
+  data; separate PDF cap; staff-approval owner and response target; family
+  permission checkbox; first-customer tools first in real-file tests;
+  sensitive-data categories; lawyer checks state laws for the family launch;
+  starter templates as a follow-up.
