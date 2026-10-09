@@ -20,6 +20,10 @@ const envSchema = z.object({
   // role, through Supabase's SESSION pooler (never the transaction pooler).
   // Optional: unset, import commit/undo/apply answer 503.
   IMPORT_DATABASE_URL: blankIsUnset(z.string().url().optional()),
+  // Held-data expiry (30 days) and its 7-day warning emails, run by the
+  // import sweep. Off unless "true": counselors can't act on held data until
+  // the "Ready to apply" page ships.
+  IMPORT_HOLD_EXPIRY_ENABLED: blankIsUnset(z.enum(["true", "false"]).optional()),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
 

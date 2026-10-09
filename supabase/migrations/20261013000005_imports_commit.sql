@@ -98,8 +98,10 @@ begin
     return jsonb_build_object('status', 'review', 'problems', v_problems);
   end;
 
-  -- Step 4: apply. A GPA that fits the 4.0 scale is written before a scale change,
-  -- and a scale change before any other GPA, so each write passes the check.
+  -- Step 4: apply. Students are written in student_id order so concurrent jobs
+  -- take row locks in the same order (no deadlock). Within a student, a GPA
+  -- that fits the 4.0 scale is written before a scale change, and a scale
+  -- change before any other GPA, so each write passes the check.
   for c in
     select ch.id, ch.op, ch.target_table, ch.field, ch.old_value, ch.new_value, it.student_id
     from public.import_changes ch
@@ -108,7 +110,7 @@ begin
       and ch.state = 'staged'
       and ch.decision in ('auto','accept')
       and it.match_status in ('matched_email','confirmed')
-    order by it.id,
+    order by it.student_id,
              case when ch.field in ('gpa_weighted','gpa_unweighted') and private.import_num(ch.new_value) <= 10 then 0
                   when ch.field = 'gpa_scale' then 1 else 2 end,
              ch.created_at
@@ -200,16 +202,16 @@ stable
 security definer
 set search_path = ''
 as $$
+  -- actor is null when the requester's account was deleted (on delete set
+  -- null): the sweep can't run such a job and fails it with a message instead.
   select case i.status when 'committing' then 'commit' else 'undo' end, i.id, i.job_actor
   from public.roster_imports i
   where i.status in ('committing','undoing')
-    and i.job_actor is not null
     and coalesce(i.job_requested_at, 'epoch'::timestamptz) < now() - make_interval(secs => p_stale_seconds)
   union all
   select 'apply', it.id, it.job_actor
   from public.import_items it
   where it.match_status = 'applying'
-    and it.job_actor is not null
     and coalesce(it.job_requested_at, 'epoch'::timestamptz) < now() - make_interval(secs => p_stale_seconds);
 $$;
 

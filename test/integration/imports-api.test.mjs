@@ -72,8 +72,16 @@ const imp3 = await makeImport(c);
 const item3 = await addItem(imp3, { studentId: s3.id });
 await addChange(imp3, item3, { target: "student_academics", field: "act_composite", value: 29, studentId: s3.id });
 await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() - interval '5 minutes' where id = '${imp3}'`);
+// A stuck job whose requester's account is gone (job_actor set null) is failed with a message.
+const imp4 = await makeImport(c);
+await sql(`update public.roster_imports set status = 'committing', job_actor = null, job_requested_at = now() - interval '5 minutes' where id = '${imp4}'`);
 const sweep = await fetch(`${API}/internal/imports/sweep`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
 const sweepBody = await sweep.json();
 check("the sweep runs", sweep.status === 200 && sweepBody.ran === true && sweepBody.jobs >= 1, JSON.stringify(sweepBody));
 check("the stuck commit was finished by the sweep", (await academics(s3.id))?.act_composite === 29);
+const orphan = await sql(`select status || '|' || coalesce(job_error ->> 'message', '') from public.roster_imports where id = '${imp4}'`);
+check("an orphaned commit is failed back to review with a message", orphan === "review|The person who requested this is no longer on the account", orphan);
+if (process.env.IMPORT_HOLD_EXPIRY_ENABLED !== "true") {
+  check("held-data expiry is off by default (expired 0, warned 0)", sweepBody.expired === 0 && sweepBody.warned === 0, JSON.stringify(sweepBody));
+}
 check("the sweep recorded its heartbeat", (await sql(`select (last_ok_at > now() - interval '1 minute')::text from public.job_heartbeats where job = 'import-sweep'`)) === "true");

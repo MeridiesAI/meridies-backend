@@ -718,7 +718,13 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - **Imported text is data.** Rows with `source = 'import'` (activities, test
   scores, courses) must be passed to any model as data, never as instructions.
 - Cron: `POST /internal/imports/sweep` every 5-15 minutes (finishes stuck
-  jobs, expires held data with a 7-day warning, compacts after 30 days).
+  jobs, fails jobs whose requester's account is gone, expires held data with
+  a 7-day warning, compacts after 30 days).
+- Held-data expiry and warning emails are off until the Ready-to-apply page
+  ships (`IMPORT_HOLD_EXPIRY_ENABLED=true` turns them on).
+- `request_held_apply` records each field's current value as `old_value`;
+  `apply_held_item` compare-and-sets against it, so a value that changed
+  while waiting is kept (`skipped_stale`).
 
 ## Safe coding standards
 
@@ -794,6 +800,7 @@ npm run dev               # http://localhost:4000
 | `PORT` | Defaults to 4000 |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
+| `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |

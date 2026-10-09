@@ -32,6 +32,7 @@ const FUNCTION_FOR: Record<ImportJobKind, string> = {
 };
 
 const FAILURE_MESSAGE = "Couldn't save. Nothing was changed. Try again.";
+const ORPHANED_MESSAGE = "The person who requested this is no longer on the account";
 
 const BUSY_ATTEMPTS = 3;
 const BUSY_RETRY_MS = 2000;
@@ -108,15 +109,30 @@ export async function runImportSweep(log: Log): Promise<ImportSweepOutcome> {
   try {
     const due = await withWorkerTransaction(async (c) => {
       const { rows } = await c.query("select kind, id, actor from public.import_jobs_due($1)", [STALE_SECONDS]);
-      return rows as Array<{ kind: ImportJobKind; id: string; actor: string }>;
+      return rows as Array<{ kind: ImportJobKind; id: string; actor: string | null }>;
     });
-    for (const job of due) await runImportJob(job.kind, job.id, job.actor, log);
+    for (const job of due) {
+      if (job.actor === null) {
+        // The requester's account is gone (job_actor set null); nobody can run it.
+        await withWorkerTransaction((c) =>
+          c.query("select public.fail_import_job($1, $2, $3)", [job.kind, job.id, ORPHANED_MESSAGE])
+        );
+        log.info({ kind: job.kind, id: job.id }, "import job requester is gone; failed the job");
+        continue;
+      }
+      await runImportJob(job.kind, job.id, job.actor, log);
+    }
 
-    const holds = await withWorkerTransaction(async (c) => {
-      const { rows } = await c.query("select public.expire_import_holds() as out");
-      return rows[0].out as { expired: number; warn: HoldWarning[] };
-    });
-    for (const w of holds.warn) await warnHoldExpiring(w, log);
+    // Held-data expiry and its warning emails stay off until the counselor's
+    // "Ready to apply" page ships (IMPORT_HOLD_EXPIRY_ENABLED=true turns them on).
+    let holds: { expired: number; warn: HoldWarning[] } = { expired: 0, warn: [] };
+    if (env.IMPORT_HOLD_EXPIRY_ENABLED === "true") {
+      holds = await withWorkerTransaction(async (c) => {
+        const { rows } = await c.query("select public.expire_import_holds() as out");
+        return rows[0].out as { expired: number; warn: HoldWarning[] };
+      });
+      for (const w of holds.warn) await warnHoldExpiring(w, log);
+    }
 
     const compacted = await withWorkerTransaction(async (c) => {
       const { rows } = await c.query("select public.compact_imports() as n");
