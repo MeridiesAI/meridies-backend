@@ -167,7 +167,8 @@ as $$
        where i.id = private.import_object_import_id(p_name)
          and i.counselor_id = p_viewer
          and i.status = 'draft'
-     );
+     )
+     and private.can_view_import(private.import_object_import_id(p_name), p_viewer);
 $$;
 
 revoke all on function private.import_object_import_id(text) from public, anon;

@@ -102,5 +102,40 @@ check("uploading into someone else's folder is refused", up3.status >= 400, `sta
 const read = await rest(outsider.token, "GET", `/storage/v1/object/imports/${soloAcl.id}/${draft}/f1-test.csv`);
 check("someone else can't read the file", read.status >= 400, `status ${read.status}`);
 
-const role = await sql(`select rolcanlogin::text from pg_roles where rolname = 'import_worker'`);
-check("the import_worker role exists", role === "false" || role === "true", role);
+// import_worker holds no standing privileges.
+const wk = await sql(`select rolsuper::text || ',' || rolbypassrls::text from pg_roles where rolname = 'import_worker'`);
+check("import_worker is not a superuser and doesn't bypass RLS", wk === "false,false", wk);
+const wkGrants = await sql(`select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'r' and (c.relname like 'import\\_%' or c.relname = 'roster_imports')
+    and has_table_privilege('import_worker', c.oid, 'select,insert,update,delete,truncate,references,trigger')`);
+check("import_worker has no table privileges on the import tables", wkGrants === "0", wkGrants);
+const wkGrants2 = await sql(`select count(*) from information_schema.role_table_grants where grantee = 'import_worker'`);
+check("import_worker has no table grants at all", wkGrants2 === "0", wkGrants2);
+
+// The access functions, called directly.
+const ownerB = await user("imp-fn-owner");
+const memberB = await user("imp-fn-member");
+const otherB = await user("imp-fn-other");
+await firmWith(ownerB, [memberB]);
+const stuB = await studentOf(memberB, "imp-fn-student");
+const impB = await makeImport(memberB);
+const fn = (name, ...args) => sql(`select private.${name}(${args.map((a) => `'${a}'`).join(", ")})::text`);
+check("can_manage_import: uploader", (await fn("can_manage_import", impB, memberB.id)) === "true");
+check("can_manage_import: firm owner", (await fn("can_manage_import", impB, ownerB.id)) === "true");
+check("can_manage_import: outsider", (await fn("can_manage_import", impB, otherB.id)) === "false");
+check("import_can_write_student: the student's own counselor", (await fn("import_can_write_student", impB, stuB.id, memberB.id)) === "true");
+check("import_can_write_student: firm owner, counselor in the firm", (await fn("import_can_write_student", impB, stuB.id, ownerB.id)) === "true");
+check("import_can_write_student: outsider counselor", (await fn("import_can_write_student", impB, stuB.id, otherB.id)) === "false");
+const stuOut = await studentOf(otherB, "imp-fn-student-out");
+check("import_can_write_student: firm owner, counselor not in the firm", (await fn("import_can_write_student", impB, stuOut.id, ownerB.id)) === "false");
+check("anon can't execute can_view_import", (await sql(`select has_function_privilege('anon', 'private.can_view_import(uuid, uuid)', 'execute')::text`)) === "false");
+
+// A former firm member can't upload into an old firm-stamped draft.
+const ownerC = await user("imp-left-owner");
+const memberC = await user("imp-left-member");
+await firmWith(ownerC, [memberC]);
+const draftC = await makeImport(memberC, { status: "draft" });
+await sql(`delete from public.firm_members where profile_id = '${memberC.id}'`);
+await sql(`update public.profiles set firm_id = null where id = '${memberC.id}'`);
+const upC = await rest(memberC.token, "POST", `/storage/v1/object/imports/${memberC.id}/${draftC}/f9-test.csv`, csv, { "Content-Type": "text/csv" });
+check("a former firm member can't upload into an old firm-stamped draft", upC.status >= 400, `status ${upC.status}`);
