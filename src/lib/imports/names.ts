@@ -60,7 +60,7 @@ export function normalizeName(s: string): string {
     .replace(/\p{M}/gu, "")
     .toLowerCase()
     .replace(/['’]/g, "")
-    .replace(/[^a-z,\s-]/g, " ")
+    .replace(/[^\p{L},\s-]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -83,9 +83,11 @@ export function parseName(s: string): { first: string; surnames: string[] } {
 }
 
 export function firstNamesMatch(a: string, b: string): boolean {
-  const x = normalizeName(a).replace(/[^a-z]/g, "");
-  const y = normalizeName(b).replace(/[^a-z]/g, "");
-  if (x.length < 2 || y.length < 2) return false;
+  const x = normalizeName(a).replace(/[^\p{L}]/gu, "");
+  const y = normalizeName(b).replace(/[^\p{L}]/gu, "");
+  // An initial never matches; a single non-Latin character (e.g. CJK) is a whole name.
+  const minLen = (n: string) => (/^[a-z]+$/.test(n) ? 2 : 1);
+  if (x.length < minLen(x) || y.length < minLen(y)) return false;
   if (x === y) return true;
   return NICKNAME_GROUPS.some((g) => g.includes(x) && g.includes(y));
 }
@@ -100,6 +102,8 @@ function surnamesMatch(a: string[], b: string[]): boolean {
 export function namesMatch(imported: string, account: string, preferred?: string | null): boolean {
   const i = parseName(imported);
   const a = parseName(account);
+  // Names written without spaces (李明) can't be split into first and last: only an exact match counts.
+  if ((i.surnames.length === 0 || a.surnames.length === 0) && normalizeName(imported) !== "" && normalizeName(imported) === normalizeName(account)) return true;
   if (!surnamesMatch(i.surnames, a.surnames)) return false;
   if (firstNamesMatch(i.first, a.first)) return true;
   return Boolean(preferred) && firstNamesMatch(i.first, preferred as string);

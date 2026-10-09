@@ -55,6 +55,8 @@ const entry = (held.body ?? []).find((e) => e.itemId === item2);
 check("the queue flags a name mismatch", entry?.nameMismatch === true, JSON.stringify(entry));
 const noName = await call(c.token, "POST", `/imports/held/${item2}/apply`, { decisions: { [ch2]: "accept" } });
 check("applying a mismatched item without the typed name is refused", noName.status === 409 && noName.body.code === "name-confirmation-required", JSON.stringify(noName.body));
+const blankName = await call(c.token, "POST", `/imports/held/${item2}/apply`, { decisions: { [ch2]: "accept" }, confirmName: "   " });
+check("a blank typed name is refused", blankName.status === 409, `status ${blankName.status}`);
 const wrongName = await call(c.token, "POST", `/imports/held/${item2}/apply`, { decisions: { [ch2]: "accept" }, confirmName: "Jane Doe" });
 check("typing the imported name instead of the account's is refused", wrongName.status === 409);
 const ok = await call(c.token, "POST", `/imports/held/${item2}/apply`, { decisions: { [ch2]: "accept" }, confirmName: "john roe" });

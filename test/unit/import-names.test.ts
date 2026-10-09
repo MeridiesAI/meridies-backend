@@ -45,3 +45,10 @@ test("a preferred name counts", () => {
 test("different last names don't match", () => {
   assert.ok(!namesMatch("Jane Doe", "Jane Roe"));
 });
+
+test("non-Latin names are kept and compared", () => {
+  assert.notEqual(normalizeName("李明"), "");
+  assert.ok(namesMatch("李明", "李明"));
+  assert.ok(namesMatch("Иван Петров", "иван петров"));
+  assert.ok(!namesMatch("Иван Петров", "Ольга Петрова"));
+});

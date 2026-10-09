@@ -23,7 +23,7 @@ const itemParam = z.object({ itemId: z.string().uuid() });
 const applyBody = z
   .object({
     decisions: z.record(z.string().uuid(), z.enum(["accept", "keep_old", "reject"])),
-    confirmName: z.string().trim().min(1).max(200).optional(),
+    confirmName: z.string().trim().max(200).optional(),
   })
   .strict();
 
@@ -123,8 +123,12 @@ export default async function importRoutes(app: FastifyInstance) {
       const entry = (await heldQueue(request)).find((e) => e.itemId === itemId);
       if (!entry) throw notFound("That data is no longer waiting to be applied");
       if (entry.nameMismatch) {
-        const typed = body.confirmName ? normalizeName(body.confirmName) : "";
-        if (typed !== normalizeName(entry.studentName)) {
+        // A guard against mistakes, not a security boundary: request_held_apply
+        // is also reachable directly by the same authorized manager.
+        const want = normalizeName(entry.studentName);
+        const typed = want ? normalizeName(body.confirmName ?? "") : (body.confirmName ?? "").trim().toLocaleLowerCase();
+        const expected = want || entry.studentName.trim().toLocaleLowerCase();
+        if (typed === "" || typed !== expected) {
           return reply.code(409).send({
             code: "name-confirmation-required",
             message: `The account is ${entry.studentName}, but the file says ${entry.importedName}. Type ${entry.studentName} to confirm.`,
