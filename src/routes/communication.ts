@@ -9,7 +9,8 @@
  *   GET  /:id/messages           what the composer sent or scheduled
  *   POST /messages/:messageId/cancel   cancel a scheduled message
  *   POST /:id/file-as-report     file the draft as a family report to approve
- *   POST /internal/dispatch      CRON_SECRET: deliver scheduled messages that are due
+ *   POST /internal/dispatch      CRON_SECRET: deliver scheduled messages that are due,
+ *                                then the students' own due-tomorrow task reminders
  *
  * Counselor-only throughout: the composer is the counselor's, and so is
  * everything it wrote. Family contacts are added and removed through the
@@ -43,6 +44,7 @@ import {
   suggestionsFor,
   type MessageRow,
 } from "../lib/studentMessages.js";
+import { sendStudentReminders } from "../lib/studentReminders.js";
 import { serviceClient } from "../lib/supabase.js";
 
 type Row = Record<string, unknown>;
@@ -481,7 +483,13 @@ export default async function communicationRoutes(app: FastifyInstance) {
       try {
         const tally = await dispatchDueMessages(svc, request.log);
         await beat("message-dispatch", true, undefined, request.log);
-        return { ran: true, ...tally };
+        // The students' own due-date reminders ride the same cron. Their
+        // failure never fails the dispatch it follows.
+        const reminders = await sendStudentReminders(svc, request.log).catch((err: unknown) => {
+          request.log.error({ err }, "student reminders failed");
+          return { ran: false, sent: 0, skipped: 0, reason: "error" };
+        });
+        return { ran: true, ...tally, reminders };
       } catch (err) {
         await beat("message-dispatch", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;
