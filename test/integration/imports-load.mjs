@@ -1,6 +1,7 @@
 // Pre-release load test (spec §9 "Load"): commit and undo the import maximum,
 // 5,000 rows in total × every single-row field + one insert per row, through
 // the API and the import_worker connection, within the 300 s timeout.
+// NOTE: this script leaves its students and data behind; run `supabase db reset` afterwards.
 // Not part of `npm run test:integration` (slow). Run: npm run test:imports-load
 import { call, check, sql, user } from "./harness.mjs";
 
@@ -23,6 +24,7 @@ await sql(`update public.profiles p set counselor_id = '${c.id}', role = 'studen
   from auth.users u where u.id = p.id and u.email like 'load-%-${stamp}@test.local'`);
 const students = Number(await sql(`select count(*) from public.profiles where counselor_id = '${c.id}'`));
 check(`${ROWS} students exist`, students === ROWS, String(students));
+if (students !== ROWS) process.exit(1);
 
 console.log("staging changes…");
 await sql(`insert into public.import_items (import_id, match_status, student_id, match_confidence)
@@ -49,6 +51,7 @@ await sql(`insert into public.import_changes (import_id, item_id, target_table, 
 const total = Number(await sql(`select count(*) from public.import_changes where import_id = '${imp}'`));
 console.log(`${total} changes staged`);
 
+const DEADLINE_MS = 300_000;
 async function timed(path, waitWhile) {
   const t0 = Date.now();
   const r = await call(c.token, "POST", path);
@@ -56,13 +59,26 @@ async function timed(path, waitWhile) {
   for (;;) {
     const s = await call(c.token, "GET", `/imports/${imp}`);
     if (s.body.status !== waitWhile) return { ms: Date.now() - t0, body: s.body };
+    if (Date.now() - t0 > DEADLINE_MS + 10_000) {
+      check(`${path} finishes within 300 s`, false, `still ${waitWhile} after ${Date.now() - t0} ms`);
+      process.exit(1);
+    }
     await new Promise((res) => setTimeout(res, 1000));
   }
 }
 
+const count = async (q) => Number(await sql(q));
+const mine = `(select id from public.profiles where counselor_id = '${c.id}')`;
+
 const commit = await timed(`/imports/${imp}/commit`, "committing");
 console.log(`commit: ${commit.ms} ms`, commit.body.jobResult);
 check("commit finishes within 300 s", commit.body.status === "committed" && commit.ms < 300_000, `${commit.ms} ms ${commit.body.status}`);
+check("commit applied every change", commit.body.jobResult?.applied === ROWS * 18, `${commit.body.jobResult?.applied} of ${ROWS * 18}`);
+check("academics rows written", (await count(`select count(*) from public.student_academics where student_id in ${mine} and sat_superscore = 1460`)) === ROWS);
+check("test_scores rows written", (await count(`select count(*) from public.test_scores where student_id in ${mine} and source = 'import'`)) === ROWS);
 const undo = await timed(`/imports/${imp}/undo`, "undoing");
 console.log(`undo: ${undo.ms} ms`, undo.body.jobResult);
 check("undo finishes within 300 s", undo.body.status === "undone" && undo.ms < 300_000, `${undo.ms} ms ${undo.body.status}`);
+check("undo reverted every change", undo.body.jobResult?.reverted === ROWS * 18, `${undo.body.jobResult?.reverted}`);
+check("imported test_scores gone", (await count(`select count(*) from public.test_scores where student_id in ${mine} and source = 'import'`)) === 0);
+check("imported academics values gone", (await count(`select count(*) from public.student_academics where student_id in ${mine} and sat_superscore is not null`)) === 0);

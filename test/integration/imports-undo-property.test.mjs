@@ -56,7 +56,13 @@ await fc.assert(
     if (!ok) failures++;
     return ok;
   }),
-  { numRuns: 20 }
+  {
+    numRuns: 20,
+    examples: [
+      [[{ kind: "import", field: "sat_superscore", pick: 0 }, { kind: "edit", field: "sat_superscore", pick: 1 }, { kind: "undo", back: 0 }]],
+      [[{ kind: "import", field: "sat_superscore", pick: 0 }, { kind: "import", field: "sat_superscore", pick: 1 }, { kind: "undo", back: 1 }]],
+    ],
+  }
 ).catch((err) => {
   console.error(err.message);
   failures++;
