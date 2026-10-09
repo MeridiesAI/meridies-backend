@@ -88,6 +88,14 @@ await sql(`update public.profiles set firm_id = null where id = '${counselorA.id
 check("an uploader who left the firm no longer sees the import", (await seen(counselorA, "roster_imports", "id")) === 0);
 check("the firm owner still sees it", (await seen(ownerA, "roster_imports", "id")) === 1);
 
+// Students can't create imports (final review fix 9).
+const stuIns = await user("imp-acl-student", "student");
+const stuImp = await rest(stuIns.token, "POST", "/rest/v1/roster_imports", { counselor_id: stuIns.id, filename: "x.csv", source: "csv" });
+check("a student can't create a roster import", stuImp.status >= 400 && stuImp.body?.code === "42501", `status ${stuImp.status} ${JSON.stringify(stuImp.body)}`);
+const ctrIns = await user("imp-acl-ctr");
+const ctrImp = await rest(ctrIns.token, "POST", "/rest/v1/roster_imports", { counselor_id: ctrIns.id, filename: "x.csv", source: "csv" });
+check("a counselor can still create a roster import", ctrImp.status === 201, `status ${ctrImp.status} ${JSON.stringify(ctrImp.body)}`);
+
 // Storage: upload only into your own draft import.
 const soloAcl = await user("imp-acl-soloAcl");
 const draft = await makeImport(soloAcl, { status: "draft" });

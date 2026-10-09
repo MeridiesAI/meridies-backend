@@ -79,7 +79,10 @@ create policy roster_imports_select on public.roster_imports
 drop policy if exists roster_imports_insert_own on public.roster_imports;
 create policy roster_imports_insert_own on public.roster_imports
   for insert to authenticated
-  with check (counselor_id = (select auth.uid()));
+  with check (
+    counselor_id = (select auth.uid())
+    and exists (select 1 from public.profiles p where p.id = (select auth.uid()) and p.role = 'counselor')
+  );
 
 drop policy if exists roster_imports_update_own on public.roster_imports;
 create policy roster_imports_update_own on public.roster_imports
@@ -162,6 +165,7 @@ set search_path = ''
 as $$
   select p_viewer is not null
      and split_part(p_name, '/', 1) = p_viewer::text
+     and exists (select 1 from public.profiles p where p.id = p_viewer and p.role = 'counselor')
      and exists (
        select 1 from public.roster_imports i
        where i.id = private.import_object_import_id(p_name)
