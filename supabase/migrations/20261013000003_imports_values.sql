@@ -57,7 +57,7 @@ as $$
      and length(btrim(private.import_str(v))) between 1 and p_max;
 $$;
 
-create or replace function private.import_value_ok(p_type text, v jsonb)
+create or replace function private.import_value_ok_raw(p_type text, v jsonb)
 returns boolean
 language plpgsql
 stable
@@ -148,6 +148,16 @@ begin
 end;
 $$;
 
+-- Never NULL: a check that cannot be decided (wrong JSON type, missing key) is a no.
+create or replace function private.import_value_ok(p_type text, v jsonb)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+  select coalesce(private.import_value_ok_raw(p_type, v), false);
+$$;
+
 create or replace function private.import_value_hash(v jsonb)
 returns text
 language sql
@@ -224,7 +234,7 @@ begin
   select f.value_type into v_type
   from public.import_fields f
   where f.target_table = new.target_table and f.field = new.field;
-  if v_type is null or not private.import_value_ok(v_type, new.new_value) then
+  if v_type is null or not coalesce(private.import_value_ok(v_type, new.new_value), false) then
     raise exception 'Imported value for %.% is not valid', new.target_table, new.field
       using errcode = '23514';
   end if;
@@ -271,7 +281,7 @@ begin
     select f.value_type into v_type from public.import_fields f
     where f.target_table = c.target_table and f.field = c.field;
 
-    if v_type is null or not private.import_value_ok(v_type, c.new_value) then
+    if v_type is null or not coalesce(private.import_value_ok(v_type, c.new_value), false) then
       v_problems := v_problems || jsonb_build_object(
         'changeId', c.id, 'sourceRef', c.source_ref,
         'message', format('%s isn''t a valid value for %s', coalesce(c.new_value #>> '{}', 'This'), c.field));
@@ -315,6 +325,7 @@ revoke all on function private.import_str(jsonb) from public, anon;
 revoke all on function private.import_is_date(text) from public, anon;
 revoke all on function private.import_absent(jsonb) from public, anon;
 revoke all on function private.import_text_ok(jsonb, integer) from public, anon;
+revoke all on function private.import_value_ok_raw(text, jsonb) from public, anon;
 revoke all on function private.import_value_ok(text, jsonb) from public, anon;
 revoke all on function private.import_value_hash(jsonb) from public, anon;
 revoke all on function private.import_current_value(text, text, uuid) from public, anon, authenticated;
