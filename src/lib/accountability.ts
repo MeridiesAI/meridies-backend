@@ -478,14 +478,17 @@ export async function runEscalationSweep(
       if (flag.deliverable_id) {
         const { data: deliverable, error: dErr } = await ctx.db
           .from("deliverables")
-          .select("current_words")
+          .select("current_words, status")
           .eq("id", flag.deliverable_id as string)
           .maybeSingle();
         if (dErr) throw fromPostgrest(dErr);
 
+        // A finished task has moved however it was finished: a handed-in
+        // transcript or a ticked-off document task has no words to count.
         const moved =
           deliverable != null &&
-          Number(deliverable.current_words ?? 0) > Number(flag.baseline_words ?? 0);
+          (deliverable.status === "complete" ||
+            Number(deliverable.current_words ?? 0) > Number(flag.baseline_words ?? 0));
 
         if (moved) {
           await ctx.db
