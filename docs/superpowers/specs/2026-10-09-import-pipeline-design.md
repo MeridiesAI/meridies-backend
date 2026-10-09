@@ -482,7 +482,7 @@ uid)`; commit, undo and applying held data go through
 
 Changing who else may see imports later is a change to these two functions
 only. What happens to a departing counselor's students and imports is decided
-by the firm (see the offboarding design, pending).
+by the firm (caseload transfer spec, §14).
 
 ### 6.5 Invitations as an abuse channel
 Invitation emails use fixed templates; the student and counselor names are
@@ -588,7 +588,7 @@ recovery).
 | Backend crash mid-job | Transaction rolls back; job lease expires and the job reruns | Progress resumes |
 | Accepting account's name differs | Item held with mismatch flag | Warning; type the name to apply |
 | Held data near expiry / expired | Email + in-app warning at 7 days; wipe; audit | "4 students' held data expires in 7 days" |
-| Uploader left the firm | Firm admins keep full access; the firm's offboarding choice decides who takes over (pending design) | Import listed under its students' new counselor |
+| Uploader left the firm | Firm admins keep full access; the firm's offboarding choice decides who takes over (caseload transfer spec, §14) | Import listed under its students' new counselor |
 
 ## 9. Testing
 
