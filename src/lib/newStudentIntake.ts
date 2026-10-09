@@ -38,6 +38,15 @@ export function canConfirm(inv: { status: string; requests: { provided: boolean 
 
 const oneLine = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
 
+/** A file the student sent: enough for the counselor to open it. */
+export type IntakeFile = {
+  documentId: string;
+  filename: string;
+  bucket: string | null;
+  storagePath: string | null;
+  externalWebUrl: string | null;
+};
+
 /** A request item, as the counselor's Overview card reads it. */
 export type IntakeItem = {
   requestId: string;
@@ -45,7 +54,7 @@ export type IntakeItem = {
   status: IntakeItemStatus;
   answer: string | null;
   sentBackNote: string | null;
-  files: { documentId: string; filename: string }[];
+  files: IntakeFile[];
   /** AxIS's latest read of a handed-in file: advice, never a decision. */
   axis: { verdict: "accepted" | "needs-fix"; note: string; findings: string[] } | null;
 };
@@ -69,13 +78,13 @@ export async function intakeItemsByInvitation(
   const rows = (tasks ?? []) as Row[];
   const ids = rows.map((t) => String(t.id));
 
-  const files = new Map<string, { documentId: string; filename: string }[]>();
+  const files = new Map<string, IntakeFile[]>();
   const verdicts = new Map<string, IntakeItem["axis"]>();
   if (ids.length) {
     const [docs, checks] = await Promise.all([
       request.db
         .from("deliverable_documents")
-        .select("deliverable_id, document_id, document:documents(filename, title)")
+        .select("deliverable_id, document_id, document:documents(filename, title, bucket, storage_path, external_web_url)")
         .in("deliverable_id", ids)
         .eq("role", "submission"),
       request.db
@@ -92,6 +101,9 @@ export async function intakeItemsByInvitation(
       files.get(key)!.push({
         documentId: String(d.document_id),
         filename: String(doc.title ?? doc.filename ?? "File"),
+        bucket: (doc.bucket as string | null) ?? null,
+        storagePath: (doc.storage_path as string | null) ?? null,
+        externalWebUrl: (doc.external_web_url as string | null) ?? null,
       });
     }
     for (const c of (checks.data ?? []) as Row[]) {
