@@ -1,6 +1,6 @@
 // Counselor approval gate: what the database enforces by itself (no API involved).
 import { createHash } from "node:crypto";
-import { check, sql, user, rest } from "./harness.mjs";
+import { check, sql, sqlAsync, user, rest } from "./harness.mjs";
 import { firmWith, makeImport, studentOf } from "./imports-helpers.mjs";
 
 const sha = (t) => createHash("sha256").update(t).digest("hex");
@@ -185,3 +185,36 @@ const folder = await rest(pending.token, "POST", "/rest/v1/folders", { owner_id:
 check("pending: cannot create even their own folder", folder.status >= 400, `status ${folder.status}`);
 check("approved: still reads the catalog", (await rows(j1, "/rest/v1/colleges?select=id&limit=5")) > 0);
 check("a student is not affected by the gate", (await rows(kid, "/rest/v1/colleges?select=id&limit=5")) > 0);
+
+// ---- Opening and cancelling a review request are one atomic step each -----------------
+const openSql = (u, t) => `select coalesce(public.open_counselor_access_request('${u.id}', '${sha(t)}')::text, 'none')`;
+const q1 = await user("gate-open", "counselor", { approved: false });
+check("opening a request returns its id", /^[0-9a-f-]{36}$/.test(await sql(openSql(q1, `o1-${tag}`))));
+check("a second request inside 24 hours opens nothing", (await sql(openSql(q1, `o2-${tag}`))) === "none");
+check("an approved counselor opens nothing", (await sql(openSql(j1, `o3-${tag}`))) === "none");
+
+const q2 = await user("gate-open-old", "counselor", { approved: false });
+const oldTok = `old-link-${tag}`;
+const oldId = await sql(`with r as (insert into public.counselor_access_requests (profile_id, token_hash, requested_at, expires_at)
+  values ('${q2.id}', '${sha(oldTok)}', now() - interval '2 days', now() + interval '5 days') returning id) select id from r`);
+const newId = await sql(openSql(q2, `new-link-${tag}`));
+check("a new request retires the older link", /^[0-9a-f-]{36}$/.test(newId) && (await sql(`select used_at is not null from public.counselor_access_requests where id = '${oldId}'`)) === "t");
+await sql(`select public.cancel_counselor_access_request('${newId}')`);
+check("cancelling an unsent request removes it", (await sql(`select count(*) from public.counselor_access_requests where id = '${newId}'`)) === "0");
+check("...and brings the previous link back", (await sql(`select used_at is null from public.counselor_access_requests where id = '${oldId}'`)) === "t");
+check("...which still approves", (await sql(`select count(*) from public.approve_counselor_by_token('${sha(oldTok)}')`)) === "1");
+
+const q3 = await user("gate-open-race", "counselor", { approved: false });
+const raced = await Promise.all([sqlAsync(openSql(q3, `r1-${tag}`)), sqlAsync(openSql(q3, `r2-${tag}`))]);
+check("two simultaneous requests open exactly one link", raced.filter((x) => x !== "none").length === 1, JSON.stringify(raced));
+for (const role of ["anon", "authenticated"]) {
+  check(`${role} cannot open or cancel a review request`,
+    (await sql(`select has_function_privilege('${role}', 'public.open_counselor_access_request(uuid, text)', 'execute')
+                    or has_function_privilege('${role}', 'public.cancel_counselor_access_request(uuid)', 'execute')`)) === "f");
+}
+
+// ---- A firm-invite approval leaves a trail ----------------------------------------------
+const firmAudit = (u) => sql(`select count(*) from public.audit_log where action = 'counselor.access.approved' and entity_id = '${u.id}' and metadata ->> 'via' = 'firm_invite'`);
+check("an approval through a firm invitation is audited", (await firmAudit(j1)) === "1");
+check("...naming who invited them", (await sql(`select metadata ->> 'invited_by' from public.audit_log where action = 'counselor.access.approved' and entity_id = '${j1.id}'`)) === approved.id);
+check("a join that approved nobody writes no approval row", (await firmAudit(j2)) === "0");

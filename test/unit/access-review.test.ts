@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { brandedEmail } from "../../src/lib/email.js";
 import {
-  TOKEN_SHAPE, hashReviewToken, newReviewToken, oneLine, reviewEmail, reviewPage, type Applicant,
+  TOKEN_SHAPE, hashReviewToken, newReviewToken, oneLine, reviewBase, reviewEmail, reviewPage, type Applicant,
 } from "../../src/lib/accessReview.js";
 
 const hostile: Applicant = {
@@ -61,4 +61,13 @@ test("the invalid page offers nothing to press", () => {
   const html = reviewPage({ kind: "invalid" });
   assert.ok(!html.includes("<form"));
   assert.match(html, /no longer valid/i);
+});
+
+test("in production the review link needs PUBLIC_API_URL: it never points at localhost", () => {
+  assert.equal(reviewBase({ NODE_ENV: "production", PUBLIC_API_URL: undefined, PORT: 4000 }), null);
+  assert.equal(reviewBase({ NODE_ENV: "production", PUBLIC_API_URL: "https://api.example.com/", PORT: 4000 }), "https://api.example.com");
+});
+
+test("outside production the review link falls back to this machine", () => {
+  assert.equal(reviewBase({ NODE_ENV: "development", PUBLIC_API_URL: undefined, PORT: 4000 }), "http://localhost:4000");
 });

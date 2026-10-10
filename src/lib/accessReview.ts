@@ -15,8 +15,6 @@ import { env } from "../env.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
 
 const REVIEW_INBOX = env.ACCESS_REVIEW_EMAIL ?? "team@meridiesai.com";
-/** At most one review email per account in this window. */
-const RESEND_AFTER_MS = 24 * 60 * 60 * 1000;
 export const TOKEN_SHAPE = /^[A-Za-z0-9_-]{43}$/;
 
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -136,8 +134,20 @@ export function reviewPage(v: ReviewView): string {
   );
 }
 
+/**
+ * Where review links point. In production this is PUBLIC_API_URL or nothing:
+ * a link to localhost would reach the team's inbox and open for nobody.
+ */
+export function reviewBase(
+  e: { NODE_ENV: string; PUBLIC_API_URL?: string; PORT: number } = env
+): string | null {
+  if (e.PUBLIC_API_URL) return e.PUBLIC_API_URL.replace(/\/+$/, "");
+  return e.NODE_ENV === "production" ? null : `http://localhost:${e.PORT}`;
+}
+
 export function reviewUrl(token: string): string {
-  const base = (env.PUBLIC_API_URL ?? `http://localhost:${env.PORT}`).replace(/\/+$/, "");
+  const base = reviewBase();
+  if (!base) throw new Error("PUBLIC_API_URL is not set: the review link has nowhere to point");
   return `${base}/access-review/${token}`;
 }
 
@@ -164,47 +174,25 @@ export async function loadApplicant(svc: SupabaseClient, profileId: string): Pro
 
 /**
  * Ask Meridies to review this pending counselor. Idempotent: inside the
- * 24-hour window it does nothing. A new request retires any older live token
- * first (the table allows one unused request per account), so only the newest
- * link works. If the email cannot be sent the request is removed, so the next
- * visit tries again instead of waiting out the window.
+ * 24-hour window it does nothing. A new request retires the older live link
+ * (the table allows one unused request per account), so only the newest link
+ * works. If the email cannot be sent the request is cancelled: the older link
+ * works again, and the next visit tries again instead of waiting out the window.
  */
 export async function requestAccess(
   svc: SupabaseClient,
   profileId: string,
   log: Log
 ): Promise<"sent" | "recent" | "email-failed"> {
-  const { data: last, error: lastErr } = await svc
-    .from("counselor_access_requests")
-    .select("requested_at")
-    .eq("profile_id", profileId)
-    .order("requested_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (lastErr) throw new Error(`access request read failed (${lastErr.code ?? "unknown"})`);
-  if (last && Date.now() - new Date(String(last.requested_at)).getTime() < RESEND_AFTER_MS) return "recent";
-
   const applicant = await loadApplicant(svc, profileId);
   if (!applicant) throw new Error("access request for a profile that is not a counselor");
 
-  const retired = await svc
-    .from("counselor_access_requests")
-    .update({ used_at: new Date().toISOString() })
-    .eq("profile_id", profileId)
-    .is("used_at", null);
-  if (retired.error) throw new Error(`access request retire failed (${retired.error.code ?? "unknown"})`);
-
+  // One transaction: the 24-hour check, retiring the older link, and the new row.
   const { token, hash } = newReviewToken();
-  const inserted = await svc
-    .from("counselor_access_requests")
-    .insert({ profile_id: profileId, token_hash: hash })
-    .select("id")
-    .single();
-  if (inserted.error) {
-    // 23505: another request for this account landed first; it will send the email.
-    if (inserted.error.code === "23505") return "recent";
-    throw new Error(`access request insert failed (${inserted.error.code ?? "unknown"})`);
-  }
+  const opened = await svc.rpc("open_counselor_access_request", { p_profile: profileId, p_token_hash: hash });
+  if (opened.error) throw new Error(`access request open failed (${opened.error.code ?? "unknown"})`);
+  if (!opened.data) return "recent";
+  const requestId = String(opened.data);
 
   const mail = reviewEmail(applicant, reviewUrl(token));
   const result = await sendEmail({
@@ -220,8 +208,9 @@ export async function requestAccess(
     logger: log,
   });
   if (!result.sent) {
-    const removed = await svc.from("counselor_access_requests").delete().eq("id", inserted.data.id);
-    if (removed.error) log.error({ code: removed.error.code }, "access request: could not remove an unsent request");
+    // Take the request back, which also restores the link it retired.
+    const cancelled = await svc.rpc("cancel_counselor_access_request", { p_id: requestId });
+    if (cancelled.error) log.error({ code: cancelled.error.code }, "access request: could not cancel an unsent request");
     return "email-failed";
   }
   return "sent";

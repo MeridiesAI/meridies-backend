@@ -7,7 +7,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { accessStatusOf } from "../lib/access.js";
-import { requestAccess } from "../lib/accessReview.js";
+import { requestAccess, reviewBase } from "../lib/accessReview.js";
 import { forbidden, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { limit } from "../lib/limits.js";
 import { toMeridiesUser } from "../lib/serialize.js";
@@ -136,7 +136,7 @@ export default async function authRoutes(app: FastifyInstance) {
       if (status === "approved") return { status, emailed: false };
 
       const svc = serviceClient();
-      if (!svc) throw unavailable("Account review is unavailable right now");
+      if (!svc || !reviewBase()) throw unavailable("Account review is unavailable right now");
       const outcome = await requestAccess(svc, request.auth.userId, request.log);
       return { status, emailed: outcome === "sent" };
     }

@@ -40,7 +40,11 @@ create table if not exists public.counselor_access_requests (
   token_hash   text not null unique check (token_hash ~ '^[0-9a-f]{64}$'),
   requested_at timestamptz not null default now(),
   expires_at   timestamptz not null default (now() + interval '7 days'),
-  used_at      timestamptz
+  used_at      timestamptz,
+  -- The newer request that retired this one, so cancelling that request (its
+  -- email could not be sent) can bring this link back. No foreign key: the
+  -- newer row is written after this one is retired.
+  superseded_by uuid
 );
 create index if not exists counselor_access_requests_profile_idx
   on public.counselor_access_requests (profile_id, requested_at desc);
@@ -286,6 +290,13 @@ begin
     update public.profiles
        set counselor_approved_at = now(), counselor_approved_via = 'firm_invite'
      where id = v_me and counselor_approved_at is null and counselor_revoked_at is null;
+    if found then
+      -- Meridies did not make this approval; leave it where the team can see it.
+      insert into public.audit_log (actor_id, action, entity_type, entity_id, metadata)
+      values (v_inv.invited_by, 'counselor.access.approved', 'profile', v_me,
+              jsonb_build_object('via', 'firm_invite', 'firm_id', v_inv.firm_id,
+                                 'invited_by', v_inv.invited_by, 'invitation_id', v_inv.id));
+    end if;
   end if;
   return v_inv.firm_id;
 end;
@@ -448,6 +459,74 @@ end;
 $$;
 revoke all on function public.approve_counselor_by_token(text) from public, anon, authenticated;
 grant execute on function public.approve_counselor_by_token(text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- 7b. Opening a review request, and taking one back when its email could not
+--     be sent. Each is one transaction, serialized per account by a row lock,
+--     so two tabs asking at once open one link, and a failed send never costs
+--     the team the link they already hold.
+-- ---------------------------------------------------------------------------
+create or replace function public.open_counselor_access_request(p_profile uuid, p_token_hash text)
+returns uuid
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_id   uuid := gen_random_uuid();
+  v_last timestamptz;
+begin
+  perform 1 from public.profiles
+   where id = p_profile and role = 'counselor' and counselor_approved_at is null
+     for update;
+  if not found then
+    return null;
+  end if;
+
+  -- At most one review email per account per 24 hours.
+  select max(requested_at) into v_last
+  from public.counselor_access_requests where profile_id = p_profile;
+  if v_last is not null and v_last > now() - interval '24 hours' then
+    return null;
+  end if;
+
+  update public.counselor_access_requests
+     set used_at = now(), superseded_by = v_id
+   where profile_id = p_profile and used_at is null;
+
+  insert into public.counselor_access_requests (id, profile_id, token_hash)
+  values (v_id, p_profile, p_token_hash);
+  return v_id;
+end;
+$$;
+revoke all on function public.open_counselor_access_request(uuid, text) from public, anon, authenticated;
+grant execute on function public.open_counselor_access_request(uuid, text) to service_role;
+
+create or replace function public.cancel_counselor_access_request(p_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_profile uuid;
+begin
+  select profile_id into v_profile from public.counselor_access_requests where id = p_id;
+  if not found then
+    return;
+  end if;
+  perform 1 from public.profiles where id = v_profile for update;
+
+  delete from public.counselor_access_requests where id = p_id and used_at is null;
+  if found then
+    update public.counselor_access_requests
+       set used_at = null, superseded_by = null
+     where superseded_by = p_id;
+  end if;
+end;
+$$;
+revoke all on function public.cancel_counselor_access_request(uuid) from public, anon, authenticated;
+grant execute on function public.cancel_counselor_access_request(uuid) to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 8. Revoke. Run by hand:  select private.revoke_counselor_access('<profile id>');
