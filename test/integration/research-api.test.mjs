@@ -13,6 +13,7 @@ check("deadlines and costs are marked verify", r1.body.recommendations.every((x)
 check("context used is reported", Array.isArray(r1.body.contextUsed.used));
 const q = await sql(`select brief::text from public.research_runs where id = '${r1.body.runId}'`);
 check("the stored brief has no name or email", !q.toLowerCase().includes(s.email.split("@")[0]) && !q.includes(s.email));
+check("the stored brief carries interest categories for the full fixture", Number(await sql(`select jsonb_array_length(brief->'interests') from public.research_runs where id = '${r1.body.runId}'`)) > 0, q.slice(0, 300));
 
 const r2 = await call(c.token, "POST", `/students/${s.id}/research/activities`, {});
 check("a second run within 7 days is cached", r2.body.cached === true && r2.body.runId === r1.body.runId);
@@ -97,3 +98,41 @@ check("…and refresh runs it again", (await call(c3.token, "POST", `/students/$
 let limited = false;
 for (let i = 0; i < 6; i++) { const r = await call(c.token, "POST", `/students/${s.id}/research/activities`, { refresh: true }); if (r.status === 429) limited = true; }
 check("more than 5 research runs a minute is refused", limited);
+
+// The counselor's export of the student now holds research; the student's own export holds none of it.
+const cex = await call(c.token, "GET", `/account/students/${s.id}/export`);
+check("the counselor's export includes recommendations and research runs", cex.status === 200 && cex.body.records.recommendations?.length > 0 && cex.body.records.research_runs?.length > 0, Object.keys(cex.body.records ?? {}).join(","));
+const sex = await call(s.token, "GET", "/account/export");
+check("a student's own export has neither", sex.status === 200 && !sex.body.records.recommendations && !sex.body.records.research_runs);
+
+// A student named "Fixture Student" still gets recommendations (the old name filter dropped every one of them).
+const c4 = await user("res-api-4");
+const { student: s4 } = await seedStudent(c4, "full");
+await sql(`update public.profiles set full_name = 'Fixture Student' where id = '${s4.id}'`);
+const n1 = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, {});
+check("a student named Fixture Student gets recommendations", n1.status === 200 && n1.body.recommendations.length > 0, JSON.stringify(n1.body).slice(0, 200));
+
+// A run whose candidates were all dropped downstream is not served from cache; one that found nothing still is.
+const d1 = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, { focus: "fixture:all-dropped" });
+const d2 = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, { focus: "fixture:all-dropped" });
+check("candidates found but all dropped: an empty successful run", d1.status === 200 && d1.body.recommendations.length === 0 && d1.body.cached === false);
+check("…the repeat runs again instead of being served from cache", d2.status === 200 && d2.body.cached === false && d2.body.runId !== d1.body.runId);
+
+// A second identical request while one is running gets 409; a stale running row (over 10 minutes) is ignored.
+const hash = await sql(`select inputs_hash from public.research_runs where id = '${n1.body.runId}'`);
+const fake = await sql(`insert into public.research_runs (student_id, counselor_id, feature, inputs_hash, brief, status, expires_at)
+  values ('${s4.id}', '${c4.id}', 'activities', '${hash}', '{}'::jsonb, 'running', now() + interval '7 days') returning id`);
+const busy = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, { refresh: true });
+check("a request identical to a running one is refused with 409", busy.status === 409 && /already running/i.test(JSON.stringify(busy.body)), `${busy.status} ${JSON.stringify(busy.body).slice(0, 200)}`);
+await sql(`update public.research_runs set created_at = now() - interval '11 minutes' where id = '${fake.split("\n")[0]}'`);
+const stale = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, { refresh: true });
+check("a running row older than 10 minutes is treated as dead", stale.status === 200, String(stale.status));
+
+// The practice's daily cap: pre-load the fixed-window counter (private.rate_limit_buckets, key research-day:<firm or counselor id>).
+const c5 = await user("res-api-5");
+const { student: s5 } = await seedStudent(c5, "full");
+await sql(`insert into private.rate_limit_buckets (key, window_start, count) values ('research-day:${c5.id}', now(), 50)
+  on conflict (key) do update set window_start = excluded.window_start, count = excluded.count`);
+const capped = await call(c5.token, "POST", `/students/${s5.id}/research/activities`, { refresh: true });
+check("the 51st run of the day is refused with 429 and the cap's message", capped.status === 429 && /used today's research runs/i.test(JSON.stringify(capped.body)), `${capped.status} ${JSON.stringify(capped.body).slice(0, 200)}`);
+check("…and no run row was created for it", (await sql(`select count(*) from public.research_runs where student_id = '${s5.id}'`)) === "0");
