@@ -7,18 +7,18 @@ comment on column public.deliverables.visible_to_student is
 drop policy if exists deliverables_student_visible on public.deliverables;
 create policy deliverables_student_visible on public.deliverables
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student' or visible_to_student);
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student' or visible_to_student);
 
 drop policy if exists deliverable_stages_student_visible on public.deliverable_stages;
 create policy deliverable_stages_student_visible on public.deliverable_stages
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 
 drop policy if exists deliverable_documents_student_visible on public.deliverable_documents;
 create policy deliverable_documents_student_visible on public.deliverable_documents
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 
 create table if not exists public.research_blocked_domains (
@@ -55,7 +55,7 @@ revoke all on table public.research_runs from anon, authenticated;
 grant select on table public.research_runs to authenticated;
 drop policy if exists research_runs_select on public.research_runs;
 create policy research_runs_select on public.research_runs for select to authenticated
-  using (student_id <> (select auth.uid()) and coalesce(private.user_role((select auth.uid())), '') = 'counselor'
+  using (student_id <> (select auth.uid()) and coalesce((select private.user_role((select auth.uid()))), '') = 'counselor'
          and private.can_view_student(student_id, (select auth.uid())));
 
 create table if not exists public.recommendations (
@@ -73,13 +73,14 @@ create table if not exists public.recommendations (
   accepted_at timestamptz,
   created_at timestamptz not null default now()
 );
+create index if not exists recommendations_run on public.recommendations (run_id);
 create index if not exists recommendations_student on public.recommendations (student_id, feature, status);
 alter table public.recommendations enable row level security;
 revoke all on table public.recommendations from anon, authenticated;
 grant select on table public.recommendations to authenticated;
 drop policy if exists recommendations_select on public.recommendations;
 create policy recommendations_select on public.recommendations for select to authenticated
-  using (student_id <> (select auth.uid()) and coalesce(private.user_role((select auth.uid())), '') = 'counselor'
+  using (student_id <> (select auth.uid()) and coalesce((select private.user_role((select auth.uid()))), '') = 'counselor'
          and private.can_view_student(student_id, (select auth.uid())));
 
 -- A hidden task leaves traces on its own: the activity log, tracker verdicts,
@@ -90,35 +91,35 @@ create policy recommendations_select on public.recommendations for select to aut
 drop policy if exists progress_events_student_visible_task on public.progress_events;
 create policy progress_events_student_visible_task on public.progress_events
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or deliverable_id is null
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 
 drop policy if exists draft_quality_checks_student_visible_task on public.draft_quality_checks;
 create policy draft_quality_checks_student_visible_task on public.draft_quality_checks
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or deliverable_id is null
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 
 drop policy if exists deliverable_tracker_checks_student_visible_task on public.deliverable_tracker_checks;
 create policy deliverable_tracker_checks_student_visible_task on public.deliverable_tracker_checks
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or deliverable_id is null
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 
 drop policy if exists red_flags_student_visible_task on public.red_flags;
 create policy red_flags_student_visible_task on public.red_flags
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or deliverable_id is null
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 
 drop policy if exists message_deliveries_student_visible_task on public.message_deliveries;
 create policy message_deliveries_student_visible_task on public.message_deliveries
   as restrictive for select to authenticated
-  using (coalesce(private.user_role((select auth.uid())), '') <> 'student'
+  using (coalesce((select private.user_role((select auth.uid()))), '') <> 'student'
          or deliverable_id is null
          or exists (select 1 from public.deliverables d where d.id = deliverable_id and d.visible_to_student));
 

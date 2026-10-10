@@ -545,6 +545,13 @@ export default async function taskRoutes(app: FastifyInstance) {
         if (b.visibleToStudent === false && existing.intake_request_id) {
           throw badRequest("A request from New student is always shown to the student");
         }
+        // Sharing is one-way: the student may already have the deadlines and
+        // the notification, so a visible task can't be taken back.
+        if (b.visibleToStudent === false && existing.visible_to_student !== false) {
+          throw conflict(
+            "A task the student can already see can't be hidden. Delete it or mark it done instead."
+          );
+        }
       }
 
       if (request.profile.role === "student") {
@@ -573,15 +580,14 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (b.targetWords !== undefined) update.target_words = b.targetWords;
       if (b.currentWords !== undefined) update.current_words = b.currentWords;
       if (b.progressPct !== undefined) update.progress_pct = b.progressPct;
-      if (b.visibleToStudent !== undefined) update.visible_to_student = b.visibleToStudent;
+      if (b.visibleToStudent === true) update.visible_to_student = true;
       if (Object.keys(update).length > 0) update.last_activity_at = new Date().toISOString();
 
-      const { data, error } = await request.db
-        .from("deliverables")
-        .update(update)
-        .eq("id", id)
-        .select("*")
-        .maybeSingle();
+      // Nothing to change (e.g. hiding a task that is already hidden): answer with the task as it is.
+      const { data, error } =
+        Object.keys(update).length === 0
+          ? await request.db.from("deliverables").select("*").eq("id", id).maybeSingle()
+          : await request.db.from("deliverables").update(update).eq("id", id).select("*").maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
 
@@ -607,7 +613,10 @@ export default async function taskRoutes(app: FastifyInstance) {
           instructions: (data.instructions as string | null) ?? null,
         });
         const notification = await notifyForTask(request, data as Row);
-        return { ...dto, notification };
+        // Re-read: the mirrored deadline ids and notifiedAt were written after the update.
+        const { data: fresh } = await request.db.from("deliverables").select("*").eq("id", id).maybeSingle();
+        const [shared] = await hydrate(request, [(fresh ?? data) as Row]);
+        return { ...shared, notification };
       }
       return dto;
     }

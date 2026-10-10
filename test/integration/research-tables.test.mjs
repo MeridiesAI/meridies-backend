@@ -51,8 +51,14 @@ const resend = await call(c.token, "POST", `/tasks/${made.body.id}/notify`, {});
 check("re-sending a hidden task's notification is refused", resend.status === 409, `status ${resend.status}`);
 
 // Student-facing feeds.
-const feed = await call(s.token, "GET", "/calendar/feed?from=2020-01-01&to=2020-02-01");
-check("the student's calendar feed omits hidden tasks", !JSON.stringify(feed.body).includes("HIDDEN"));
+const calVisible = await call(c.token, "POST", "/tasks", { studentId: s.id, title: "CAL-VISIBLE", dueDate: "2030-03-16", notifyEmail: false });
+await sql(`update public.deliverables set due_date = '2030-03-15' where id = '${task}'`);
+await sql(`update public.deliverables set due_date = '2030-03-17' where id = '${made.body.id}'`);
+const feed = await call(s.token, "GET", "/calendar/feed?from=2030-03-01&to=2030-03-31&tz=UTC");
+check("the student's calendar feed has the visible task in the window", JSON.stringify(feed.body).includes("CAL-VISIBLE"), `status ${feed.status}`);
+check("…and not the hidden ones dated in the same window", !JSON.stringify(feed.body).includes("HIDDEN"));
+const cfeed = await call(c.token, "GET", `/calendar/feed?from=2030-03-01&to=2030-03-31&tz=UTC&studentId=${s.id}`);
+check("the counselor's feed has the hidden task", JSON.stringify(cfeed.body).includes("HIDDEN-TASK"));
 
 // Accountability: a hidden task never makes the student look stalled.
 await sql(`update public.deliverables set last_activity_at = now() - interval '60 days' where id = '${task}'`);
@@ -62,22 +68,48 @@ const over = await call(c.token, "GET", "/accountability/overview");
 const mine = (over.body.students ?? []).find((x) => x.studentId === s.id);
 check("the alert list counts a stalled visible task", JSON.stringify(mine?.stalled ?? []).includes("STALLED-VISIBLE"));
 check("…and never a stalled hidden one", !JSON.stringify(over.body).includes("HIDDEN-TASK"));
+const flagHidden = await call(c.token, "POST", "/accountability/red-flags", { studentId: s.id, deliverableId: task, title: "API-FLAG-HIDDEN", message: "m" });
+check("flagging a hidden task is refused (409)", flagHidden.status === 409, `status ${flagHidden.status}`);
+check("…with no flag and no student notification", Number(await sql(`select count(*) from public.red_flags where title = 'API-FLAG-HIDDEN'`)) === 0
+  && Number(await sql(`select count(*) from public.notifications where recipient_id = '${s.id}' and title = 'API-FLAG-HIDDEN'`)) === 0);
+// The API refuses this now, so the row for the sweep check is written with sql() directly.
 await sql(`insert into public.red_flags (student_id, deliverable_id, title, message, trigger, issued_by, issued_by_id, escalate_at)
   values ('${s.id}', '${task}', 'FLAG-HIDDEN', 'm', 'manual', 'counselor', '${c.id}', now() - interval '1 hour')`);
 check("a student can't see a flag about a hidden task", ((await rest(s.token, "GET", `/rest/v1/red_flags?select=id&deliverable_id=eq.${task}`)).body ?? []).length === 0);
-await call(c.token, "POST", "/accountability/sweep", {});
-check("the sweep doesn't escalate a flag on a hidden task", (await sql(`select status from public.red_flags where title = 'FLAG-HIDDEN' and student_id = '${s.id}'`)) === "open");
+const hiddenFlagId = await sql(`select id from public.red_flags where title = 'FLAG-HIDDEN' and student_id = '${s.id}'`);
+const sweep = await call(c.token, "POST", "/accountability/sweep", {});
+const skip = (sweep.body.skipped ?? []).find((x) => x.id === hiddenFlagId);
+check("the sweep skips a flag on a hidden task, naming that reason", sweep.status < 300 && /isn't shared with the student/.test(skip?.reason ?? ""), JSON.stringify(sweep.body));
+check("…and the flag is still open", (await sql(`select status from public.red_flags where id = '${hiddenFlagId}'`)) === "open");
 
 // Reminders: a hidden task due tomorrow is not reminded; a visible one is the control.
 await sql(`insert into public.student_preferences (student_id, email_enabled, email_address) values ('${s.id}', true, 'r@test.local')
   on conflict (student_id) do update set email_enabled = true, email_address = 'r@test.local'`);
-const tz = (await sql(`select coalesce((select timezone from public.accountability_settings where counselor_id = '${c.id}' limit 1), 'America/New_York')`)) || "America/New_York";
+// Quiet hours default to 21:00-08:00, which would hold every reminder at night:
+// give this counselor none, so the visible control can be sent at any hour.
+const tz = "America/New_York";
+await sql(`insert into public.accountability_settings (counselor_id, timezone, quiet_hours_start, quiet_hours_end) values ('${c.id}', '${tz}', null, null)`);
 const tomorrow = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date(Date.now() + 86_400_000));
 await sql(`update public.deliverables set due_date = '${tomorrow}' where id in ('${task}', '${visibleOne.body.id}')`);
-await fetch(`${API}/communication/internal/dispatch`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
-check("no reminder is recorded for a hidden task", Number(await sql(`select count(*) from public.message_deliveries where deliverable_id = '${task}'`)) === 0);
+const disp = await fetch(`${API}/communication/internal/dispatch`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+const dispBody = await disp.json().catch(() => ({}));
+check("the dispatch cron ran the reminders", disp.status === 200 && dispBody.reminders?.ran === true, JSON.stringify(dispBody));
+check("the visible task due tomorrow was reminded", Number(await sql(`select count(*) from public.message_deliveries where deliverable_id = '${visibleOne.body.id}' and template like 'task-due-reminder:%'`)) >= 1);
+check("no reminder is recorded for the hidden task", Number(await sql(`select count(*) from public.message_deliveries where deliverable_id = '${task}'`)) === 0);
 
-// Sharing.
+// Sharing is one-way and sets up what creation would have.
+const hiddenAgain = await call(c.token, "PATCH", `/tasks/${visibleOne.body.id}`, { visibleToStudent: false });
+check("a task the student can see can't be hidden again (409)", hiddenAgain.status === 409, `status ${hiddenAgain.status}`);
+check("…and the row is unchanged", (await sql(`select visible_to_student from public.deliverables where id = '${visibleOne.body.id}'`)) === "t");
+const noopHide = await call(c.token, "PATCH", `/tasks/${made.body.id}`, { visibleToStudent: false });
+check("hiding an already hidden task is a no-op", noopHide.status === 200 && noopHide.body.visibleToStudent === false, `status ${noopHide.status}`);
+const mirrored = (id) => sql(`select count(*) from public.deadlines where student_id = '${s.id}' and title like 'HIDDEN-CREATED%'`);
+const bells = () => sql(`select count(*) from public.notifications where recipient_id = '${s.id}' and title like '%HIDDEN-CREATED%'`);
+check("a task created hidden has no deadlines and no student notification", Number(await mirrored()) === 0 && Number(await bells()) === 0);
+const shareMade = await call(c.token, "PATCH", `/tasks/${made.body.id}`, { visibleToStudent: true });
+check("sharing it mirrors the deadline and tells the student", shareMade.status === 200 && Number(await mirrored()) === 1 && Number(await bells()) === 1, `status ${shareMade.status}`);
+check("the share response is read after the mirror", shareMade.body.stages?.[0]?.deadlineId != null && shareMade.body.notification != null);
+
 const share = await call(c.token, "PATCH", `/tasks/${task}`, { visibleToStudent: true });
 check("the counselor can share it", share.status === 200);
 const after = await rest(s.token, "GET", `/rest/v1/deliverables?select=id&id=eq.${task}`);

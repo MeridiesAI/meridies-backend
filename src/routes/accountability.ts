@@ -18,7 +18,7 @@ import {
   resolveAlertRecipients,
   runEscalationSweep,
 } from "../lib/accountability.js";
-import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { deliverParentAlert, type ParentAlertRow } from "../lib/parentAlertDelivery.js";
@@ -312,9 +312,14 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
       if (b.deliverableId) {
         const { data } = await request.db
           .from("deliverables")
-          .select("current_words")
+          .select("current_words, visible_to_student")
           .eq("id", b.deliverableId)
           .maybeSingle();
+        // The student is notified of a flag at once; a counselor-only task
+        // isn't theirs to hear about.
+        if (data && data.visible_to_student === false) {
+          throw conflict("Share this task with the student before flagging it");
+        }
         baselineWords = data ? Number(data.current_words ?? 0) : null;
       }
 
