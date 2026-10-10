@@ -76,6 +76,8 @@ jobs:
           RESEND_WEBHOOK_SECRET: whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==
           PUBLIC_API_URL: http://127.0.0.1:4100
           TWILIO_AUTH_TOKEN: local-twilio-test-token-123
+          # Research test double (no model or web calls); refuses to boot in production.
+          RESEARCH_FAKE: fixture
         run: |
           npx tsx src/index.ts > api.log 2>&1 &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done
