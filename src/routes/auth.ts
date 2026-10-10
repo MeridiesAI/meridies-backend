@@ -33,7 +33,7 @@ const updateMeSchema = z
 const confirmRoleSchema = z.object({ role: z.enum(["student", "counselor"]) }).strict();
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.get("/me", { preHandler: app.authenticate }, async (request) => {
+  app.get("/me", { preHandler: app.authenticate, config: { allowPending: true } }, async (request) => {
     const p = request.profile;
 
     let counselorName: string | null = null;
@@ -51,7 +51,7 @@ export default async function authRoutes(app: FastifyInstance) {
 
   app.patch(
     "/me",
-    { preHandler: [app.authenticate, limit("auth:patch", 60, 60)] },
+    { preHandler: [app.authenticate, limit("auth:patch", 60, 60)], config: { allowPending: true } },
     async (request) => {
       const patch = updateMeSchema.parse(request.body);
 
@@ -97,7 +97,7 @@ export default async function authRoutes(app: FastifyInstance) {
    */
   app.post(
     "/confirm-role",
-    { preHandler: [app.authenticate, limit("auth:confirm-role", 10, 3600)] },
+    { preHandler: [app.authenticate, limit("auth:confirm-role", 10, 3600)], config: { allowPending: true } },
     async (request, reply) => {
       const { role } = confirmRoleSchema.parse(request.body);
 

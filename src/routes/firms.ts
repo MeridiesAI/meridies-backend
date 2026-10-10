@@ -243,7 +243,7 @@ export default async function firmRoutes(app: FastifyInstance) {
     return { id, status: "revoked" };
   });
 
-  app.post("/join", { preHandler: [...counselor, limit("firms:join", 15, 3600)] }, async (request) => {
+  app.post("/join", { preHandler: [...counselor, limit("firms:join", 15, 3600)], config: { allowPending: true } }, async (request) => {
     const { token } = z.object({ token: z.string().trim().min(16).max(200) }).strict().parse(request.body);
     const { data, error } = await request.db.rpc("accept_firm_invitation", { p_token: token });
     if (error) throw crmError(error);
