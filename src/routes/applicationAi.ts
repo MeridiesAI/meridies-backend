@@ -29,6 +29,7 @@ import {
   runStructured,
 } from "../lib/anthropic.js";
 import { buildStudentContext } from "../lib/context/index.js";
+import { buildCoherenceMaterial } from "../lib/context/coherenceMaterial.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
@@ -172,21 +173,6 @@ const coherenceBody = z
     supplementEssayIds: z.array(uuid).max(60),
   })
   .strict();
-
-/** A data-block source label from a student-written name: one line, bounded. */
-const sourceTag = (prefix: string, name: unknown) => `${prefix}:${String(name ?? "").replace(/\s+/g, " ").trim().slice(0, 80)}`;
-
-/** Whole blocks only: a block that would pass the cap is left out, never cut mid-escape. */
-function joinBlocks(blocks: string[], cap: number): string {
-  const kept: string[] = [];
-  let size = 0;
-  for (const b of blocks) {
-    if (size + b.length + 2 > cap) break;
-    kept.push(b);
-    size += b.length + 2;
-  }
-  return kept.join("\n\n");
-}
 
 /** Only the student's identity and personal details, from the context layer; essays stay the counselor's ticks. */
 const coherenceBase = (request: FastifyRequest, studentId: string) =>
@@ -376,14 +362,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const readActivities = b.activities && docs.activities > 0;
       const readAwards = b.awards && docs.awards > 0;
 
-      const read: string[] = [];
-      if (statement) read.push("Personal statement");
-      const schools = [...new Set(supplements.map((s) => String(s.school || "Other")))];
-      if (schools.length === 1) read.push(`${schools[0]} supplement${supplements.length === 1 ? "" : "s"}`);
-      else if (schools.length > 1) read.push(`Supplements for ${schools.length} schools`);
-      if (readActivities) read.push("Activities list");
-      if (readAwards) read.push("Awards");
-      if (read.length === 0) throw badRequest("No documents are ticked. Pick at least one under Documents.");
+      if (!statement && supplements.length === 0 && !readActivities && !readAwards) {
+        throw badRequest("No documents are ticked. Pick at least one under Documents.");
+      }
 
       const [profile, acts, honors] = await Promise.all([
         request.db.from("profiles").select("full_name").eq("id", studentId).maybeSingle(),
@@ -396,23 +377,21 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       ]);
       const first = firstName(String(profile.data?.full_name ?? ""));
 
-      const blocks: string[] = [];
-      if (statement) blocks.push(`Personal statement:\n${wrapUntrusted(sourceTag("essay", statement.title || "personal statement"), clip(statement.body, 12_000))}`);
-      for (const sup of supplements) {
-        blocks.push(
-          `Supplement:\n${wrapUntrusted(
-            sourceTag("essay", sup.title || sup.school),
-            [`School: ${clip(sup.school, 200)}`, `Title: ${clip(sup.title, 200)}`, `Prompt: ${clip(sup.prompt, 600)}`, `Text: ${clip(sup.body, 6_000)}`].join("\n")
-          )}`
-        );
-      }
-      if (readActivities) {
-        for (const a of (acts.data ?? []) as Row[]) blocks.push(`Activity:\n${wrapUntrusted(sourceTag("activity", a.organization || a.position), JSON.stringify(a, null, 1))}`);
-      }
-      if (readAwards) {
-        for (const a of (honors.data ?? []) as Row[]) blocks.push(`Award:\n${wrapUntrusted(sourceTag("award", a.name), JSON.stringify(a, null, 1))}`);
-      }
-      const material = joinBlocks(blocks, 80_000);
+      const { text: material, sent } = buildCoherenceMaterial({
+        statement,
+        supplements,
+        activities: readActivities ? ((acts.data ?? []) as Row[]) : [],
+        awards: readAwards ? ((honors.data ?? []) as Row[]) : [],
+      });
+      // The labels name only what the prompt actually carried.
+      const read: string[] = [];
+      if (sent.statement) read.push("Personal statement");
+      const schools = [...new Set(sent.supplements.map((x) => String(x.school || "Other")))];
+      if (schools.length === 1) read.push(`${schools[0]} supplement${sent.supplements.length === 1 ? "" : "s"}`);
+      else if (schools.length > 1) read.push(`Supplements for ${schools.length} schools`);
+      if (sent.activities) read.push("Activities list");
+      if (sent.awards) read.push("Awards");
+      if (read.length === 0) throw badRequest("No documents are ticked. Pick at least one under Documents.");
       const base = await coherenceBase(request, studentId);
       const contextUsed = { used: base.used, omitted: base.omitted };
 
@@ -491,10 +470,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         .insert({
           student_id: studentId,
           criteria: {
-            statement: Boolean(statement),
-            activities: readActivities,
-            awards: readAwards,
-            supplementEssayIds: supplements.map((s) => s.id),
+            statement: sent.statement,
+            activities: sent.activities,
+            awards: sent.awards,
+            supplementEssayIds: sent.supplements.map((x) => x.id),
           },
           read_labels: read,
           storyline,

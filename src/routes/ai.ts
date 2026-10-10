@@ -350,7 +350,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
       const { data: essay } = await request.db
         .from("essays")
-        .select("body, word_count")
+        .select("title, body, word_count")
         .eq("id", b.essayId)
         .eq("student_id", b.studentId)
         .maybeSingle();
@@ -368,8 +368,9 @@ export default async function aiRoutes(app: FastifyInstance) {
           "You assess whether a draft shows genuine student effort.",
           "Signals of machine generation are indicative, never proof — say so, and never accuse.",
           "This is a prompt for a counselor conversation, not a verdict on the student.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
-        prompt: `Word count: ${essay.word_count}\n\nDraft:\n${String(essay.body ?? "").slice(0, 20_000)}`,
+        prompt: `Word count: ${essay.word_count}\n${essay.title ? `Title: ${wrapUntrusted("essay-title", String(essay.title))}\n` : ""}\nDraft:\n${wrapUntrusted("essay-draft", String(essay.body ?? "").slice(0, 20_000))}`,
         toolName: "draft_quality",
         schema: {
           type: "object",
