@@ -396,6 +396,9 @@ Two layers, and they are not redundant:
 
 1. `@fastify/rate-limit` — in-process, per authenticated user (falling back to
    IP). Cheap, soaks up floods, **resets on deploy and doesn't span replicas.**
+   Its hook runs before `authenticate`, so the key comes from verifying the
+   bearer token on the spot (`clientKey` in `plugins/rateLimit.ts`,
+   `lib/bearer.ts`), not from `request.auth`. A limited request answers 429.
 2. `public.consume_rate_limit` / `public.consume_quota` — Postgres counters via
    `lib/limits.ts`. This is the layer that actually holds, and the one that
    protects AI spend. EXECUTE is granted to `service_role` only.
