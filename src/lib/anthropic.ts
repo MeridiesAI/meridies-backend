@@ -88,7 +88,9 @@ export type AiModule =
   // SV Demo v2 (student view): Profile Update, AxIS collecting a student's news.
   | "profile-update"
   // A file the student handed in against a task, checked against what was asked.
-  | "submission-review";
+  | "submission-review"
+  | "activity-research"
+  | "research-match";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
