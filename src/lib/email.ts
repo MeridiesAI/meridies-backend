@@ -56,6 +56,11 @@ type SendEmailArgs = DeliveryColumns & {
   text: string;
   /** Short identifier for the message shape: 'invite', 'task-assigned', 'blast'. */
   template: string;
+  /**
+   * What message_deliveries keeps as the body, when it must differ from what
+   * was sent: an email whose text carries a one-time link records this instead.
+   */
+  recordText?: string;
   logger?: Logger;
 };
 
@@ -160,7 +165,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       provider_message_id: providerId,
       template,
       subject,
-      body: text.slice(0, 8000),
+      body: (args.recordText ?? text).slice(0, 8000),
       status: sent ? "sent" : "failed",
       error: errorText,
       sent_at: sent ? new Date().toISOString() : null,

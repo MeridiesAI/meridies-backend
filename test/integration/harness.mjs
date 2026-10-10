@@ -16,10 +16,15 @@ export const ANON = need("SUPABASE_ANON_KEY");
 const SERVICE = need("SUPABASE_SERVICE_ROLE_KEY");
 const DB_URL = process.env.DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
 const PSQL = process.env.PSQL ?? "psql";
+// The API's in-process limiter allows 300 requests a minute per client address,
+// and every suite calls from this machine. Each suite (one process) presents
+// its own address, so the suites don't spend one shared budget.
+const octet = () => 1 + Math.floor(Math.random() * 250);
+export const CLIENT = { "X-Forwarded-For": `10.${octet()}.${octet()}.${octet()}` };
 const svc = { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, "Content-Type": "application/json" };
 
-/** A confirmed account with a confirmed role, signed in. */
-export async function user(tag, role = "counselor") {
+/** A confirmed account with a confirmed role, signed in. Counselors are approved unless `approved: false`. */
+export async function user(tag, role = "counselor", { approved = true } = {}) {
   const email = `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@test.local`;
   const password = `pw-${Math.random().toString(36).slice(2)}-Aa1!`;
   let r = await fetch(`${SB}/auth/v1/admin/users`, { method: "POST", headers: svc, body: JSON.stringify({ email, password, email_confirm: true, user_metadata: { full_name: tag, role } }) });
@@ -29,11 +34,14 @@ export async function user(tag, role = "counselor") {
   const t = await r.json();
   if (!r.ok) throw new Error("login " + JSON.stringify(t));
   await fetch(`${SB}/rest/v1/rpc/confirm_user_role`, { method: "POST", headers: { apikey: ANON, Authorization: `Bearer ${t.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ p_role: role }) });
-  return { id: u.id, email, token: t.access_token };
+  if (role === "counselor" && approved) {
+    await sql(`update public.profiles set counselor_approved_at = now(), counselor_approved_via = 'team' where id = '${u.id}'`);
+  }
+  return { id: u.id, email, password, token: t.access_token };
 }
 
 export async function call(token, method, path, body) {
-  const r = await fetch(API + path, { method, headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+  const r = await fetch(API + path, { method, headers: { ...CLIENT, Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
   const text = await r.text();
   let json;
   try { json = JSON.parse(text); } catch { json = text; }

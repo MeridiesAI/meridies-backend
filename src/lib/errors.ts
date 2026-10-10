@@ -1,16 +1,21 @@
 /** Errors that carry an HTTP status through to the centralized error handler. */
 export class HttpError extends Error {
   statusCode: number;
-  constructor(statusCode: number, message: string) {
+  /** A stable machine-readable reason, when a client needs to branch on one. */
+  code?: string;
+  constructor(statusCode: number, message: string, code?: string) {
     super(message);
     this.name = "HttpError";
     this.statusCode = statusCode;
+    this.code = code;
   }
 }
 
 export const badRequest = (m: string) => new HttpError(400, m);
 export const unauthorized = (m = "Unauthorized") => new HttpError(401, m);
 export const forbidden = (m = "You don't have access to that") => new HttpError(403, m);
+export const accountPending = () =>
+  new HttpError(403, "Your account is waiting for review", "account_pending");
 export const notFound = (m = "Not found") => new HttpError(404, m);
 export const conflict = (m: string) => new HttpError(409, m);
 export const tooManyRequests = (m = "Too many requests — slow down") => new HttpError(429, m);

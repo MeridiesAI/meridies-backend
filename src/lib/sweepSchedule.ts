@@ -27,6 +27,7 @@ import { env } from "../env.js";
 import { runEscalationSweep } from "./accountability.js";
 import { beat } from "./heartbeat.js";
 import { serviceClient } from "./supabase.js";
+import { approvedCounselorIds } from "./access.js";
 
 const LEASE_NAME = "accountability-sweep";
 /** Long enough for a large roster; a crashed holder frees it after this. */
@@ -47,6 +48,8 @@ export type SweepAuditSummary = {
   escalated: number;
   skipped: number;
   failedCounselors: number;
+  /** Counselors skipped because their account is not approved. */
+  unapproved?: number;
   durationMs: number;
 };
 
@@ -145,12 +148,19 @@ export async function runScheduledSweep(
   let escalated = 0;
   let skipped = 0;
   let failedCounselors = 0;
+  let unapproved = 0;
 
   try {
     const byCounselor = await dueStudentsByCounselor(svc, new Date().toISOString());
     counselors = byCounselor.size;
+    // The service client scopes nothing, so approval is asked here, per run.
+    const approved = await approvedCounselorIds(svc, [...byCounselor.keys()]);
 
     for (const [counselorId, studentIds] of byCounselor) {
+      if (!approved.has(counselorId)) {
+        unapproved += 1;
+        continue;
+      }
       try {
         const result = await runEscalationSweep({ db: svc }, counselorId, {
           studentIds,
@@ -175,6 +185,7 @@ export async function runScheduledSweep(
     escalated,
     skipped,
     failedCounselors,
+    unapproved,
     durationMs: Date.now() - startedAt,
   };
   log.info(summary, `accountability sweep (${trigger}) finished`);

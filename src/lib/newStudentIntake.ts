@@ -18,6 +18,7 @@ import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { badRequest, conflict, fromPostgrest, notFound } from "./errors.js";
 import { serviceClient } from "./supabase.js";
 import { startSubmissionReview } from "./submissionReview.js";
+import { isCounselorApproved } from "./access.js";
 
 type Row = Record<string, unknown>;
 
@@ -197,6 +198,7 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
   const svc = serviceClient();
   const counselorId = request.profile.counselor_id;
   if (!svc || !counselorId) return;
+  if (!(await isCounselorApproved(svc, counselorId))) return;
   const name = String(request.profile.full_name ?? "").trim() || "Your new student";
   const { data: tasks } = await request.db.from("deliverables").select("title").in("id", taskIds);
   const items = ((tasks ?? []) as Row[]).map((t) => String(t.title));

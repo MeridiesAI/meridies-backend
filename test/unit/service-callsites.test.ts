@@ -1,0 +1,32 @@
+import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+// Every file that reaches past RLS (service client or the import pool). Adding
+// one means deciding whether it acts for a counselor outside their own request
+// and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
+const REVIEWED = [
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/email.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts",
+  "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
+  "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
+  "routes/collegeIntel.ts", "routes/communication.ts", "routes/health.ts", "routes/integrations.ts",
+  "routes/internal.ts", "routes/webhooks.ts",
+];
+
+function tsFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? tsFiles(join(dir, e.name)) : e.name.endsWith(".ts") ? [join(dir, e.name)] : []
+  );
+}
+
+test("every elevated-access call site has been reviewed for the approval gate", () => {
+  const src = fileURLToPath(new URL("../../src", import.meta.url));
+  const found = tsFiles(src)
+    .filter((f) => /serviceClient\(|withWorkerTransaction\(/.test(readFileSync(f, "utf8")))
+    .map((f) => relative(src, f).split("\\").join("/"))
+    .sort();
+  assert.deepEqual(found, [...REVIEWED].sort());
+});

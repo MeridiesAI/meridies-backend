@@ -7,6 +7,11 @@ declare module "fastify" {
     authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
 
+  interface FastifyContextConfig {
+    /** Open this route to a counselor whose account is not approved yet. Closed by default. */
+    allowPending?: boolean;
+  }
+
   interface FastifyRequest {
     /** Set by the supabaseAuth plugin on authenticated routes. */
     auth: { userId: string; email?: string; token: string };

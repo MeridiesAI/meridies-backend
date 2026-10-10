@@ -10,13 +10,17 @@
  *   request.auth    - { userId, email, token }
  *   request.db      - a Supabase client bound to THAT user's token (RLS applies)
  *   request.profile - the caller's profiles row, loaded once per request
+ *
+ * A counselor whose account is not approved is refused here (403,
+ * code "account_pending") unless the route sets config.allowPending.
  */
 
 import fp from "fastify-plugin";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { env } from "../env.js";
 import { userClient } from "../lib/supabase.js";
-import { unauthorized } from "../lib/errors.js";
+import { blockedAsPending } from "../lib/access.js";
+import { accountPending, unauthorized } from "../lib/errors.js";
 import type { Profile } from "../lib/serialize.js";
 
 const ISSUER = `${env.SUPABASE_URL}/auth/v1`;
@@ -65,7 +69,7 @@ export default fp(async (app) => {
       .select(
         "id, full_name, email, role, role_confirmed, onboarding_step, onboarding_complete, " +
           "counselor_id, firm_id, avatar_url, phone, timezone, title, headline, hometown, " +
-          "high_school, grad_year, profile"
+          "high_school, grad_year, profile, counselor_approved_at"
       )
       .eq("id", userId)
       .maybeSingle();
@@ -80,5 +84,11 @@ export default fp(async (app) => {
     }
 
     request.profile = data as unknown as Profile;
+
+    // Approval comes from the row just read, never from the token, so a revoke
+    // holds from the next request. A route opts in with config.allowPending.
+    if (blockedAsPending(request.profile, request.routeOptions.config.allowPending)) {
+      throw accountPending();
+    }
   });
 });
