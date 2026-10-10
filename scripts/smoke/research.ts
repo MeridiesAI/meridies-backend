@@ -16,7 +16,8 @@
  * and web-search money and writes rows there.
  *
  * Making the fixture student locally (the persona-suite harness needs SUPABASE_URL, SUPABASE_ANON_KEY,
- * SUPABASE_SERVICE_ROLE_KEY and DB_URL; see .superpowers or the "Local env" steps in AGENTS.md / ci.yml):
+ * SUPABASE_SERVICE_ROLE_KEY and DB_URL; the "Start Supabase" and "Start the API" steps of .github/workflows/ci.yml
+ * show the environment, and `supabase status -o env` prints the keys of a local stack):
  *
  *   supabase db reset
  *   # start the API; add ANTHROPIC_API_KEY for a real run, or RESEARCH_FAKE=fixture for canned answers
@@ -67,19 +68,25 @@ type Rec = { id: string; title: string; why: string; sources: Source[] };
 type Run = { runId: string; cached: boolean; recommendations: Rec[] };
 
 async function api(method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; json: unknown }> {
-  const res = await fetch(`${apiUrl}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
-  let json: unknown = text;
   try {
-    json = JSON.parse(text);
-  } catch {
-    /* leave as text */
+    const res = await fetch(`${apiUrl}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let json: unknown = text;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      /* leave as text */
+    }
+    return { status: res.status, json };
+  } catch (err) {
+    // A token holding an invalid header character makes the HTTP client throw an error whose message can include the
+    // header value, so only the error's name is printed.
+    return fail(`The request to the API failed (${err instanceof Error ? err.name : "unknown error"}). Check API_URL and that the API is running.`);
   }
-  return { status: res.status, json };
 }
 
 // The guard comes first: nothing below runs for a student whose name doesn't start with "Fixture ".

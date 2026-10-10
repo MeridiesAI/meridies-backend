@@ -32,6 +32,12 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
     service-role-only tables with no policies, and leaked-password protection (P1). A stray
     `public.test` table predates v10. Check what it is and drop it if it's unused.
 
+- [ ] **AI context and research migrations** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, last section). Apply
+  `20261016000001_context_documents.sql` (the document kinds, `ai_access` and `ferpa_waived` the context layer
+  reads), then `20261016000002_research.sql` (hidden counselor tasks, `research_runs`, `recommendations`,
+  `research_blocked_domains`), each before deploying the code that needs it. Never set `RESEARCH_FAKE` on
+  Railway: the server refuses to boot with it unless `NODE_ENV` is `development` or `test`.
+
 ### Railway variables
 
 - [x] `NODE_ENV=production`

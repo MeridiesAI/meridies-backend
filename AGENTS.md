@@ -815,9 +815,11 @@ dismisses what is left. The code is `src/lib/research/` and `routes/research.ts`
 and after `20261016000001`. The code filters and writes `deliverables.visible_to_student`
 and reads `research_runs`, `recommendations` and `research_blocked_domains`.
 With the code first, every query that names the new column fails: creating a
-counselor task, the student's due-tomorrow reminders, the calendar feed for a
-student, stall detection, the composer's overdue check, and the research
-routes. The migration is safe to apply first: the previous code ignores the new
+counselor task, every `PATCH /tasks/:id` (including a student's progress
+updates), raising a flag on a task, the escalation sweep, the parent-alert draft,
+the student's due-tomorrow reminders, the calendar feed for a student, stall
+detection, the composer's overdue check, and the research routes. The list is
+not exhaustive. The migration is safe to apply first: the previous code ignores the new
 column and tables.
 
 - **Routes** (all `requireRole("counselor")`; a student gets 403):
@@ -825,32 +827,52 @@ column and tables.
     body `{ refresh?: boolean, focus?: string (max 2000) }`, strict. Limited to
     5 a minute per user (`limit("research:run", 5, 60)`, a preHandler, so it
     also counts requests that are then refused or served from the cache) and
-    50 runs per practice in a rolling 24 hours. The daily cap is
-    `enforceRateLimit` on the key `research-day:<firm id, or the counselor's id
-    when solo>`, not `enforceQuota`: `usage_counters` is keyed by one profile and
-    its metric names are fixed by a CHECK constraint, so a per-practice count
-    would need a migration, while a rate-limit key is any string. A request
-    served from the cache, refused for its focus, or refused by the up-front AI
-    check does not spend the daily cap.
+    50 runs per practice per 24-hour window. The window is fixed, not sliding:
+    `consume_rate_limit` anchors it at the first run, so a practice can spend up
+    to about 100 across a boundary. The daily cap is `enforceRateLimit` on the
+    key `research-day:<firm id, or the counselor's id when solo>`, not
+    `enforceQuota`: `usage_counters` is keyed by one profile and its metric names
+    are fixed by a CHECK constraint, so a per-practice count would need a
+    migration, while a rate-limit key is any string. The limiter falls back to a
+    per-process counter when its database call errors or no service-role key is
+    set, so the cap is not a hard guarantee. A request served from the cache,
+    refused for its focus, refused because the same run is already in flight, or
+    refused by the up-front AI check does not spend the daily cap.
   - `GET /students/:id/recommendations?feature=college_list|activities`
     (newest first, 200 at most).
   - `POST /recommendations/:id/accept` and `.../dismiss`. These two and the
     list share a limit of 120 a minute per user.
   - Order inside a run: access (the counselor must be able to see the student:
     403 or 404), the brief and its identity filter, the cache, the practice's AI
-    switches, the daily cap, the run row, then the model.
+    switches, the in-flight check, the daily cap, the run row, then the model.
+  - **One identical run at a time.** If a `research_runs` row for the same
+    student, feature and inputs hash is `running` and was created in the last 10
+    minutes, the request gets 409 ("Research is already running for this
+    student. Try again in a minute."). A `running` row older than 10 minutes is
+    treated as dead and ignored: nothing sweeps them.
 - **What the research model receives.** `RESEARCH_CANDIDATES_SYSTEM` (fixed
   instructions) and the brief as a data block (`buildResearchQuestion(brief)` in
   `prompt.ts`, a pure function that takes only the brief), so nothing else about
-  the student can reach it by construction. The match step (`FAST_MODEL`) is the
+  the student can reach it by construction. The brief is the allowlisted fields
+  only; the one free-text part of it is the counselor's focus, which has passed
+  the identity filter. The match step (`FAST_MODEL`) is the
   only step that reads the student's context (`buildStudentContext`, the
   `college-list` or `activities` profile); it sees the kept candidates, not the web.
 - **The brief** (`brief.ts`): `feature`, `grade`, `region`, `majors`,
   `interests`, `gpaBand`, `testBand`, `focus`. Majors are kept only when they pass
   a shape rule (1 to 5 words, at most 60 characters, letters, spaces and
-  `& - / , '` only; anything else is dropped silently), at most 5. Interests are
-  the student's activity categories matched against a fixed vocabulary
-  (`ACTIVITY_CATEGORIES`); anything outside it is dropped. The GPA is a 0.2-wide
+  `& - / , '` only; anything else is dropped silently), at most 5. A major that
+  holds the student's name, school or hometown (the identity filter below) is
+  dropped too and the run goes ahead without it. Interests are the student's
+  activity categories turned into a fixed vocabulary of generic words
+  (`ACTIVITY_CATEGORIES`): `ACTIVITY_TYPE_CATEGORY` in `brief.ts` maps every
+  value of `ACTIVITY_TYPES` (the Common App list in `profileUpdates.ts`) to
+  exactly one vocabulary word, and `category()` looks a category up there first,
+  then in the vocabulary itself; anything else is dropped. "other" is never sent,
+  and neither are "LGBT" and "School Spirit" (mapped to "other" on purpose: a
+  protected characteristic must not reach an outside model, and the other has no
+  research use). A unit test imports the real `ACTIVITY_TYPES` and fails when a
+  type has no row. The GPA is a 0.2-wide
   band on a 4.0 or 5.0 scale, the scale label chosen by the scale kind and never
   copied from the student's string (`unknown` when the GPA can't be put on a 4 or
   5 point scale). The test band is the SAT in 100s, else the ACT in 3s, else
@@ -862,24 +884,34 @@ column and tables.
   text is: the name's parts of three or more characters (two when they hold a
   non-ASCII letter), the whole name, the name with its apostrophes and hyphens
   fused ("obrien"), the email, its local part and the pieces of it, the school
-  and the hometown whole and with punctuation stripped, and each word of the
+  and the hometown whole and with punctuation stripped, each word of the
   school and the hometown of four or more characters (two when non-ASCII) that
   isn't on `IDENTITY_STOPLIST` (generic school words such as "high", "academy",
-  "north"). The state at the end of a hometown ("Fresno, CA") isn't tokenized by
-  word. Text and tokens are compared after a Unicode fold (NFKC, lowercase,
-  invisible format characters and combining marks removed), so accents,
-  full-width letters and zero-width characters don't hide a name. ASCII tokens
-  match as whole words; tokens with a non-ASCII letter match anywhere. A focus
-  that holds any of it is refused with 400 before the daily cap is spent, a run
-  row is written or a model is called. The finished brief is checked too. After
-  the research, every query the model issued (each search, and each URL it
-  fetched) is checked against the same tokens; a hit discards the run
-  (`status = 'discarded'`, 400 to the counselor, nothing stored or served).
-  Known limits: two-letter Latin name parts ("Li", "Bo") are not tokens; ASCII
-  tokens match only as whole words; and a student whose name, school or hometown
-  word equals one of the brief's own words (a major, an interest) is refused
-  every time, because the brief then contains their identity (the 400 asks the
-  counselor to check the intended majors).
+  "north"), and the school's short form: its name without the last word when
+  that word is generic and a distinctive word is left ("Lee High School" also
+  yields "lee high"). The state at the end of a hometown ("Fresno, CA") isn't
+  tokenized by word. Text and tokens are compared after a Unicode fold (NFKC,
+  lowercase, invisible format characters and combining marks removed, then the
+  letters that don't decompose mapped to ASCII: ø to o, ł to l, đ to d, ß to ss,
+  æ to ae, œ to oe, þ to th, ı to i), so accents, full-width letters and
+  zero-width characters don't hide a name. Matching: ASCII tokens of 5 or more
+  characters match as a word prefix (the token starts at a word boundary and
+  anything may follow, so "the Okafors" and "avery2027" are caught); shorter
+  ASCII tokens match whole words only (so a student named Will doesn't refuse
+  "willing"); tokens with a non-ASCII letter match anywhere. The scan runs on the
+  counselor's focus (in full, before it is cut to 200 characters) and on each
+  major; nothing else in the brief is scanned, because the rest is built by code
+  from fixed sets and would only trip on the brief's own words (a surname
+  "Null", a school "Health Sciences High"). A focus that holds any of it is
+  refused with 400 ("The focus contains the student's name, school or
+  hometown") before the daily cap is spent, a run row is written or a model is
+  called. After the research, every query the model issued (each search, and
+  each URL it fetched) is checked against the same tokens; a hit discards the
+  run (`status = 'discarded'`, 400 to the counselor, nothing stored or served).
+  Known limits: two-letter Latin name parts ("Li", "Bo") are not tokens; names
+  transliterated from a non-Latin script are caught only in the script the
+  student's record uses; and the two layers (focus and post-run queries) share
+  one token list, so a form of the identity the list lacks is missed by both.
 - **Sources.** A candidate is kept only if it has a source that came back as a
   real citation, on a URL the run searched or fetched (`seenUrls`, compared
   ignoring `#fragment`, a trailing slash and http versus https), not on
@@ -897,15 +929,32 @@ column and tables.
   200 characters and two sentences, otherwise the pick is dropped whole (never
   clipped); the title is at most 300 characters; a deadline or cost is kept only
   as a plain string of at most 120 characters; `details.verify` is always
-  true. A `why` that holds the student's name or email is dropped
-  (`dropPicksNamingStudent`). Recommendation titles, deadlines and costs are
+  true. A pick whose `why` names the student is kept and its `why` is replaced
+  with "Fits the student's interests and record." (`replaceWhysNamingStudent`).
+  A `why` names the student when it holds the email; the whole name (two or more
+  parts, in order, any case); or one name part (3+ characters, 2+ when
+  non-ASCII) written with a capital first letter as a whole word in the middle of
+  a sentence. That single-part rule is case-sensitive and skips the first word of
+  a sentence, so "This will help the student" and "May suit the student" survive
+  for a student named Will or May, while "Fits Will's interest" doesn't.
+  Non-ASCII parts match anywhere, ignoring case. A `why` that holds a link
+  (`http://`, `https://`, `www.`), an email address or a phone number (7 or more
+  digits in a row, or a ddd-ddd-dddd shape) is replaced the same way, because
+  reasons are copied into task text that can be shared. Recommendation titles, deadlines and costs are
   deliberately not checked against the student's school or town: a program in the
   student's own town is a legitimate result, and recommendations are counselor-only.
 - **Cache.** A run that succeeded is served for 7 days for the same student,
   feature and brief hash (`briefHash`; majors and interests sorted). `refresh:
   true` bypasses it, and so does any change to the brief, the focus included. A
-  run that found nothing is cached too, so a repeat click doesn't pay for the
-  same empty search. Failed and discarded runs are never served.
+  run whose answer held no candidate objects at all is cached too, so a repeat
+  click doesn't pay for the same empty search. A run whose answer held
+  candidates but stored none (dropped by the citation keeper, the link check, the
+  match step or the reason checks) is stored as `succeeded` with an empty list
+  but expires at once, so the next request runs again. Each run logs its counts
+  with the run id (numbers only): answer parts, candidate objects found,
+  candidates parsed, kept by the keeper, picked, stored. The scanner steps into an
+  object with no string `title`, so a `{"candidates":[...]}` wrapper yields its
+  inner candidates. Failed and discarded runs are never served.
 - **Recommendations.** `recommendations` and `research_runs` are readable by a
   counselor who can view the student (RLS: role `counselor` and
   `private.can_view_student`): never the student, never a same-firm counselor
@@ -937,10 +986,12 @@ column and tables.
   student, and a task the student can already see can't be hidden again (409). A
   red flag can't be raised on a hidden task (409), and an intake request task
   from New student can't be hidden (400).
-- **`RESEARCH_FAKE=fixture`** is for tests. `seamFor` returns the fixtures only
-  when `NODE_ENV` isn't `production`, `src/index.ts` exits at boot with a message
-  naming `RESEARCH_FAKE` if it is set in production, and the server logs a
-  warning whenever it is on. With it on, research, the match step and the link
+- **`RESEARCH_FAKE=fixture`** is for tests. It works only when `NODE_ENV` is
+  `development` or `test`: `seamFor` returns the fixtures only then, and
+  `src/index.ts` exits at boot with a message naming `RESEARCH_FAKE` if it is
+  set with any other `NODE_ENV` (production, staging, unset). The boot check reads
+  the raw `process.env.NODE_ENV`, so the default of "development" when it is unset
+  does not unlock the fake. The server logs a warning whenever it is on. With it on, research, the match step and the link
   check return canned answers (including a candidate on a blocked domain and one
   the run never saw, to exercise the keeper) and no model or web call is made.
 - **Checking the live path by hand:** `scripts/smoke/research.ts` (its header
@@ -950,7 +1001,9 @@ column and tables.
 
 **Not built or not covered.** There is no student-facing research. Nothing
 sweeps a run left `running` after a crash; such a run is never served and stays
-as it is. Two identical uncached requests made at the same instant can both run.
+as it is (the in-flight check ignores one older than 10 minutes). Two identical
+uncached requests made at the same instant can both pass the in-flight check and
+run.
 Research is in none of the practice AI switches (`practiceSettings.ts`), so the
 up-front AI check gates nothing yet. The app has no screens for any of this.
 
@@ -1031,7 +1084,9 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   backwards. With `PUBLIC_API_URL` set, every SMS asks Twilio to report there.
 - **Data rights.** `GET /account/export` (self) and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
-  client, so an export holds exactly what that person can already see.
+  client, so an export holds exactly what that person can already see (the
+  counselor's export of a student includes `recommendations` and `research_runs`;
+  the student's own export holds neither).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
   user; a counselor with an active roster or an owned firm is refused.
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
