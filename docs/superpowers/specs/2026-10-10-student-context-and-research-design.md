@@ -1,6 +1,6 @@
 # Student context layer and research — design
 
-Status: draft for review · 2026-10-10 · Owner: Elvin
+Status: approved with conditions (§3.2, §3.3, §4 omitted, §7 tasks) · 2026-10-10 · Owner: Elvin
 Scope: levels 1 and 2 of the AI context roadmap. Counselors only.
 
 ## 1. Goal
@@ -114,6 +114,23 @@ via `PATCH /files/documents/:id { aiAccess }`; the constraint refuses enabling a
 waived letter. `available_to_llm` keeps its current meaning for existing
 features (submission review, task tracker), which are unchanged.
 
+### 3.2 Switch order (tested)
+
+"Keep out of AI" (`available_to_llm = false`) always wins: a document with
+`ai_access = 'allowed'` and keep-out on is excluded. Order of evaluation:
+keep-out → waived letter → `ai_access` explicit → kind default → practice
+document reading. Unit and SQL tests cover each step, including allowed + keep-out.
+
+### 3.3 Students can't see restricted documents (PR 1)
+
+Today `documents_select` lets a student read every document filed under them
+(`private.can_view_student` includes the student). PR 1 adds a restrictive select
+policy: a student never sees a document that is `kind = 'recommendation-letter'
+and ferpa_waived`, `kind = 'counselor-only'` or `kind = 'iep-504'`, unless they
+uploaded it themselves (`owner_id = auth.uid()`). Storage follows automatically
+(the `student-documents` read rule defers to `documents` RLS). Persona test: a
+student gets none of these through PostgREST, `/files` or a signed URL.
+
 ## 4. The context builder
 
 `buildStudentContext(request, studentId, feature): Promise<StudentContext>`
@@ -122,7 +139,7 @@ features (submission review, task tracker), which are unchanged.
 type StudentContext = {
   text: string;                       // prompt-ready
   used: { section: string; items?: string[] }[];       // e.g. documents: ["Transcript.pdf"]
-  omitted: { section: string; reason: "budget" | "not-allowed" | "practice-setting" | "empty" }[];
+  omitted: { section: string; reason: "budget" | "not-allowed" | "not-categorized" | "practice-setting" | "empty"; count?: number }[];
   brief?: ResearchBrief;              // §6, only for research features
 };
 ```
@@ -143,7 +160,12 @@ type StudentContext = {
   24,000; activities 24,000). A profile is a subset of the allowlist by type; a
   test proves a profile can't name a table or column outside it.
 - **Budget:** sections are added in priority order; a section that doesn't fit is
-  dropped **whole** and listed in `omitted` with `budget`. List sections are
+  dropped **whole** and listed in `omitted` with `budget`. Documents excluded only
+  because they are uncategorized (`kind = 'other'`, `ai_access = 'default'`) are
+  reported as one entry, `{ section: "documents", reason: "not-categorized",
+  count: N }`, so the client can show "3 documents aren't categorized, so AxIS
+  can't use them" with a link to categorize them (`PATCH /files/documents/:id
+  { kind }`). List sections are
   pre-capped by count (newest first). Nothing is cut mid-record.
 - **Untrusted text:** student-written, imported and document text is emitted as
   `<data source="essay:Common App" kind="untrusted">…</data>` with `<`/`>` in the
@@ -225,8 +247,13 @@ school name, hometown or address. A query that fails is a hard error for the run
 - RLS: select where `private.can_view_student(student_id, auth.uid()) and
   auth.uid() <> student_id` and the caller is a counselor; no browser writes
   (routes write as the caller through definer functions that re-check).
-- `deliverables.visible_to_student boolean not null default true`; a restrictive
-  RLS policy hides rows with `false` from the student. Accepting an activity
+- `deliverables.visible_to_student boolean not null default true` (existing tasks
+  therefore stay visible); a restrictive select policy hides rows with `false`
+  from the student (`private.user_role(auth.uid()) = 'student'`), enforced in the
+  database, so the API, PostgREST and every student route agree. Related rows
+  (`deliverable_stages`, `deliverable_documents`) of a hidden task are hidden the
+  same way. Persona test: a student can't read a hidden task through `/tasks`,
+  `/me` or PostgREST. Accepting an activity
   creates a task with `source='counselor'`, `visible_to_student=false`; the
   counselor shares it with `PATCH /tasks/:id { visibleToStudent: true }`.
 - Accepting a college adds a `student_colleges` row through the existing insert
@@ -267,7 +294,7 @@ every budget; a 100-point GPA and a non-Latin name.
 ## 10. Delivery
 
 - PR 1 (context layer): migration `20261016000001` (document kinds, `ferpa_waived`,
-  `ai_access`, `document_ai_allowed`), `src/lib/context/*`, consumers in §5,
+  `ai_access`, `document_ai_allowed`, the student document-visibility policy §3.3), `src/lib/context/*`, consumers in §5,
   `PATCH /files/documents/:id { aiAccess }`, tests. Reviewed first.
 - PR 2 (research), stacked on PR 1: migration `20261016000002`
   (`research_runs`, `recommendations`, `research_blocked_domains` + seed,
