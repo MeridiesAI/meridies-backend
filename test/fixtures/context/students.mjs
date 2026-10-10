@@ -8,6 +8,8 @@ export const MARKERS = {
   private: [
     "PRIVATE-NOTE-MARKER", "STATUS-NOTE-MARKER", "GUARDIAN-MARKER", "ADDRESS-MARKER",
     "2008-03-09", "contact-marker@test.local",
+    "555-0142-PHONE-MARKER", "REDFLAG-TITLE-MARKER", "REDFLAG-MESSAGE-MARKER", "AID-SPECIAL-MARKER",
+    "AWARD-LETTER-MARKER", "PROFILE-JSONB-MARKER",
   ],
   keptOutEssay: "KEEPOUT-ESSAY-MARKER",
   excludedDocs: ["RESUME-TEXT", "LETTER-TEXT", "IEP-TEXT", "FIN-TEXT", "OTHER-TEXT", "ACTLIST-TEXT"],
@@ -80,6 +82,12 @@ async function seedPrivate(counselor, student) {
   await sql(`insert into public.student_status_overrides (student_id, status, note) values ('${student.id}', 'at-risk', 'STATUS-NOTE-MARKER')
     on conflict (student_id) do update set status = excluded.status, note = excluded.note`);
   await sql(`insert into public.guardians (student_id, full_name, email) values ('${student.id}', 'GUARDIAN-MARKER', 'guardian@test.local')`);
+  await sql(`update public.profiles set phone = '555-0142-PHONE-MARKER',
+    profile = '{"secretKey":"PROFILE-JSONB-MARKER"}'::jsonb where id = '${student.id}'`);
+  await sql(`insert into public.red_flags (student_id, title, message) values ('${student.id}', 'REDFLAG-TITLE-MARKER', 'REDFLAG-MESSAGE-MARKER')`);
+  await sql(`insert into public.student_aid_profiles (student_id, special_circumstances) values ('${student.id}', 'AID-SPECIAL-MARKER')
+    on conflict (student_id) do update set special_circumstances = excluded.special_circumstances`);
+  await sql(`insert into public.award_letters (student_id, school_name, notes) values ('${student.id}', 'Aid U', 'AWARD-LETTER-MARKER')`);
   await sql(`update public.student_personal_details set address = 'ADDRESS-MARKER', birthday = '2008-03-09',
     contact_email = 'contact-marker@test.local', gender = 'undisclosed' where student_id = '${student.id}'`);
 }

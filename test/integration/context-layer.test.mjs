@@ -63,6 +63,9 @@ const { student: edge } = await seedStudent(c, "edge");
 const e = await ctx(edge.id);
 check("a 100-point GPA keeps its scale", /92(\.0+)? \(100-point scale\)/.test(e.body.text), e.body.text.slice(0, 300));
 
+check("a CJK name appears inside a data block", /<data source="[^"]*" kind="untrusted">[^<]*李明[^<]*<\/data>/.test(e.body.text), e.body.text.slice(0, 300));
+check("a CJK name is in no trusted text", !e.body.text.replace(/<data source="[^"]*" kind="untrusted">[\s\S]*?<\/data>/g, "").includes("李明"));
+
 const owner = await user("ctx-owner");
 const member = await user("ctx-member");
 const member2 = await user("ctx-member-b");

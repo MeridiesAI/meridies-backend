@@ -705,12 +705,28 @@ can see, their own id, or `unfiled`.
 data-handling switches, not display preferences. Anything that reads a document
 into a prompt must filter on them (see `routes/tasks.ts`, and the context
 layer below). Students don't see waived recommendation letters, IEP/504 or
-counselor-only documents they didn't upload (`documents_student_restricted_select`).
+counselor-only documents they didn't upload (`documents_student_restricted_select`),
+nor the task-document links of those files (`deliverable_documents_student_restricted_select`),
+nor their names in the activity log (the upload's `progress_events` row omits the filename).
+Only a counselor sets `aiAccess` and `ferpaWaived`, on create and on patch: the
+route answers 403 to anyone else, and the `documents_guard_student_restricted`
+trigger refuses a student's write of either, also through PostgREST. The same
+trigger stops a student filing a document they didn't upload under a restricted kind.
 
 ### AI context layer
 
 What AxIS may read about a student is decided in one place, `src/lib/context/`.
 
+**Deploy order.** Apply `20261016000001_context_documents.sql` before deploying
+this code: the documents loader, the essays list and task documents select
+the new columns (`ai_access`, `ferpa_waived`) and fail without them. The
+migration is safe to apply first; the previous code ignores the new columns.
+
+- **Counselors only.** `buildStudentContext` refuses a caller whose role isn't
+  `counselor` (403) before any read, the six `/ai/*` routes that call it have
+  `requireRole("counselor")`, and chat answers 403 before it saves the message
+  or opens the stream when a student id comes with a non-counselor caller (chat
+  without a student id is unchanged). A student's own session never builds a context.
 - **One entry point.** `buildStudentContext(request, studentId, feature, { only }?)`
   runs on `request.db`, so it never returns more than the counselor can see. A
   feature is `chat`, `student-ai`, `narrative-coherence`, `college-list` or
@@ -719,10 +735,12 @@ What AxIS may read about a student is decided in one place, `src/lib/context/`.
   `text`, `used`, `omitted`, `studentName` and `facts`.
 - **Deny by default.** `ai-allowlist.ts` lists the tables and columns AI may
   read, and every loader selects through `columns(...)`, never `select *` (a
-  unit test enforces it). Private notes, status overrides, red flags, guardians,
+  unit test fails on any `.select(` in the layer that doesn't). Private notes, status overrides, red flags, guardians,
   address, birthday, gender, contact email, phone, the aid tables and
-  `profiles.profile` are not on it. The login email is read separately, only
-  into `facts.identity`, to feed the identity filter; it never enters `text`.
+  `profiles.profile` are not on it. The login email is read separately (the one
+  annotated exception to the `columns(...)` rule), only for the `college-list`
+  and `activities` features and only into `facts.identity`, to feed the identity
+  filter; for other features `facts.identity.email` stays null. It never enters `text`.
 - **Free text is data.** Every free-text value a student, an import or a
   document supplied goes into an escaped `<data kind="untrusted">` block
   (`wrapUntrusted` in `pack.ts`). That includes names and titles, not only
@@ -743,15 +761,22 @@ What AxIS may read about a student is decided in one place, `src/lib/context/`.
   any other kind is out. An allowed document with no parsed text, or with more
   than 12,000 characters of it, is reported in `omitted` (`empty`, `budget`)
   rather than dropped silently.
-- **Essays.** An essay's body is read only by a feature that asks for bodies
-  (narrative coherence), and is left out when its linked document is kept out
-  of AI or isn't readable by the caller (`essayBodyReadable`); a linked file
-  that didn't come back fails closed.
+- **Essays.** The layer's `essays` section selects and renders a body only for
+  a feature that asks for bodies (narrative coherence), and leaves it out when
+  the linked document is kept out of AI or isn't readable by the caller
+  (`essayBodyReadable`); a linked file that didn't come back fails closed. No
+  current consumer reads essay bodies through that section: the Application
+  page's Coherence builds its ticked essays through `coherenceMaterial.ts`
+  (`usableEssay`), which applies the same `essayBodyReadable` rule.
+  `GET /students/:id/ai-context?feature=narrative-coherence` shows the layer's
+  view, not the ticked material a coherence run sends.
+- **Chat does not read intake answers.** `intake_responses.answers` is free-form
+  JSON from a counselor-designed form; only the `student-ai` profile includes it.
 - **Narrowing.** `{ only }` narrows a feature's sections and never widens them.
   Narrative coherence asks for `profile` and `personal` only, and builds its
   ticked material (essays, activities, awards) through `coherenceMaterial.ts`,
-  which wraps each piece, skips a block that would pass the cap whole, and
-  reports only what was actually sent.
+  which wraps each piece, skips a block that would pass the 80,000-character cap
+  whole, and reports only what was actually sent.
 - **What each consumer returns.** The `/ai/*` student routes
   (`/ai/profile-summary`, `/ai/narrative-coherence`, `/ai/family-report`,
   `/ai/school-reframing`, `/ai/college-list`, `/ai/concierge`) and the
@@ -763,11 +788,14 @@ What AxIS may read about a student is decided in one place, `src/lib/context/`.
   shows what AxIS would see.
 
 **Not on the layer yet** (follow-up work; each still reads the record on its
-own, with the text it reads wrapped as data where the route does so):
-`/ai/essay-review` (its verbatim-quote span matching breaks under escaping, so
-it needs a different defense), `/ai/award-appeal`, `/ai/aid-report`,
-`/ai/file-filing`, and the single-essay routes (`/ai/essay-advice`,
-`/ai/draft-quality`). On the Application page, the recommended-colleges column
+own, with the text it reads wrapped as data where the route does so). The list
+covers routes that read a student's record: `/ai/essay-review` (its
+verbatim-quote span matching breaks under escaping, so it needs a different
+defense), `/ai/award-appeal`, `/ai/aid-report`, `/ai/file-filing`,
+`/ai/parent-alert`, and the single-essay routes (`/ai/essay-advice`,
+`/ai/draft-quality`). Profile Update, submission review, email templates and
+college research have their own inputs and are not part of this list.
+On the Application page, the recommended-colleges column
 (`POST /application/college-list/recommendations/axis`) and Activities Build
 (`POST /application/activities-build`) still use a local `studentBrief` in
 `src/routes/applicationAi.ts`.
