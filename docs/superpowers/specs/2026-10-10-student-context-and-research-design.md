@@ -73,10 +73,13 @@ export const AI_ALLOWLIST = {
   test_scores:              ["exam", "kind", "score", "taken_on", "source"],
   student_colleges:         ["name", "round", "fit", "status"],
   intake_responses:         ["answers"],
-  meetings:                 ["meeting_date", "title", "summary", "tags"],
+  meeting_notes:            ["meeting_date", "title", "summary", "tags"],
+  meetings:                 ["title", "starts_at", "status", "agenda"],
+  deadlines:                ["title", "school", "type", "due_date", "level", "done"],
+  student_polygon_axes:     ["label", "score", "max_score", "note"],
   deliverables:             ["title", "kind", "status", "due_date"],
   essays:                   ["title", "prompt", "school", "status", "word_count", "body"],
-  documents:                ["filename", "title", "kind", "parsed_data"],
+  documents:                ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "parsed_data"],
 } as const;
 ```
 
