@@ -17,6 +17,8 @@ import {
   NO_PROSE_SYSTEM,
   runStructured,
 } from "../lib/anthropic.js";
+import { buildStudentContext } from "../lib/context/index.js";
+import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -30,41 +32,6 @@ const BASE_SYSTEM = [
 ].join("\n");
 
 const studentBody = z.object({ studentId: z.string().uuid() }).strict();
-
-/** Compact the student's record into a prompt-sized brief. */
-async function studentBrief(
-  request: import("fastify").FastifyRequest,
-  studentId: string
-): Promise<string> {
-  const db = request.db;
-  const [profile, academics, activities, awards, essays, colleges, intake] = await Promise.all([
-    db.from("profiles").select("full_name, grad_year, high_school, hometown, headline, profile").eq("id", studentId).maybeSingle(),
-    db.from("student_academics").select("*").eq("student_id", studentId).maybeSingle(),
-    db.from("activities").select("name, position, organization, category, hours_per_week, description").eq("student_id", studentId).order("sort_order").limit(30),
-    db.from("awards").select("name, level, year").eq("student_id", studentId).order("sort_order").limit(30),
-    db.from("essays").select("title, prompt, school, status, word_count").eq("student_id", studentId).limit(30),
-    db.from("student_colleges").select("name, round, fit, status").eq("student_id", studentId).order("sort_order").limit(40),
-    db.from("intake_responses").select("answers").eq("student_id", studentId).maybeSingle(),
-  ]);
-
-  if (!profile.data) throw notFound("That student isn't on your roster");
-
-  // Essay *bodies* are deliberately excluded — these routes advise, they don't
-  // read drafts back to the model unless a route explicitly needs to.
-  return JSON.stringify(
-    {
-      student: profile.data,
-      academics: academics.data,
-      activities: activities.data,
-      awards: awards.data,
-      essays: essays.data,
-      colleges: colleges.data,
-      intake: intake.data?.answers ?? {},
-    },
-    null,
-    1
-  ).slice(0, 60_000);
-}
 
 const bulletSchema = {
   type: "object",
@@ -91,13 +58,16 @@ export default async function aiRoutes(app: FastifyInstance) {
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "view");
-      const brief = await studentBrief(request, studentId);
+      const ctx = await buildStudentContext(request, studentId, "student-ai");
+      const brief = ctx.text;
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
 
       const result = await runStructured<{ aiSummary: string; aiSuggestions: string[] }>({
         request,
         module: "profile-summary",
         studentId,
-        system: BASE_SYSTEM,
+        system: `${BASE_SYSTEM}\n\n${UNTRUSTED_DATA_RULE}`,
+        contextUsage: contextUsed,
         prompt: `Summarize this student for their counselor, then list next actions.\n\n${brief}`,
         toolName: "profile_summary",
         schema: {
@@ -121,7 +91,7 @@ export default async function aiRoutes(app: FastifyInstance) {
         })
         .eq("id", studentId);
 
-      return result;
+      return { ...result, contextUsed };
     }
   );
 
@@ -133,14 +103,17 @@ export default async function aiRoutes(app: FastifyInstance) {
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "edit");
-      const brief = await studentBrief(request, studentId);
+      const ctx = await buildStudentContext(request, studentId, "student-ai");
+      const brief = ctx.text;
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
 
       const result = await runStructured<{ flags: Record<string, unknown>[] }>({
         request,
         module: "narrative-coherence",
         studentId,
         model: DEEP_MODEL,
-        system: `${BASE_SYSTEM}\n\nYou compare an application's parts for contradictions. Cite the two sources that disagree. Do not rewrite anything.`,
+        system: `${BASE_SYSTEM}\n\nYou compare an application's parts for contradictions. Cite the two sources that disagree. Do not rewrite anything.\n\n${UNTRUSTED_DATA_RULE}`,
+        contextUsage: contextUsed,
         prompt: `Find inconsistencies across this student's activities, essays and stated goals.\n\n${brief}`,
         toolName: "narrative_flags",
         maxTokens: 3000,
@@ -183,7 +156,7 @@ export default async function aiRoutes(app: FastifyInstance) {
         const { error } = await request.db.from("narrative_flags").insert(rows);
         if (error) throw fromPostgrest(error);
       }
-      return { flags: result.flags };
+      return { flags: result.flags, contextUsed };
     }
   );
 
@@ -195,7 +168,9 @@ export default async function aiRoutes(app: FastifyInstance) {
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "edit");
-      const brief = await studentBrief(request, studentId);
+      const ctx = await buildStudentContext(request, studentId, "student-ai");
+      const brief = ctx.text;
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
 
       const result = await runStructured<{
         title: string; summary: string; highlights: string[]; body: string;
@@ -203,7 +178,8 @@ export default async function aiRoutes(app: FastifyInstance) {
         request,
         module: "family-report",
         studentId,
-        system: `${BASE_SYSTEM}\n\nWrite for a parent with no admissions jargon. Plain English. Warm, factual, never alarmist.`,
+        system: `${BASE_SYSTEM}\n\nWrite for a parent with no admissions jargon. Plain English. Warm, factual, never alarmist.\n\n${UNTRUSTED_DATA_RULE}`,
+        contextUsage: contextUsed,
         prompt: `Draft a progress report a parent can read in two minutes.\n\n${brief}`,
         toolName: "family_report",
         maxTokens: 2500,
@@ -236,7 +212,7 @@ export default async function aiRoutes(app: FastifyInstance) {
         .single();
 
       if (error) throw fromPostgrest(error);
-      return { report: data };
+      return { report: data, contextUsed };
     }
   );
 
@@ -251,7 +227,9 @@ export default async function aiRoutes(app: FastifyInstance) {
         .strict()
         .parse(request.body);
       await resolveStudentId(request, b.studentId, "edit");
-      const brief = await studentBrief(request, b.studentId);
+      const ctx = await buildStudentContext(request, b.studentId, "student-ai");
+      const brief = ctx.text;
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
 
       const result = await runStructured<{
         likes: { point: string }[]; reframeFrom: string; reframeTo: string; note: string;
@@ -259,7 +237,8 @@ export default async function aiRoutes(app: FastifyInstance) {
         request,
         module: "school-reframing",
         studentId: b.studentId,
-        system: `${BASE_SYSTEM}\n\nExplain what a specific institution says it values, and how to present this student in that language without changing the facts.`,
+        system: `${BASE_SYSTEM}\n\nExplain what a specific institution says it values, and how to present this student in that language without changing the facts.\n\n${UNTRUSTED_DATA_RULE}`,
+        contextUsage: contextUsed,
         prompt: `School: ${b.school}\n\nStudent:\n${brief}`,
         toolName: "school_reframing",
         schema: {
@@ -296,7 +275,7 @@ export default async function aiRoutes(app: FastifyInstance) {
         .single();
 
       if (error) throw fromPostgrest(error);
-      return { insight: data };
+      return { insight: data, contextUsed };
     }
   );
 
@@ -330,15 +309,15 @@ export default async function aiRoutes(app: FastifyInstance) {
         request,
         module: "essay-advice",
         studentId: b.studentId,
-        system: NO_PROSE_SYSTEM,
+        system: `${NO_PROSE_SYSTEM}\n\n${UNTRUSTED_DATA_RULE}`,
         prompt: [
-          `Prompt: ${essay.prompt ?? "(none recorded)"}`,
-          `School: ${essay.school ?? "(general)"}`,
+          `Prompt: ${essay.prompt ? wrapUntrusted("essay-prompt", String(essay.prompt)) : "(none recorded)"}`,
+          `School: ${essay.school ? wrapUntrusted("essay-school", String(essay.school)) : "(general)"}`,
           `Word count: ${essay.word_count} of ${essay.word_limit ?? "no stated limit"}`,
           b.focus ? `Counselor's focus: ${b.focus}` : "",
           "",
           "Draft:",
-          String(essay.body ?? "").slice(0, 20_000),
+          wrapUntrusted("essay-draft", String(essay.body ?? "").slice(0, 20_000)),
           "",
           "Give the counselor bullets on what to work on. Do not write any of it for them.",
         ]
@@ -434,7 +413,9 @@ export default async function aiRoutes(app: FastifyInstance) {
         .parse(request.body);
 
       await resolveStudentId(request, b.studentId, "edit");
-      const brief = await studentBrief(request, b.studentId);
+      const ctx = await buildStudentContext(request, b.studentId, "student-ai");
+      const brief = ctx.text;
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
 
       const result = await runStructured<{
         variants: {
@@ -450,7 +431,9 @@ export default async function aiRoutes(app: FastifyInstance) {
           BASE_SYSTEM,
           "Build balanced reach/target/likely lists. Every school needs a specific 'why this student, this school' — a generic reason is a wrong answer.",
           "Do not state acceptance rates or admissions statistics as fact; the app sources those separately.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
+        contextUsage: contextUsed,
         prompt: `${b.strategy ? `Counselor's steer: ${b.strategy}\n\n` : ""}Build ${b.variants ?? 2} distinct list variants.\n\n${brief}`,
         toolName: "college_lists",
         maxTokens: 4000,
@@ -517,7 +500,7 @@ export default async function aiRoutes(app: FastifyInstance) {
         saved.push({ ...row, items });
       }
 
-      return { variants: saved };
+      return { variants: saved, contextUsed };
     }
   );
 
@@ -538,7 +521,9 @@ export default async function aiRoutes(app: FastifyInstance) {
         .parse(request.body);
 
       await resolveStudentId(request, b.studentId, "edit");
-      const brief = await studentBrief(request, b.studentId);
+      const ctx = await buildStudentContext(request, b.studentId, "student-ai");
+      const brief = ctx.text;
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
 
       const { data: axes } = await request.db
         .from("student_polygon_axes")
@@ -575,12 +560,14 @@ export default async function aiRoutes(app: FastifyInstance) {
           "Work from their STATED interests. Do not collapse them into one academic theme.",
           "Every recommendation needs: what it is, why it fits THIS student, eligibility, rough timing, and where to apply.",
           "If you are not confident a program currently exists and is open, leave it out. A short honest list beats a long invented one.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
+        contextUsage: contextUsed,
         prompt: [
           b.targetAxisKey ? `Improve this axis of their profile: ${b.targetAxisKey}` : "",
           b.directions ? `Counselor's direction: ${b.directions}` : "",
           b.interests?.length ? `Interests to honour: ${b.interests.join(", ")}` : "",
-          `Current profile shape: ${JSON.stringify(axes ?? [])}`,
+          `Current profile shape:\n${wrapUntrusted("polygon", JSON.stringify(axes ?? []))}`,
           "",
           brief,
         ]
@@ -644,7 +631,7 @@ export default async function aiRoutes(app: FastifyInstance) {
           .eq("id", requestRow.id);
       }
 
-      return { matches: rows };
+      return { matches: rows, contextUsed };
     }
   );
 
@@ -968,13 +955,14 @@ export default async function aiRoutes(app: FastifyInstance) {
           isSms
             ? "This is an SMS: under 320 characters, one paragraph, no salutation."
             : "This is an email: a short paragraph, then what you need from them.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
         prompt: [
-          `Draft a ${b.channel} to the family of ${student.data.full_name}.`,
+          `Draft a ${b.channel} to the family of the student named in this block: ${wrapUntrusted("student-name", String(student.data.full_name ?? ""))}`,
           `Urgency: ${b.urgency}.`,
           b.context ? `The counselor adds: ${b.context}` : "",
           "",
-          `Outstanding work:\n${JSON.stringify(tasks.data ?? [], null, 1).slice(0, 8000)}`,
+          `Outstanding work:\n${wrapUntrusted("outstanding-work", JSON.stringify(tasks.data ?? [], null, 1).slice(0, 8000))}`,
         ]
           .filter(Boolean)
           .join("\n"),
