@@ -10,6 +10,7 @@ import { env } from "../../env.js";
 import { FAST_MODEL, RESEARCH_MODEL, researchDomains, runStructured, runWebResearch, type ResearchResult } from "../anthropic.js";
 import { buildStudentContext, type ContextUsage, type StudentContext } from "../context/index.js";
 import { loadWorkspace } from "../crm.js";
+import { assertAiAllowed } from "../practiceSettings.js";
 import { badRequest, fromPostgrest, HttpError, unavailable } from "../errors.js";
 import { enforceRateLimit } from "../limits.js";
 import { checkLink } from "../links.js";
@@ -18,7 +19,7 @@ import { assertNoIdentity, briefHash, identityTokens, IdentityLeakError, toResea
 import { keepCandidates } from "./citations.js";
 import { fakeSeam } from "./fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, dropPicksNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
   validatePicks, type RecommendationDraft, type ResearchCandidate,
 } from "./prompt.js";
 
@@ -174,14 +175,16 @@ export async function runResearch(
         .eq("run_id", hit.id as string)
         .order("created_at", { ascending: false });
       if (recError) throw fromPostgrest(recError);
+      // A run that found nothing is cached too: repeat clicks don't pay for the same empty search again.
       const recommendations = (rows ?? []).map((r) => toDto(r as Row));
-      if (recommendations.length > 0) {
-        return { runId: hit.id as string, checkedAt: checkedAtOf(recommendations, hit.created_at as string), cached: true, recommendations, contextUsed };
-      }
+      return { runId: hit.id as string, checkedAt: checkedAtOf(recommendations, hit.created_at as string), cached: true, recommendations, contextUsed };
     }
   }
 
-  // 4. Limits: the practice's daily cap on runs (the per-minute limit is the route's preHandler).
+  // 4. The practice's AI switches (a refusal here leaves no run row and spends no cap), then its daily cap on runs
+  // (the per-minute limit is the route's preHandler). The check is the one the model wrappers make, run up front.
+  await assertAiAllowed(request, feature === "college_list" ? "college-research" : "activity-research");
+  await assertAiAllowed(request, "research-match");
   const svc = serviceClient();
   if (!svc) throw unavailable("Research is unavailable right now. Try again shortly.");
   const workspace = await loadWorkspace(request);
@@ -247,7 +250,9 @@ export async function runResearch(
     const kept = await keepCandidates(parseCandidates(result.parts), result, blocked, seam.check);
 
     // 9. Match: a cheap model picks the fits. Nothing to match means an empty, successful run.
-    const drafts: RecommendationDraft[] = kept.length ? validatePicks(await seam.match({ request, ctx, kept, studentId }), kept) : [];
+    const drafts: RecommendationDraft[] = kept.length
+      ? dropPicksNamingStudent(validatePicks(await seam.match({ request, ctx, kept, studentId }), kept), ctx.facts.identity)
+      : [];
 
     // 10. Store.
     const collegeIds = feature === "college_list" ? await Promise.all(drafts.map((d) => collegeIdFor(request, d.title))) : [];

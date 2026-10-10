@@ -7,7 +7,7 @@
  * filtered focus), so no other student data can reach it by construction.
  */
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../context/pack.js";
-import type { ResearchBrief } from "./brief.js";
+import { assertNoIdentity, identityTokens, IdentityLeakError, type ResearchBrief } from "./brief.js";
 import type { Candidate } from "./citations.js";
 
 export const MAX_CANDIDATES = 8;
@@ -22,7 +22,7 @@ export const RESEARCH_CANDIDATES_SYSTEM = [
   "You are given a short, anonymous brief about a student: categories and bands only. You know nothing else about the student and must not try to find out; never search for a person's name.",
   UNTRUSTED_DATA_RULE,
   "Search for real, current options that fit the brief. Prefer the organizers' own pages. Do not use listicle sites, lead-generation sites or pay-to-play programs.",
-  "Report at most 8 candidates. Write each candidate as its own text block holding one JSON object: {\"title\": string, \"summary\": string (one or two sentences), \"deadline\": string (optional), \"cost\": string (optional)}. Cite the page that supports each candidate. A candidate without a source is not a candidate.",
+  "Report at most 8 candidates. Write each candidate as one JSON object: {\"title\": string, \"summary\": string (one or two sentences), \"deadline\": string (optional), \"cost\": string (optional)}. Cite the page that supports each candidate's summary, so the cited text sits inside that candidate's object. A candidate without a source is not a candidate. Put nothing but these objects (and plain connecting words) in your answer.",
   "Never write essay prose or application text for the student.",
 ].join("\n");
 
@@ -95,29 +95,68 @@ export function firstJson(text: string): unknown {
 
 type PartLike = { text: string; citations: { url: string; title: string | null }[] };
 
+/** Every top-level JSON object in `text` (tolerating prose, fences and arrays around them), with its character span. */
+export function jsonObjectsWithSpans(text: string): { value: Record<string, unknown>; start: number; end: number }[] {
+  const out: { value: Record<string, unknown>; start: number; end: number }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "{") { i++; continue; }
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inString) {
+        if (ch === "\\") j++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) { end = j + 1; break; }
+    }
+    let value: unknown;
+    if (end > 0) {
+      try { value = JSON.parse(text.slice(i, end)); } catch { /* not JSON: look again after this brace */ }
+    }
+    if (end > 0 && value && typeof value === "object" && !Array.isArray(value)) {
+      out.push({ value: value as Record<string, unknown>, start: i, end });
+      i = end;
+    } else i++;
+  }
+  return out;
+}
+
 /**
- * One candidate per cited part. A part without citations is connective text and is ignored, so is a part with no
- * readable candidate JSON. Sources are the part's real citations, never URLs the model typed into the JSON.
+ * Candidates from the whole answer. The citations API splits one model answer into text blocks at citation
+ * boundaries, so a candidate's JSON object can arrive as an uncited opening fragment, a cited middle and an uncited
+ * tail. The parts are joined in order, each remembers its character span, and a candidate's sources are the citations
+ * of every part whose span overlaps its object. An object that overlaps no citation is dropped (uncited is not a
+ * candidate). Sources come only from real citations, never from URLs typed inside the JSON. A JSON array around
+ * several objects needs no special rule: each object is judged by its own span, so objects share citations only when
+ * one cited block really covers both.
  */
 export function parseCandidates(parts: PartLike[]): ResearchCandidate[] {
+  let full = "";
+  const spans = parts.map((p) => {
+    const start = full.length;
+    full += p.text;
+    return { start, end: full.length, citations: p.citations };
+  });
   const out: ResearchCandidate[] = [];
   const titles = new Set<string>();
-  for (const part of parts) {
-    if (part.citations.length === 0) continue;
-    let value = firstJson(part.text);
-    if (Array.isArray(value)) value = value.length === 1 ? value[0] : undefined;
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const o = value as Record<string, unknown>;
+  for (const { value: o, start, end } of jsonObjectsWithSpans(full)) {
     const title = cleanText(o.title);
     if (!title || title.length > 300 || titles.has(title.toLowerCase())) continue;
     const seen = new Set<string>();
     const sources: Candidate["sources"] = [];
-    for (const c of part.citations) {
-      if (seen.has(c.url) || c.url.length > 2000) continue;
-      seen.add(c.url);
-      sources.push({ url: c.url, title: plain(c.title, 300) ?? null });
-      if (sources.length === 5) break;
+    for (const sp of spans) {
+      if (!(sp.start < end && sp.end > start)) continue;
+      for (const c of sp.citations) {
+        if (seen.has(c.url) || c.url.length > 2000 || sources.length === 5) continue;
+        seen.add(c.url);
+        sources.push({ url: c.url, title: plain(c.title, 300) ?? null });
+      }
     }
+    if (sources.length === 0) continue;
     titles.add(title.toLowerCase());
     const deadline = plain(o.deadline, 120);
     const cost = plain(o.cost, 120);
@@ -138,6 +177,7 @@ export function parseCandidates(parts: PartLike[]): ResearchCandidate[] {
 export const MATCH_SYSTEM = [
   UNTRUSTED_DATA_RULE,
   "Pick the candidates that fit this student and say why in one sentence. Never write essay prose.",
+  "Never name the student, their school or their town in a reason; write \"the student\".",
 ].join("\n");
 
 export const MATCH_SCHEMA = {
@@ -214,13 +254,42 @@ export function validatePicks(raw: unknown, kept: Kept[]): RecommendationDraft[]
   return out;
 }
 
+/**
+ * Drops any pick whose reason holds the student's name or email (the match model reads the student's record, so it can
+ * slip). Only the model-written `why` is checked. Titles, deadlines and costs come from the web and are deliberately
+ * not checked against school or hometown: a program in the student's own town is a legitimate result, and
+ * recommendations are counselor-only.
+ */
+export function dropPicksNamingStudent<T extends { why: string }>(drafts: T[], identity: { name: string | null; email: string | null }): T[] {
+  const tokens = identityTokens({ name: identity.name, email: identity.email, school: null, hometown: null });
+  return drafts.filter((d) => {
+    try {
+      assertNoIdentity(d.why, tokens);
+      return true;
+    } catch (err) {
+      if (err instanceof IdentityLeakError) return false;
+      throw err;
+    }
+  });
+}
+
 // --- the hidden task made on accept -------------------------------------------------------------------------------
 
-/** Title and instructions for the counselor's task, from stored recommendation text only. */
+const TASK_CAP = 8000;
+
+/** Title and instructions for the counselor's task, from stored recommendation text only. Whole URLs or none. */
 export function taskTextFor(rec: { title: string; why: string; sources: { url: string }[] }): { title: string; instructions: string } {
-  const urls = rec.sources.map((s) => cleanText(s.url)).filter(Boolean);
-  const instructions = [cleanText(rec.why), urls.length ? `Sources: ${urls.join(", ")}` : "", "Verify dates and costs before applying."]
-    .filter(Boolean)
-    .join("\n\n");
-  return { title: cleanText(rec.title).slice(0, 300) || "Recommended activity", instructions: instructions.slice(0, 8000) };
+  const why = cleanText(rec.why);
+  const tail = "Verify dates and costs before applying.";
+  const room = TASK_CAP - why.length - tail.length - 4 - "Sources: ".length;
+  const urls: string[] = [];
+  let used = 0;
+  for (const u of rec.sources.map((x) => cleanText(x.url)).filter(Boolean)) {
+    const add = u.length + (urls.length ? 2 : 0);
+    if (used + add > room) continue;
+    urls.push(u);
+    used += add;
+  }
+  const instructions = [why, urls.length ? `Sources: ${urls.join(", ")}` : "", tail].filter(Boolean).join("\n\n");
+  return { title: cleanText(rec.title).slice(0, 300) || "Recommended activity", instructions: instructions.slice(0, TASK_CAP) };
 }

@@ -11,6 +11,7 @@ if (refusal) {
   app.log.error(refusal);
   process.exit(1);
 }
+if (env.RESEARCH_FAKE) app.log.warn("RESEARCH_FAKE is on: research returns canned fixtures, not real results");
 
 await verifyImportWorkerAtBoot(app.log);
 

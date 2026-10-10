@@ -4,7 +4,7 @@ import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
 import { fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, cleanText, firstJson, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, cleanText, dropPicksNamingStudent, jsonObjectsWithSpans, firstJson, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
   taskTextFor, validatePicks,
 } from "../../src/lib/research/prompt.js";
 import { realSeam, seamFor } from "../../src/lib/research/run.js";
@@ -59,7 +59,8 @@ test("parseCandidates: one per cited part, citations are the sources, uncited pa
     { text: '{"title":"A"}', citations: cite("https://example.org/a2") },
     { text: "plain prose with a citation", citations: cite("https://example.org/e") },
   ]);
-  assert.deepEqual(out.map((c) => c.title), ["A", "B", "D"]);
+  // A top-level array is judged object by object: both C objects sit in one cited part, so both keep its citation.
+  assert.deepEqual(out.map((c) => c.title), ["A", "B", "C1", "C2", "D"]);
   assert.deepEqual(out[0]!.sources, [{ url: "https://example.org/a", title: "T" }]);
   assert.equal(out[0]!.deadline, "Mar 1");
   assert.equal(out[1]!.sources.length, 1);
@@ -129,4 +130,64 @@ test("the fake's research answer is the real result shape, and the keeper leaves
     const picks = validatePicks(fakeMatch(out), out);
     assert.equal(picks.length, 2);
   }
+});
+
+// The citations API splits one answer into blocks at citation boundaries: opening fragment (uncited), cited middle, tail (uncited).
+const cite = (url: string) => [{ url, title: "Page" }];
+const splitCandidate = (obj: { title: string; summary: string; deadline?: string }, url: string | null) => {
+  const json = JSON.stringify(obj);
+  const at = json.indexOf(obj.summary);
+  return [
+    { text: json.slice(0, at), citations: [] },
+    { text: obj.summary, citations: url ? cite(url) : [] },
+    { text: json.slice(at + obj.summary.length), citations: [] },
+  ];
+};
+test("parseCandidates reads candidates whose JSON is split across blocks with the citation on the middle one", () => {
+  const parts = [
+    { text: "Here is what I found:\n```json\n", citations: [] },
+    ...splitCandidate({ title: "Split One", summary: "A lab placement.", deadline: "May 1" }, "https://example.org/one"),
+    { text: "\n", citations: [] },
+    ...splitCandidate({ title: "Split Two", summary: "A summer course." }, "https://example.org/two"),
+    { text: "\n", citations: [] },
+    ...splitCandidate({ title: "Uncited Three", summary: "No source for this." }, null),
+    { text: "\n```\nHope that helps.", citations: [] },
+  ];
+  const out = parseCandidates(parts);
+  assert.deepEqual(out.map((c) => c.title), ["Split One", "Split Two"]);
+  assert.deepEqual(out[0]!.sources, [{ url: "https://example.org/one", title: "Page" }]);
+  assert.deepEqual(out[1]!.sources, [{ url: "https://example.org/two", title: "Page" }]);
+  assert.equal(out[0]!.deadline, "May 1");
+});
+test("the brace scanner respects strings and escapes and skips what is not JSON", () => {
+  const obj = { a: '}"{', b: { c: 1 } };
+  const found = jsonObjectsWithSpans(`x { not json } y ${JSON.stringify(obj)} z`);
+  assert.equal(found.length, 1);
+  assert.deepEqual(found[0]!.value, obj);
+});
+
+test("a pick whose reason names the student is dropped and the others stay", () => {
+  const picks = [
+    { title: "A", why: "Fits Maya's marine biology interest." },
+    { title: "B", why: "Fits the student's interests." },
+    { title: "C", why: "Reach out at maya.t@example.com." },
+  ];
+  const out = dropPicksNamingStudent(picks, { name: "Maya Test", email: "maya.t@example.com" });
+  assert.deepEqual(out.map((p) => p.title), ["B"]);
+});
+test("a program in the student's own town is kept: titles are not checked against school or hometown", () => {
+  const k = [{ title: "Cheyenne Marine Lab Program", summary: "s", sources: [{ url: "https://example.org/a", title: null }], checkedAt: "2026-10-10T00:00:00.000Z" }];
+  const drafts = validatePicks({ picks: [{ index: 0, why: "Close to home and relevant.", effort: "low" }] }, k);
+  const out = dropPicksNamingStudent(drafts, { name: "Avery Quinlan", email: "avery.q@example.com" });
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.title, "Cheyenne Marine Lab Program");
+});
+test("the task text never cuts a source URL in half", () => {
+  const long = (n: number) => `https://example.org/${"p".repeat(n)}`;
+  const t = taskTextFor({ title: "T", why: "w".repeat(7500), sources: [{ url: long(600) }, { url: long(100) }, { url: long(500) }] });
+  assert.ok(t.instructions.length <= 8000);
+  assert.ok(t.instructions.includes(long(100)));
+  assert.ok(!t.instructions.includes(long(600)));
+  assert.ok(t.instructions.endsWith("Verify dates and costs before applying."));
+  for (const m of t.instructions.match(/https:\/\/\S+/g) ?? []) assert.ok(m.replace(/,$/, "") === long(100), "only whole URLs");
 });

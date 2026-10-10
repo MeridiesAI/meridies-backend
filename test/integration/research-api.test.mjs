@@ -33,8 +33,9 @@ const col = await call(c.token, "POST", `/students/${s.id}/research/college-list
 check("college research runs", col.status === 200 && col.body.recommendations.length > 0);
 const accC = await call(c.token, "POST", `/recommendations/${col.body.recommendations[0].id}/accept`, {});
 check("accepting a college adds it to the list", accC.status === 200 && accC.body.acceptedAs.type === "student_college");
-const dis = await call(c.token, "POST", `/recommendations/${col.body.recommendations[1]?.id ?? col.body.recommendations[0].id}/dismiss`, {});
-check("dismiss works", dis.status === 200 || dis.status === 409);
+const disId = col.body.recommendations[1].id;
+const dis = await call(c.token, "POST", `/recommendations/${disId}/dismiss`, {});
+check("dismiss works", dis.status === 200 && (await sql(`select status from public.recommendations where id = '${disId}'`)) === "dismissed", String(dis.status));
 
 const owner = await user("res-api-owner"); const other = await user("res-api-other");
 await firmWith(owner, [c, other]);
@@ -77,6 +78,21 @@ check("a student can't list recommendations", (await call(s.token, "GET", `/stud
 check("a student can't accept", (await call(s.token, "POST", `/recommendations/${rec.id}/accept`, {})).status === 403);
 check("a student's task list doesn't show the accepted activity", !JSON.stringify((await call(s.token, "GET", "/tasks")).body).includes(rec.title));
 check("an unknown recommendation id is 404", (await call(c.token, "POST", `/recommendations/00000000-0000-4000-8000-000000000001/accept`, {})).status === 404);
+
+// The second layer: a search query that holds the student's school discards the run and stores nothing.
+const c3 = await user("res-api-3");
+const { student: s3 } = await seedStudent(c3, "full");
+const leak = await call(c3.token, "POST", `/students/${s3.id}/research/activities`, { focus: "fixture:leak-query" });
+check("a query holding the student's school is refused with 400", leak.status === 400, JSON.stringify(leak.body).slice(0, 200));
+check("…the run is marked discarded with the identity-filter code", (await sql(`select status || ':' || error from public.research_runs where student_id = '${s3.id}'`)) === "discarded:identity-filter");
+check("…and nothing was stored", (await sql(`select count(*) from public.recommendations where student_id = '${s3.id}'`)) === "0");
+check("…and the 400 doesn't repeat the school", !JSON.stringify(leak.body).toLowerCase().includes("lincoln"));
+// A run that found nothing is cached too.
+const e1 = await call(c3.token, "POST", `/students/${s3.id}/research/activities`, { focus: "fixture:empty" });
+const e2 = await call(c3.token, "POST", `/students/${s3.id}/research/activities`, { focus: "fixture:empty" });
+check("a run with no fits succeeds with an empty list", e1.status === 200 && e1.body.recommendations.length === 0 && e1.body.cached === false);
+check("…and the repeat is served from cache, empty", e2.status === 200 && e2.body.cached === true && e2.body.runId === e1.body.runId && e2.body.recommendations.length === 0);
+check("…and refresh runs it again", (await call(c3.token, "POST", `/students/${s3.id}/research/activities`, { focus: "fixture:empty", refresh: true })).body.cached === false);
 
 let limited = false;
 for (let i = 0; i < 6; i++) { const r = await call(c.token, "POST", `/students/${s.id}/research/activities`, { refresh: true }); if (r.status === 429) limited = true; }

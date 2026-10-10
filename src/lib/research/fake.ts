@@ -25,21 +25,32 @@ const COLLEGES: Fixture[] = [
   { title: "Beta Example University", summary: "A university with undergraduate research in the sciences.", deadline: "November 1", url: "https://example.org/program-b" },
 ];
 
-export function fakeResearch(feature: "college_list" | "activities"): ResearchResult {
-  const rows = feature === "college_list" ? COLLEGES : ACTIVITIES;
+/**
+ * Test hooks, reachable only here (the fake is never used in production): a focus of FOCUS_LEAK makes the fake issue a
+ * search query holding the fixture student's school ("Lincoln High", the "full" fixture), to exercise the post-run
+ * identity check; FOCUS_EMPTY makes the search find nothing.
+ */
+export const FOCUS_LEAK = "fixture:leak-query";
+export const FOCUS_EMPTY = "fixture:empty";
+
+export function fakeResearch(feature: "college_list" | "activities", focus: string | null = null): ResearchResult {
+  const rows = focus === FOCUS_EMPTY ? [] : feature === "college_list" ? COLLEGES : ACTIVITIES;
   const parts = rows.map((r) => ({
     text: JSON.stringify({ title: r.title, summary: r.summary, deadline: r.deadline, cost: r.cost }),
     citations: [{ url: r.url, title: r.title, citedText: r.summary }],
   }));
   // Connective text with no citation: the parser must ignore it.
-  parts.unshift({ text: "Here are some options I found.", citations: [] });
+  if (rows.length) parts.unshift({ text: "Here are some options I found.", citations: [] });
   const seenUrls = rows.filter((r) => !r.url.startsWith("https://invented.example")).map((r) => r.url);
   return {
     parts,
     sources: rows.map((r) => ({ url: r.url, title: r.title })),
     runId: null,
     refused: false,
-    queries: [feature === "college_list" ? "colleges strong biology undergraduate research" : "marine science summer programs high school"],
+    queries: [
+      feature === "college_list" ? "colleges strong biology undergraduate research" : "marine science summer programs high school",
+      ...(focus === FOCUS_LEAK ? ["robotics programs near lincoln high school"] : []),
+    ],
     seenUrls,
   };
 }
@@ -50,7 +61,7 @@ export function fakeMatch(candidates: unknown[]): { picks: { index: number; why:
 
 export const fakeSeam: ResearchSeam = {
   model: "fake-fixture",
-  research: async ({ feature }) => fakeResearch(feature),
+  research: async ({ feature, brief }) => fakeResearch(feature, brief.focus),
   match: async ({ kept }) => fakeMatch(kept),
   check: async () => ({ status: "ok" }),
 };
