@@ -52,6 +52,7 @@ export type ResearchBrief = {
   feature: "college_list" | "activities";
   grade: number | null;
   region: string | null;
+  city: string | null;
   majors: string[];
   interests: string[];
   gpaBand: string;
@@ -86,18 +87,9 @@ function hasNonAsciiLetter(s: string): boolean {
   return [...s].some((ch) => /\p{L}/u.test(ch) && !/^[\x00-\x7F]$/.test(ch));
 }
 
-const STATE_NAMES = [
-  "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida", "georgia",
-  "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
-  "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire",
-  "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
-  "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont", "virginia", "washington",
-  "west virginia", "wisconsin", "wyoming",
-];
-
 /**
  * Words that are generic for a school and say nothing about where it is. They are not added as word tokens (the whole
- * school or hometown string still is). Place words (city, valley, park, ...) and state names are deliberately NOT here:
+ * school string still is). Place words (valley, park, ...) and state names are deliberately NOT here:
  * too broad a list leaks, too narrow a list only refuses runs.
  */
 export const IDENTITY_STOPLIST: ReadonlySet<string> = new Set([
@@ -133,106 +125,158 @@ function keepPart(part: string): boolean {
   return len >= 3 || (len >= 2 && hasNonAsciiLetter(part));
 }
 
-/** School and hometown words: 4+ characters, or 2+ when non-ASCII, and not a generic word. */
+/** School words: 4+ characters, or 2+ when non-ASCII, and not a generic word. */
 function keepPlaceWord(w: string): boolean {
   const len = [...w].length;
   return (len >= 4 || (len >= 2 && hasNonAsciiLetter(w))) && !IDENTITY_STOPLIST.has(w) && !IDENTITY_FILLER_WORDS.has(w);
 }
 
-/** True for the part after a hometown's last comma when it is a two-letter code or a full US state name. */
+/** The 50 states and DC: folded full name to two-letter code. */
+const STATE_CODES: Readonly<Record<string, string>> = {
+  "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA", "colorado": "CO",
+  "connecticut": "CT", "delaware": "DE", "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+  "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS", "kentucky": "KY", "louisiana": "LA",
+  "maine": "ME", "maryland": "MD", "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+  "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ",
+  "new mexico": "NM", "new york": "NY", "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+  "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC", "south dakota": "SD",
+  "tennessee": "TN", "texas": "TX", "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+  "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+};
+
+/** True for a two-letter code or a full US state name (already folded). */
 function isStatePart(p: string): boolean {
   const t = p.trim();
-  return /^[a-z]{2}$/.test(t) || STATE_NAMES.includes(t);
+  return /^[a-z]{2}$/.test(t) || Object.hasOwn(STATE_CODES, t);
 }
 
-function addPlace(raw: string | null, out: Set<string>, kind: "school" | "hometown"): void {
-  const hometown = kind === "hometown";
+/** The two-letter code for the folded part after a hometown's last comma, else null. */
+function stateCode(p: string): string | null {
+  const t = p.trim();
+  if (/^[a-z]{2}$/.test(t)) return t.toUpperCase();
+  return Object.hasOwn(STATE_CODES, t) ? STATE_CODES[t]! : null;
+}
+
+/**
+ * The student's state and city from the hometown free text ("City, ST", "City, State", "Brooklyn, New York, NY").
+ * State: the part after the last comma, when it is a state code or name. City: the part just before the last comma (the
+ * text between the second-to-last and last comma when there are two or more), or the whole string when there is no
+ * comma and it isn't a state; kept only when it is 1 to 4 words, at most 40 characters, letters, spaces and - ' . only.
+ */
+export function locationOf(hometown: string | null): { state: string | null; city: string | null } {
+  const s = fold(hometown ?? "").replace(/[\u2018\u2019]/g, "'").trim().replace(/\s+/g, " ");
+  if (!s) return { state: null, city: null };
+  const parts = s.split(",").map((p) => p.trim());
+  let state: string | null = null;
+  let cityRaw: string | null;
+  if (parts.length === 1) {
+    cityRaw = isStatePart(s) ? null : s;
+  } else {
+    state = stateCode(parts[parts.length - 1]!);
+    cityRaw = parts[parts.length - 2]!;
+  }
+  return { state, city: cityRaw === null ? null : cityOf(cityRaw) };
+}
+
+function cityOf(raw: string): string | null {
+  const c = raw.trim().replace(/\s+/g, " ");
+  if (!c || c.length > 40 || !/^[\p{L} \-'.]+$/u.test(c)) return null;
+  const words = c.split(" ");
+  if (words.length > 4 || !words.every((w) => /\p{L}/u.test(w))) return null;
+  return words.map((w) => w.replace(/(^|[-'.])(\p{L})/gu, (_m, sep: string, ch: string) => sep + ch.toUpperCase())).join(" ");
+}
+
+/**
+ * A token with the way it matches. `prefix` is true only for tokens from the student's name and email, which also match
+ * as a word prefix ("the Okafors"); school tokens match as whole words or whole phrases only.
+ */
+export type IdentityToken = { text: string; prefix: boolean };
+
+function addSchool(raw: string | null, out: Map<string, boolean>): void {
+  const add = (t: string) => { if (!out.has(t)) out.set(t, false); };
   const s = fold(raw ?? "").trim().replace(/\s+/g, " ");
   if (!s) return;
-  out.add(s);
-  let wordSource = s;
-  const comma = s.lastIndexOf(",");
-  // "City, ST" or "City, State": the state is not tokenized by word (it stays inside the whole-string token).
-  if (hometown && comma >= 0 && isStatePart(s.slice(comma + 1))) wordSource = s.slice(0, comma);
+  add(s);
   const stripped = s.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
-  if (stripped) out.add(stripped);
+  if (stripped) add(stripped);
   // "Lee High School" is also written "Lee High": the school without its last generic word, as a phrase. Only when two
   // or more words are left and one of them says something about the school ("Central High School" gets no alias).
-  if (kind === "school") {
-    const words = s.split(" ");
-    const last = words[words.length - 1]!.replace(NON_ALNUM, "");
-    const rest = words.slice(0, -1);
-    // Filler words ("of", "the") never count as distinctive and are trimmed from both ends of the alias, so "Academy
-    // of Science" gets none and "Bronx High School of Science" yields "bronx high school".
-    while (rest.length && isFiller(rest[rest.length - 1]!)) rest.pop();
-    while (rest.length && isFiller(rest[0]!)) rest.shift();
-    if (rest.length >= 2 && IDENTITY_STOPLIST.has(last) && rest.some(isDistinctive)) {
-      const alias = rest.join(" ");
-      out.add(alias);
-      const aliasStripped = alias.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
-      if (aliasStripped) out.add(aliasStripped);
-    }
+  const words = s.split(" ");
+  const last = words[words.length - 1]!.replace(NON_ALNUM, "");
+  const rest = words.slice(0, -1);
+  // Filler words ("of", "the") never count as distinctive and are trimmed from both ends of the alias, so "Academy
+  // of Science" gets none and "Bronx High School of Science" yields "bronx high school".
+  while (rest.length && isFiller(rest[rest.length - 1]!)) rest.pop();
+  while (rest.length && isFiller(rest[0]!)) rest.shift();
+  if (rest.length >= 2 && IDENTITY_STOPLIST.has(last) && rest.some(isDistinctive)) {
+    const alias = rest.join(" ");
+    add(alias);
+    const aliasStripped = alias.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
+    if (aliasStripped) add(aliasStripped);
   }
-  for (const w of wordSource.split(/[\s,]+/)) {
+  for (const w of s.split(/[\s,]+/)) {
     for (const c of [w.replace(NON_ALNUM, ""), ...w.split(/[^\p{L}\p{N}]+/u)]) {
-      if (c && keepPlaceWord(c)) out.add(c);
+      if (c && keepPlaceWord(c)) add(c);
     }
   }
 }
 
-export function identityTokens(id: Facts["identity"]): string[] {
-  const out = new Set<string>();
+export function identityTokens(id: Facts["identity"]): IdentityToken[] {
+  // Name and email tokens match as a word prefix too; a token is stored once, with the widest rule it was added under.
+  const out = new Map<string, boolean>();
+  const addPrefix = (t: string) => { out.set(t, true); };
   const name = fold(id.name ?? "").trim();
   if (name) {
     const parts = name.split(NAME_SEPARATORS).filter(Boolean);
-    for (const part of parts) if (keepPart(part)) out.add(part);
-    if (parts.length > 1) out.add(parts.join(" "));
+    for (const part of parts) if (keepPart(part)) addPrefix(part);
+    if (parts.length > 1) addPrefix(parts.join(" "));
     const joined = name.replace(NON_ALNUM, "");
-    if (keepPart(joined)) out.add(joined);
+    if (keepPart(joined)) addPrefix(joined);
     // Words joined by an apostrophe or hyphen also appear fused ("obrien", "maryjane").
     for (const word of name.split(/[\s,]+/)) {
       if (/['\u2018\u2019\u02bc`\u00b4-]/u.test(word)) {
         const fused = word.replace(NON_ALNUM, "");
-        if (keepPart(fused)) out.add(fused);
+        if (keepPart(fused)) addPrefix(fused);
       }
     }
   }
   const email = fold(id.email ?? "").trim();
   if (email) {
-    out.add(email);
+    addPrefix(email);
     const at = email.lastIndexOf("@");
     const local = at > 0 ? email.slice(0, at) : email;
-    if (keepPart(local)) out.add(local);
+    if (keepPart(local)) addPrefix(local);
     const fusedLocal = local.replace(NON_ALNUM, "");
-    if (keepPart(fusedLocal)) out.add(fusedLocal);
+    if (keepPart(fusedLocal)) addPrefix(fusedLocal);
     for (const piece of local.split(/[^\p{L}\p{N}]+/u)) {
-      if (keepPart(piece) && /\p{L}/u.test(piece)) out.add(piece);
+      if (keepPart(piece) && /\p{L}/u.test(piece)) addPrefix(piece);
     }
   }
-  addPlace(id.school, out, "school");
-  addPlace(id.hometown, out, "hometown");
+  const schoolTokens = new Map<string, boolean>();
+  addSchool(id.school, schoolTokens);
+  // The hometown is not identifying: it is shared by many students and the brief carries it (see locationOf).
+  for (const [t] of schoolTokens) if (!out.has(t)) out.set(t, false);
   // Never a token that is a single character or has no letter or digit.
-  return [...out].filter((t) => [...t].length >= 2 && /[\p{L}\p{N}]/u.test(t));
+  return [...out].filter(([t]) => [...t].length >= 2 && /[\p{L}\p{N}]/u.test(t)).map(([text, prefix]) => ({ text, prefix }));
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * Throws when the text holds any token. Non-ASCII tokens match anywhere. ASCII tokens of 5 or more characters match as a
- * word prefix (the token starts at a word boundary and anything may follow: "okafors", "avery2027", "lee high school"
- * for "lee high"); shorter ones must be whole words, so the four-letter names that are also common words (Will, Mark,
+ * Throws when the text holds any token. Non-ASCII tokens match anywhere. ASCII tokens from the name or email (`prefix`)
+ * of 5 or more characters match as a word prefix (the token starts at a word boundary and anything may follow: "okafors", "avery2027"); school tokens and shorter ones must be whole words or whole phrases, so the four-letter names that are also common words (Will, Mark,
  * Hope, Rose) don't refuse every "willing" or "marking".
  */
-export function assertNoIdentity(text: string, tokens: string[]): void {
+export function assertNoIdentity(text: string, tokens: IdentityToken[]): void {
   const t = fold(text);
-  for (const raw of tokens) {
+  for (const { text: raw, prefix } of tokens) {
     const tok = fold(raw);
     if (!tok) continue;
     if (hasNonAsciiLetter(tok)) {
       if (t.includes(tok)) throw new IdentityLeakError();
       continue;
     }
-    const after = [...tok].length >= 5 ? "" : "([^\\p{L}\\p{N}]|$)";
+    const after = prefix && [...tok].length >= 5 ? "" : "([^\\p{L}\\p{N}]|$)";
     if (new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(tok)}${after}`, "u").test(t)) throw new IdentityLeakError();
   }
 }
@@ -317,10 +361,14 @@ export function toResearchBrief(facts: Facts, feature: ResearchBrief["feature"],
       }
     })
     .slice(0, 5);
+  // The student's state and city come from the hometown text: they are shared by many students and bring back local
+  // results, so they go into the brief and the hometown is not an identity token. A non-null facts.state wins.
+  const place = locationOf(facts.identity.hometown);
   return {
     feature,
     grade: grade(facts.gradYear, now),
-    region: region(facts.state),
+    region: region(facts.state) ?? place.state,
+    city: place.city,
     majors,
     interests: [...new Set(facts.activityCategories.map(category).filter((c): c is string => !!c))],
     gpaBand: gpaBand(facts.gpa),

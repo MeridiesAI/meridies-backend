@@ -151,7 +151,7 @@ function briefOrRefuse(ctx: StudentContext, feature: Feature, focus: string | nu
     return toResearchBrief(ctx.facts, feature, focus);
   } catch (err) {
     if (!(err instanceof IdentityLeakError)) throw err;
-    throw badRequest("The focus contains the student's name, school or hometown. Take it out and try again.");
+    throw badRequest("The focus contains the student's name, email or school. Take it out and try again.");
   }
 }
 

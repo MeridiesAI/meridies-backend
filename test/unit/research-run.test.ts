@@ -14,7 +14,7 @@ const facts = {
   intendedMajors: ["Biology"], gradYear: "2027", state: "WY",
   gpa: { value: 3.74, scale: "4.0" }, sat: 1460, act: null,
   activityCategories: ["robotics", "debate"],
-  identity: { name: "Avery Quinlan", email: "avery.q@example.com", school: "Cheyenne Central High", hometown: "Cheyenne" },
+  identity: { name: "Avery Quinlan", email: "avery.q@example.com", school: "Lincoln Central High", hometown: "Cheyenne, WY" },
 };
 const now = new Date("2026-10-10");
 
@@ -22,10 +22,10 @@ test("the research question carries the brief only, and only inside the data blo
   const brief = toResearchBrief(facts, "activities", "hands-on lab work", now);
   const q = buildResearchQuestion(brief);
   const lower = q.toLowerCase();
-  for (const t of ["avery", "quinlan", "avery.q", "example.com", "cheyenne", "central high"]) assert.ok(!lower.includes(t), `${t} leaked`);
+  for (const t of ["avery", "quinlan", "avery.q", "example.com", "lincoln", "central high"]) assert.ok(!lower.includes(t), `${t} leaked`);
   assert.match(q, /<data source="brief" kind="untrusted">/);
   const outside = q.replace(/<data [^>]*>[\s\S]*<\/data>/, "").toLowerCase();
-  for (const field of ["biology", "robotics", "debate", "hands-on lab work", "3.6", "sat 1400", "wy"]) {
+  for (const field of ["biology", "robotics", "debate", "hands-on lab work", "3.6", "sat 1400", "wy", "cheyenne"]) {
     assert.ok(lower.includes(field), `${field} missing from the data block`);
     assert.ok(!outside.includes(field), `${field} appears outside the data block`);
   }

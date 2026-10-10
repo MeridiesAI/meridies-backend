@@ -14,6 +14,7 @@ check("context used is reported", Array.isArray(r1.body.contextUsed.used));
 const q = await sql(`select brief::text from public.research_runs where id = '${r1.body.runId}'`);
 check("the stored brief has no name or email", !q.toLowerCase().includes(s.email.split("@")[0]) && !q.includes(s.email));
 check("the stored brief carries interest categories for the full fixture", Number(await sql(`select jsonb_array_length(brief->'interests') from public.research_runs where id = '${r1.body.runId}'`)) > 0, q.slice(0, 300));
+check("the stored brief carries the student's state and city", (await sql(`select brief->>'region' || '|' || (brief->>'city') from public.research_runs where id = '${r1.body.runId}'`)) === "CA|Fresno", q.slice(0, 300));
 
 const r2 = await call(c.token, "POST", `/students/${s.id}/research/activities`, {});
 check("a second run within 7 days is cached", r2.body.cached === true && r2.body.runId === r1.body.runId);

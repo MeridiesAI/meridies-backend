@@ -859,11 +859,11 @@ column and tables.
   the identity filter. The match step (`FAST_MODEL`) is the
   only step that reads the student's context (`buildStudentContext`, the
   `college-list` or `activities` profile); it sees the kept candidates, not the web.
-- **The brief** (`brief.ts`): `feature`, `grade`, `region`, `majors`,
+- **The brief** (`brief.ts`): `feature`, `grade`, `region`, `city`, `majors`,
   `interests`, `gpaBand`, `testBand`, `focus`. Majors are kept only when they pass
   a shape rule (1 to 5 words, at most 60 characters, letters, spaces and
   `& - / , '` only; anything else is dropped silently), at most 5. A major that
-  holds the student's name, school or hometown (the identity filter below) is
+  holds the student's name, email or school (the identity filter below) is
   dropped too and the run goes ahead without it. Interests are the student's
   activity categories turned into a fixed vocabulary of generic words
   (`ACTIVITY_CATEGORIES`): `ACTIVITY_TYPE_CATEGORY` in `brief.ts` maps every
@@ -877,16 +877,31 @@ column and tables.
   band on a 4.0 or 5.0 scale, the scale label chosen by the scale kind and never
   copied from the student's string (`unknown` when the GPA can't be put on a 4 or
   5 point scale). The test band is the SAT in 100s, else the ACT in 3s, else
-  null. The grade is 9 to 12 from the graduation year, else null. `region` is
-  kept only as a two-letter code, and is null today because the context layer
-  doesn't carry the student's state (it isn't on the allowlist). The counselor's
+  null. The grade is 9 to 12 from the graduation year, else null. `region` and
+  `city` come from the student's hometown (`facts.identity.hometown`, free text,
+  the only location on the AI allowlist), parsed in `brief.ts` (`locationOf`): a
+  state or city is shared by many students and brings back local results, so
+  both are sent. `region` is the part after the last comma when it is a US state
+  code or full state name (all 50 plus DC), as the two-letter uppercase code,
+  else null; a non-null `facts.state` (null today) would win, kept only as two
+  letters. `city` is the part between the second-to-last and the last comma
+  ("Brooklyn, New York, NY" gives "New York"), or just before the last comma, or
+  the whole string when there is no comma and it isn't a state; it is kept only
+  when it is 1 to 4 words, at most 40 characters, with letters, spaces and `- ' .`
+  only (no digits, `@` or other punctuation), title-cased, else null, so a street
+  address, an email or a sentence never reaches the model ("123 Main St,
+  Cheyenne, WY" gives "Cheyenne"; "New York NY" with no comma gives city "New
+  York Ny", region null). The counselor's
   focus is scanned for identity in full, then cut to 200 characters.
 - **The identity filter** (`identityTokens`, `assertNoIdentity`). Identifying
-  text is: the name's parts of three or more characters (two when they hold a
-  non-ASCII letter), the whole name, the name with its apostrophes and hyphens
-  fused ("obrien"), the email, its local part and the pieces of it, the school
-  and the hometown whole and with punctuation stripped, each word of the
-  school and the hometown of four or more characters (two when non-ASCII) that
+  text is the student's name, email and school; the hometown is not (the brief
+  carries the state and city, and a counselor may type a town in the focus).
+  Each token carries a kind, `{ text, prefix }`. Name and email tokens
+  (`prefix: true`): the name's parts of three or more characters (two when they
+  hold a non-ASCII letter), the whole name, the name with its apostrophes and
+  hyphens fused ("obrien"), the email, its local part and the pieces of it.
+  School tokens (`prefix: false`): the school whole and with punctuation
+  stripped, each word of it of four or more characters (two when non-ASCII) that
   isn't on `IDENTITY_STOPLIST` (generic school words such as "high", "academy",
   "north"), and the school's short form: its name without the last word when
   that word is generic and a distinctive word is left ("Lee High School" also
@@ -894,29 +909,36 @@ column and tables.
   at, in, on, a, an, de, la, el, del, des, du, le, les, y, &) never count as
   distinctive and are trimmed from both ends of the alias, so "Academy of
   Science" and "The Arts Academy" get no alias and "Bronx High School of Science"
-  yields "bronx high school"; fillers are never single-word tokens. The state at the end of a hometown ("Fresno, CA") isn't
-  tokenized by word. Text and tokens are compared after a Unicode fold (NFKC,
+  yields "bronx high school"; fillers are never single-word tokens. Text and
+  tokens are compared after a Unicode fold (NFKC,
   lowercase, invisible format characters and combining marks removed, then the
   letters that don't decompose mapped to ASCII: ø to o, ł to l, đ to d, ß to ss,
   æ to ae, œ to oe, þ to th, ı to i), so accents, full-width letters and
-  zero-width characters don't hide a name. Matching: ASCII tokens of 5 or more
-  characters match as a word prefix (the token starts at a word boundary and
-  anything may follow, so "the Okafors" and "avery2027" are caught); shorter
-  ASCII tokens match whole words only (so a student named Will doesn't refuse
-  "willing"); tokens with a non-ASCII letter match anywhere. The scan runs on the
+  zero-width characters don't hide a name. Matching: ASCII name and email tokens
+  of 5 or more characters match as a word prefix (the token starts at a word
+  boundary and anything may follow, so "the Okafors" and "avery2027" are
+  caught); school tokens and shorter ASCII tokens match whole words or whole
+  phrases only (so a student named Will doesn't refuse "willing", and a student
+  at "Academy of Science" refuses "academy of science robotics" but not
+  "national academy of sciences"); tokens with a non-ASCII letter match
+  anywhere. The scan runs on the
   counselor's focus (in full, before it is cut to 200 characters) and on each
   major; nothing else in the brief is scanned, because the rest is built by code
   from fixed sets and would only trip on the brief's own words (a surname
   "Null", a school "Health Sciences High"). A focus that holds any of it is
-  refused with 400 ("The focus contains the student's name, school or
-  hometown") before the daily cap is spent, a run row is written or a model is
+  refused with 400 ("The focus contains the student's name, email or school")
+  before the daily cap is spent, a run row is written or a model is
   called. After the research, every query the model issued (each search, and
   each URL it fetched) is checked against the same tokens; a hit discards the
   run (`status = 'discarded'`, 400 to the counselor, nothing stored or served).
   Known limits: two-letter Latin name parts ("Li", "Bo") are not tokens; names
   transliterated from a non-Latin script are caught only in the script the
-  student's record uses; and the two layers (focus and post-run queries) share
-  one token list, so a form of the identity the list lacks is missed by both.
+  student's record uses; the two layers (focus and post-run queries) share
+  one token list, so a form of the identity the list lacks is missed by both;
+  the hometown is parsed from free text, so a hometown typed in an odd form
+  gives a null city or region (the run still works, without local results); and
+  because the city is in the brief, the model's searches will contain it, which
+  is intended.
 - **Sources.** A candidate is kept only if it has a source that came back as a
   real citation, on a URL the run searched or fetched (`seenUrls`, compared
   ignoring `#fragment`, a trailing slash and http versus https), not on
@@ -951,7 +973,7 @@ column and tables.
   after `validatePicks`): a title holding the student's email, whole name (same
   word-boundary rule) or contact text (link, email address, phone number) drops
   the whole suggestion; a deadline or cost holding any of those loses just that
-  field. Single name parts, the school and the hometown are deliberately not
+  field. Single name parts and the school are deliberately not
   checked in titles: a single part would drop real programs ("Lincoln Scholars"
   for a student named Lincoln), and the owner allows a title to name the
   student's town or school, since a local program is a good result.
