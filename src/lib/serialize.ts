@@ -8,6 +8,8 @@
  * that still holds intake answers. Normalized rows win over the blob.
  */
 
+import { accessStatusOf, type AccessStatus } from "./access.js";
+
 export type Role = "student" | "counselor";
 
 export type Profile = {
@@ -29,6 +31,7 @@ export type Profile = {
   high_school: string | null;
   grad_year: string | null;
   profile: Record<string, unknown> | null;
+  counselor_approved_at: string | null;
 };
 
 export type MeridiesUser = {
@@ -41,6 +44,8 @@ export type MeridiesUser = {
   counselorId: string | null;
   counselorName: string | null;
   avatarUrl: string | null;
+  /** Counselors: "pending" until Meridies approves the account. null for students. */
+  accessStatus: AccessStatus | null;
   profile: Record<string, unknown>;
 };
 
@@ -67,6 +72,7 @@ export function toMeridiesUser(
     counselorId: p.counselor_id,
     counselorName: opts.counselorName ?? null,
     avatarUrl: p.avatar_url,
+    accessStatus: accessStatusOf(p),
     profile: {
       ...blob,
       headline: p.headline ?? blob.headline,

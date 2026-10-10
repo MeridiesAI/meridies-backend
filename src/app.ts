@@ -196,7 +196,9 @@ export function buildApp() {
     }
     if (err instanceof HttpError) {
       if (err.statusCode >= 500) request.log.error(err);
-      return reply.code(err.statusCode).send({ error: err.message });
+      return reply
+        .code(err.statusCode)
+        .send(err.code ? { error: err.message, code: err.code } : { error: err.message });
     }
     if ((err as FastifyError).validation) {
       return reply
