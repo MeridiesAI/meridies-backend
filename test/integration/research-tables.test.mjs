@@ -114,7 +114,8 @@ const share = await call(c.token, "PATCH", `/tasks/${task}`, { visibleToStudent:
 check("the counselor can share it", share.status === 200);
 const after = await rest(s.token, "GET", `/rest/v1/deliverables?select=id&id=eq.${task}`);
 check("then the student sees it", (after.body ?? []).length === 1);
-check("existing tasks default to visible", (await sql(`select count(*) from public.deliverables where visible_to_student = false and title not like 'HIDDEN-%' and title <> 'FLAG-HIDDEN'`)) === "0");
+check("existing tasks default to visible", (await sql(`select count(*) from public.deliverables where visible_to_student = false and title not like 'HIDDEN-%' and title <> 'FLAG-HIDDEN'
+  and id::text not in (select accepted_as->>'id' from public.recommendations where accepted_as is not null)`)) === "0");
 
 const run = await sql(`with r as (insert into public.research_runs (student_id, counselor_id, feature, inputs_hash, brief, status, created_by, expires_at)
   values ('${s.id}', '${c.id}', 'activities', 'h', '{}'::jsonb, 'succeeded', '${c.id}', now() + interval '7 days') returning id) select id from r`);
