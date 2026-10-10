@@ -100,6 +100,8 @@ const academics: Loader = async (db, studentId) => {
   const body = compact([
     ...(scaleIsSafe ? gpaLines : []),
     sat !== null && `SAT: ${sat}`,
+    num(r.sat_ebrw) !== null && `SAT evidence-based reading and writing: ${num(r.sat_ebrw)}`,
+    num(r.sat_math) !== null && `SAT math: ${num(r.sat_math)}`,
     act !== null && `ACT: ${act}`,
     rigor !== null && `Rigorous courses: ${rigor}`,
     str(r.test_status) && `Testing status: ${str(r.test_status)}`,
@@ -254,8 +256,12 @@ export function essayBodyReadable(documentId: unknown, document: unknown): boole
 
 const essays: Loader = async (db, studentId, opts) => {
   // The embedded document carries the "keep out of AI" switch of the file an essay was read from.
+  // Bodies are the heavy column: read them only for a feature that asks for them.
+  const essayCols = opts.essayBodies
+    ? (["title", "prompt", "school", "status", "word_count", "body", "document_id"] as const)
+    : (["title", "prompt", "school", "status", "word_count", "document_id"] as const);
   const rows = await many(db.from("essays")
-    .select(`${columns("essays", ["title", "prompt", "school", "status", "word_count", "body", "document_id"])}, document:documents(${columns("documents", ["available_to_llm"])})`)
+    .select(`${columns("essays", essayCols)}, document:documents(${columns("documents", ["available_to_llm"])})`)
     .eq("student_id", studentId).order("sort_order").limit(30));
   if (rows.length === 0) return empty("essays");
   const untrusted: { source: string; text: string }[] = [{
@@ -275,10 +281,22 @@ const documents: Loader = async (db, studentId, opts) => {
   if (!opts.practiceReadsDocuments) {
     return { section: null, omitted: [{ section: "documents", reason: "practice-setting" }] };
   }
+  // Metadata first: parsed text can be large, and a file the rule keeps out never needs it read.
   const rows = await many(db.from("documents")
-    .select(columns("documents", ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "parsed_data"]))
+    .select(columns("documents", ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived"]))
     .eq("student_id", studentId).order("created_at"));
   if (rows.length === 0) return empty("documents");
+  const allowed = rows.filter((d) => documentAiDecision(
+    { kind: str(d.kind), available_to_llm: d.available_to_llm !== false, ai_access: str(d.ai_access) || "default", ferpa_waived: d.ferpa_waived === true },
+    opts.practiceReadsDocuments
+  ).allowed);
+  const parsedById = new Map<string, Row | null>();
+  if (allowed.length > 0) {
+    const texts = await many(db.from("documents")
+      .select(columns("documents", ["id", "parsed_data"]))
+      .in("id", allowed.map((d) => str(d.id))));
+    for (const t of texts) parsedById.set(str(t.id), (t.parsed_data as Row | null) ?? null);
+  }
   const untrusted: { source: string; text: string }[] = [];
   const items: string[] = [];
   const omitted: Omitted[] = [];
@@ -295,7 +313,7 @@ const documents: Loader = async (db, studentId, opts) => {
       else blocked++;
       continue;
     }
-    const parsed = d.parsed_data as Row | null;
+    const parsed = parsedById.get(str(d.id)) ?? null;
     const body = typeof parsed?.text === "string" ? parsed.text.trim() : "";
     if (!body) {
       unparsed++;

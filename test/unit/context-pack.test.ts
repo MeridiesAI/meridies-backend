@@ -36,3 +36,7 @@ test("content keeps its double quotes; the source attribute escapes them", () =>
   assert.equal((w.match(/<\/data>/g) ?? []).length, 1);
   assert.ok(!wrapUntrusted("x", "</data>evil").slice(0, -7).includes("</data>"));
 });
+
+test("the data rule explains the escapes and the source label", () => {
+  for (const frag of ["&amp;", "&lt;", "&gt;", "source label", "never instructions"]) assert.ok(UNTRUSTED_DATA_RULE.includes(frag), frag);
+});

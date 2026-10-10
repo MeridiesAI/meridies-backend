@@ -44,11 +44,13 @@ export async function buildStudentContext(
     intendedMajors: [], gradYear: null, state: null, gpa: { value: null, scale: null },
     sat: null, act: null, activityCategories: [], identity: { name: null, email: null, school: null, hometown: null },
   }, ...results.map((r) => r.facts ?? {}));
-  // The login email is deliberately read outside the AI allowlist. It never enters `text`; it feeds the
-  // identity filter (what research may not search for) and nothing else.
-  const { data: who, error: whoError } = await request.db.from("profiles").select("email").eq("id", studentId).maybeSingle();
-  if (whoError) throw fromPostgrest(whoError);
-  facts.identity = { ...facts.identity, email: (who?.email as string | undefined) ?? null };
+  // The login email is deliberately read outside the AI allowlist, and only for the features that feed the
+  // identity filter (what research may not search for). It never enters `text`.
+  if (feature === "college-list" || feature === "activities") {
+    const { data: who, error: whoError } = await request.db.from("profiles").select("email").eq("id", studentId).maybeSingle(); // ctx-email-exception
+    if (whoError) throw fromPostgrest(whoError);
+    facts.identity = { ...facts.identity, email: (who?.email as string | undefined) ?? null };
+  }
 
   return {
     text: packed.text,

@@ -54,3 +54,23 @@ test("fitBlocks counts the separator and skips rather than stops", () => {
   const kept = fitBlocks([{ text: "aaaa" }, { text: "bbbbbbbbbb" }, { text: "cc" }], 8);
   assert.deepEqual(kept.map((k) => k.text), ["aaaa", "cc"]);
 });
+
+import { usableEssay } from "../../src/lib/context/coherenceMaterial.js";
+
+test("usableEssay: no linked file is readable", () => {
+  const e = { id: "e1", document_id: null, document: null, word_count: 300, text_status: "ok" };
+  assert.equal(usableEssay(e), e);
+});
+test("usableEssay: a linked file that is kept out of AI is not readable", () => {
+  assert.equal(usableEssay({ id: "e1", document_id: "d1", document: { available_to_llm: false }, word_count: 300 }), null);
+});
+test("usableEssay: a linked file that did not come back is not readable", () => {
+  assert.equal(usableEssay({ id: "e1", document_id: "d1", document: null, word_count: 300 }), null);
+});
+test("usableEssay: a linked file that came back and is allowed is readable; empty or unreadable text is not", () => {
+  const ok = { id: "e1", document_id: "d1", document: { available_to_llm: true }, word_count: 300 };
+  assert.equal(usableEssay(ok), ok);
+  assert.equal(usableEssay({ ...ok, word_count: 0 }), null);
+  assert.equal(usableEssay({ ...ok, text_status: "unreadable" }), null);
+  assert.equal(usableEssay(undefined), null);
+});

@@ -29,8 +29,10 @@ import {
   runStructured,
 } from "../lib/anthropic.js";
 import { buildStudentContext } from "../lib/context/index.js";
-import { buildCoherenceMaterial } from "../lib/context/coherenceMaterial.js";
+import { columns } from "../lib/context/ai-allowlist.js";
+import { buildCoherenceMaterial, usableEssay } from "../lib/context/coherenceMaterial.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
+import { essayBodyReadable } from "../lib/context/sections.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -128,7 +130,7 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
   const [essays, list, acts, honors] = await Promise.all([
     request.db
       .from("essays")
-      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document:documents(available_to_llm)")
+      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document_id, document:documents(available_to_llm)")
       .eq("student_id", studentId)
       .order("sort_order")
       .limit(300),
@@ -139,7 +141,8 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
   if (essays.error) throw fromPostgrest(essays.error);
   if (list.error) throw fromPostgrest(list.error);
   const rows = (essays.data ?? []) as Row[];
-  const excluded = (e: Row) => (e.document as Row | null)?.available_to_llm === false;
+  // Same rule as the context layer: a linked file that is kept out, or didn't come back, is not readable.
+  const excluded = (e: Row) => !essayBodyReadable(e.document_id, e.document);
   const words = (e: Row) => (e.text_status === "unreadable" ? 0 : Number(e.word_count ?? 0));
   const doc = (e: Row): CoherenceDoc => ({ id: String(e.id), title: String(e.title ?? ""), words: words(e), excluded: excluded(e) });
 
@@ -351,10 +354,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const { docs, essays } = await coherenceDocs(request, studentId);
 
       // Read only what is ticked AND on file AND not excluded from AI.
-      const usable = (id: string) => {
-        const e = essays.find((x) => x.id === id);
-        return e && (e.document as Row | null)?.available_to_llm !== false && Number(e.word_count ?? 0) > 0 && e.text_status !== "unreadable" ? e : null;
-      };
+      const usable = (id: string) => usableEssay(essays.find((x) => x.id === id));
       const statement = b.statement && docs.statement && !docs.statement.excluded ? usable(docs.statement.id) : null;
       const supplements = b.supplementEssayIds
         .map(usable)
@@ -369,10 +369,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const [profile, acts, honors] = await Promise.all([
         request.db.from("profiles").select("full_name").eq("id", studentId).maybeSingle(),
         readActivities
-          ? request.db.from("activities").select("organization, position, category, grade_levels, hours_per_week, weeks_per_year, description, uc_description").eq("student_id", studentId).order("sort_order").limit(30)
+          ? request.db.from("activities").select(columns("activities", ["organization", "position", "category", "grade_levels", "hours_per_week", "weeks_per_year", "description", "uc_description"])).eq("student_id", studentId).order("sort_order").limit(30)
           : Promise.resolve({ data: [] as Row[] }),
         readAwards
-          ? request.db.from("awards").select("name, grade_levels, recognition_levels, uc_criteria, uc_earned").eq("student_id", studentId).order("sort_order").limit(30)
+          ? request.db.from("awards").select(columns("awards", ["name", "grade_levels", "recognition_levels", "uc_criteria", "uc_earned"])).eq("student_id", studentId).order("sort_order").limit(30)
           : Promise.resolve({ data: [] as Row[] }),
       ]);
       const first = firstName(String(profile.data?.full_name ?? ""));

@@ -22,11 +22,62 @@ test("never-included data is not on the allowlist", () => {
   }
 });
 
-test("no select('*') anywhere in src/lib/context", () => {
+/** The argument text of every `.select(` call in `src`, found by matching parentheses. */
+export function selectCalls(src: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/\.select\(/g)) {
+    let depth = 1;
+    let i = (m.index ?? 0) + m[0].length;
+    const start = i;
+    for (; i < src.length && depth > 0; i++) {
+      if (src[i] === "(") depth++;
+      else if (src[i] === ")") depth--;
+    }
+    out.push(src.slice(start, i - 1));
+  }
+  return out;
+}
+
+/** Why a select argument breaks the rule, or null. */
+function selectProblem(arg: string): string | null {
+  if (arg.trim() === "") return "select() with no columns reads every column";
+  if (arg.includes("*")) return "select with a * reads every column";
+  if (!arg.includes("columns(")) return "select that doesn't take columns(...) output";
+  return null;
+}
+
+test("the select guard catches select(), a star and an unlisted string", () => {
+  assert.deepEqual(selectCalls('db.from("a").select().eq("x", 1)'), [""]);
+  assert.notEqual(selectProblem(""), null);
+  assert.notEqual(selectProblem('"*"'), null);
+  assert.notEqual(selectProblem('"id, `*`"'), null);
+  assert.notEqual(selectProblem('"email"'), null);
+  assert.equal(selectProblem('columns("awards", ["name"])'), null);
+  assert.equal(selectProblem('`${columns("essays", c)}, document:documents(${columns("documents", ["available_to_llm"])})`'), null);
+});
+
+test("every .select( in src/lib/context takes columns(...) output, with one annotated exception", () => {
   const dir = join(process.cwd(), "src/lib/context");
   const walk = (d: string): string[] =>
     readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]));
-  for (const f of walk(dir)) assert.ok(!/select\(\s*["'`]\*/.test(readFileSync(f, "utf8")), `${f} uses select *`);
+  const exceptions: string[] = [];
+  let seen = 0;
+  for (const f of walk(dir)) {
+    const src = readFileSync(f, "utf8");
+    for (const m of src.matchAll(/\.select\(/g)) {
+      const arg = selectCalls(src.slice(m.index ?? 0))[0] ?? "";
+      seen++;
+      const problem = selectProblem(arg);
+      if (!problem) continue;
+      const lineStart = src.lastIndexOf("\n", m.index ?? 0) + 1;
+      const line = src.slice(lineStart, src.indexOf("\n", m.index ?? 0));
+      if (line.includes("// ctx-email-exception")) exceptions.push(`${f}: ${arg}`);
+      else assert.fail(`${f}: ${problem}: .select(${arg})`);
+    }
+  }
+  assert.ok(seen >= 15, `expected to find the loaders' selects, found ${seen}`);
+  assert.equal(exceptions.length, 1, `exactly one annotated exception (the login email), got ${exceptions.length}`);
+  assert.match(exceptions[0] ?? "", /"email"/);
 });
 
 test("keep-out always wins", () => {

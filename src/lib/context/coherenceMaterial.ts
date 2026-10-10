@@ -4,10 +4,21 @@
  * escaped data block, and the cap drops whole blocks, never part of one.
  */
 import { wrapUntrusted } from "./pack.js";
+import { essayBodyReadable } from "./sections.js";
 
 type Row = Record<string, unknown>;
 
 const clip = (s: unknown, max: number) => String(s ?? "").trim().slice(0, max);
+
+/**
+ * The essay a Coherence run may read, or null: it has words, isn't unreadable, and passes the layer's rule for
+ * essay bodies (no linked file, or the linked file came back and is not kept out of AI).
+ */
+export function usableEssay(e: Row | undefined): Row | null {
+  if (!e) return null;
+  if (!essayBodyReadable(e.document_id, e.document)) return null;
+  return Number(e.word_count ?? 0) > 0 && e.text_status !== "unreadable" ? e : null;
+}
 
 /** A data-block source label from a student-written name: one line, bounded. */
 export const sourceTag = (prefix: string, name: unknown): string =>
