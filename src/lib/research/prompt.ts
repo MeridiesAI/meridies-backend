@@ -255,6 +255,18 @@ function capitalizedWordMidSentence(text: string, word: string): boolean {
   return false;
 }
 
+/**
+ * True when every part of the student's name appears in the text, in order and with single spaces between them
+ * (two or more parts), with a word boundary at both ends: "may strongly help" is not a hit for "May Strong".
+ * Both sides go through the same `fold` brief.ts uses.
+ */
+function containsWholeName(text: string, name: string | null): boolean {
+  const parts = fold(name ?? "").split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  const body = parts.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+  return new RegExp(`(?<![${WORD_CHAR}])${body}(?![${WORD_CHAR}])`, "u").test(fold(text));
+}
+
 const CONTACT_TEXT = [/https?:\/\/|www\./i, /[^\s@]+@[^\s@]+\.[^\s@]+/, /\d{7,}/, /\b\d{3}[-.\s)]\s?\d{3}[-.\s]\d{4}\b/];
 
 /**
@@ -269,9 +281,7 @@ export function whyNamesStudent(why: string, identity: { name: string | null; em
   const text = fold(why).replace(/\s+/g, " ");
   const email = fold(identity.email ?? "").trim();
   if (email && text.includes(email)) return true;
-  const name = fold(identity.name ?? "").replace(/\s+/g, " ").trim();
-  const nameParts = name.split(" ").filter(Boolean);
-  if (nameParts.length >= 2 && text.includes(name)) return true;
+  if (containsWholeName(text, identity.name)) return true;
   const keepCaseText = foldKeepCase(why);
   const rawParts = (identity.name ?? "").split(/[\s,._\-'\u2018\u2019\u02bc`\u00b4]+/u).filter(Boolean);
   for (const raw of rawParts) {
@@ -295,11 +305,36 @@ export function whyNamesStudent(why: string, identity: { name: string | null; em
  * into writing a link, an address or a phone number; reasons are later copied into task text that can be shared. Such a
  * pick is KEPT and only its reason is replaced with a fixed sentence: the candidate is a fine result, and dropping it
  * made a student named "Fixture Student" (or Will, Grant, Young...) get nothing at all. Only the model-written `why`
- * is checked. Titles, deadlines and costs come from the web and are deliberately not checked against school or
- * hometown: a program in the student's own town is a legitimate result, and recommendations are counselor-only.
+ * is checked here; titles, deadlines and costs go through `dropStudentInfoInSuggestions`.
  */
 export function replaceWhysNamingStudent<T extends { why: string }>(drafts: T[], identity: { name: string | null; email: string | null }): T[] {
   return drafts.map((d) => (whyNamesStudent(d.why, identity) || CONTACT_TEXT.some((re) => re.test(d.why)) ? { ...d, why: GENERIC_WHY } : d));
+}
+
+/**
+ * Titles, deadlines and costs come from the web, but they must never carry the student's own information. A title
+ * holding the student's email, whole name or contact text (URL, email address, phone number) drops the whole
+ * suggestion; a deadline or cost holding any of those loses just that field and the suggestion stays.
+ *
+ * Deliberately NOT checked: single name parts, the school and the hometown. A single part would drop real programs
+ * ("Lincoln Scholars" for a student named Lincoln), and the product owner explicitly allows the student's town or
+ * school in a title: a local program is a good result.
+ */
+export function dropStudentInfoInSuggestions<T extends { title: string; details: { deadline?: string; cost?: string } }>(
+  drafts: T[], identity: { name: string | null; email: string | null },
+): T[] {
+  const email = fold(identity.email ?? "").trim();
+  const carries = (text: string) =>
+    (email !== "" && fold(text).includes(email)) || containsWholeName(text, identity.name) || CONTACT_TEXT.some((re) => re.test(text));
+  const out: T[] = [];
+  for (const d of drafts) {
+    if (carries(d.title)) continue;
+    const details = { ...d.details };
+    if (details.deadline !== undefined && carries(details.deadline)) delete details.deadline;
+    if (details.cost !== undefined && carries(details.cost)) delete details.cost;
+    out.push({ ...d, details });
+  }
+  return out;
 }
 
 // --- the hidden task made on accept -------------------------------------------------------------------------------

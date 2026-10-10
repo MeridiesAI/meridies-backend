@@ -933,7 +933,8 @@ column and tables.
   true. A pick whose `why` names the student is kept and its `why` is replaced
   with "Fits the student's interests and record." (`replaceWhysNamingStudent`).
   A `why` names the student when it holds the email; the whole name (two or more
-  parts, in order, any case); or one name part (3+ characters, 2+ when
+  parts, in order, any case, with a word boundary at both ends, so "may strongly
+  help" is not a hit for "May Strong"); or one name part (3+ characters, 2+ when
   non-ASCII) written with a capital first letter as a whole word in the middle of
   a sentence. That single-part rule is case-sensitive and skips the first word of
   a sentence, so "This will help the student" and "May suit the student" survive
@@ -941,9 +942,15 @@ column and tables.
   Non-ASCII parts match anywhere, ignoring case. A `why` that holds a link
   (`http://`, `https://`, `www.`), an email address or a phone number (7 or more
   digits in a row, or a ddd-ddd-dddd shape) is replaced the same way, because
-  reasons are copied into task text that can be shared. Recommendation titles, deadlines and costs are
-  deliberately not checked against the student's school or town: a program in the
-  student's own town is a legitimate result, and recommendations are counselor-only.
+  reasons are copied into task text that can be shared.
+  Titles, deadlines and costs are checked too (`dropStudentInfoInSuggestions`,
+  after `validatePicks`): a title holding the student's email, whole name (same
+  word-boundary rule) or contact text (link, email address, phone number) drops
+  the whole suggestion; a deadline or cost holding any of those loses just that
+  field. Single name parts, the school and the hometown are deliberately not
+  checked in titles: a single part would drop real programs ("Lincoln Scholars"
+  for a student named Lincoln), and the owner allows a title to name the
+  student's town or school, since a local program is a good result.
 - **Cache.** A run that succeeded is served for 7 days for the same student,
   feature and brief hash (`briefHash`; majors and interests sorted). `refresh:
   true` bypasses it, and so does any change to the brief, the focus included. A

@@ -5,7 +5,7 @@ import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
 import { fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, cleanText, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, cleanText, dropStudentInfoInSuggestions, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
   replaceWhysNamingStudent, taskTextFor, validatePicks,
 } from "../../src/lib/research/prompt.js";
 import { expiryFor, realSeam, seamFor } from "../../src/lib/research/run.js";
@@ -206,6 +206,37 @@ test("a program in the student's own town is kept: titles are not checked agains
   const out = replaceWhysNamingStudent(drafts, { name: "Avery Quinlan", email: "avery.q@example.com" });
   assert.equal(out.length, 1);
   assert.equal(out[0]!.title, "Cheyenne Marine Lab Program");
+});
+const ident = { name: "Avery Quinlan", email: "avery.q@example.com" };
+const draft = (title: string, details: { deadline?: string; cost?: string } = {}) =>
+  ({ title, why: "w", details: { ...details, effort: "low" as const, verify: true as const }, sources: [] });
+const titlesKept = (titles: string[], id = ident) => dropStudentInfoInSuggestions(titles.map((t) => draft(t)), id).map((d) => d.title);
+test("a title holding the student's email, whole name, a phone number or a link drops the suggestion", () => {
+  const all = ["Write avery.q@EXAMPLE.com Program", "Avery Quinlan Scholarship", "avery  quinlan summer camp", "Call 307-555-0100 Camp",
+    "Camp 3075550100", "Camp www.example.org", "Camp https://x.example/a", "Camp admissions@example.org", "Robotics Camp"];
+  assert.deepEqual(titlesKept(all), ["Robotics Camp"]);
+});
+test("a title with only the town, the school or a single name part is kept", () => {
+  const kept = ["Cheyenne Summer Robotics Camp", "Cheyenne Central High Science Fair", "Avery Fellowship", "Quinlan Prize"];
+  assert.deepEqual(titlesKept(kept), kept);
+  assert.deepEqual(titlesKept(["Lincoln Scholars Program"], { name: "Lincoln Park", email: null }), ["Lincoln Scholars Program"]);
+  assert.deepEqual(titlesKept(["Avery Quinlans Prize"]), ["Avery Quinlans Prize"], "a word boundary at the end");
+});
+test("a deadline or cost holding the email, whole name or contact text is removed and the suggestion stays", () => {
+  const out = dropStudentInfoInSuggestions([
+    draft("Camp", { deadline: "Email avery.q@example.com by May 1", cost: "$150" }),
+    draft("Prize", { deadline: "May 1", cost: "Ask Avery Quinlan or call 307-555-0100" }),
+    draft("Fair", { deadline: "see https://x.example/dates", cost: "free" }),
+  ], ident);
+  assert.deepEqual(out.map((d) => d.title), ["Camp", "Prize", "Fair"]);
+  assert.deepEqual(out.map((d) => [d.details.deadline, d.details.cost]), [[undefined, "$150"], ["May 1", undefined], [undefined, "free"]]);
+  assert.ok(!("deadline" in out[0]!.details));
+  assert.equal(out[0]!.details.effort, "low");
+});
+test("the whole-name match has word boundaries: 'may strongly help' is kept for May Strong, \"Fits May Strong's interests\" is not", () => {
+  assert.equal(swap("May Strong", "may strongly help the student"), "may strongly help the student");
+  assert.equal(swap("May Strong", "Fits May Strong's interests"), GENERIC_WHY);
+  assert.equal(swap("May Strong", "Fits may strong, a lot"), GENERIC_WHY);
 });
 test("the task text never cuts a source URL in half", () => {
   const long = (n: number) => `https://example.org/${"p".repeat(n)}`;

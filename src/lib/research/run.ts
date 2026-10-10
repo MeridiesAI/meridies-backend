@@ -20,7 +20,7 @@ import { researchFakeAllowed, type FakeEnv } from "./bootGuard.js";
 import { keepCandidates } from "./citations.js";
 import { fakeSeam } from "./fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, dropStudentInfoInSuggestions, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
   validatePicks, type RecommendationDraft, type ResearchCandidate,
 } from "./prompt.js";
 
@@ -284,7 +284,9 @@ export async function runResearch(
 
     // 9. Match: a cheap model picks the fits. Nothing to match means an empty, successful run.
     const drafts: RecommendationDraft[] = kept.length
-      ? replaceWhysNamingStudent(validatePicks(await seam.match({ request, ctx, kept, studentId }), kept), ctx.facts.identity)
+      ? dropStudentInfoInSuggestions(
+          replaceWhysNamingStudent(validatePicks(await seam.match({ request, ctx, kept, studentId }), kept), ctx.facts.identity),
+          ctx.facts.identity)
       : [];
 
     // 10. Store.
