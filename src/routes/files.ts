@@ -68,6 +68,7 @@ const documentBody = z
       .enum([
         "transcript", "resume", "essay", "test-report", "award-letter",
         "financial", "common-app", "other",
+        "recommendation-letter", "activity-list", "iep-504", "counselor-only",
       ])
       .optional(),
     availableToLlm: z.boolean().optional(),
@@ -414,6 +415,8 @@ export default async function fileRoutes(app: FastifyInstance) {
           description: z.string().trim().max(2000).nullable().optional(),
           kind: documentBody.shape.kind,
           availableToLlm: z.boolean().optional(),
+          aiAccess: z.enum(["default", "allowed", "excluded"]).optional(),
+          ferpaWaived: z.boolean().optional(),
         })
         .strict()
         .parse(request.body);
@@ -444,6 +447,8 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (b.description !== undefined) update.description = b.description;
       if (b.kind !== undefined) update.kind = b.kind;
       if (b.availableToLlm !== undefined) update.available_to_llm = b.availableToLlm;
+      if (b.aiAccess !== undefined) update.ai_access = b.aiAccess;
+      if (b.ferpaWaived !== undefined) update.ferpa_waived = b.ferpaWaived;
 
       const { data, error } = await request.db
         .from("documents")
