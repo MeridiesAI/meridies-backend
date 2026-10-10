@@ -1,13 +1,14 @@
 // Counselor approval gate: asking for review, and approving by the emailed link.
 import { createHash, randomBytes } from "node:crypto";
-import { API, check, sql, user, call } from "./harness.mjs";
+import { API, CLIENT, check, sql, user, call } from "./harness.mjs";
 
 const sha = (t) => createHash("sha256").update(t).digest("hex");
 const approvedAt = (u) => sql(`select coalesce(counselor_approved_at::text, 'none') from public.profiles where id = '${u.id}'`);
 const page = async (method, token) => {
   const r = await fetch(`${API}/access-review/${token}`, {
     method,
-    ...(method === "POST" ? { headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "" } : {}),
+    headers: { ...CLIENT, ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
+    ...(method === "POST" ? { body: "" } : {}),
   });
   return { status: r.status, html: await r.text(), headers: r.headers };
 };

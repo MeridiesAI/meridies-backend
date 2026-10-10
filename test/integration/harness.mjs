@@ -16,6 +16,11 @@ export const ANON = need("SUPABASE_ANON_KEY");
 const SERVICE = need("SUPABASE_SERVICE_ROLE_KEY");
 const DB_URL = process.env.DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
 const PSQL = process.env.PSQL ?? "psql";
+// The API's in-process limiter allows 300 requests a minute per client address,
+// and every suite calls from this machine. Each suite (one process) presents
+// its own address, so the suites don't spend one shared budget.
+const octet = () => 1 + Math.floor(Math.random() * 250);
+export const CLIENT = { "X-Forwarded-For": `10.${octet()}.${octet()}.${octet()}` };
 const svc = { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, "Content-Type": "application/json" };
 
 /** A confirmed account with a confirmed role, signed in. Counselors are approved unless `approved: false`. */
@@ -36,7 +41,7 @@ export async function user(tag, role = "counselor", { approved = true } = {}) {
 }
 
 export async function call(token, method, path, body) {
-  const r = await fetch(API + path, { method, headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
+  const r = await fetch(API + path, { method, headers: { ...CLIENT, Authorization: `Bearer ${token}`, ...(body !== undefined ? { "Content-Type": "application/json" } : {}) }, body: body !== undefined ? JSON.stringify(body) : undefined });
   const text = await r.text();
   let json;
   try { json = JSON.parse(text); } catch { json = text; }
