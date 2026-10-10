@@ -3,16 +3,29 @@ import { fromPostgrest, notFound } from "../errors.js";
 import { assertCanViewStudent } from "../guards.js";
 import { loadPracticeSettings } from "../practiceSettings.js";
 import { packSections, type Section } from "./pack.js";
-import { PROFILES, type Feature } from "./profiles.js";
+import { PROFILES, type Feature, type SectionName } from "./profiles.js";
 import { LOADERS } from "./sections.js";
 import type { ContextUsage, StudentContext } from "./types.js";
 
 export type { ContextUsage, StudentContext, Feature };
 
-/** What one AI feature may read about one student, packed to that feature's budget. */
-export async function buildStudentContext(request: FastifyRequest, studentId: string, feature: Feature): Promise<StudentContext> {
+/** A profile's sections narrowed to `only`, in the profile's order; names the profile lacks are ignored. */
+export function selectSections(sections: SectionName[], only?: SectionName[]): SectionName[] {
+  return only ? sections.filter((name) => only.includes(name)) : sections;
+}
+
+/**
+ * What one AI feature may read about one student, packed to that feature's budget.
+ * `opts.only` narrows the feature's profile to those sections (never widens it).
+ */
+export async function buildStudentContext(
+  request: FastifyRequest,
+  studentId: string,
+  feature: Feature,
+  opts?: { only?: SectionName[] }
+): Promise<StudentContext> {
   await assertCanViewStudent(request, studentId);
-  const profile = PROFILES[feature];
+  const profile = { ...PROFILES[feature], sections: selectSections(PROFILES[feature].sections, opts?.only) };
   const { settings } = await loadPracticeSettings(request);
   const results = await Promise.all(
     profile.sections.map((name) => LOADERS[name](request.db, studentId, {

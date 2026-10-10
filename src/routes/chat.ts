@@ -14,15 +14,29 @@ import { z } from "zod";
 import { runStructured, streamChat, type ChatTurn } from "../lib/anthropic.js";
 import {
   buildRosterContext,
-  buildStudentContext,
   buildSystemPrompt,
   chatToolCatalog,
   getChatTool,
   REASONING_SCHEMA,
 } from "../lib/chat.js";
+import { buildStudentContext } from "../lib/context/index.js";
+import type { ContextUsage } from "../lib/context/types.js";
 import { fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+
+/** How the AxIS trace names a context section; two sections can share a label. */
+const SOURCE_LABELS: Record<string, string> = {
+  profile: "Student profile",
+  activities: "Activities and awards",
+  awards: "Activities and awards",
+  essays: "Essays",
+  colleges: "College list",
+  meetingNotes: "Meeting notes",
+  deadlines: "Calendar",
+  upcomingMeetings: "Calendar",
+  documents: "Documents",
+};
 
 const AXIS_UNAVAILABLE = "AxIS is unavailable right now. Try again in a few minutes.";
 
@@ -236,28 +250,24 @@ export default async function chatRoutes(app: FastifyInstance) {
 
       void (async () => {
         try {
-          let studentName: string | null = null;
           let studentContext: string | null = null;
           let rosterContext: string | null = null;
           let sources: string[] = [];
+          let contextUsage: ContextUsage | null = null;
           if (studentId) {
-            const built = await buildStudentContext(request, studentId);
-            studentContext = built?.text ?? null;
-            sources = built?.sources ?? [];
-            const { data: p } = await request.db
-              .from("profiles")
-              .select("full_name")
-              .eq("id", studentId)
-              .maybeSingle();
-            studentName = p?.full_name ?? null;
+            const built = await buildStudentContext(request, studentId, "chat");
+            studentContext = built.text;
+            sources = [...new Set(built.used.map((u) => SOURCE_LABELS[u.section] ?? u.section))];
+            contextUsage = { used: built.used, omitted: built.omitted };
           } else {
             const built = await buildRosterContext(request);
             rosterContext = built?.text ?? null;
             sources = built?.sources ?? [];
           }
-          const system = buildSystemPrompt(tool, studentContext, studentName, rosterContext);
+          const system = buildSystemPrompt(tool, studentContext, rosterContext);
           const trace: { label: string }[] = [];
           if (sources.length > 0) send("sources", { sources });
+          if (contextUsage) send("context", contextUsage);
 
           // 1) Grounded reasoning plan, shown as the assistant "thinking".
           send("status", { phase: "thinking" });
@@ -272,6 +282,7 @@ export default async function chatRoutes(app: FastifyInstance) {
               prompt: `The counselor asked: "${body.content}"\nReturn 2–4 short planning steps.`,
               schema: REASONING_SCHEMA as unknown as Record<string, unknown>,
               toolName: "plan",
+              ...(contextUsage ? { contextUsage } : {}),
               maxTokens: 400,
             });
             for (const step of plan.steps) {
@@ -292,6 +303,7 @@ export default async function chatRoutes(app: FastifyInstance) {
             model: tool.model,
             maxTokens: 1400,
             onDelta: (t) => send("delta", { text: t }),
+            contextUsage,
           });
 
           const { data: saved } = await request.db

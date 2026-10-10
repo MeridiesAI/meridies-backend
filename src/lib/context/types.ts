@@ -10,6 +10,7 @@ export type ContextUsage = {
 export type StudentContext = ContextUsage & {
   text: string;
   studentName: string | null;
+  /** Untrusted student text (names, schools, hometown): wrap with wrapUntrusted before it enters a prompt. */
   facts: {
     intendedMajors: string[];
     gradYear: string | null;
