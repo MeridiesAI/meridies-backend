@@ -20,7 +20,7 @@ import {
 import { buildStudentContext } from "../lib/context/index.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
-import { resolveStudentId } from "../lib/guards.js";
+import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { toEssayReview } from "../lib/serialize.js";
 
@@ -54,7 +54,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/profile-summary",
-    { preHandler: [app.authenticate, aiLimit("profile-summary")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("profile-summary")] },
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "view");
@@ -99,7 +99,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/narrative-coherence",
-    { preHandler: [app.authenticate, aiLimit("narrative-coherence")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("narrative-coherence")] },
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "edit");
@@ -164,7 +164,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/family-report",
-    { preHandler: [app.authenticate, aiLimit("family-report")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("family-report")] },
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "edit");
@@ -220,7 +220,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/school-reframing",
-    { preHandler: [app.authenticate, aiLimit("school-reframing")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("school-reframing")] },
     async (request) => {
       const b = z
         .object({ studentId: z.string().uuid(), school: z.string().trim().min(1).max(200) })
@@ -402,7 +402,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/college-list",
-    { preHandler: [app.authenticate, aiLimit("college-list")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("college-list")] },
     async (request) => {
       const b = z
         .object({
@@ -509,7 +509,7 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/concierge",
-    { preHandler: [app.authenticate, aiLimit("concierge")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("concierge")] },
     async (request) => {
       const b = z
         .object({

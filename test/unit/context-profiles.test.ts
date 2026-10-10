@@ -29,3 +29,19 @@ test("an essay body is read only when unlinked, or linked to a file that came ba
   assert.equal(essayBodyReadable("doc-1", { available_to_llm: false }), false);
   assert.equal(essayBodyReadable("doc-1", null), false, "a linked file RLS hid fails closed");
 });
+
+test("chat does not read intake answers; student-ai still does", () => {
+  assert.ok(!PROFILES.chat.sections.includes("intake"));
+  assert.ok(PROFILES["student-ai"].sections.includes("intake"));
+});
+
+import type { FastifyRequest } from "fastify";
+import { buildStudentContext } from "../../src/lib/context/index.js";
+
+test("buildStudentContext refuses a non-counselor before any read", async () => {
+  const request = {
+    profile: { role: "student" },
+    get db(): never { throw new Error("the builder read from the database"); },
+  } as unknown as FastifyRequest;
+  await assert.rejects(buildStudentContext(request, "11111111-1111-1111-1111-111111111111", "chat"), (e: { statusCode?: number }) => e.statusCode === 403);
+});

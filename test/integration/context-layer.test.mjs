@@ -76,3 +76,13 @@ const nope = await ctx(theirs.id, "chat", otherMember.token);
 check("a counselor in another firm gets 404", nope.status === 404, `status ${nope.status}`);
 const st = await call(priv.token, "GET", `/students/${priv.id}/ai-context?feature=chat`);
 check("a student gets 403", st.status === 403, `status ${st.status}`);
+
+// Counselor-only: refused before any read (profile summary) and before a chat message is saved.
+const ps = await call(priv.token, "POST", "/ai/profile-summary", { studentId: priv.id });
+check("a student calling POST /ai/profile-summary with their own id gets 403", ps.status === 403, `status ${ps.status}`);
+const conv = await call(priv.token, "POST", "/chat/conversations", {});
+check("a student can open a conversation (no student scope)", conv.status === 201, `status ${conv.status}`);
+const msg = await call(priv.token, "POST", `/chat/conversations/${conv.body.id}/messages`, { content: "Summarize me", studentId: priv.id });
+check("a student posting a chat message with their own student id gets 403", msg.status === 403, `status ${msg.status}`);
+const saved = await sql(`select count(*) from public.ai_messages where conversation_id = '${conv.body.id}'`);
+check("no message row is saved for the refused chat turn", saved === "0", saved);

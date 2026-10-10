@@ -21,7 +21,7 @@ import {
 } from "../lib/chat.js";
 import { buildStudentContext } from "../lib/context/index.js";
 import type { ContextUsage } from "../lib/context/types.js";
-import { fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
+import { forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
@@ -36,6 +36,13 @@ const SOURCE_LABELS: Record<string, string> = {
   deadlines: "Calendar",
   upcomingMeetings: "Calendar",
   documents: "Documents",
+  academics: "Grades and scores",
+  testScores: "Grades and scores",
+  courses: "Courses",
+  personal: "Student profile",
+  tasks: "Tasks",
+  polygon: "Strength profile",
+  intake: "Intake answers",
 };
 
 const AXIS_UNAVAILABLE = "AxIS is unavailable right now. Try again in a few minutes.";
@@ -206,6 +213,9 @@ export default async function chatRoutes(app: FastifyInstance) {
 
       const requestedStudent = body.studentId ?? (conv.student_id as string | null) ?? undefined;
       let studentId: string | null = null;
+      // A student-scoped turn reads the record through the context layer, which is counselor-only. Refuse
+      // before the message is saved or the stream opens.
+      if (requestedStudent && request.profile.role !== "counselor") throw forbidden("Only counselors can do that");
       if (requestedStudent) studentId = await resolveStudentId(request, requestedStudent, "view");
 
       const tool = getChatTool(body.tool ?? (conv.module as string));

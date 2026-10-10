@@ -1,5 +1,5 @@
 import type { FastifyRequest } from "fastify";
-import { fromPostgrest, notFound } from "../errors.js";
+import { forbidden, fromPostgrest, notFound } from "../errors.js";
 import { assertCanViewStudent } from "../guards.js";
 import { loadPracticeSettings } from "../practiceSettings.js";
 import { packSections, type Section } from "./pack.js";
@@ -24,6 +24,8 @@ export async function buildStudentContext(
   feature: Feature,
   opts?: { only?: SectionName[] }
 ): Promise<StudentContext> {
+  // Counselors only (spec §4): a student's own session never builds a context, even for themselves.
+  if (request.profile.role !== "counselor") throw forbidden("Only counselors can do that");
   await assertCanViewStudent(request, studentId);
   const profile = { ...PROFILES[feature], sections: selectSections(PROFILES[feature].sections, opts?.only) };
   const { settings } = await loadPracticeSettings(request);
