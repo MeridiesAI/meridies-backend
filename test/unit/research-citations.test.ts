@@ -94,3 +94,19 @@ test("kept sources are copied unchanged", async () => {
   const out = await keepCandidates(one("https://a.org/x/#frag", "<b>T</b>"), { seenUrls: ["https://a.org/x"] }, [], ok);
   assert.deepEqual(out[0].sources, [{ url: "https://a.org/x/#frag", title: "<b>T</b>" }]);
 });
+
+test("a trailing-dot host is still blocked, in the URL, the entry, or both", () => {
+  assert.ok(isBlocked("https://niche.com./x", ["niche.com"]));
+  assert.ok(isBlocked("https://niche.com/x", ["niche.com."]));
+  assert.ok(isBlocked("https://www.niche.com./x", ["niche.com."]));
+});
+test("a unicode blocklist entry matches both forms of the host", () => {
+  assert.ok(isBlocked("https://bücher.de/x", ["bücher.de"]));
+  assert.ok(isBlocked("https://xn--bcher-kva.de/x", ["bücher.de"]));
+  assert.ok(!isBlocked("https://a.org/x", ["not a host!"]));
+});
+test("the trailing-slash strip applies to the path, not the query", async () => {
+  assert.equal((await keepCandidates(one("https://a.org/x?next=/"), { seenUrls: ["https://a.org/x?next="] }, [], ok)).length, 0);
+  assert.equal((await keepCandidates(one("https://a.org/x/"), { seenUrls: ["https://a.org/x"] }, [], ok)).length, 1);
+  assert.equal((await keepCandidates(one("https://a.org/x/?q=1"), { seenUrls: ["https://a.org/x?q=1"] }, [], ok)).length, 1);
+});

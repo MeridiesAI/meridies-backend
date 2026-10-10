@@ -505,8 +505,8 @@ export function extractResearchActivity(blocks: readonly unknown[]): { queries: 
     if (block.type === "server_tool_use") {
       const input = block.input;
       if (!isRecord(input)) continue;
-      if (typeof input.query === "string" && input.query) queries.add(input.query);
-      if (typeof input.url === "string" && input.url) queries.add(input.url);
+      if (block.name === "web_search" && typeof input.query === "string" && input.query) queries.add(input.query);
+      if (block.name === "web_fetch" && typeof input.url === "string" && input.url) queries.add(input.url);
     } else if (block.type === "web_search_tool_result") {
       if (!Array.isArray(block.content)) continue;
       for (const r of block.content) if (isRecord(r) && typeof r.url === "string" && r.url) seenUrls.add(r.url);

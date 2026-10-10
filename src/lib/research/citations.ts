@@ -8,17 +8,29 @@ const parse = (u: string): URL | null => {
   }
 };
 
+const bareHost = (h: string): string => h.toLowerCase().replace(/\.+$/, "").replace(/^www\./, "");
+
 const host = (u: string): string | null => {
   const url = parse(u);
-  return url ? url.hostname.toLowerCase().replace(/^www\./, "") : null;
+  return url ? bareHost(url.hostname) : null;
+};
+
+/** A blocklist entry in the same form as a parsed hostname (punycode, lowercase, no www. or trailing dot); null if it doesn't parse. */
+const entryHost = (entry: string): string | null => {
+  try {
+    const h = bareHost(new URL(`http://${entry.trim()}`).hostname);
+    return h || null;
+  } catch {
+    return null;
+  }
 };
 
 export function isBlocked(url: string, blocked: string[]): boolean {
   const h = host(url);
   if (!h) return true;
   return blocked.some((raw) => {
-    const d = raw.toLowerCase().replace(/^www\./, "");
-    return h === d || h.endsWith(`.${d}`);
+    const d = entryHost(raw);
+    return d !== null && (h === d || h.endsWith(`.${d}`));
   });
 }
 
@@ -31,7 +43,7 @@ export function isBlocked(url: string, blocked: string[]): boolean {
 function norm(u: string): string | null {
   const url = parse(u);
   if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) return null;
-  return `//${url.host}${url.pathname}${url.search}`.replace(/\/$/, "");
+  return `//${url.host}${url.pathname.replace(/\/$/, "")}${url.search}`;
 }
 
 export async function keepCandidates(

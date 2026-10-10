@@ -31,3 +31,12 @@ test("an unknown block, null and odd shapes do not throw", () => {
   const out = extractResearchActivity([null, 3, "x", { type: "mystery", url: "https://x.org" }, { type: "server_tool_use", input: null }, { type: "web_fetch_tool_result", content: null }, { type: "web_search_tool_result", content: [null, { url: 5 }] }]);
   assert.deepEqual(out, { queries: [], seenUrls: [] });
 });
+
+test("a server tool use for another tool contributes nothing", () => {
+  const out = extractResearchActivity([
+    { type: "server_tool_use", name: "code_execution", input: { query: "q", url: "https://x.org" } },
+    { type: "server_tool_use", name: "web_search", input: { url: "https://x.org" } },
+    { type: "server_tool_use", name: "web_fetch", input: { query: "q" } },
+  ]);
+  assert.deepEqual(out, { queries: [], seenUrls: [] });
+});
