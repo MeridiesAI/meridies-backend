@@ -28,6 +28,8 @@ import {
   NO_PROSE_SYSTEM,
   runStructured,
 } from "../lib/anthropic.js";
+import { buildStudentContext } from "../lib/context/index.js";
+import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -170,6 +172,25 @@ const coherenceBody = z
     supplementEssayIds: z.array(uuid).max(60),
   })
   .strict();
+
+/** A data-block source label from a student-written name: one line, bounded. */
+const sourceTag = (prefix: string, name: unknown) => `${prefix}:${String(name ?? "").replace(/\s+/g, " ").trim().slice(0, 80)}`;
+
+/** Whole blocks only: a block that would pass the cap is left out, never cut mid-escape. */
+function joinBlocks(blocks: string[], cap: number): string {
+  const kept: string[] = [];
+  let size = 0;
+  for (const b of blocks) {
+    if (size + b.length + 2 > cap) break;
+    kept.push(b);
+    size += b.length + 2;
+  }
+  return kept.join("\n\n");
+}
+
+/** Only the student's identity and personal details, from the context layer; essays stay the counselor's ticks. */
+const coherenceBase = (request: FastifyRequest, studentId: string) =>
+  buildStudentContext(request, studentId, "narrative-coherence", { only: ["profile", "personal"] });
 
 const REWRITE = /\b(rewrite|re-write|write|draft|reword|rephrase|paragraph|fix the essay|polish|edit (it|this|the essay))\b/i;
 
@@ -375,21 +396,25 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       ]);
       const first = firstName(String(profile.data?.full_name ?? ""));
 
-      const material = JSON.stringify(
-        {
-          personalStatement: statement ? clip(statement.body, 12_000) : undefined,
-          supplements: supplements.map((s) => ({
-            school: s.school,
-            title: s.title,
-            prompt: clip(s.prompt, 600),
-            text: clip(s.body, 6_000),
-          })),
-          activities: readActivities ? acts.data : undefined,
-          awards: readAwards ? honors.data : undefined,
-        },
-        null,
-        1
-      ).slice(0, 80_000);
+      const blocks: string[] = [];
+      if (statement) blocks.push(`Personal statement:\n${wrapUntrusted(sourceTag("essay", statement.title || "personal statement"), clip(statement.body, 12_000))}`);
+      for (const sup of supplements) {
+        blocks.push(
+          `Supplement:\n${wrapUntrusted(
+            sourceTag("essay", sup.title || sup.school),
+            [`School: ${clip(sup.school, 200)}`, `Title: ${clip(sup.title, 200)}`, `Prompt: ${clip(sup.prompt, 600)}`, `Text: ${clip(sup.body, 6_000)}`].join("\n")
+          )}`
+        );
+      }
+      if (readActivities) {
+        for (const a of (acts.data ?? []) as Row[]) blocks.push(`Activity:\n${wrapUntrusted(sourceTag("activity", a.organization || a.position), JSON.stringify(a, null, 1))}`);
+      }
+      if (readAwards) {
+        for (const a of (honors.data ?? []) as Row[]) blocks.push(`Award:\n${wrapUntrusted(sourceTag("award", a.name), JSON.stringify(a, null, 1))}`);
+      }
+      const material = joinBlocks(blocks, 80_000);
+      const base = await coherenceBase(request, studentId);
+      const contextUsed = { used: base.used, omitted: base.omitted };
 
       type Out = {
         storyline: { label: string; text: string }[];
@@ -409,9 +434,11 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           "Flags: contradictions and gaps between the documents (dates, roles, hours, claims that disagree), most serious first. Name both places each one sits.",
           "Fix: what the student should settle or decide, never the words to write.",
           "Next: up to three bullets on what the counselor does next.",
-          `Address the counselor; the student is ${first}.`,
+          "Address the counselor; the student's name is in the student record below.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
-        prompt: `Read only these documents:\n${material}`,
+        contextUsage: contextUsed,
+        prompt: `${base.text ? `${base.text}\n\n` : ""}Read only these documents:\n${material}`,
         toolName: "coherence_report",
         maxTokens: 3000,
         schema: {
@@ -497,7 +524,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         if (ins.error) throw fromPostgrest(ins.error);
         flagRows = (ins.data ?? []) as Row[];
       }
-      return reply.code(201).send(toCoherenceReport(report as Row, flagRows));
+      return reply.code(201).send({ ...toCoherenceReport(report as Row, flagRows), contextUsed });
     }
   );
 
@@ -533,6 +560,8 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         };
       }
 
+      const base = await coherenceBase(request, studentId);
+      const contextUsed = { used: base.used, omitted: base.omitted };
       const [{ data: flags }, { data: programs }] = await Promise.all([
         request.db.from("narrative_flags").select("*").eq("report_id", report.id),
         request.db.from("opportunity_matches").select("name, org, program_type, location, deadline").eq("student_id", studentId).neq("status", "dismissed").limit(5),
@@ -543,7 +572,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         flags: ((flags ?? []) as Row[]).map((f) => toFlag(f)),
         next: report.next_steps,
         programs,
-      }).slice(0, 20_000);
+      });
 
       const result = await runStructured<{ bullets: string[] }>({
         request,
@@ -555,8 +584,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           "",
           "Answer the counselor's question about this Narrative Coherence report only, in at most four bullets.",
           "If the report doesn't say, answer that it doesn't.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
-        prompt: `Report:\n${context}\n\nQuestion: ${b.question}`,
+        contextUsage: contextUsed,
+        prompt: `${base.text ? `${base.text}\n\n` : ""}Report:\n${wrapUntrusted("coherence-report", context.slice(0, 20_000))}\n\nQuestion: ${b.question}`,
         toolName: "coherence_answer",
         maxTokens: 800,
         schema: {
@@ -569,6 +600,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       return {
         bullets:
           bullets.length > 0 ? bullets : ["Ask about the storyline, a flag, or activities to add."],
+        contextUsed,
       };
     }
   );
