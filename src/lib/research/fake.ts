@@ -1,6 +1,6 @@
 /**
  * Test double for research (RESEARCH_FAKE=fixture). It is reached only through `seamFor` in run.ts, which also
- * refuses it when NODE_ENV is production, and the server refuses to boot with it set in production
+ * refuses it unless NODE_ENV is development or test, and the server refuses to boot with it set otherwise
  * (bootGuard.ts). It returns the same shapes as the real calls and never touches the network or a model.
  *
  * Each answer holds four cited candidates: one on a blocked domain, one whose URL the run never saw, and two good
@@ -28,13 +28,16 @@ const COLLEGES: Fixture[] = [
 /**
  * Test hooks, reachable only here (the fake is never used in production): a focus of FOCUS_LEAK makes the fake issue a
  * search query holding the fixture student's school ("Lincoln High", the "full" fixture), to exercise the post-run
- * identity check; FOCUS_EMPTY makes the search find nothing.
+ * identity check; FOCUS_EMPTY makes the search find nothing; FOCUS_ALL_DROPPED finds only candidates the keeper drops.
  */
 export const FOCUS_LEAK = "fixture:leak-query";
 export const FOCUS_EMPTY = "fixture:empty";
+/** Candidates are found but the keeper drops every one (a blocked domain, a URL the run never saw): a run that lost them downstream. */
+export const FOCUS_ALL_DROPPED = "fixture:all-dropped";
 
 export function fakeResearch(feature: "college_list" | "activities", focus: string | null = null): ResearchResult {
-  const rows = focus === FOCUS_EMPTY ? [] : feature === "college_list" ? COLLEGES : ACTIVITIES;
+  const all = feature === "college_list" ? COLLEGES : ACTIVITIES;
+  const rows = focus === FOCUS_EMPTY ? [] : focus === FOCUS_ALL_DROPPED ? all.slice(0, 2) : all;
   const parts = rows.map((r) => ({
     text: JSON.stringify({ title: r.title, summary: r.summary, deadline: r.deadline, cost: r.cost }),
     citations: [{ url: r.url, title: r.title, citedText: r.summary }],

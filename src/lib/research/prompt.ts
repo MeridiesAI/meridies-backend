@@ -62,7 +62,12 @@ function plain(s: unknown, max: number): string | undefined {
 
 type PartLike = { text: string; citations: { url: string; title: string | null }[] };
 
-/** Every top-level JSON object in `text` (tolerating prose, fences and arrays around them), with its character span. */
+/**
+ * Every candidate-shaped JSON object in `text` (one with a string `title`), with its character span, tolerating prose,
+ * fences and arrays around them. An object WITHOUT a string title is not a candidate but may wrap some (`{"candidates":
+ * [ ... ]}`), so the scanner steps into it and looks at what is inside; an object that has a title is taken whole, so
+ * a `details` object nested inside a candidate never becomes a candidate of its own.
+ */
 export function jsonObjectsWithSpans(text: string): { value: Record<string, unknown>; start: number; end: number }[] {
   const out: { value: Record<string, unknown>; start: number; end: number }[] = [];
   let i = 0;
@@ -84,10 +89,10 @@ export function jsonObjectsWithSpans(text: string): { value: Record<string, unkn
     if (end > 0) {
       try { value = JSON.parse(text.slice(i, end)); } catch { /* not JSON: look again after this brace */ }
     }
-    if (end > 0 && value && typeof value === "object" && !Array.isArray(value)) {
+    if (end > 0 && value && typeof value === "object" && !Array.isArray(value) && typeof (value as Record<string, unknown>).title === "string") {
       out.push({ value: value as Record<string, unknown>, start: i, end });
       i = end;
-    } else i++;
+    } else i++; // not a candidate (or not JSON): step inside it, a wrapper's candidates are found by their own span
   }
   return out;
 }
@@ -102,6 +107,11 @@ export function jsonObjectsWithSpans(text: string): { value: Record<string, unkn
  * one cited block really covers both.
  */
 export function parseCandidates(parts: PartLike[]): ResearchCandidate[] {
+  return parseCandidatesCounted(parts).candidates;
+}
+
+/** `parseCandidates` plus how many candidate-shaped objects the answer held before any were dropped (for the run's counts). */
+export function parseCandidatesCounted(parts: PartLike[]): { candidates: ResearchCandidate[]; objects: number } {
   let full = "";
   const spans = parts.map((p) => {
     const start = full.length;
@@ -110,7 +120,8 @@ export function parseCandidates(parts: PartLike[]): ResearchCandidate[] {
   });
   const out: ResearchCandidate[] = [];
   const titles = new Set<string>();
-  for (const { value: o, start, end } of jsonObjectsWithSpans(full)) {
+  const found = jsonObjectsWithSpans(full);
+  for (const { value: o, start, end } of found) {
     const title = cleanText(o.title);
     if (!title || title.length > 300 || titles.has(title.toLowerCase())) continue;
     const seen = new Set<string>();
@@ -136,7 +147,7 @@ export function parseCandidates(parts: PartLike[]): ResearchCandidate[] {
     });
     if (out.length === MAX_CANDIDATES) break;
   }
-  return out;
+  return { candidates: out, objects: found.length };
 }
 
 // --- the match step ---------------------------------------------------------------------------------------------

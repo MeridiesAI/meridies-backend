@@ -5,8 +5,9 @@ import { researchFakeRefusal } from "./lib/research/bootGuard.js";
 
 const app = buildApp();
 
-// The research test double must never run for real counselors.
-const refusal = researchFakeRefusal(env);
+// The research test double must never run for real counselors: only with NODE_ENV=development or test, read raw
+// (env.NODE_ENV defaults to development when unset).
+const refusal = researchFakeRefusal({ RESEARCH_FAKE: env.RESEARCH_FAKE, NODE_ENV: process.env.NODE_ENV });
 if (refusal) {
   app.log.error(refusal);
   process.exit(1);

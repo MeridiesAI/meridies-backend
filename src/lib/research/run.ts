@@ -11,15 +11,16 @@ import { FAST_MODEL, RESEARCH_MODEL, researchDomains, runStructured, runWebResea
 import { buildStudentContext, type ContextUsage, type StudentContext } from "../context/index.js";
 import { loadWorkspace } from "../crm.js";
 import { assertAiAllowed } from "../practiceSettings.js";
-import { badRequest, fromPostgrest, HttpError, unavailable } from "../errors.js";
+import { badRequest, conflict, fromPostgrest, HttpError, unavailable } from "../errors.js";
 import { enforceRateLimit } from "../limits.js";
 import { checkLink } from "../links.js";
 import { serviceClient } from "../supabase.js";
 import { assertNoIdentity, briefHash, identityTokens, IdentityLeakError, toResearchBrief, type ResearchBrief } from "./brief.js";
+import { researchFakeAllowed, type FakeEnv } from "./bootGuard.js";
 import { keepCandidates } from "./citations.js";
 import { fakeSeam } from "./fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
   validatePicks, type RecommendationDraft, type ResearchCandidate,
 } from "./prompt.js";
 
@@ -84,12 +85,35 @@ export const realSeam: ResearchSeam = {
   check: checkLink,
 };
 
-/** The test double only when asked for, and never in production (the server also refuses to boot that way). */
-export function seamFor(e: { RESEARCH_FAKE?: string | undefined; NODE_ENV?: string | undefined }): ResearchSeam {
-  return e.RESEARCH_FAKE === "fixture" && e.NODE_ENV !== "production" ? fakeSeam : realSeam;
+/** The test double only when asked for and NODE_ENV is development or test (the server also refuses to boot otherwise). */
+export function seamFor(e: FakeEnv): ResearchSeam {
+  return e.RESEARCH_FAKE === "fixture" && researchFakeAllowed(e) ? fakeSeam : realSeam;
 }
 
+/** NODE_ENV as the process has it: `env.NODE_ENV` defaults to development when unset, which must not unlock the fake. */
+const rawEnv = (): FakeEnv => ({ RESEARCH_FAKE: env.RESEARCH_FAKE, NODE_ENV: process.env.NODE_ENV });
+
 type Row = Record<string, unknown>;
+
+/** What a run did at each step: numbers only, logged with the run id and never any text. */
+export type RunCounts = { parts: number; objects: number; parsed: number; kept: number; picked: number; stored: number };
+
+const WEEK_MS = 7 * 86_400_000;
+
+/**
+ * When a finished run stops being served from the cache. A run that stored something, or whose answer held no
+ * candidate objects at all (the web really had nothing), is reusable for 7 days, so a repeat click doesn't pay for the
+ * same empty search. A run whose answer DID hold candidates but stored nothing lost them downstream (a dead link, the
+ * citation keeper, the match step, a bad reason): that looks the same as "nothing found" to the counselor but usually
+ * isn't, so it is stored as succeeded with an empty list and expires at once, and the next request runs again.
+ */
+export function expiryFor(counts: RunCounts, now = Date.now()): string {
+  const lostDownstream = counts.stored === 0 && counts.objects > 0;
+  return new Date(lostDownstream ? now : now + WEEK_MS).toISOString();
+}
+
+/** A run still `running` after this long is treated as dead: nothing sweeps them, so the age is the only signal. */
+export const RUNNING_STALE_MS = 10 * 60_000;
 
 export function toDto(r: Row): RecommendationDto {
   return {
@@ -136,7 +160,7 @@ export async function runResearch(
   studentId: string,
   feature: Feature,
   opts: { refresh: boolean; focus: string | null },
-  seam: ResearchSeam = seamFor(env)
+  seam: ResearchSeam = seamFor(rawEnv())
 ): Promise<ResearchResponse> {
   // 1. Access: counselors only, on the case (403 / 404).
   const ctx = await buildStudentContext(request, studentId, feature === "college_list" ? "college-list" : "activities");
@@ -167,7 +191,7 @@ export async function runResearch(
         .eq("run_id", hit.id as string)
         .order("created_at", { ascending: false });
       if (recError) throw fromPostgrest(recError);
-      // A run that found nothing is cached too: repeat clicks don't pay for the same empty search again.
+      // A run whose answer held no candidates at all is cached too (see expiryFor); one that lost them downstream isn't.
       const recommendations = (rows ?? []).map((r) => toDto(r as Row));
       return { runId: hit.id as string, checkedAt: checkedAtOf(recommendations, hit.created_at as string), cached: true, recommendations, contextUsed };
     }
@@ -179,6 +203,22 @@ export async function runResearch(
   await assertAiAllowed(request, "research-match");
   const svc = serviceClient();
   if (!svc) throw unavailable("Research is unavailable right now. Try again shortly.");
+
+  // The same request is already running (a double click, a proxy retry): runs are long and paid, so refuse before the
+  // daily cap is spent. Read on the caller's client. A `running` row older than 10 minutes is treated as dead and
+  // ignored; nothing sweeps them, so a crashed run would otherwise block this student and feature for good.
+  const { data: inFlight, error: inFlightError } = await request.db
+    .from("research_runs")
+    .select("id")
+    .eq("student_id", studentId)
+    .eq("feature", feature)
+    .eq("inputs_hash", hash)
+    .eq("status", "running")
+    .gt("created_at", new Date(Date.now() - RUNNING_STALE_MS).toISOString())
+    .limit(1);
+  if (inFlightError) throw fromPostgrest(inFlightError);
+  if (inFlight?.length) throw conflict("Research is already running for this student. Try again in a minute.");
+
   const workspace = await loadWorkspace(request);
   await enforceRateLimit(
     `research-day:${workspace.firmId ?? request.auth.userId}`,
@@ -200,7 +240,7 @@ export async function runResearch(
       status: "running",
       model: seam.model,
       created_by: request.auth.userId,
-      expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+      expires_at: new Date(Date.now() + WEEK_MS).toISOString(),
     })
     .select("id, created_at")
     .single();
@@ -210,9 +250,9 @@ export async function runResearch(
   }
   const runId = created.id as string;
   let settled = false;
-  const finish = async (status: "failed" | "discarded" | "succeeded", error: string | null) => {
+  const finish = async (status: "failed" | "discarded" | "succeeded", error: string | null, expiresAt?: string) => {
     settled = true;
-    const { error: e } = await svc.from("research_runs").update({ status, error }).eq("id", runId);
+    const { error: e } = await svc.from("research_runs").update({ status, error, ...(expiresAt ? { expires_at: expiresAt } : {}) }).eq("id", runId);
     if (e) request.log.error({ runId, code: e.code }, "research run status update failed");
   };
 
@@ -239,7 +279,8 @@ export async function runResearch(
     }
 
     // 8. Keep only what was really seen in this run, isn't blocked and still answers.
-    const kept = await keepCandidates(parseCandidates(result.parts), result, blocked, seam.check);
+    const { candidates, objects } = parseCandidatesCounted(result.parts);
+    const kept = await keepCandidates(candidates, result, blocked, seam.check);
 
     // 9. Match: a cheap model picks the fits. Nothing to match means an empty, successful run.
     const drafts: RecommendationDraft[] = kept.length
@@ -272,7 +313,9 @@ export async function runResearch(
       const order = new Map(drafts.map((d, i) => [d.title, i]));
       recommendations.sort((a, b) => (order.get(a.title) ?? 0) - (order.get(b.title) ?? 0));
     }
-    await finish("succeeded", null);
+    const counts: RunCounts = { parts: result.parts.length, objects, parsed: candidates.length, kept: kept.length, picked: drafts.length, stored: recommendations.length };
+    request.log.info({ runId, counts }, "research run counts");
+    await finish("succeeded", null, expiryFor(counts));
     return { runId, checkedAt: checkedAtOf(recommendations, created.created_at as string), cached: false, recommendations, contextUsed };
   } catch (err) {
     // Discarded and refused runs are already settled; anything else is a failure with a code, never a message.

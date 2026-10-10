@@ -5,10 +5,10 @@ import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
 import { fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, cleanText, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, cleanText, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
   replaceWhysNamingStudent, taskTextFor, validatePicks,
 } from "../../src/lib/research/prompt.js";
-import { realSeam, seamFor } from "../../src/lib/research/run.js";
+import { expiryFor, realSeam, seamFor } from "../../src/lib/research/run.js";
 
 const facts = {
   intendedMajors: ["Biology"], gradYear: "2027", state: "WY",
@@ -154,7 +154,7 @@ test("parseCandidates reads candidates whose JSON is split across blocks with th
   assert.equal(out[0]!.deadline, "May 1");
 });
 test("the brace scanner respects strings and escapes and skips what is not JSON", () => {
-  const obj = { a: '}"{', b: { c: 1 } };
+  const obj = { title: "T", a: '}"{', b: { c: 1 } };
   const found = jsonObjectsWithSpans(`x { not json } y ${JSON.stringify(obj)} z`);
   assert.equal(found.length, 1);
   assert.deepEqual(found[0]!.value, obj);
@@ -226,4 +226,40 @@ test("parseCandidates on the recorded live shape: fragments split at citation bo
   ]);
   assert.equal(out[0]!.cost, "Free.");
   assert.equal(out[1]!.sources.length, 1);
+});
+
+// G4: a wrapper object, nested objects, and what an empty run means.
+test("a {\"candidates\":[...]} wrapper yields its inner candidates, each with its own citations", () => {
+  const a = '{"title":"Inner A","summary":"first"}';
+  const b = '{"title":"Inner B","summary":"second"}';
+  const parts = [
+    { text: '{"candidates":[', citations: [] },
+    { text: a, citations: cite("https://example.org/a") },
+    { text: ",", citations: [] },
+    { text: b, citations: cite("https://example.org/b") },
+    { text: "]}", citations: [] },
+  ];
+  const { candidates, objects } = parseCandidatesCounted(parts);
+  assert.deepEqual(candidates.map((c) => c.title), ["Inner A", "Inner B"]);
+  assert.deepEqual(candidates[0]!.sources.map((s) => s.url), ["https://example.org/a"]);
+  assert.deepEqual(candidates[1]!.sources.map((s) => s.url), ["https://example.org/b"]);
+  assert.equal(objects, 2);
+});
+test("an object nested inside a candidate does not become a candidate", () => {
+  const text = JSON.stringify({ title: "Outer", summary: "s", details: { title: "Not a candidate", note: 1 }, extra: { x: { y: 1 } } });
+  const out = parseCandidates([{ text, citations: cite("https://example.org/o") }]);
+  assert.deepEqual(out.map((c) => c.title), ["Outer"]);
+  assert.equal(jsonObjectsWithSpans(text).length, 1);
+});
+test("an answer with no candidate objects counts zero, however much JSON it holds", () => {
+  assert.equal(parseCandidatesCounted([{ text: '{"candidates":[]} {"note":{"a":1}}', citations: cite("https://example.org/x") }]).objects, 0);
+  assert.equal(parseCandidatesCounted([]).objects, 0);
+});
+test("an empty run is reusable for a week only when the answer held no candidates", () => {
+  const now = Date.parse("2026-10-10T00:00:00Z");
+  const c = (o: Partial<Record<"parts" | "objects" | "parsed" | "kept" | "picked" | "stored", number>>) => ({ parts: 1, objects: 0, parsed: 0, kept: 0, picked: 0, stored: 0, ...o });
+  assert.equal(expiryFor(c({}), now), "2026-10-17T00:00:00.000Z");
+  assert.equal(expiryFor(c({ objects: 3, parsed: 3, kept: 0 }), now), "2026-10-10T00:00:00.000Z");
+  assert.equal(expiryFor(c({ objects: 3, parsed: 3, kept: 2, picked: 0 }), now), "2026-10-10T00:00:00.000Z");
+  assert.equal(expiryFor(c({ objects: 3, parsed: 3, kept: 2, picked: 2, stored: 2 }), now), "2026-10-17T00:00:00.000Z");
 });
