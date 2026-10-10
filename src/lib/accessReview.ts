@@ -212,7 +212,11 @@ export async function requestAccess(
     subject: mail.subject,
     html: brandedEmail(mail.content),
     text: brandedText(mail.content),
+    // Only the token's hash is ever stored: the delivery record keeps the
+    // email without its link.
+    recordText: brandedText({ ...mail.content, cta: undefined }),
     template: "access-review",
+    recipient_kind: "counselor",
     logger: log,
   });
   if (!result.sent) {

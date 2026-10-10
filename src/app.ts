@@ -3,6 +3,7 @@ import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
 import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio } from "./env.js";
 import { HttpError } from "./lib/errors.js";
+import { loggedUrl } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
 import { startSweepInterval } from "./lib/sweepSchedule.js";
@@ -71,18 +72,12 @@ import profileUpdateRoutes from "./routes/profileUpdates.js";
 export function buildApp() {
   const app = Fastify({
     logger: {
-      // Query values are dropped from request logs: the OAuth callback carries
-      // a live authorization code and state there, and nothing in a query
-      // string is worth keeping in Railway's logs. Keys stay for debugging.
+      // Query values and the account review token are dropped (lib/requestLog.ts).
       serializers: {
         req(req) {
-          const [path, query] = req.url.split("?", 2);
-          const keys = query
-            ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
-            : "";
           return {
             method: req.method,
-            url: keys ? `${path}?${keys}` : path,
+            url: loggedUrl(req.url),
             hostname: req.hostname,
             remoteAddress: req.ip,
           };

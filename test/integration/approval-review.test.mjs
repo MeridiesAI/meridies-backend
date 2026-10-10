@@ -67,3 +67,9 @@ check("a newer request retires the older link", (await page("POST", older)).stat
 check("...and the newer one works", (await page("POST", newer)).status === 200 && (await approvedAt(p2)) !== "none");
 check("a malformed token is just invalid", (await page("GET", "short")).status === 404);
 check("an unknown well-formed token is just invalid", (await page("POST", randomBytes(32).toString("base64url"))).status === 404);
+
+// ---- The link is never stored in readable form ----------------------------------------
+const p4 = await user("review-stored", "counselor", { approved: false });
+await call(p4.token, "POST", "/auth/request-access");
+check("a review email was recorded", Number(await sql(`select count(*) from public.message_deliveries where template = 'access-review' and subject like '%${p4.email}%'`)) === 1);
+check("no recorded email body holds a review link", Number(await sql(`select count(*) from public.message_deliveries where template = 'access-review' and subject like '%${p4.email}%' and body like '%/access-review/%'`)) === 0);
