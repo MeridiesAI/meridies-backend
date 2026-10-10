@@ -1,7 +1,7 @@
 // Counselor approval gate: what the database enforces by itself (no API involved).
 import { createHash } from "node:crypto";
 import { check, sql, user, rest } from "./harness.mjs";
-import { firmWith, makeImport } from "./imports-helpers.mjs";
+import { firmWith, makeImport, studentOf } from "./imports-helpers.mjs";
 
 const sha = (t) => createHash("sha256").update(t).digest("hex");
 const rpc = (token, fn, args) => rest(token, "POST", `/rest/v1/rpc/${fn}`, args);
@@ -138,3 +138,50 @@ check("a token works once", (await sql(`select count(*) from public.approve_coun
 const p3 = await user("gate-expired", "counselor", { approved: false });
 await sql(`insert into public.counselor_access_requests (profile_id, token_hash, expires_at) values ('${p3.id}', '${sha("old-" + tag)}', now() - interval '1 minute')`);
 check("an expired token approves nobody", (await sql(`select count(*) from public.approve_counselor_by_token('${sha("old-" + tag)}')`)) === "0" && (await approvedAt(p3)) === "none");
+
+// ---- A roster is closed to its counselor once they are not approved ----------------
+// The student-scoped tables don't ask is_counselor; they ask can_view_student /
+// can_edit_student / is_counselor_of, so those must ask about approval too.
+const owner = await user("gate-roster");
+const kid = await studentOf(owner, "gate-roster-student");
+await sql(`insert into public.guardians (student_id, full_name, email) values ('${kid.id}', 'Parent', 'parent-${tag}@test.local')`);
+await sql(`insert into public.documents (student_id, owner_id, storage_path, filename, kind) values ('${kid.id}', '${owner.id}', 'x/gate-${tag}', 'gate.pdf', 'transcript')`);
+const rows = async (u, path) => ((await rest(u.token, "GET", path)).body ?? []).length;
+const roster = (u) => Promise.all([
+  rows(u, `/rest/v1/profiles?select=id&id=eq.${kid.id}`),
+  rows(u, `/rest/v1/guardians?select=id&student_id=eq.${kid.id}`),
+  rows(u, `/rest/v1/documents?select=id&student_id=eq.${kid.id}`),
+]);
+const none = (counts) => counts.every((n) => n === 0);
+const before = await roster(owner);
+check("approved: reads their student's profile, guardians and documents", before.every((n) => n === 1), JSON.stringify(before));
+
+const helper = await user("gate-collab", "counselor", { approved: false });
+await sql(`insert into public.student_collaborators (student_id, counselor_id, access) values ('${kid.id}', '${helper.id}', 'write')`);
+const shared = await roster(helper);
+check("a pending collaborator reads nothing of a student shared with them", none(shared), JSON.stringify(shared));
+
+await revoke(owner);
+const after = await roster(owner);
+check("revoked: reads nothing of their roster straight from Supabase", none(after), JSON.stringify(after));
+const note = await rest(owner.token, "POST", "/rest/v1/notifications", { recipient_id: kid.id, created_by: owner.id, kind: "system", title: "hi", body: "x" });
+check("revoked: cannot notify a student", note.status >= 400, `status ${note.status}`);
+await rest(owner.token, "PATCH", `/rest/v1/profiles?id=eq.${kid.id}`, { headline: "changed by a revoked counselor" });
+check("revoked: cannot edit a student's profile", (await sql(`select coalesce(headline, '') from public.profiles where id = '${kid.id}'`)) === "");
+const share = await rest(owner.token, "POST", "/rest/v1/student_collaborators", { student_id: kid.id, counselor_id: pending.id, access: "read" });
+check("revoked: cannot hand a student to another account", share.status >= 400, `status ${share.status}`);
+const own = await roster(kid);
+check("the student still reads their own profile, guardians and documents", own.every((n) => n === 1), JSON.stringify(own));
+
+// ---- The blanket rule: an unapproved counselor's database is their own profile row ----
+check("every public table with RLS carries the approval gate", (await sql(`select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind in ('r','p') and c.relrowsecurity
+    and not exists (select 1 from pg_policy p where p.polrelid = c.oid and p.polname = 'approval_gate' and not p.polpermissive)`)) === "0");
+check("storage objects carry the approval gate", (await sql(`select count(*) from pg_policy where polrelid = 'storage.objects'::regclass and polname = 'approval_gate' and not polpermissive`)) === "1");
+const ownRow = await rows(pending, `/rest/v1/profiles?select=id`);
+check("pending: sees exactly one profile, their own", ownRow === 1, `rows ${ownRow}`);
+check("pending: reads nothing else, the catalog included", (await rows(pending, "/rest/v1/colleges?select=id&limit=5")) === 0);
+const folder = await rest(pending.token, "POST", "/rest/v1/folders", { owner_id: pending.id, name: "Mine" });
+check("pending: cannot create even their own folder", folder.status >= 400, `status ${folder.status}`);
+check("approved: still reads the catalog", (await rows(j1, "/rest/v1/colleges?select=id&limit=5")) > 0);
+check("a student is not affected by the gate", (await rows(kid, "/rest/v1/colleges?select=id&limit=5")) > 0);

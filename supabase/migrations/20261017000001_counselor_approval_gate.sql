@@ -100,6 +100,124 @@ as $$
 $$;
 
 -- ---------------------------------------------------------------------------
+-- 3b. A roster is closed to its counselor while they are not approved.
+--     The student-scoped tables (about 130 policies, plus the documents bucket)
+--     never ask is_counselor: they ask is_counselor_of / can_view_student /
+--     can_edit_student. So the counselor and collaborator branches ask about
+--     approval here. The `student = viewer` branches are untouched: a student
+--     keeps their own record whatever happens to their counselor.
+-- ---------------------------------------------------------------------------
+create or replace function private.is_counselor_of(student uuid, viewer uuid)
+returns boolean
+language sql stable security definer set search_path to 'private','public'
+as $$
+  select private.is_counselor(viewer) and (
+    exists (
+      select 1 from public.profiles p
+      where p.id = student and p.counselor_id = viewer
+    ) or exists (
+      select 1 from public.student_collaborators c
+      where c.student_id = student and c.counselor_id = viewer
+    )
+  );
+$$;
+
+create or replace function private.can_edit_student(student uuid, viewer uuid)
+returns boolean
+language sql stable security definer set search_path to 'private','public'
+as $$
+  select student = viewer
+      or (private.is_counselor(viewer) and (
+            exists (select 1 from public.profiles p
+                    where p.id = student and p.counselor_id = viewer)
+         or exists (select 1 from public.student_collaborators c
+                    where c.student_id = student and c.counselor_id = viewer and c.access = 'write')));
+$$;
+
+-- The two original profiles policies compared counselor_id alone.
+drop policy if exists "profiles_select_counselor_of_student" on public.profiles;
+create policy "profiles_select_counselor_of_student" on public.profiles
+  for select using ((select auth.uid()) = counselor_id and private.is_counselor((select auth.uid())));
+
+drop policy if exists "profiles_update_counselor_of_student" on public.profiles;
+create policy "profiles_update_counselor_of_student" on public.profiles
+  for update using ((select auth.uid()) = counselor_id and private.is_counselor((select auth.uid())));
+
+-- Only an approved primary counselor may share a student out.
+drop policy if exists student_collaborators_write_primary on public.student_collaborators;
+create policy student_collaborators_write_primary on public.student_collaborators
+  for all to authenticated
+  using ((select auth.uid()) = private.get_user_counselor_id(student_id)
+         and private.is_counselor((select auth.uid())))
+  with check ((select auth.uid()) = private.get_user_counselor_id(student_id)
+              and private.is_counselor((select auth.uid())));
+
+-- ---------------------------------------------------------------------------
+-- 3c. The blanket rule. Many policies key on ownership alone (a file's
+--     uploader, a row's counselor_id), so no list of helpers can be complete.
+--     One restrictive policy on every table says it once: a counselor who is
+--     not approved sees and writes nothing, except their own profiles row.
+--     Restrictive policies AND with everything else, so nobody gains access;
+--     students and approved counselors pass it untouched. It is wrapped in
+--     (select ...) so Postgres evaluates it once per statement.
+--     NEW TABLES: call private.attach_approval_gate('public.<table>') in the
+--     migration that creates them (approval-db.test.mjs fails otherwise).
+-- ---------------------------------------------------------------------------
+create or replace function private.account_open(viewer uuid)
+returns boolean
+language sql stable security definer set search_path to 'private','public'
+as $$
+  select not exists (
+    select 1 from public.profiles p
+    where p.id = viewer and p.role = 'counselor' and p.counselor_approved_at is null
+  );
+$$;
+revoke all on function private.account_open(uuid) from public, anon;
+grant execute on function private.account_open(uuid) to authenticated;
+
+create or replace function private.attach_approval_gate(p_table regclass)
+returns void
+language plpgsql
+as $$
+begin
+  execute format('drop policy if exists approval_gate on %s', p_table);
+  execute format(
+    'create policy approval_gate on %s as restrictive for all to authenticated '
+    'using ((select private.account_open((select auth.uid())))) '
+    'with check ((select private.account_open((select auth.uid()))))', p_table);
+end;
+$$;
+revoke all on function private.attach_approval_gate(regclass) from public, anon, authenticated;
+
+do $$
+declare
+  t record;
+begin
+  for t in
+    select c.oid::regclass as tbl
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+    where n.nspname = 'public' and c.relkind in ('r', 'p') and c.relrowsecurity
+      and c.relname <> 'profiles'
+  loop
+    perform private.attach_approval_gate(t.tbl);
+  end loop;
+end;
+$$;
+
+-- profiles: the one row an unapproved counselor keeps is their own.
+drop policy if exists approval_gate on public.profiles;
+create policy approval_gate on public.profiles as restrictive for all to authenticated
+  using ((select private.account_open((select auth.uid()))) or id = (select auth.uid()))
+  with check ((select private.account_open((select auth.uid()))) or id = (select auth.uid()));
+
+-- Files: Storage lets an uploader read their own objects whatever the
+-- documents row says.
+drop policy if exists approval_gate on storage.objects;
+create policy approval_gate on storage.objects as restrictive for all to authenticated
+  using ((select private.account_open((select auth.uid()))))
+  with check ((select private.account_open((select auth.uid()))));
+
+-- ---------------------------------------------------------------------------
 -- 4. Policies that checked the role directly.
 -- ---------------------------------------------------------------------------
 drop policy if exists firms_insert_owner on public.firms;
