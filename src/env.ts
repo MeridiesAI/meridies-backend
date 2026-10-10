@@ -73,6 +73,8 @@ const envSchema = z.object({
   // told to report status there, and its signature is computed over that URL.
   RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
   PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
+  // Where counselor access requests are sent for review (lib/accessReview.ts).
+  ACCESS_REVIEW_EMAIL: blankIsUnset(z.string().email().optional()),
 
   // College Scorecard (api.data.gov key, free). Optional: unset, the catalog
   // ingest (POST /internal/ingest/scorecard, scripts/ingest/scorecard.ts)

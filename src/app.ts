@@ -9,6 +9,7 @@ import { startSweepInterval } from "./lib/sweepSchedule.js";
 import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
+import accessReviewRoutes from "./routes/accessReview.js";
 import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
 import chatRoutes from "./routes/chat.js";
@@ -106,6 +107,8 @@ export function buildApp() {
 
   app.register(healthRoutes);
   app.register(authRoutes, { prefix: "/auth" });
+  // Absolute paths (/access-review/:token): no prefix.
+  app.register(accessReviewRoutes);
   app.register(inviteRoutes, { prefix: "/invites" });
   app.register(studentRoutes, { prefix: "/students" });
   app.register(aiContextRoutes, { prefix: "/students" });

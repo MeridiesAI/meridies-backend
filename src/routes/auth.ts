@@ -6,9 +6,12 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { fromPostgrest, notFound } from "../lib/errors.js";
+import { accessStatusOf } from "../lib/access.js";
+import { requestAccess } from "../lib/accessReview.js";
+import { forbidden, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { limit } from "../lib/limits.js";
 import { toMeridiesUser } from "../lib/serialize.js";
+import { serviceClient } from "../lib/supabase.js";
 
 const updateMeSchema = z
   .object({
@@ -113,6 +116,29 @@ export default async function authRoutes(app: FastifyInstance) {
       }
 
       return toMeridiesUser(data as never, { counselorName: null });
+    }
+  );
+
+  /**
+   * A pending counselor asks Meridies to review their account. The holding
+   * screen calls this on every visit; inside 24 hours of the last request it
+   * does nothing. `emailed` says whether a review email left just now.
+   */
+  app.post(
+    "/request-access",
+    {
+      preHandler: [app.authenticate, limit("auth:request-access", 10, 3600)],
+      config: { allowPending: true },
+    },
+    async (request) => {
+      const status = accessStatusOf(request.profile);
+      if (status === null) throw forbidden("Only counselor accounts are reviewed");
+      if (status === "approved") return { status, emailed: false };
+
+      const svc = serviceClient();
+      if (!svc) throw unavailable("Account review is unavailable right now");
+      const outcome = await requestAccess(svc, request.auth.userId, request.log);
+      return { status, emailed: outcome === "sent" };
     }
   );
 }
