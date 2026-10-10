@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertNoIdentity, briefHash, identityTokens, IdentityLeakError, toResearchBrief } from "../../src/lib/research/brief.js";
+import { assertNoIdentity, briefHash, fold, identityTokens, IDENTITY_STOPLIST, IdentityLeakError, toResearchBrief } from "../../src/lib/research/brief.js";
 
 const facts = {
   intendedMajors: ["Biology", "Computer Science"], gradYear: "2027", state: "WY",
@@ -62,4 +62,117 @@ test("empty or whitespace-only identity fields produce no tokens and never match
   const identity = { name: null, email: null, school: "", hometown: "  " };
   assert.deepEqual(identityTokens(identity), []);
   assert.doesNotThrow(() => assertNoIdentity("anything", identityTokens(identity)));
+});
+
+const ident = (o: Partial<{ name: string | null; email: string | null; school: string | null; hometown: string | null }>) =>
+  ({ name: null, email: null, school: null, hometown: null, ...o });
+const refuses = (text: string, id: ReturnType<typeof ident>) =>
+  assert.throws(() => assertNoIdentity(text, identityTokens(id)), IdentityLeakError, text);
+const allows = (text: string, id: ReturnType<typeof ident>) =>
+  assert.doesNotThrow(() => assertNoIdentity(text, identityTokens(id)), text);
+const withMajors = (intendedMajors: string[]) => toResearchBrief({ ...facts, intendedMajors }, "college_list", null).majors;
+
+// Finding 1
+test("majors are kept only when short and plain", () => {
+  assert.deepEqual(withMajors(["Computer Science", "Film & Media Studies", "Pre-Med"]), ["computer science", "film & media studies", "pre-med"]);
+  assert.deepEqual(withMajors(["I go to Lincoln High and love bio", "biology 307-555-0100", "bio@x.org", "see http://x.org", "a".repeat(61), "  ", "&"]), []);
+  assert.deepEqual(withMajors(["one two three four five", "one two three four five six"]), ["one two three four five"]);
+  assert.equal(withMajors(["a", "b", "c", "d", "e", "f", "g"]).length, 5);
+});
+
+// Finding 2
+test("the GPA band label comes from the scale kind, never the raw string", () => {
+  const band = (scale: string | null, value = 3.74) => toResearchBrief({ ...facts, gpa: { value, scale } }, "college_list", null).gpaBand;
+  assert.equal(band("4.0 weighted at Lincoln High"), "3.6–3.8 on 4.0");
+  assert.equal(band("4.0"), "3.6–3.8 on 4.0");
+  assert.equal(band("5.0 scale", 4.5), "4.4–4.6 on 5.0");
+  assert.equal(band(null), "3.6–3.8 on 4.0");
+  assert.equal(band("100"), "unknown");
+});
+
+// Finding 3
+test("school and hometown words match, generic words do not", () => {
+  const school = ident({ school: "Cheyenne Central High" });
+  refuses("cheyenne central robotics", school);
+  refuses("programs near cheyenne", ident({ hometown: "Cheyenne, WY" }));
+  refuses("st marys", ident({ school: "St. Mary's H.S." }));
+  refuses("st marys hs", ident({ school: "St. Mary's H.S." }));
+  allows("math competitions for high school juniors in WY", ident({ school: "Cheyenne Central High", hometown: "Cheyenne, WY" }));
+  const sci = identityTokens(ident({ school: "Science Academy" }));
+  assert.deepEqual(sci, ["science academy"]);
+  assert.doesNotThrow(() => assertNoIdentity("science research", sci));
+  assert.ok(IDENTITY_STOPLIST.has("high") && IDENTITY_STOPLIST.has("wyoming") && IDENTITY_STOPLIST.has("carolina"));
+});
+
+// Finding 4
+test("Unicode forms compare equal", () => {
+  refuses("hi jose\u0301 here", ident({ name: "Jos\u00e9" }));
+  refuses("hi jos\u00e9 here", ident({ name: "Jose\u0301" }));
+  refuses("ＱＵＩＮＬＡＮ", ident({ name: "Quinlan" }));
+  refuses("camp for Nunez", ident({ name: "Núñez" }));
+  refuses("camp for Núñez", ident({ name: "Nunez" }));
+  refuses("适合李明的夏令营", ident({ name: "李明" }));
+  refuses("Q\u200buinlan", ident({ name: "Quinlan" }));
+  assert.equal(fold("Ｃafé"), "cafe");
+  assert.deepEqual(withMajors(["Ingeniería"]), ["ingenieria"]);
+  const b = toResearchBrief({ ...facts, activityCategories: ["ROBOTICS", "Ｍusic"] }, "activities", null);
+  assert.deepEqual(b.interests, ["robotics", "music"]);
+});
+
+// Finding 5
+test("name parts split on separators and fused forms are tokens", () => {
+  refuses("obrien lab", ident({ name: "O'Brien" }));
+  refuses("brien lab", ident({ name: "O'Brien" }));
+  refuses("o\u2019brien lab", ident({ name: "O\u2019Brien" }));
+  refuses("maryjane camp", ident({ name: "Mary-Jane Smith" }));
+  refuses("avery camp", ident({ name: "Avery_Quinlan" }));
+  refuses("averyquinlan camp", ident({ name: "Avery_Quinlan" }));
+  refuses("quinlan camp", ident({ name: "Avery_Quinlan" }));
+});
+
+// Finding 6
+test("region must be exactly two ASCII letters", () => {
+  const region = (state: string | null) => toResearchBrief({ ...facts, state }, "college_list", null).region;
+  assert.equal(region("wy"), "WY");
+  assert.equal(region("Wyoming"), null);
+  assert.equal(region("W1"), null);
+  assert.equal(region("Ｗｙ"), null);
+  assert.equal(region(null), null);
+});
+
+test("a name equal to a fixed vocabulary word refuses the run at the final scan", () => {
+  // Hometown "Music City": "music" is a word token and the brief's interests hold "music".
+  const withMusic = { ...facts, identity: { ...facts.identity, hometown: "Music City" }, activityCategories: ["music"] };
+  assert.throws(() => toResearchBrief(withMusic, "activities", null), IdentityLeakError);
+  assert.doesNotThrow(() => toResearchBrief({ ...withMusic, activityCategories: ["robotics"] }, "activities", null));
+});
+
+// Adversarial table
+test("adversarial inputs", () => {
+  const cases: Array<{ label: string; id: ReturnType<typeof ident>; text: string; leaks: boolean }> = [
+    { label: "one-word name", id: ident({ name: "Madonna" }), text: "camps like madonna's", leaks: true },
+    { label: "one-word name, other text", id: ident({ name: "Madonna" }), text: "summer camps", leaks: false },
+    { label: "name inside a common word", id: ident({ name: "Ann Lee" }), text: "planning, annual leeway", leaks: false },
+    { label: "name inside a common word 2", id: ident({ name: "Art" }), text: "start party", leaks: false },
+    { label: "email local part with dots and digits", id: ident({ email: "j.r.smith99@mail.org" }), text: "jrsmith99 club", leaks: true },
+    { label: "email local piece", id: ident({ email: "j.r.smith99@mail.org" }), text: "smith99 club", leaks: true },
+    { label: "email full", id: ident({ email: "j.r.smith99@mail.org" }), text: "write j.r.smith99@mail.org", leaks: true },
+    { label: "school with metacharacters", id: ident({ school: "C++ Academy (North)" }), text: "c++ academy (north) clubs", leaks: true },
+    { label: "school with metacharacters, other", id: ident({ school: "C++ Academy (North)" }), text: "c programming north", leaks: false },
+    { label: "whitespace-only fields", id: ident({ name: "  ", email: " ", school: "\t", hometown: "\n" }), text: "anything", leaks: false },
+    { label: "empty fields", id: ident({ name: "", email: "", school: "", hometown: "" }), text: "anything", leaks: false },
+    { label: "case and spacing", id: ident({ name: "AVERY   QUINLAN" }), text: "avery quinlan", leaks: true },
+  ];
+  for (const c of cases) {
+    const run = () => assertNoIdentity(c.text, identityTokens(c.id));
+    if (c.leaks) assert.throws(run, IdentityLeakError, c.label);
+    else assert.doesNotThrow(run, c.label);
+  }
+});
+test("a focus of 500 characters with the name at position 300 refuses, though only 200 would be stored", () => {
+  const focus = "x ".repeat(150) + "Quinlan " + "y ".repeat(100);
+  assert.ok(focus.indexOf("Quinlan") >= 300 - 2);
+  assert.throws(() => toResearchBrief(facts, "activities", focus), IdentityLeakError);
+  const ok = toResearchBrief(facts, "activities", "z ".repeat(250));
+  assert.equal(ok.focus?.length, 200);
 });
