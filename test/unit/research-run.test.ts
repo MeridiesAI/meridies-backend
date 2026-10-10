@@ -5,8 +5,8 @@ import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
 import { fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, cleanText, dropPicksNamingStudent, jsonObjectsWithSpans, firstJson, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
-  taskTextFor, validatePicks,
+  buildMatchPrompt, buildResearchQuestion, cleanText, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
+  replaceWhysNamingStudent, taskTextFor, validatePicks,
 } from "../../src/lib/research/prompt.js";
 import { realSeam, seamFor } from "../../src/lib/research/run.js";
 
@@ -41,13 +41,6 @@ test("the research system prompt carries the untrusted-data rule and no allowed-
   assert.ok(!/allowed official sites/i.test(RESEARCH_CANDIDATES_SYSTEM));
 });
 
-test("firstJson reads whole text, fenced blocks and JSON among prose", () => {
-  assert.deepEqual(firstJson('{"a":1}'), { a: 1 });
-  assert.deepEqual(firstJson('```json\n{"a":"}"}\n```'), { a: "}" });
-  assert.deepEqual(firstJson('Sure! Here it is: {"a":{"b":2}} hope that helps'), { a: { b: 2 } });
-  assert.equal(firstJson("no json here"), undefined);
-  assert.equal(firstJson('{"a": '), undefined);
-});
 test("parseCandidates: one per cited part, citations are the sources, uncited parts are ignored", () => {
   const cite = (url: string) => [{ url, title: "T" }];
   const out = parseCandidates([
@@ -167,19 +160,50 @@ test("the brace scanner respects strings and escapes and skips what is not JSON"
   assert.deepEqual(found[0]!.value, obj);
 });
 
-test("a pick whose reason names the student is dropped and the others stay", () => {
+const swap = (name: string, why: string, email: string | null = null) =>
+  replaceWhysNamingStudent([{ title: "T", why }], { name, email })[0]!.why;
+test("a pick whose reason names the student is kept with a fixed reason; the others are unchanged", () => {
   const picks = [
     { title: "A", why: "Fits Maya's marine biology interest." },
     { title: "B", why: "Fits the student's interests." },
     { title: "C", why: "Reach out at maya.t@example.com." },
   ];
-  const out = dropPicksNamingStudent(picks, { name: "Maya Test", email: "maya.t@example.com" });
-  assert.deepEqual(out.map((p) => p.title), ["B"]);
+  const out = replaceWhysNamingStudent(picks, { name: "Maya Test", email: "maya.t@example.com" });
+  assert.deepEqual(out.map((p) => p.title), ["A", "B", "C"]);
+  assert.deepEqual(out.map((p) => p.why), [GENERIC_WHY, "Fits the student's interests.", GENERIC_WHY]);
+});
+test("a name part that is also a word is a hit only as a capitalized word inside a sentence", () => {
+  const plain = "This will help the student build a research record.";
+  assert.equal(swap("Will Turner", plain), plain);
+  assert.equal(swap("Will Turner", "Fits Will's interest in biology."), GENERIC_WHY);
+  assert.equal(swap("Will Turner", "Will benefit from a lab placement."), "Will benefit from a lab placement.");
+  assert.equal(swap("Will Turner", "Strong fit. Will benefit from a lab placement."), "Strong fit. Will benefit from a lab placement.");
+  assert.equal(swap("May Strong", "A strong fit that may suit the student."), "A strong fit that may suit the student.");
+  assert.equal(swap("Fixture Student", "Fits the student's interests."), "Fits the student's interests.");
+  assert.equal(swap("Grant Major", "Good grant money and a major in biology."), "Good grant money and a major in biology.");
+  assert.equal(swap("Avery Young", "A young program that fits."), "A young program that fits.");
+});
+test("the whole name, the email and a non-ASCII part are hits wherever they stand and in any case", () => {
+  assert.equal(swap("Will Turner", "will turner would enjoy this."), GENERIC_WHY);
+  assert.equal(swap("Will Turner", "Fits WILL   TURNER well."), GENERIC_WHY);
+  assert.equal(swap("Will Turner", "Write to Will.Turner@Example.com.", "will.turner@example.com"), GENERIC_WHY);
+  assert.equal(swap("李明", "适合李明的夏令营"), GENERIC_WHY);
+  assert.equal(swap("Søren Lund", "Fits Soren's interests."), GENERIC_WHY);
+  assert.equal(swap("Avery Quinlan", "Fits Quinlan's interests."), GENERIC_WHY);
+});
+test("a reason holding a link, an email address or a phone number is replaced", () => {
+  const n = "Avery Quinlan";
+  assert.equal(swap(n, "See https://x.example/apply for details."), GENERIC_WHY);
+  assert.equal(swap(n, "Details at www.example.org."), GENERIC_WHY);
+  assert.equal(swap(n, "Write to admissions@example.org."), GENERIC_WHY);
+  assert.equal(swap(n, "Call 3075550100 today."), GENERIC_WHY);
+  assert.equal(swap(n, "Call 307-555-0100 today."), GENERIC_WHY);
+  assert.equal(swap(n, "Runs in 2027 and costs 150 dollars."), "Runs in 2027 and costs 150 dollars.");
 });
 test("a program in the student's own town is kept: titles are not checked against school or hometown", () => {
   const k = [{ title: "Cheyenne Marine Lab Program", summary: "s", sources: [{ url: "https://example.org/a", title: null }], checkedAt: "2026-10-10T00:00:00.000Z" }];
   const drafts = validatePicks({ picks: [{ index: 0, why: "Close to home and relevant.", effort: "low" }] }, k);
-  const out = dropPicksNamingStudent(drafts, { name: "Avery Quinlan", email: "avery.q@example.com" });
+  const out = replaceWhysNamingStudent(drafts, { name: "Avery Quinlan", email: "avery.q@example.com" });
   assert.equal(out.length, 1);
   assert.equal(out[0]!.title, "Cheyenne Marine Lab Program");
 });

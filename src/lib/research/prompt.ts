@@ -7,7 +7,7 @@
  * filtered focus), so no other student data can reach it by construction.
  */
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../context/pack.js";
-import { assertNoIdentity, identityTokens, IdentityLeakError, type ResearchBrief } from "./brief.js";
+import { fold, type ResearchBrief } from "./brief.js";
 import type { Candidate } from "./citations.js";
 
 export const MAX_CANDIDATES = 8;
@@ -59,39 +59,6 @@ function plain(s: unknown, max: number): string | undefined {
 }
 
 // --- reading the research answer ---------------------------------------------------------------------------------
-
-/** The first JSON object or array in `text` (whole text, a fenced block, or JSON among prose), or undefined. */
-export function firstJson(text: string): unknown {
-  const t = text.trim();
-  try {
-    return JSON.parse(t);
-  } catch {
-    /* fall through to the scan */
-  }
-  for (let i = 0; i < t.length; i++) {
-    const open = t[i];
-    if (open !== "{" && open !== "[") continue;
-    const close = open === "{" ? "}" : "]";
-    let depth = 0;
-    let inString = false;
-    for (let j = i; j < t.length; j++) {
-      const ch = t[j];
-      if (inString) {
-        if (ch === "\\") j++;
-        else if (ch === '"') inString = false;
-      } else if (ch === '"') inString = true;
-      else if (ch === open) depth++;
-      else if (ch === close && --depth === 0) {
-        try {
-          return JSON.parse(t.slice(i, j + 1));
-        } catch {
-          break;
-        }
-      }
-    }
-  }
-  return undefined;
-}
 
 type PartLike = { text: string; citations: { url: string; title: string | null }[] };
 
@@ -254,23 +221,74 @@ export function validatePicks(raw: unknown, kept: Kept[]): RecommendationDraft[]
   return out;
 }
 
+/** The reason a pick gets when its own reason names the student or carries contact text. */
+export const GENERIC_WHY = "Fits the student's interests and record.";
+
+/** Same as `fold` in brief.ts but keeps the case, so a capitalized word can be told from the same word in lower case. */
+function foldKeepCase(s: string): string {
+  return s.normalize("NFKC").normalize("NFD").replace(/[\p{M}\p{Cf}]/gu, "").normalize("NFC")
+    .replace(/[ØÆŒÞŁĐ]/g, (c) => ({ "Ø": "O", "Æ": "Ae", "Œ": "Oe", "Þ": "Th", "Ł": "L", "Đ": "D" })[c]!)
+    .replace(/[øłđßæœþı]/g, (c) => ({ "ø": "o", "ł": "l", "đ": "d", "ß": "ss", "æ": "ae", "œ": "oe", "þ": "th", "ı": "i" })[c]!);
+}
+
+const WORD_CHAR = "\\p{L}\\p{N}";
+
+/** True when `word` stands in the text as its own capitalized word somewhere other than the first word of a sentence. */
+function capitalizedWordMidSentence(text: string, word: string): boolean {
+  const re = new RegExp(`(?<![${WORD_CHAR}])${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![${WORD_CHAR}])`, "gu");
+  for (const m of text.matchAll(re)) {
+    const before = text.slice(0, m.index).trimEnd();
+    const sentenceStart = before === "" || /[.!?]["')\]]*$/.test(before);
+    if (!sentenceStart) return true;
+  }
+  return false;
+}
+
+const CONTACT_TEXT = [/https?:\/\/|www\./i, /[^\s@]+@[^\s@]+\.[^\s@]+/, /\d{7,}/, /\b\d{3}[-.\s)]\s?\d{3}[-.\s]\d{4}\b/];
+
 /**
- * Drops any pick whose reason holds the student's name or email (the match model reads the student's record, so it can
- * slip). Only the model-written `why` is checked. Titles, deadlines and costs come from the web and are deliberately
- * not checked against school or hometown: a program in the student's own town is a legitimate result, and
- * recommendations are counselor-only.
+ * True when a match model's reason names the student: their email; their whole name (two or more parts, in order);
+ * or one part of it (3+ characters, 2+ when it holds a non-ASCII letter) written as a capitalized word in the middle
+ * of a sentence. Case-sensitive on purpose for the single part, so "This will help the student" is not a hit for a
+ * student named Will, while "Fits Will's interest" is. A reason that starts a sentence with the word ("Will benefit
+ * from...") is not a hit either: that is the price of not refusing every "May" and "Grant". Non-ASCII parts match
+ * anywhere, ignoring case.
  */
-export function dropPicksNamingStudent<T extends { why: string }>(drafts: T[], identity: { name: string | null; email: string | null }): T[] {
-  const tokens = identityTokens({ name: identity.name, email: identity.email, school: null, hometown: null });
-  return drafts.filter((d) => {
-    try {
-      assertNoIdentity(d.why, tokens);
-      return true;
-    } catch (err) {
-      if (err instanceof IdentityLeakError) return false;
-      throw err;
+export function whyNamesStudent(why: string, identity: { name: string | null; email: string | null }): boolean {
+  const text = fold(why).replace(/\s+/g, " ");
+  const email = fold(identity.email ?? "").trim();
+  if (email && text.includes(email)) return true;
+  const name = fold(identity.name ?? "").replace(/\s+/g, " ").trim();
+  const nameParts = name.split(" ").filter(Boolean);
+  if (nameParts.length >= 2 && text.includes(name)) return true;
+  const keepCaseText = foldKeepCase(why);
+  const rawParts = (identity.name ?? "").split(/[\s,._\-'\u2018\u2019\u02bc`\u00b4]+/u).filter(Boolean);
+  for (const raw of rawParts) {
+    const part = fold(raw);
+    const len = [...part].length;
+    if (/[^\x00-\x7F]/.test(part)) {
+      if (len >= 2 && /\p{L}/u.test(part) && text.includes(part)) return true;
+      continue;
     }
-  });
+    if (len < 3) continue;
+    const kept = foldKeepCase(raw);
+    const lowerRest = kept.charAt(0).toUpperCase() + kept.slice(1).toLowerCase();
+    const asWritten = kept.charAt(0).toUpperCase() + kept.slice(1);
+    if (capitalizedWordMidSentence(keepCaseText, asWritten) || capitalizedWordMidSentence(keepCaseText, lowerRest)) return true;
+  }
+  return false;
+}
+
+/**
+ * The match model reads the student's record, so a reason can slip and name the student, and web text can steer it
+ * into writing a link, an address or a phone number; reasons are later copied into task text that can be shared. Such a
+ * pick is KEPT and only its reason is replaced with a fixed sentence: the candidate is a fine result, and dropping it
+ * made a student named "Fixture Student" (or Will, Grant, Young...) get nothing at all. Only the model-written `why`
+ * is checked. Titles, deadlines and costs come from the web and are deliberately not checked against school or
+ * hometown: a program in the student's own town is a legitimate result, and recommendations are counselor-only.
+ */
+export function replaceWhysNamingStudent<T extends { why: string }>(drafts: T[], identity: { name: string | null; email: string | null }): T[] {
+  return drafts.map((d) => (whyNamesStudent(d.why, identity) || CONTACT_TEXT.some((re) => re.test(d.why)) ? { ...d, why: GENERIC_WHY } : d));
 }
 
 // --- the hidden task made on accept -------------------------------------------------------------------------------

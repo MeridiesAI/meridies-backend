@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertNoIdentity, briefHash, fold, identityTokens, IDENTITY_STOPLIST, IdentityLeakError, toResearchBrief } from "../../src/lib/research/brief.js";
+import { ACTIVITY_TYPES } from "../../src/lib/profileUpdates.js";
+import { ACTIVITY_CATEGORIES, ACTIVITY_TYPE_CATEGORY, assertNoIdentity, briefHash, category, fold, identityTokens, IDENTITY_STOPLIST, IdentityLeakError, toResearchBrief } from "../../src/lib/research/brief.js";
 
 const facts = {
   intendedMajors: ["Biology", "Computer Science"], gradYear: "2027", state: "WY",
@@ -140,11 +141,83 @@ test("region must be exactly two ASCII letters", () => {
   assert.equal(region(null), null);
 });
 
-test("a name equal to a fixed vocabulary word refuses the run at the final scan", () => {
-  // Hometown "Music City": "music" is a word token and the brief's interests hold "music".
-  const withMusic = { ...facts, identity: { ...facts.identity, hometown: "Music City" }, activityCategories: ["music"] };
-  assert.throws(() => toResearchBrief(withMusic, "activities", null), IdentityLeakError);
-  assert.doesNotThrow(() => toResearchBrief({ ...withMusic, activityCategories: ["robotics"] }, "activities", null));
+// G2: the final scan reads only the majors and the focus, never the brief's own keys and fixed words.
+test("a name equal to a fixed vocabulary word no longer refuses the run", () => {
+  // Was: hometown "Music City" and the interest "music" refused every run. The interests are code-built and not scanned.
+  const withMusic = { ...facts, identity: { ...facts.identity, hometown: "Music City" }, activityCategories: ["Music: Vocal"] };
+  assert.deepEqual(toResearchBrief(withMusic, "activities", null).interests, ["music"]);
+});
+test("surnames and schools that equal the brief's own keys or words are not refused", () => {
+  const brief = (identity: Partial<typeof facts.identity>, over: Partial<typeof facts> = {}, feature: "activities" | "college_list" = "activities") =>
+    toResearchBrief({ ...facts, ...over, identity: { ...facts.identity, ...identity } }, feature, null);
+  assert.doesNotThrow(() => brief({ name: "Sam Null" }));
+  assert.doesNotThrow(() => brief({ name: "Sam List" }, {}, "college_list"));
+  assert.doesNotThrow(() => brief({ name: "Sam Region" }));
+  const b = brief({ school: "Health Sciences High" }, { activityCategories: ["Research"] });
+  assert.deepEqual(b.interests, ["science research"]);
+  assert.doesNotThrow(() => brief({ school: "Health Sciences High" }, { activityCategories: ["health and medicine"] }));
+  assert.deepEqual(brief({ school: "Health Sciences High" }, { activityCategories: ["health and medicine"] }).interests, ["health and medicine"]);
+});
+test("a major that holds the student's identity is dropped and the others are kept", () => {
+  const b = toResearchBrief({ ...facts, intendedMajors: ["Biology", "Quinlan studies", "Computer Science"] }, "college_list", null);
+  assert.deepEqual(b.majors, ["biology", "computer science"]);
+  assert.equal(toResearchBrief({ ...facts, intendedMajors: ["Cheyenne studies"] }, "college_list", null).majors.length, 0);
+});
+test("a focus that holds the name, school or hometown still throws", () => {
+  assert.throws(() => toResearchBrief(facts, "activities", "like Quinlan did"), IdentityLeakError);
+  assert.throws(() => toResearchBrief(facts, "activities", "near Cheyenne"), IdentityLeakError);
+});
+
+// G3: the product's own activity types reach the brief as interests.
+test("every ACTIVITY_TYPES value maps to a vocabulary entry, and the table has no stale rows", () => {
+  for (const t of ACTIVITY_TYPES) {
+    const key = fold(t).trim().replace(/\s+/g, " ");
+    const hit = ACTIVITY_TYPE_CATEGORY[key];
+    assert.ok(hit && (ACTIVITY_CATEGORIES as readonly string[]).includes(hit), `${t} has no row in ACTIVITY_TYPE_CATEGORY`);
+  }
+  assert.equal(Object.keys(ACTIVITY_TYPE_CATEGORY).length, ACTIVITY_TYPES.length);
+});
+test("category(): types map, the vocabulary still matches, 'other' and unknown words give nothing", () => {
+  assert.equal(category("Science/Math"), "science research");
+  assert.equal(category("  Athletics:  Club "), "athletics");
+  assert.equal(category("Robotics"), "robotics");
+  assert.equal(category("math competitions"), "math competitions");
+  assert.equal(category("Other Club/Activity"), null);
+  assert.equal(category("other"), null);
+  assert.equal(category("LGBT"), null);
+  assert.equal(category("USAMO Qualifier"), null);
+  assert.equal(category("constructor"), null);
+  const b = toResearchBrief({ ...facts, activityCategories: ["Robotics", "Science/Math", "Other Club/Activity", "Music: Vocal", "Music: Instrumental"] }, "activities", null);
+  assert.deepEqual(b.interests, ["robotics", "science research", "music"]);
+});
+
+// G5: the two layers no longer share the same blind spots.
+test("plurals, glued digits, the school's short form and ø-type letters are caught", () => {
+  refuses("the Okafors want something local", ident({ name: "Will Okafor" }));
+  refuses("avery2027 robotics", ident({ name: "Avery Quinlan" }));
+  refuses("avery2027", ident({ email: "avery.q@example.com" }));
+  refuses("robotics at Lee High", ident({ school: "Lee High School" }));
+  refuses("at cheyenne central high", ident({ school: "Cheyenne Central High School" }));
+  refuses("ask Soren", ident({ name: "Søren Lund" }));
+  refuses("ask Søren", ident({ name: "Soren Lund" }));
+  refuses("Lukasz club", ident({ name: "Łukasz Nowak" }));
+  refuses("Strasse", ident({ name: "Straße Mueller" }));
+  refuses("Dorde", ident({ name: "Đorđe Petrovic" }));
+  refuses("Aelfric", ident({ name: "Ælfric Gray" }));
+  refuses("Thor", ident({ name: "Þor Gray" }));
+  assert.equal(fold("ıı Øl Łđ"), "ii ol ld");
+});
+test("short tokens keep the whole-word rule", () => {
+  allows("students willing to travel", ident({ name: "Will Turner" }));
+  allows("marking period", ident({ name: "Mark Hale" }));
+  allows("okay", ident({ name: "Oka Ito" }));
+  refuses("will travel", ident({ name: "Will Turner" }));
+  allows("annual leeway", ident({ name: "Ann Lee" }));
+  assert.deepEqual(identityTokens(ident({ school: "Central High School" })).sort(), ["central high school"]);
+  assert.ok(identityTokens(ident({ school: "Lee High School" })).includes("lee high"));
+});
+test("known limits: a two-letter Latin name part is not a token", () => {
+  allows("Li and Bo want a camp", ident({ name: "Li Bo" }));
 });
 
 // Adversarial table

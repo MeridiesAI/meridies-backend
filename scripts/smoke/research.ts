@@ -25,16 +25,12 @@
  *   import { seedStudent } from "./test/fixtures/context/students.mjs";
  *   const counselor = await user("smoke-counselor");
  *   const { student } = await seedStudent(counselor, "full");
- *   await sql(`update public.profiles set full_name = 'Fixture Maya' where id = '${student.id}'`);
+ *   await sql(`update public.profiles set full_name = 'Fixture Student' where id = '${student.id}'`);
  *   console.log(`export SMOKE_COUNSELOR_TOKEN='${counselor.token}'\nexport SMOKE_STUDENT_ID='${student.id}'`);
  *   EOF
  *   eval "$(node make-fixture.mjs)"    # the token is in your shell only; delete make-fixture.mjs afterwards
  *
  * A counselor token from the harness lasts about an hour.
- *
- * Name the fixture student "Fixture <something that is not a common word>", not "Fixture Student": every part of a
- * student's name is an identity token, and a reason that contains one (the match step is told to write "the
- * student") is dropped, so a student named "Fixture Student" gets no recommendations at all.
  */
 import { checkLink } from "../../src/lib/links.js";
 
@@ -111,7 +107,7 @@ async function runOne(label: string, path: string, body: Record<string, unknown>
   const run = res.json as Run;
   console.log(`HTTP ${res.status}  cached=${run.cached}  recommendations=${run.recommendations.length}`);
   if (run.recommendations.length === 0) {
-    console.log("  WARN: no recommendations (a valid answer, but check the student's name isn't a word the reasons use)");
+    console.log("  WARN: no recommendations (a valid answer: the web had nothing, or nothing survived the checks)");
     warnings++;
   }
   for (const rec of run.recommendations) {

@@ -6,8 +6,47 @@ export const ACTIVITY_CATEGORIES = [
   "math competitions", "science research", "robotics", "computer science", "debate", "model un", "journalism",
   "creative writing", "visual arts", "music", "theater", "athletics", "community service", "student government",
   "entrepreneurship", "environmental", "health and medicine", "engineering", "languages", "religious",
-  "cultural clubs", "tutoring", "work", "family responsibilities", "other",
+  "cultural clubs", "tutoring", "work", "family responsibilities", "dance", "career exploration", "leadership",
+  "academics", "other",
 ] as const;
+
+/**
+ * The product's own activity types (`ACTIVITY_TYPES` in src/lib/profileUpdates.ts, the Common App list) each map to
+ * exactly one entry of the vocabulary above. The table is keyed by the folded type. It is not imported from
+ * profileUpdates.ts because that module pulls in env and the Supabase client, which this pure module must not load;
+ * test/unit/research-brief.test.ts imports the real list and fails when a type has no row here.
+ * "other" is never sent as an interest. Two types are deliberately "other": "LGBT" (a protected characteristic that
+ * must not reach an outside model, however generic the word) and "School Spirit" (no useful research category).
+ */
+export const ACTIVITY_TYPE_CATEGORY: Readonly<Record<string, (typeof ACTIVITY_CATEGORIES)[number]>> = {
+  "academic": "academics",
+  "art": "visual arts",
+  "athletics: club": "athletics",
+  "athletics: jv/varsity": "athletics",
+  "career-oriented": "career exploration",
+  "community service (volunteer)": "community service",
+  "computer/technology": "computer science",
+  "cultural": "cultural clubs",
+  "dance": "dance",
+  "debate/speech": "debate",
+  "environmental": "environmental",
+  "family responsibilities": "family responsibilities",
+  "foreign exchange": "languages",
+  "journalism/publication": "journalism",
+  "junior r.o.t.c.": "leadership",
+  "lgbt": "other",
+  "music: instrumental": "music",
+  "music: vocal": "music",
+  "religious": "religious",
+  "research": "science research",
+  "robotics": "robotics",
+  "school spirit": "other",
+  "science/math": "science research",
+  "student govt./politics": "student government",
+  "theater/drama": "theater",
+  "work (paid)": "work",
+  "other club/activity": "other",
+};
 
 export type ResearchBrief = {
   feature: "college_list" | "activities";
@@ -31,11 +70,16 @@ type Facts = StudentContext["facts"];
 
 /**
  * One comparison form for tokens and text: NFKC (full-width to ASCII), lowercase, strip invisible format
- * characters (zero-width space, soft hyphen), then drop combining marks so NFC, NFD and unaccented spellings agree.
+ * characters (zero-width space, soft hyphen), then drop combining marks so NFC, NFD and unaccented spellings agree,
+ * and finally map the few letters that don't decompose (ø, ł, đ, ß, æ, œ, þ, ı) to their ASCII spelling.
  */
 export function fold(s: string): string {
-  return s.normalize("NFKC").toLowerCase().normalize("NFD").replace(/[\p{M}\p{Cf}]/gu, "").normalize("NFC");
+  return s.normalize("NFKC").toLowerCase().normalize("NFD").replace(/[\p{M}\p{Cf}]/gu, "").normalize("NFC").replace(NON_DECOMPOSING, (c) => LETTER_FOLDS[c]!);
 }
+
+/** Letters NFKD doesn't decompose, mapped to their usual ASCII spelling (on tokens and on text alike). */
+const LETTER_FOLDS: Readonly<Record<string, string>> = { "ø": "o", "ł": "l", "đ": "d", "ß": "ss", "æ": "ae", "œ": "oe", "þ": "th", "ı": "i" };
+const NON_DECOMPOSING = /[øłđßæœþı]/g;
 
 /** True when the text holds a letter outside ASCII (CJK, Cyrillic, ...). Accented Latin is already folded to ASCII. */
 function hasNonAsciiLetter(s: string): boolean {
@@ -86,7 +130,8 @@ function isStatePart(p: string): boolean {
   return /^[a-z]{2}$/.test(t) || STATE_NAMES.includes(t);
 }
 
-function addPlace(raw: string | null, out: Set<string>, hometown = false): void {
+function addPlace(raw: string | null, out: Set<string>, kind: "school" | "hometown"): void {
+  const hometown = kind === "hometown";
   const s = fold(raw ?? "").trim().replace(/\s+/g, " ");
   if (!s) return;
   out.add(s);
@@ -96,6 +141,19 @@ function addPlace(raw: string | null, out: Set<string>, hometown = false): void 
   if (hometown && comma >= 0 && isStatePart(s.slice(comma + 1))) wordSource = s.slice(0, comma);
   const stripped = s.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
   if (stripped) out.add(stripped);
+  // "Lee High School" is also written "Lee High": the school without its last generic word, as a phrase. Only when two
+  // or more words are left and one of them says something about the school ("Central High School" gets no alias).
+  if (kind === "school") {
+    const words = s.split(" ");
+    const last = words[words.length - 1]!.replace(NON_ALNUM, "");
+    const rest = words.slice(0, -1);
+    if (rest.length >= 2 && IDENTITY_STOPLIST.has(last) && rest.some((w) => !IDENTITY_STOPLIST.has(w.replace(NON_ALNUM, "")))) {
+      const alias = rest.join(" ");
+      out.add(alias);
+      const aliasStripped = alias.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
+      if (aliasStripped) out.add(aliasStripped);
+    }
+  }
   for (const w of wordSource.split(/[\s,]+/)) {
     for (const c of [w.replace(NON_ALNUM, ""), ...w.split(/[^\p{L}\p{N}]+/u)]) {
       if (c && keepPlaceWord(c)) out.add(c);
@@ -132,14 +190,20 @@ export function identityTokens(id: Facts["identity"]): string[] {
       if (keepPart(piece) && /\p{L}/u.test(piece)) out.add(piece);
     }
   }
-  addPlace(id.school, out);
-  addPlace(id.hometown, out, true);
+  addPlace(id.school, out, "school");
+  addPlace(id.hometown, out, "hometown");
   // Never a token that is a single character or has no letter or digit.
   return [...out].filter((t) => [...t].length >= 2 && /[\p{L}\p{N}]/u.test(t));
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/**
+ * Throws when the text holds any token. Non-ASCII tokens match anywhere. ASCII tokens of 5 or more characters match as a
+ * word prefix (the token starts at a word boundary and anything may follow: "okafors", "avery2027", "lee high school"
+ * for "lee high"); shorter ones must be whole words, so the four-letter names that are also common words (Will, Mark,
+ * Hope, Rose) don't refuse every "willing" or "marking".
+ */
 export function assertNoIdentity(text: string, tokens: string[]): void {
   const t = fold(text);
   for (const raw of tokens) {
@@ -149,12 +213,18 @@ export function assertNoIdentity(text: string, tokens: string[]): void {
       if (t.includes(tok)) throw new IdentityLeakError();
       continue;
     }
-    if (new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(tok)}([^\\p{L}\\p{N}]|$)`, "u").test(t)) throw new IdentityLeakError();
+    const after = [...tok].length >= 5 ? "" : "([^\\p{L}\\p{N}]|$)";
+    if (new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(tok)}${after}`, "u").test(t)) throw new IdentityLeakError();
   }
 }
 
 const FOLDED_CATEGORIES = new Map<string, string>(ACTIVITY_CATEGORIES.map((c) => [fold(c), c]));
-const category = (c: string): string | null => FOLDED_CATEGORIES.get(fold(c).trim().replace(/\s+/g, " ")) ?? null;
+/** The brief's interest word for a student's activity category: the product's types first, then the vocabulary. "other" and anything unknown give null. */
+export function category(c: string): string | null {
+  const key = fold(c).trim().replace(/\s+/g, " ");
+  const hit = Object.hasOwn(ACTIVITY_TYPE_CATEGORY, key) ? ACTIVITY_TYPE_CATEGORY[key]! : FOLDED_CATEGORIES.get(key) ?? null;
+  return hit === "other" ? null : hit;
+}
 
 /**
  * A major is kept only when it is short and plain: 1 to 5 words, at most 60 characters, letters, spaces and & - / , '
@@ -211,18 +281,33 @@ export function toResearchBrief(facts: Facts, feature: ResearchBrief["feature"],
   // Scan the whole text first: the stored focus is cut to 200 characters, an identity at position 300 must still refuse.
   if (fullFocus) assertNoIdentity(fullFocus, tokens);
   const cleanFocus = fullFocus ? fullFocus.slice(0, 200) : null;
-  const brief: ResearchBrief = {
+  // Only the two fields that can carry text someone typed are scanned: each major and the focus. Everything else is
+  // built by code from fixed sets (a band, a two-letter code, a word from the vocabulary), so scanning it could only
+  // trip on the brief's own keys and words (a surname "Null", a school "Health Sciences High"). A major that trips the
+  // scan is dropped and the run goes ahead without it; a focus that trips it refuses the run (above).
+  const majors = facts.intendedMajors
+    .map(majorOf)
+    .filter((m): m is string => m !== null)
+    .filter((m) => {
+      try {
+        assertNoIdentity(m, tokens);
+        return true;
+      } catch (err) {
+        if (err instanceof IdentityLeakError) return false;
+        throw err;
+      }
+    })
+    .slice(0, 5);
+  return {
     feature,
     grade: grade(facts.gradYear, now),
     region: region(facts.state),
-    majors: facts.intendedMajors.map(majorOf).filter((m): m is string => m !== null).slice(0, 5),
+    majors,
     interests: [...new Set(facts.activityCategories.map(category).filter((c): c is string => !!c))],
     gpaBand: gpaBand(facts.gpa),
     testBand: testBand(facts.sat, facts.act),
     focus: cleanFocus,
   };
-  assertNoIdentity(JSON.stringify(brief), tokens);
-  return brief;
 }
 
 export function briefHash(b: ResearchBrief): string {

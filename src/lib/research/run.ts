@@ -19,7 +19,7 @@ import { assertNoIdentity, briefHash, identityTokens, IdentityLeakError, toResea
 import { keepCandidates } from "./citations.js";
 import { fakeSeam } from "./fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, dropPicksNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidates, RESEARCH_CANDIDATES_SYSTEM,
   validatePicks, type RecommendationDraft, type ResearchCandidate,
 } from "./prompt.js";
 
@@ -121,21 +121,13 @@ async function collegeIdFor(request: FastifyRequest, title: string): Promise<str
   return hits.length === 1 ? (hits[0]!.id as string) : undefined;
 }
 
+/** Only the counselor's focus can trip the identity filter (a major that does is dropped from the brief), so the 400 says so. */
 function briefOrRefuse(ctx: StudentContext, feature: Feature, focus: string | null): ResearchBrief {
   try {
     return toResearchBrief(ctx.facts, feature, focus);
   } catch (err) {
     if (!(err instanceof IdentityLeakError)) throw err;
-    if (focus) {
-      try {
-        toResearchBrief(ctx.facts, feature, null);
-      } catch (inner) {
-        if (!(inner instanceof IdentityLeakError)) throw inner;
-        throw badRequest("Research can't run safely for this student's record yet. Check their intended majors.");
-      }
-      throw badRequest("Take the student's name, school or hometown out of the focus and try again.");
-    }
-    throw badRequest("Research can't run safely for this student's record yet. Check their intended majors.");
+    throw badRequest("The focus contains the student's name, school or hometown. Take it out and try again.");
   }
 }
 
@@ -251,7 +243,7 @@ export async function runResearch(
 
     // 9. Match: a cheap model picks the fits. Nothing to match means an empty, successful run.
     const drafts: RecommendationDraft[] = kept.length
-      ? dropPicksNamingStudent(validatePicks(await seam.match({ request, ctx, kept, studentId }), kept), ctx.facts.identity)
+      ? replaceWhysNamingStudent(validatePicks(await seam.match({ request, ctx, kept, studentId }), kept), ctx.facts.identity)
       : [];
 
     // 10. Store.
