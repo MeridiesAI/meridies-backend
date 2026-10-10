@@ -22,10 +22,11 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { runStructured } from "../lib/anthropic.js";
-import { badRequest, conflict, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, normalizeLink } from "../lib/links.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { isRestrictedDocument } from "../lib/context/documentAi.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
 import {
   ensurePracticeFolders,
@@ -72,8 +73,18 @@ const documentBody = z
       ])
       .optional(),
     availableToLlm: z.boolean().optional(),
+    /** Counselor only: how AI may use the file, and whether the student waived seeing a recommendation letter. */
+    aiAccess: z.enum(["default", "allowed", "excluded"]).optional(),
+    ferpaWaived: z.boolean().optional(),
   })
   .strict();
+
+/** Only a counselor sets the two switches that decide what a student sees and what AI reads. */
+function assertCounselorSetsRestrictions(request: FastifyRequest, b: { aiAccess?: unknown; ferpaWaived?: unknown }): void {
+  if ((b.aiAccess !== undefined || b.ferpaWaived !== undefined) && request.profile.role !== "counselor") {
+    throw forbidden("Only your counselor can change those settings");
+  }
+}
 
 /** A folder the caller may file into: their own, anywhere in their drive. */
 export async function assertOwnFolder(request: FastifyRequest, folderId: string): Promise<Row> {
@@ -338,6 +349,7 @@ export default async function fileRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate, limit("documents:create", 120, 60)] },
     async (request, reply) => {
       const b = documentBody.parse(request.body);
+      assertCounselorSetsRestrictions(request, b);
       await enforceQuota(
         request.auth.userId,
         "uploads",
@@ -380,6 +392,8 @@ export default async function fileRoutes(app: FastifyInstance) {
           kind: b.kind ?? "other",
           source: "upload",
           available_to_llm: b.availableToLlm ?? true,
+          ai_access: b.aiAccess ?? "default",
+          ferpa_waived: b.ferpaWaived ?? false,
           uploaded_by: request.auth.userId,
         })
         .select("*")
@@ -387,7 +401,8 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
 
       // The accountability engine reads these rows; an upload that skips this
-      // is a student who looks stalled when they aren't.
+      // is a student who looks stalled when they aren't. The student reads the log, so a restricted file's
+      // name stays out of it.
       if (studentId) {
         await request.db.from("progress_events").insert({
           student_id: studentId,
@@ -395,7 +410,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           entity_id: data.id as string,
           event: "uploaded",
           actor_id: request.auth.userId,
-          metadata: { filename: b.filename },
+          metadata: isRestrictedDocument({ kind: b.kind ?? "other", ferpa_waived: b.ferpaWaived ?? false }) ? {} : { filename: b.filename },
         });
       }
 
@@ -420,6 +435,7 @@ export default async function fileRoutes(app: FastifyInstance) {
         })
         .strict()
         .parse(request.body);
+      assertCounselorSetsRestrictions(request, b);
 
       const { data: existing } = await request.db
         .from("documents")

@@ -16,3 +16,12 @@ export function documentAiDecision(
   if (doc.kind === "other") return { allowed: false, reason: "not-categorized" };
   return { allowed: false, reason: "kind-excluded" };
 }
+
+/**
+ * Documents a student may not see unless they uploaded them (documents_student_restricted_select): a waived
+ * recommendation letter, IEP/504 and counselor-only files. Anything that would echo such a file's name to a
+ * student (an activity log entry, say) must leave the name out.
+ */
+export function isRestrictedDocument(doc: { kind: string; ferpa_waived?: boolean }): boolean {
+  return (doc.kind === "recommendation-letter" && doc.ferpa_waived === true) || doc.kind === "iep-504" || doc.kind === "counselor-only";
+}

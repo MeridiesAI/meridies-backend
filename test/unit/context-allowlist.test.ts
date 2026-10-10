@@ -48,3 +48,12 @@ test("kind defaults", () => {
 test("practice document reading off excludes everything", () => {
   assert.deepEqual(documentAiDecision(doc(), false), { allowed: false, reason: "practice-setting" });
 });
+
+import { isRestrictedDocument } from "../../src/lib/context/documentAi.js";
+test("restricted documents are the ones a student may not see", () => {
+  assert.equal(isRestrictedDocument({ kind: "recommendation-letter", ferpa_waived: true }), true);
+  assert.equal(isRestrictedDocument({ kind: "recommendation-letter", ferpa_waived: false }), false);
+  assert.equal(isRestrictedDocument({ kind: "iep-504" }), true);
+  assert.equal(isRestrictedDocument({ kind: "counselor-only" }), true);
+  assert.equal(isRestrictedDocument({ kind: "transcript" }), false);
+});

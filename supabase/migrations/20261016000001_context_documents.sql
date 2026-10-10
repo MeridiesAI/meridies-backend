@@ -36,3 +36,72 @@ create policy documents_student_restricted_select on public.documents
       or kind in ('iep-504','counselor-only')
     )
   );
+
+-- ---------------------------------------------------------------------------
+-- Only a counselor sets the two switches that decide what a student sees and
+-- what AI reads (ai_access, ferpa_waived), and a student can't file a document
+-- they didn't upload under a restricted kind.
+--
+-- documents_write lets a student update documents filed under them, also
+-- directly through PostgREST, so the rule lives here and not only in the route.
+-- Service-role and postgres writes carry no auth.uid() and pass untouched.
+-- The other direction (a student re-kinding a restricted document that isn't
+-- theirs) needs no code: they can't see the row, so UPDATE and DELETE match
+-- nothing (documents_student_restricted_select applies to the WHERE clause).
+-- ---------------------------------------------------------------------------
+
+create or replace function private.documents_guard_student_restricted()
+returns trigger
+language plpgsql
+security invoker
+set search_path = ''
+as $function$
+declare
+  v_uid uuid := auth.uid();
+begin
+  if v_uid is null then
+    return new;
+  end if;
+  if coalesce(private.user_role(v_uid), '') <> 'student' then
+    return new;
+  end if;
+
+  if tg_op = 'INSERT' then
+    if new.ai_access is distinct from 'default' or new.ferpa_waived is distinct from false then
+      raise exception 'Only your counselor can change those settings' using errcode = '42501';
+    end if;
+  elsif new.ai_access is distinct from old.ai_access or new.ferpa_waived is distinct from old.ferpa_waived then
+    raise exception 'Only your counselor can change those settings' using errcode = '42501';
+  end if;
+
+  if new.kind in ('recommendation-letter', 'iep-504', 'counselor-only')
+     and new.owner_id is distinct from v_uid
+     and (tg_op = 'INSERT' or new.kind is distinct from old.kind) then
+    raise exception 'Only your counselor can file a document under that kind' using errcode = '42501';
+  end if;
+  return new;
+end;
+$function$;
+
+revoke all on function private.documents_guard_student_restricted() from public, anon, authenticated;
+
+drop trigger if exists documents_guard_student_restricted on public.documents;
+create trigger documents_guard_student_restricted
+  before insert or update on public.documents
+  for each row execute function private.documents_guard_student_restricted();
+
+-- ---------------------------------------------------------------------------
+-- A task's document links follow the document: a student who can't see a
+-- restricted document doesn't see that it is attached to a task either (its
+-- id, role and note). Their own submission rows stay: the file is theirs, so
+-- documents RLS shows it to them inside the subquery.
+-- ---------------------------------------------------------------------------
+
+drop policy if exists deliverable_documents_student_restricted_select on public.deliverable_documents;
+create policy deliverable_documents_student_restricted_select on public.deliverable_documents
+  as restrictive for select to authenticated
+  using (
+    coalesce(private.user_role((select auth.uid())), '') <> 'student'
+    or document_id is null
+    or exists (select 1 from public.documents d where d.id = document_id)
+  );
