@@ -30,8 +30,8 @@ test("an essay body is read only when unlinked, or linked to a file that came ba
   assert.equal(essayBodyReadable("doc-1", null), false, "a linked file RLS hid fails closed");
 });
 
-test("chat does not read intake answers; student-ai still does", () => {
-  assert.ok(!PROFILES.chat.sections.includes("intake"));
+test("chat and student-ai both read intake answers", () => {
+  assert.ok(PROFILES.chat.sections.includes("intake"));
   assert.ok(PROFILES["student-ai"].sections.includes("intake"));
 });
 

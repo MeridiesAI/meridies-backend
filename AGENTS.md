@@ -770,8 +770,9 @@ migration is safe to apply first; the previous code ignores the new columns.
   (`usableEssay`), which applies the same `essayBodyReadable` rule.
   `GET /students/:id/ai-context?feature=narrative-coherence` shows the layer's
   view, not the ticked material a coherence run sends.
-- **Chat does not read intake answers.** `intake_responses.answers` is free-form
-  JSON from a counselor-designed form; only the `student-ai` profile includes it.
+- **Chat and the `student-ai` routes read intake answers.** `intake_responses.answers`
+  is free-form JSON from a counselor-designed form, so what reaches AI is whatever
+  that form asks. It is wrapped as untrusted data (`source: "intake"`) in both profiles.
 - **Narrowing.** `{ only }` narrows a feature's sections and never widens them.
   Narrative coherence asks for `profile` and `personal` only, and builds its
   ticked material (essays, activities, awards) through `coherenceMaterial.ts`,
