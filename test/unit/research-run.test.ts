@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
@@ -190,4 +191,15 @@ test("the task text never cuts a source URL in half", () => {
   assert.ok(!t.instructions.includes(long(600)));
   assert.ok(t.instructions.endsWith("Verify dates and costs before applying."));
   for (const m of t.instructions.match(/https:\/\/\S+/g) ?? []) assert.ok(m.replace(/,$/, "") === long(100), "only whole URLs");
+});
+
+test("parseCandidates on the recorded live shape: fragments split at citation boundaries, one uncited object dropped", () => {
+  const { parts } = JSON.parse(readFileSync(new URL("../fixtures/research/split-parts.json", import.meta.url), "utf8"));
+  const out = parseCandidates(parts);
+  assert.deepEqual(out.map((c) => c.title), ["Example Lab Challenge 2027", "Example Science Olympiad"]);
+  assert.deepEqual(out[0]!.sources.map((s) => s.url), [
+    "https://example.org/lab-challenge", "https://example.org/lab-challenge/format", "https://example.org/lab-challenge/fees",
+  ]);
+  assert.equal(out[0]!.cost, "Free.");
+  assert.equal(out[1]!.sources.length, 1);
 });
