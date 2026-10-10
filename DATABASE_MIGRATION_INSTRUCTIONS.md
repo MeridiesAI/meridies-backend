@@ -173,3 +173,29 @@ from SQL, so nothing needs creating in the dashboard. No new environment variabl
 
 The app changes with it: `polygon` writes, `DELETE /tasks/:id/documents/:documentId` and the legacy
 `/polygon/axes` writes are counselor-only in code too, so a student client that used them gets 403.
+
+---
+
+# AI context and research: two more migrations
+
+Apply these after every earlier file, in this order, the same way (paste each file whole into the SQL
+editor, or the Management API; not `supabase db push`, see the launch checklist). Both are additive and
+idempotent. Apply each **before deploying the code that needs it**.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261016000001_context_documents.sql` | Adds the document kinds the AI allowlist needs, `documents.ai_access` and `documents.ferpa_waived`, and hides restricted documents from students; apply before deploying the context-layer code, which selects the new columns |
+| 2 | `20261016000002_research.sql` | Adds `deliverables.visible_to_student` (hidden counselor tasks, with restrictive RLS on the tables that point at a task), and the tables `research_runs`, `recommendations` and `research_blocked_domains`; apply before deploying the research code, and after file 1 |
+
+With the research code deployed before file 2, every query that names `visible_to_student` fails
+(creating a counselor task, every `PATCH /tasks/:id`, raising a flag, the escalation sweep, the
+parent-alert draft, due-tomorrow reminders, the calendar feed, stall detection, the composer's
+overdue check) as well as the research routes; the list is not exhaustive. The previous code ignores
+the new column and tables, so applying the files first is always safe.
+
+Check:
+
+```sql
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;  -- expect 0
+select to_regclass('public.research_runs'), to_regclass('public.recommendations');   -- both non-null
+```

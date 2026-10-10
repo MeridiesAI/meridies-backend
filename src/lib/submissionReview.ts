@@ -446,7 +446,8 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
     }
   }
 
-  if (reviewed?.verdict === "needs-fix" && !advisory) {
+  // A counselor-only task is never the student's to hear about.
+  if (reviewed?.verdict === "needs-fix" && !advisory && task.visible_to_student !== false) {
     const fix = reviewed.studentFix ?? reviewed.note;
     rows.push({
       recipient_id: studentId,

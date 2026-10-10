@@ -1,0 +1,70 @@
+{
+ "note": "Recorded shape of a live answer (made-up text and example.org URLs): the model's JSON arrives split at citation boundaries, the citation only on middle fragments.",
+ "parts": [
+  {
+   "text": "{\"title\": \"Example Lab Challenge 2027\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "The Example Lab Challenge is open to high school students.",
+   "citations": [
+    {
+     "url": "https://example.org/lab-challenge",
+     "title": "Example page"
+    }
+   ]
+  },
+  {
+   "text": " Teams work on a research question for a term.",
+   "citations": [
+    {
+     "url": "https://example.org/lab-challenge/format",
+     "title": "Example page"
+    }
+   ]
+  },
+  {
+   "text": "\", \"deadline\": \"",
+   "citations": []
+  },
+  {
+   "text": "Applications close on a date in November.",
+   "citations": [
+    {
+     "url": "https://example.org/lab-challenge",
+     "title": "Example page"
+    }
+   ]
+  },
+  {
+   "text": "\", \"cost\": \"",
+   "citations": []
+  },
+  {
+   "text": "Free.",
+   "citations": [
+    {
+     "url": "https://example.org/lab-challenge/fees",
+     "title": "Example page"
+    }
+   ]
+  },
+  {
+   "text": "\"}\n\n{\"title\": \"Example Science Olympiad\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "Students take staged exams on biology.",
+   "citations": [
+    {
+     "url": "https://example.org/olympiad",
+     "title": "Example page"
+    }
+   ]
+  },
+  {
+   "text": "\"}\n\n{\"title\": \"Example Uncited Program\", \"summary\": \"A program the model did not source.\"}\n",
+   "citations": []
+  }
+ ]
+}

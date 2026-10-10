@@ -75,12 +75,14 @@ src/
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
 │   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
+│   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── imports.ts         # import requests, held-data queue, status, sweep (thin)
 │   ├── aiContext.ts       # /students/:id/ai-context   what AxIS sees for a student (counselor)
+│   ├── research.ts        # /students/:id/research/:feature, /recommendations   research and its results (counselor)
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
@@ -490,7 +492,8 @@ Grant, Dream Act) carry the current cycle; roll them forward each August.
 ## Scheduled jobs
 
 The escalation sweep (`runEscalationSweep` in `lib/accountability.ts`) turns red
-flags whose timer expired into parent alerts. One implementation, three
+flags whose timer expired into parent alerts (a flag about a task that isn't
+shared with the student is skipped, with a reason). One implementation, three
 triggers:
 
 - **The dashboard button** — `POST /accountability/sweep`, the caller's own
@@ -801,6 +804,245 @@ On the Application page, the recommended-colleges column
 (`POST /application/activities-build`) still use a local `studentBrief` in
 `src/routes/applicationAi.ts`.
 
+### Research (counselor only)
+
+A counselor asks for college or activity suggestions for a student. A
+web-research model works from a de-identified brief and returns cited
+candidates; code keeps only the candidates whose citations were really seen in
+that run; a cheaper model picks the ones that fit; the counselor accepts or
+dismisses what is left. The code is `src/lib/research/` and `routes/research.ts`.
+
+**Deploy order.** Apply `20261016000002_research.sql` before deploying this code,
+and after `20261016000001`. The code filters and writes `deliverables.visible_to_student`
+and reads `research_runs`, `recommendations` and `research_blocked_domains`.
+With the code first, every query that names the new column fails: creating a
+counselor task, every `PATCH /tasks/:id` (including a student's progress
+updates), raising a flag on a task, the escalation sweep, the parent-alert draft,
+the student's due-tomorrow reminders, the calendar feed for a student, stall
+detection, the composer's overdue check, and the research routes. The list is
+not exhaustive. The migration is safe to apply first: the previous code ignores the new
+column and tables.
+
+- **Routes** (all `requireRole("counselor")`; a student gets 403):
+  - `POST /students/:id/research/college-list` and `.../research/activities`,
+    body `{ refresh?: boolean, focus?: string (max 2000) }`, strict. Limited to
+    5 a minute per user (`limit("research:run", 5, 60)`, a preHandler, so it
+    also counts requests that are then refused or served from the cache) and
+    50 runs per practice per 24-hour window. The window is fixed, not sliding:
+    `consume_rate_limit` anchors it at the first run, so a practice can spend up
+    to about 100 across a boundary. The daily cap is `enforceRateLimit` on the
+    key `research-day:<firm id, or the counselor's id when solo>`, not
+    `enforceQuota`: `usage_counters` is keyed by one profile and its metric names
+    are fixed by a CHECK constraint, so a per-practice count would need a
+    migration, while a rate-limit key is any string. The limiter falls back to a
+    per-process counter when its database call errors or no service-role key is
+    set, so the cap is not a hard guarantee. A request served from the cache,
+    refused for its focus, refused because the same run is already in flight, or
+    refused by the up-front AI check does not spend the daily cap.
+  - `GET /students/:id/recommendations?feature=college_list|activities`
+    (newest first, 200 at most).
+  - `POST /recommendations/:id/accept` and `.../dismiss`. These two and the
+    list share a limit of 120 a minute per user.
+  - Order inside a run: access (the counselor must be able to see the student:
+    403 or 404), the brief and its identity filter, the cache, the practice's AI
+    switches, the in-flight check, the daily cap, the run row, then the model.
+  - **One identical run at a time.** If a `research_runs` row for the same
+    student, feature and inputs hash is `running` and was created in the last 10
+    minutes, the request gets 409 ("Research is already running for this
+    student. Try again in a minute."). A `running` row older than 10 minutes is
+    treated as dead and ignored: nothing sweeps them.
+- **What the research model receives.** `RESEARCH_CANDIDATES_SYSTEM` (fixed
+  instructions) and the brief as a data block (`buildResearchQuestion(brief)` in
+  `prompt.ts`, a pure function that takes only the brief), so nothing else about
+  the student can reach it by construction. The brief is the allowlisted fields
+  only; the one free-text part of it is the counselor's focus, which has passed
+  the identity filter. The match step (`FAST_MODEL`) is the
+  only step that reads the student's context (`buildStudentContext`, the
+  `college-list` or `activities` profile); it sees the kept candidates, not the web.
+- **The brief** (`brief.ts`): `feature`, `grade`, `region`, `city`, `majors`,
+  `interests`, `gpaBand`, `testBand`, `focus`. Majors are kept only when they pass
+  a shape rule (1 to 5 words, at most 60 characters, letters, spaces and
+  `& - / , '` only; anything else is dropped silently), at most 5. A major that
+  holds the student's name, email or school (the identity filter below) is
+  dropped too and the run goes ahead without it. Interests are the student's
+  activity categories turned into a fixed vocabulary of generic words
+  (`ACTIVITY_CATEGORIES`): `ACTIVITY_TYPE_CATEGORY` in `brief.ts` maps every
+  value of `ACTIVITY_TYPES` (the Common App list in `profileUpdates.ts`) to
+  exactly one vocabulary word, and `category()` looks a category up there first,
+  then in the vocabulary itself; anything else is dropped. "other" is never sent,
+  and neither are "LGBT" and "School Spirit" (mapped to "other" on purpose: a
+  protected characteristic must not reach an outside model, and the other has no
+  research use). A unit test imports the real `ACTIVITY_TYPES` and fails when a
+  type has no row. The GPA is a 0.2-wide
+  band on a 4.0 or 5.0 scale, the scale label chosen by the scale kind and never
+  copied from the student's string (`unknown` when the GPA can't be put on a 4 or
+  5 point scale). The test band is the SAT in 100s, else the ACT in 3s, else
+  null. The grade is 9 to 12 from the graduation year, else null. `region` and
+  `city` come from the student's hometown (`facts.identity.hometown`, free text,
+  the only location on the AI allowlist), parsed in `brief.ts` (`locationOf`): a
+  state or city is shared by many students and brings back local results, so
+  both are sent. `region` is the part after the last comma when it is a US state
+  code or full state name (all 50 plus DC), as the two-letter uppercase code,
+  else null; a non-null `facts.state` (null today) would win, kept only as two
+  letters. `city` is the part between the second-to-last and the last comma
+  ("Brooklyn, New York, NY" gives "New York"), or just before the last comma, or
+  the whole string when there is no comma and it isn't a state; it is kept only
+  when it is 1 to 4 words, at most 40 characters, with letters, spaces and `- ' .`
+  only (no digits, `@` or other punctuation), title-cased, else null, so a street
+  address, an email or a sentence never reaches the model ("123 Main St,
+  Cheyenne, WY" gives "Cheyenne"; "New York NY" with no comma gives city "New
+  York Ny", region null). The counselor's
+  focus is scanned for identity in full, then cut to 200 characters.
+- **The identity filter** (`identityTokens`, `assertNoIdentity`). Identifying
+  text is the student's name, email and school; the hometown is not (the brief
+  carries the state and city, and a counselor may type a town in the focus).
+  Each token carries a kind, `{ text, prefix }`. Name and email tokens
+  (`prefix: true`): the name's parts of three or more characters (two when they
+  hold a non-ASCII letter), the whole name, the name with its apostrophes and
+  hyphens fused ("obrien"), the email, its local part and the pieces of it.
+  School tokens (`prefix: false`): the school whole and with punctuation
+  stripped, each word of it of four or more characters (two when non-ASCII) that
+  isn't on `IDENTITY_STOPLIST` (generic school words such as "high", "academy",
+  "north"), and the school's short form: its name without the last word when
+  that word is generic and a distinctive word is left ("Lee High School" also
+  yields "lee high"). Filler words (`IDENTITY_FILLER_WORDS`: of, the, for, and,
+  at, in, on, a, an, de, la, el, del, des, du, le, les, y, &) never count as
+  distinctive and are trimmed from both ends of the alias, so "Academy of
+  Science" and "The Arts Academy" get no alias and "Bronx High School of Science"
+  yields "bronx high school"; fillers are never single-word tokens. Text and
+  tokens are compared after a Unicode fold (NFKC,
+  lowercase, invisible format characters and combining marks removed, then the
+  letters that don't decompose mapped to ASCII: ø to o, ł to l, đ to d, ß to ss,
+  æ to ae, œ to oe, þ to th, ı to i), so accents, full-width letters and
+  zero-width characters don't hide a name. Matching: ASCII name and email tokens
+  of 5 or more characters match as a word prefix (the token starts at a word
+  boundary and anything may follow, so "the Okafors" and "avery2027" are
+  caught); school tokens and shorter ASCII tokens match whole words or whole
+  phrases only (so a student named Will doesn't refuse "willing", and a student
+  at "Academy of Science" refuses "academy of science robotics" but not
+  "national academy of sciences"); tokens with a non-ASCII letter match
+  anywhere. The scan runs on the
+  counselor's focus (in full, before it is cut to 200 characters) and on each
+  major; nothing else in the brief is scanned, because the rest is built by code
+  from fixed sets and would only trip on the brief's own words (a surname
+  "Null", a school "Health Sciences High"). A focus that holds any of it is
+  refused with 400 ("The focus contains the student's name, email or school")
+  before the daily cap is spent, a run row is written or a model is
+  called. After the research, every query the model issued (each search, and
+  each URL it fetched) is checked against the same tokens; a hit discards the
+  run (`status = 'discarded'`, 400 to the counselor, nothing stored or served).
+  Known limits: two-letter Latin name parts ("Li", "Bo") are not tokens; names
+  transliterated from a non-Latin script are caught only in the script the
+  student's record uses; the two layers (focus and post-run queries) share
+  one token list, so a form of the identity the list lacks is missed by both;
+  the hometown is parsed from free text, so a hometown typed in an odd form
+  gives a null city or region (the run still works, without local results); and
+  because the city is in the brief, the model's searches will contain it, which
+  is intended.
+- **Sources.** A candidate is kept only if it has a source that came back as a
+  real citation, on a URL the run searched or fetched (`seenUrls`, compared
+  ignoring `#fragment`, a trailing slash and http versus https), not on
+  `research_blocked_domains` (the host or a subdomain of it), and answering
+  `checkLink` with `ok` (`blocked`, a site refusing robots, doesn't pass). URLs
+  the model types into its answer are ignored: sources are citations only. The
+  API splits one answer into text blocks at citation boundaries, so
+  `parseCandidates` joins the blocks in order and gives each JSON candidate
+  object the citations of every block that overlaps it; an object that overlaps
+  no citation is dropped. At most 8 candidates and 5 sources each. Colleges
+  search the official-site allowlist (`researchDomains`); activities search the
+  open web minus the blocklist.
+- **Before anything is stored** (`validatePicks`): a pick must name a real,
+  unused candidate and have an effort of low, medium or high; `why` is at most
+  200 characters and two sentences, otherwise the pick is dropped whole (never
+  clipped); the title is at most 300 characters; a deadline or cost is kept only
+  as a plain string of at most 120 characters; `details.verify` is always
+  true. A pick whose `why` names the student is kept and its `why` is replaced
+  with "Fits the student's interests and record." (`replaceWhysNamingStudent`).
+  A `why` names the student when it holds the email; the whole name (two or more
+  parts, in order, any case, with a word boundary at both ends, so "may strongly
+  help" is not a hit for "May Strong"); or one name part (3+ characters, 2+ when
+  non-ASCII) written with a capital first letter as a whole word in the middle of
+  a sentence. That single-part rule is case-sensitive and skips the first word of
+  a sentence, so "This will help the student" and "May suit the student" survive
+  for a student named Will or May, while "Fits Will's interest" doesn't.
+  Non-ASCII parts match anywhere, ignoring case. A `why` that holds a link
+  (`http://`, `https://`, `www.`), an email address or a phone number (7 or more
+  digits in a row, or a ddd-ddd-dddd shape) is replaced the same way, because
+  reasons are copied into task text that can be shared.
+  Titles, deadlines and costs are checked too (`dropStudentInfoInSuggestions`,
+  after `validatePicks`): a title holding the student's email, whole name (same
+  word-boundary rule) or contact text (link, email address, phone number) drops
+  the whole suggestion; a deadline or cost holding any of those loses just that
+  field. Single name parts and the school are deliberately not
+  checked in titles: a single part would drop real programs ("Lincoln Scholars"
+  for a student named Lincoln), and the owner allows a title to name the
+  student's town or school, since a local program is a good result.
+- **Cache.** A run that succeeded is served for 7 days for the same student,
+  feature and brief hash (`briefHash`; majors and interests sorted). `refresh:
+  true` bypasses it, and so does any change to the brief, the focus included. A
+  run whose answer held no candidate objects at all is cached too, so a repeat
+  click doesn't pay for the same empty search. A run whose answer held
+  candidates but stored none (dropped by the citation keeper, the link check, the
+  match step or the reason checks) is stored as `succeeded` with an empty list
+  but expires at once, so the next request runs again. Each run logs its counts
+  with the run id (numbers only): answer parts, candidate objects found,
+  candidates parsed, kept by the keeper, picked, stored. The scanner steps into an
+  object with no string `title`, so a `{"candidates":[...]}` wrapper yields its
+  inner candidates. Failed and discarded runs are never served.
+- **Recommendations.** `recommendations` and `research_runs` are readable by a
+  counselor who can view the student (RLS: role `counselor` and
+  `private.can_view_student`): never the student, never a same-firm counselor
+  who isn't on the case. Only the service role writes them. A college
+  recommendation carries `collegeId` when exactly one catalog college has that
+  name. Accepting needs edit access to the student. It claims the row first with
+  a conditional update (`status = 'suggested'`; a second click gets 409), then
+  creates, and releases the claim if creating fails. A college becomes a row on
+  the student's college list (`addToList`). An activity becomes a counselor task
+  (kind `custom`, `source = 'counselor'`, `visible_to_student = false`, no
+  deadline mirroring, no notification) whose instructions are the `why`, the
+  source URLs and "Verify dates and costs before applying."; what was created is
+  stored in `accepted_as`. Dismiss is the same conditional update. Nothing is
+  shared across practices.
+- **Hidden tasks.** `deliverables.visible_to_student` (default true). Enforced in
+  RLS by restrictive select policies, so a student's read never returns a hidden
+  task or what points at it: `deliverables`, `deliverable_stages`,
+  `deliverable_documents`, `progress_events`, `draft_quality_checks`,
+  `deliverable_tracker_checks`, `red_flags` and `message_deliveries`. Counselors
+  are unaffected. Side channels that skip hidden tasks in code: the student's
+  due-tomorrow reminders, the student's calendar feed, stall detection, the
+  escalation sweep (a flag about a hidden task is skipped with a reason, so it
+  never reaches the family), the composer's overdue check and its AxIS draft,
+  the parent-alert draft (`POST /ai/parent-alert`), the "needs a fix" notice
+  after a submission review, `POST /tasks/:id/notify` (409), and creating a hidden
+  task (no deadline mirroring, no assignment email or text). Only a counselor
+  sets the flag; a student gets 403. Sharing is one-way: `PATCH /tasks/:id {
+  visibleToStudent: true }` mirrors the dated stages into deadlines and tells the
+  student, and a task the student can already see can't be hidden again (409). A
+  red flag can't be raised on a hidden task (409), and an intake request task
+  from New student can't be hidden (400).
+- **`RESEARCH_FAKE=fixture`** is for tests. It works only when `NODE_ENV` is
+  `development` or `test`: `seamFor` returns the fixtures only then, and
+  `src/index.ts` exits at boot with a message naming `RESEARCH_FAKE` if it is
+  set with `NODE_ENV=production` or with `NODE_ENV` unset. Any other value
+  (staging, say) never gets that far: `env.ts` rejects a `NODE_ENV` that is not
+  `development`, `production` or `test` first, with its own error. The boot check reads
+  the raw `process.env.NODE_ENV`, so the default of "development" when it is unset
+  does not unlock the fake. The server logs a warning whenever it is on. With it on, research, the match step and the link
+  check return canned answers (including a candidate on a blocked domain and one
+  the run never saw, to exercise the keeper) and no model or web call is made.
+- **Checking the live path by hand:** `scripts/smoke/research.ts` (its header
+  says how to make the fixture student). It refuses a student whose name doesn't
+  start with "Fixture ", and an API that isn't on localhost unless
+  `SMOKE_ALLOW_REMOTE=1`.
+
+**Not built or not covered.** There is no student-facing research. Nothing
+sweeps a run left `running` after a crash; such a run is never served and stays
+as it is (the in-flight check ignores one older than 10 minutes). Two identical
+uncached requests made at the same instant can both pass the in-flight check and
+run.
+Research is in none of the practice AI switches (`practiceSettings.ts`), so the
+up-front AI check gates nothing yet. The app has no screens for any of this.
+
 ### Import pipeline (step 1)
 
 Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
@@ -878,7 +1120,9 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   backwards. With `PUBLIC_API_URL` set, every SMS asks Twilio to report there.
 - **Data rights.** `GET /account/export` (self) and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
-  client, so an export holds exactly what that person can already see.
+  client, so an export holds exactly what that person can already see (the
+  counselor's export of a student includes `recommendations` and `research_runs`;
+  the student's own export holds neither).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
   user; a counselor with an active roster or an owned firm is refused.
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
@@ -892,15 +1136,22 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
   mapping (against a recorded real Scorecard response in `test/fixtures`), the
   essay guardrails, the link guard, payments, class rank, proposals, webhook
-  signatures, heartbeats, and the context layer (allowlist, packing, feature
-  profiles, coherence material, consumers).
+  signatures, heartbeats, the context layer (allowlist, packing, feature
+  profiles, coherence material, consumers), and research (`research-brief`,
+  `research-citations`, `research-extract`, `research-run`,
+  `research-boot-guard`: the brief and identity filter, the citation keeper,
+  the answer parser, the match validation and the boot check).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
-  including `context-layer` and `context-documents`.
+  including `context-layer`, `context-documents`, `research-tables` (RLS and
+  hidden tasks) and `research-api` (the routes, with the test double).
 - `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
   tests; then a throwaway Supabase with every migration, an RLS-on-every-table
-  check, the fixtures, and the persona suites. AI calls are not exercised in CI
-  (they cost money); their pure parts are unit-tested.
+  check, the fixtures, and the persona suites, with the API started under
+  `RESEARCH_FAKE=fixture` so research runs without a model or the web. Other AI
+  calls are not exercised in CI (they cost money); their pure parts are
+  unit-tested. The live research path is checked by hand with
+  `scripts/smoke/research.ts`.
 
 ## Environment
 
@@ -923,6 +1174,7 @@ npm run dev               # http://localhost:4000
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
+| `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |

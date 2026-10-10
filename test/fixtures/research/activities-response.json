@@ -1,0 +1,93 @@
+{
+  "id": "msg_01ResearchFixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5-5",
+  "stop_reason": "end_turn",
+  "content": [
+    { "type": "text", "text": "I'll look for summer programs in marine biology." },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01A",
+      "name": "web_search",
+      "input": { "query": "marine biology summer program high school" }
+    },
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_01A",
+      "content": [
+        {
+          "type": "web_search_result",
+          "url": "https://www.whoi.edu/education/high-school/",
+          "title": "High school programs | WHOI",
+          "page_age": "March 3, 2026",
+          "encrypted_content": "EqgfCioIARgB..."
+        },
+        {
+          "type": "web_search_result",
+          "url": "https://example.org/marine-camp#apply",
+          "title": "Marine camp",
+          "page_age": null,
+          "encrypted_content": "EpMBCioIARgB..."
+        }
+      ]
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01B",
+      "name": "web_search",
+      "input": { "query": "ocean research volunteer teens" }
+    },
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_01B",
+      "content": { "type": "web_search_tool_result_error", "error_code": "unavailable" }
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01C",
+      "name": "web_fetch",
+      "input": { "url": "https://www.whoi.edu/education/high-school/" }
+    },
+    {
+      "type": "web_fetch_tool_result",
+      "tool_use_id": "srvtoolu_01C",
+      "content": {
+        "type": "web_fetch_result",
+        "url": "https://www.whoi.edu/education/high-school/",
+        "retrieved_at": "2026-10-10T12:00:00Z",
+        "content": {
+          "type": "document",
+          "title": "High school programs | WHOI",
+          "source": { "type": "text", "media_type": "text/plain", "data": "Programs for rising seniors..." },
+          "citations": { "enabled": true }
+        }
+      }
+    },
+    {
+      "type": "server_tool_use",
+      "id": "srvtoolu_01D",
+      "name": "web_fetch",
+      "input": { "url": "https://example.org/gone" }
+    },
+    {
+      "type": "web_fetch_tool_result",
+      "tool_use_id": "srvtoolu_01D",
+      "content": { "type": "web_fetch_tool_result_error", "error_code": "url_not_accessible" }
+    },
+    { "type": "some_future_block", "payload": { "url": "https://not-a-real-block.example/" } },
+    {
+      "type": "text",
+      "text": "WHOI runs a summer program for rising seniors.",
+      "citations": [
+        {
+          "type": "web_search_result_location",
+          "url": "https://www.whoi.edu/education/high-school/",
+          "title": "High school programs | WHOI",
+          "cited_text": "Programs for rising seniors",
+          "encrypted_index": "Eo8BCioIARgB..."
+        }
+      ]
+    }
+  ]
+}

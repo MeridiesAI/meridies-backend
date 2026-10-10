@@ -212,7 +212,10 @@ export async function buildBehindList(
       // A to-do the student added for themselves (SV Demo v2) is theirs, not
       // an assignment: it never makes them look stalled to the counselor or
       // their parents.
-      .neq("source", "student"),
+      .neq("source", "student")
+      // A counselor-only task is not the student's work: it can't make them
+      // look stalled to the counselor or their parents.
+      .eq("visible_to_student", true),
     request.db
       .from("red_flags")
       .select("student_id, status")
@@ -478,10 +481,17 @@ export async function runEscalationSweep(
       if (flag.deliverable_id) {
         const { data: deliverable, error: dErr } = await ctx.db
           .from("deliverables")
-          .select("current_words, status")
+          .select("current_words, status, visible_to_student")
           .eq("id", flag.deliverable_id as string)
           .maybeSingle();
         if (dErr) throw fromPostgrest(dErr);
+
+        // A flag about a task the student can't see never reaches their
+        // family: the task is the counselor's, not the student's work.
+        if (deliverable != null && deliverable.visible_to_student === false) {
+          skipped.push({ id: flagId, reason: "the task isn't shared with the student" });
+          continue;
+        }
 
         // A finished task has moved however it was finished: a handed-in
         // transcript or a ticked-off document task has no words to count.

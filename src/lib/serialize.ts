@@ -310,6 +310,8 @@ export const toTask = (
   intakeRequestId: nstr(r.intake_request_id),
   intakeAnswer: nstr(r.intake_answer),
   sentBackNote: nstr(r.sent_back_note),
+  /** False: a counselor-only task the student does not see until it is shared. */
+  visibleToStudent: r.visible_to_student !== false,
   notifyEmail: Boolean(r.notify_email),
   notifySms: Boolean(r.notify_sms),
   notifiedAt: nstr(r.notified_at),

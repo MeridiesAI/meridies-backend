@@ -26,6 +26,10 @@ const envSchema = z.object({
   IMPORT_HOLD_EXPIRY_ENABLED: blankIsUnset(z.enum(["true", "false"]).optional()),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
+  // Test double for research (no model, no web). Works only with NODE_ENV
+  // development or test; the server refuses to start otherwise, and warns
+  // whenever it is on (lib/research/bootGuard.ts).
+  RESEARCH_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
 
   // Outbound email (student invitations). Optional: without the key, invite
   // creation still works but the email is skipped and logged, rather than

@@ -233,6 +233,8 @@ export async function buildCalendarFeed(
     .from("deliverables")
     .select("id, student_id, title, status, due_date, instructions, deadline_id, deliverable_stages(id, name, detail, due_date, done, deadline_id, sequence)");
   if (scopeStudent) tasks = tasks.eq("student_id", scopeStudent);
+  // RLS already hides counselor-only tasks from a student; say so here too.
+  if (isStudent) tasks = tasks.eq("visible_to_student", true);
   if (!q.includeDone) tasks = tasks.neq("status", "complete");
 
   // ---- practice events ----

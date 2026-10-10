@@ -88,7 +88,9 @@ export type AiModule =
   // SV Demo v2 (student view): Profile Update, AxIS collecting a student's news.
   | "profile-update"
   // A file the student handed in against a task, checked against what was asked.
-  | "submission-review";
+  | "submission-review"
+  | "activity-research"
+  | "research-match";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
@@ -482,7 +484,39 @@ export type ResearchResult = {
   sources: { url: string; title: string | null }[];
   runId: string | null;
   refused: boolean;
+  /** Every search query and fetched URL the model asked for, de-duplicated, in order. Empty when nothing ran. */
+  queries: string[];
+  /** Every URL that came back in a search result or a fetch, de-duplicated, in order. Empty when nothing ran. */
+  seenUrls: string[];
 };
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+
+/**
+ * What the model searched for and which pages it actually saw, from response
+ * content blocks. Pure and tolerant: an errored search or fetch result, an
+ * unknown block type or an odd shape contributes nothing and never throws.
+ */
+export function extractResearchActivity(blocks: readonly unknown[]): { queries: string[]; seenUrls: string[] } {
+  const queries = new Set<string>();
+  const seenUrls = new Set<string>();
+  for (const block of blocks) {
+    if (!isRecord(block)) continue;
+    if (block.type === "server_tool_use") {
+      const input = block.input;
+      if (!isRecord(input)) continue;
+      if (block.name === "web_search" && typeof input.query === "string" && input.query) queries.add(input.query);
+      if (block.name === "web_fetch" && typeof input.url === "string" && input.url) queries.add(input.url);
+    } else if (block.type === "web_search_tool_result") {
+      if (!Array.isArray(block.content)) continue;
+      for (const r of block.content) if (isRecord(r) && typeof r.url === "string" && r.url) seenUrls.add(r.url);
+    } else if (block.type === "web_fetch_tool_result") {
+      const c = block.content;
+      if (isRecord(c) && c.type === "web_fetch_result" && typeof c.url === "string" && c.url) seenUrls.add(c.url);
+    }
+  }
+  return { queries: [...queries], seenUrls: [...seenUrls] };
+}
 
 const RESEARCH_SYSTEM = [
   "You research US college admissions and financial aid facts for a college counselor.",
@@ -503,11 +537,26 @@ export async function runWebResearch(opts: {
   question: string;
   /** Facts or catalog rows the answer should be read against (not instructions). */
   context?: string;
-  domains: string[];
+  /** Allowed domains; omit (with no blockedDomains) to search the open web. Exclusive with blockedDomains. */
+  domains?: string[];
+  /** Domains the tools must never use. Exclusive with domains: the API takes only one of the two. */
+  blockedDomains?: string[];
+  /** Replaces the default research system prompt. */
+  system?: string;
   studentId?: string | null;
   maxSearches?: number;
 }): Promise<ResearchResult> {
+  // A programming mistake, not a user error: refuse before anything is audited or sent.
+  if (opts.domains !== undefined && opts.blockedDomains !== undefined) {
+    throw new Error("runWebResearch: pass domains or blockedDomains, not both");
+  }
   const { request, module } = opts;
+  const domainScope: { allowed_domains?: string[]; blocked_domains?: string[] } =
+    opts.domains !== undefined
+      ? { allowed_domains: opts.domains }
+      : opts.blockedDomains?.length
+        ? { blocked_domains: opts.blockedDomains }
+        : {};
   const actorId = request.auth.userId;
   await assertAiAllowed(request, module);
   await enforceQuota(actorId, "ai_calls", "day", DAILY_AI_CALL_LIMIT, "You've hit today's AI limit. It resets at midnight.");
@@ -524,7 +573,12 @@ export async function runWebResearch(opts: {
         module,
         model: RESEARCH_MODEL,
         status: "running",
-        input: { promptChars: opts.question.length + (opts.context?.length ?? 0), domains: opts.domains.length },
+        input: {
+          promptChars: opts.question.length + (opts.context?.length ?? 0),
+          domains: opts.domains?.length ?? 0,
+          allowedDomains: opts.domains?.length ?? 0,
+          blockedDomains: opts.blockedDomains?.length ?? 0,
+        },
       })
       .select("id")
       .single();
@@ -547,6 +601,8 @@ export async function runWebResearch(opts: {
     let inputTokens = 0;
     let outputTokens = 0;
     let response: Anthropic.Beta.BetaMessage | null = null;
+    const queries = new Set<string>();
+    const seenUrls = new Set<string>();
     // Server tools can pause a long turn; resume it a few times at most.
     for (let turn = 0; turn < 4; turn++) {
       response = await anthropic().beta.messages.create(
@@ -556,14 +612,14 @@ export async function runWebResearch(opts: {
           betas: ["server-side-fallback-2026-07-01"],
           fallbacks: "default",
           output_config: { effort: "medium" },
-          system: RESEARCH_SYSTEM,
+          system: opts.system ?? RESEARCH_SYSTEM,
           // The basic tool versions on purpose: the _20260209 ones filter results
           // through code execution, and the answer then comes back with empty
           // citation lists (checked 10/7). "A link for every claim" needs the
           // per-sentence web_search_result_location citations these give.
           tools: [
-            { type: "web_search_20250305", name: "web_search", allowed_domains: opts.domains, max_uses: opts.maxSearches ?? 5 },
-            { type: "web_fetch_20250910", name: "web_fetch", allowed_domains: opts.domains, max_uses: 3, citations: { enabled: true }, max_content_tokens: 20000 },
+            { type: "web_search_20250305", name: "web_search", ...domainScope, max_uses: opts.maxSearches ?? 5 },
+            { type: "web_fetch_20250910", name: "web_fetch", ...domainScope, max_uses: 3, citations: { enabled: true }, max_content_tokens: 20000 },
           ],
           messages,
         },
@@ -571,6 +627,9 @@ export async function runWebResearch(opts: {
       );
       inputTokens += response.usage.input_tokens;
       outputTokens += response.usage.output_tokens;
+      const activity = extractResearchActivity(response.content);
+      for (const q of activity.queries) queries.add(q);
+      for (const u of activity.seenUrls) seenUrls.add(u);
       if (response.stop_reason !== "pause_turn") break;
       messages.push({ role: "assistant", content: response.content });
     }
@@ -578,7 +637,7 @@ export async function runWebResearch(opts: {
 
     if (response.stop_reason === "refusal") {
       await finish("blocked", { input_tokens: inputTokens, output_tokens: outputTokens, error: "refusal" });
-      return { parts: [], sources: [], runId, refused: true };
+      return { parts: [], sources: [], runId, refused: true, queries: [...queries], seenUrls: [...seenUrls] };
     }
 
     const parts: ResearchPart[] = [];
@@ -601,7 +660,7 @@ export async function runWebResearch(opts: {
 
     await finish("succeeded", { input_tokens: inputTokens, output_tokens: outputTokens });
     await enforceQuota(actorId, "ai_output_tokens", "month", 5_000_000, "Monthly AI usage limit reached.", outputTokens).catch(() => undefined);
-    return { parts, sources: [...seen].map(([url, title]) => ({ url, title })), runId, refused: false };
+    return { parts, sources: [...seen].map(([url, title]) => ({ url, title })), runId, refused: false, queries: [...queries], seenUrls: [...seenUrls] };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });

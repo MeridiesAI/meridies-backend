@@ -99,6 +99,8 @@ const createTaskBody = z
     notifySms: z.boolean().optional(),
     /** Mirror each stage into the Deadline Command Center. On by default. */
     syncDeadlines: z.boolean().optional(),
+    /** Counselor-only. False keeps the task off the student's side until it is shared. */
+    visibleToStudent: z.boolean().optional(),
   })
   .strict();
 
@@ -123,6 +125,8 @@ const patchTaskBody = z
     targetWords: z.number().int().min(0).max(100_000).nullable().optional(),
     currentWords: z.number().int().min(0).max(100_000).optional(),
     progressPct: z.number().int().min(0).max(100).optional(),
+    /** Counselor-only: share a hidden task with the student, or take it back. */
+    visibleToStudent: z.boolean().optional(),
   })
   .strict();
 
@@ -341,6 +345,13 @@ export default async function taskRoutes(app: FastifyInstance) {
       // an assignment: no stages, documents or notifications, and it is
       // marked as theirs so the counselor can tell it from what they assigned.
       if (request.profile.role === "student") {
+        if (
+          typeof request.body === "object" &&
+          request.body !== null &&
+          "visibleToStudent" in request.body
+        ) {
+          throw forbidden("Only your counselor can choose what you see");
+        }
         const sb = studentTaskBody.parse(request.body);
         const studentId = request.auth.userId;
         const { data, error } = await request.db
@@ -378,6 +389,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       const b = createTaskBody.parse(request.body);
       await resolveStudentId(request, b.studentId, "edit");
 
+      const visible = b.visibleToStudent !== false;
       const kind = b.kind ?? "custom";
       const stages = b.stages ?? [];
       // The task's own due date defaults to the last stage's, so a multi-step
@@ -421,6 +433,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           assigned_at: new Date().toISOString(),
           notify_email: b.notifyEmail ?? true,
           notify_sms: b.notifySms ?? false,
+          visible_to_student: visible,
         })
         .select("*")
         .single();
@@ -445,36 +458,17 @@ export default async function taskRoutes(app: FastifyInstance) {
       }
 
       // Mirror dated stages into the existing deadline tracker rather than
-      // standing up a second one the counselor has to check separately.
-      if (b.syncDeadlines !== false) {
-        const { data: saved } = await request.db
-          .from("deliverable_stages")
-          .select("id, name, due_date")
-          .eq("deliverable_id", taskId)
-          .order("sequence");
-
-        for (const stage of saved ?? []) {
-          if (!stage.due_date) continue;
-          const { data: deadline } = await request.db
-            .from("deadlines")
-            .insert({
-              student_id: b.studentId,
-              title: `${b.title} — ${stage.name}`,
-              type: DEADLINE_TYPE_BY_KIND[kind] ?? "document",
-              due_date: stage.due_date,
-              owner: "student",
-              description: b.instructions ?? null,
-              created_by: request.auth.userId,
-            })
-            .select("id")
-            .maybeSingle();
-          if (deadline) {
-            await request.db
-              .from("deliverable_stages")
-              .update({ deadline_id: deadline.id })
-              .eq("id", stage.id as string);
-          }
-        }
+      // standing up a second one the counselor has to check separately. A
+      // hidden task mirrors nothing: deadlines are the student's to read, so
+      // they are made when the task is shared.
+      if (b.syncDeadlines !== false && visible) {
+        await mirrorStageDeadlines(request, {
+          taskId,
+          studentId: b.studentId,
+          title: b.title,
+          kind,
+          instructions: b.instructions ?? null,
+        });
       }
 
       if (documents.length > 0) {
@@ -500,17 +494,20 @@ export default async function taskRoutes(app: FastifyInstance) {
         metadata: { stages: stages.length, documents: documents.length },
       });
 
-      const notified = await notifyAssignment(request, {
-        taskId,
-        studentId: b.studentId,
-        title: b.title,
-        instructions: b.instructions ?? null,
-        dueDate,
-        stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
-        documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
-        email: b.notifyEmail ?? true,
-        sms: b.notifySms ?? false,
-      });
+      // Nobody is told about a task the student can't see.
+      const notified = visible
+        ? await notifyAssignment(request, {
+            taskId,
+            studentId: b.studentId,
+            title: b.title,
+            instructions: b.instructions ?? null,
+            dueDate,
+            stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
+            documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
+            email: b.notifyEmail ?? true,
+            sms: b.notifySms ?? false,
+          })
+        : { email: false, sms: "skipped" as SmsNotifyState, error: null };
 
       const { data: fresh } = await request.db
         .from("deliverables")
@@ -532,12 +529,30 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("deliverables")
-        .select("student_id, source")
+        .select("student_id, source, visible_to_student, intake_request_id")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That task isn't on file");
       const studentId = existing.student_id as string;
       await resolveStudentId(request, studentId, "edit");
+
+      if (b.visibleToStudent !== undefined) {
+        if (request.profile.role !== "counselor") {
+          throw forbidden("Only your counselor can choose what you see");
+        }
+        // A request from New student is answered by the student's Submit,
+        // which needs every item in front of them.
+        if (b.visibleToStudent === false && existing.intake_request_id) {
+          throw badRequest("A request from New student is always shown to the student");
+        }
+        // Sharing is one-way: the student may already have the deadlines and
+        // the notification, so a visible task can't be taken back.
+        if (b.visibleToStudent === false && existing.visible_to_student !== false) {
+          throw conflict(
+            "A task the student can already see can't be hidden. Delete it or mark it done instead."
+          );
+        }
+      }
 
       if (request.profile.role === "student") {
         // On their own to-do a student changes anything a to-do has; on an
@@ -565,14 +580,14 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (b.targetWords !== undefined) update.target_words = b.targetWords;
       if (b.currentWords !== undefined) update.current_words = b.currentWords;
       if (b.progressPct !== undefined) update.progress_pct = b.progressPct;
+      if (b.visibleToStudent === true) update.visible_to_student = true;
       if (Object.keys(update).length > 0) update.last_activity_at = new Date().toISOString();
 
-      const { data, error } = await request.db
-        .from("deliverables")
-        .update(update)
-        .eq("id", id)
-        .select("*")
-        .maybeSingle();
+      // Nothing to change (e.g. hiding a task that is already hidden): answer with the task as it is.
+      const { data, error } =
+        Object.keys(update).length === 0
+          ? await request.db.from("deliverables").select("*").eq("id", id).maybeSingle()
+          : await request.db.from("deliverables").update(update).eq("id", id).select("*").maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
 
@@ -586,6 +601,23 @@ export default async function taskRoutes(app: FastifyInstance) {
       });
 
       const [dto] = await hydrate(request, [data as Row]);
+
+      // Sharing a hidden task is the moment it is assigned: do what creating
+      // a visible one does (mirror its dated stages, tell the student).
+      if (b.visibleToStudent === true && existing.visible_to_student === false) {
+        await mirrorStageDeadlines(request, {
+          taskId: id,
+          studentId,
+          title: String(data.title),
+          kind: String(data.kind),
+          instructions: (data.instructions as string | null) ?? null,
+        });
+        const notification = await notifyForTask(request, data as Row);
+        // Re-read: the mirrored deadline ids and notifiedAt were written after the update.
+        const { data: fresh } = await request.db.from("deliverables").select("*").eq("id", id).maybeSingle();
+        const [shared] = await hydrate(request, [(fresh ?? data) as Row]);
+        return { ...shared, notification };
+      }
       return dto;
     }
   );
@@ -887,36 +919,11 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (!task) throw notFound("That task isn't on file");
       const studentId = task.student_id as string;
       await resolveStudentId(request, studentId, "edit");
+      if (task.visible_to_student === false) {
+        throw conflict("Share this task with the student before sending it");
+      }
 
-      const [{ data: stages }, { data: docs }] = await Promise.all([
-        request.db
-          .from("deliverable_stages")
-          .select("name, due_date")
-          .eq("deliverable_id", id)
-          .order("sequence"),
-        request.db
-          .from("deliverable_documents")
-          .select("document:documents(filename, title)")
-          .eq("deliverable_id", id),
-      ]);
-
-      return notifyAssignment(request, {
-        taskId: id,
-        studentId,
-        title: String(task.title),
-        instructions: (task.instructions as string | null) ?? null,
-        dueDate: (task.due_date as string | null) ?? null,
-        stages: (stages ?? []).map((s) => ({
-          name: String(s.name),
-          dueDate: (s.due_date as string | null) ?? null,
-        })),
-        documentNames: ((docs ?? []) as unknown as Row[]).map((d) => {
-          const doc = d.document as Row | null;
-          return String(doc?.title ?? doc?.filename ?? "document");
-        }),
-        email: b.email ?? Boolean(task.notify_email),
-        sms: b.sms ?? Boolean(task.notify_sms),
-      });
+      return notifyForTask(request, task as Row, b);
     }
   );
 
@@ -1270,6 +1277,79 @@ async function saveCheck(
  * losing the task they just wrote.
  */
 type SmsNotifyState = "sent" | "queued" | "failed" | "skipped" | "unavailable";
+
+/** Send (or re-send) the assignment for a saved task, from its own stages and files. */
+async function notifyForTask(
+  request: FastifyRequest,
+  task: Row,
+  channels: { email?: boolean; sms?: boolean } = {}
+) {
+  const id = task.id as string;
+  const [{ data: stages }, { data: docs }] = await Promise.all([
+    request.db
+      .from("deliverable_stages")
+      .select("name, due_date")
+      .eq("deliverable_id", id)
+      .order("sequence"),
+    request.db
+      .from("deliverable_documents")
+      .select("document:documents(filename, title)")
+      .eq("deliverable_id", id),
+  ]);
+
+  return notifyAssignment(request, {
+    taskId: id,
+    studentId: task.student_id as string,
+    title: String(task.title),
+    instructions: (task.instructions as string | null) ?? null,
+    dueDate: (task.due_date as string | null) ?? null,
+    stages: (stages ?? []).map((s) => ({
+      name: String(s.name),
+      dueDate: (s.due_date as string | null) ?? null,
+    })),
+    documentNames: ((docs ?? []) as unknown as Row[]).map((d) => {
+      const doc = d.document as Row | null;
+      return String(doc?.title ?? doc?.filename ?? "document");
+    }),
+    email: channels.email ?? Boolean(task.notify_email),
+    sms: channels.sms ?? Boolean(task.notify_sms),
+  });
+}
+
+/** Give each dated stage that has none a Deadline Command Center entry. */
+async function mirrorStageDeadlines(
+  request: FastifyRequest,
+  input: { taskId: string; studentId: string; title: string; kind: string; instructions: string | null }
+): Promise<void> {
+  const { data: saved } = await request.db
+    .from("deliverable_stages")
+    .select("id, name, due_date, deadline_id")
+    .eq("deliverable_id", input.taskId)
+    .order("sequence");
+
+  for (const stage of saved ?? []) {
+    if (!stage.due_date || stage.deadline_id) continue;
+    const { data: deadline } = await request.db
+      .from("deadlines")
+      .insert({
+        student_id: input.studentId,
+        title: `${input.title} — ${stage.name}`,
+        type: DEADLINE_TYPE_BY_KIND[input.kind] ?? "document",
+        due_date: stage.due_date,
+        owner: "student",
+        description: input.instructions,
+        created_by: request.auth.userId,
+      })
+      .select("id")
+      .maybeSingle();
+    if (deadline) {
+      await request.db
+        .from("deliverable_stages")
+        .update({ deadline_id: deadline.id })
+        .eq("id", stage.id as string);
+    }
+  }
+}
 
 async function notifyAssignment(
   request: FastifyRequest,
