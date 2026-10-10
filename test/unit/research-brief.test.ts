@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ACTIVITY_TYPES } from "../../src/lib/profileUpdates.js";
-import { ACTIVITY_CATEGORIES, ACTIVITY_TYPE_CATEGORY, assertNoIdentity, briefHash, category, fold, identityTokens, IDENTITY_STOPLIST, IdentityLeakError, toResearchBrief } from "../../src/lib/research/brief.js";
+import { ACTIVITY_CATEGORIES, ACTIVITY_TYPE_CATEGORY, assertNoIdentity, briefHash, category, fold, identityTokens, IDENTITY_FILLER_WORDS, IDENTITY_STOPLIST, IdentityLeakError, toResearchBrief } from "../../src/lib/research/brief.js";
 
 const facts = {
   intendedMajors: ["Biology", "Computer Science"], gradYear: "2027", state: "WY",
@@ -215,6 +215,32 @@ test("short tokens keep the whole-word rule", () => {
   allows("annual leeway", ident({ name: "Ann Lee" }));
   assert.deepEqual(identityTokens(ident({ school: "Central High School" })).sort(), ["central high school"]);
   assert.ok(identityTokens(ident({ school: "Lee High School" })).includes("lee high"));
+});
+test("a school alias never consists only of generic and filler words", () => {
+  const schools = ["Academy of Science", "School of the Arts", "The Arts Academy", "The Science Academy", "School of Science and Engineering Magnet"];
+  for (const school of schools) {
+    for (const tok of identityTokens(ident({ school }))) {
+      if (tok === fold(school) || tok === fold(school).replace(/[^\p{L}\p{N}\s]/gu, "")) continue;
+      assert.ok(
+        tok.split(" ").some((w) => !IDENTITY_STOPLIST.has(w) && !IDENTITY_FILLER_WORDS.has(w)),
+        `${school}: token "${tok}" is only generic/filler words`,
+      );
+    }
+  }
+  allows("summer programs in the arts", ident({ school: "The Arts Academy" }));
+  // The whole name "Academy of Science" itself still matches "academy of sciences" by design (whole-string prefix rule).
+  allows("national academy of sciences", ident({ school: "Academy of Science Magnet" }));
+  allows("tulane school of science and engineering", ident({ school: "School of Science and Engineering Magnet" }));
+  allows("programs for the arts and the science of learning", ident({ school: "School of the Arts" }));
+});
+test("aliases still work with fillers around a distinctive word", () => {
+  assert.ok(identityTokens(ident({ school: "Lee High School" })).includes("lee high"));
+  refuses("the Lee High robotics team", ident({ school: "Lee High School" }));
+  const bronx = identityTokens(ident({ school: "Bronx High School of Science" }));
+  assert.ok(bronx.includes("bronx high school"));
+  // Caught by the "bronx" word token (5 characters, word prefix); "bronx science" is not an alias.
+  refuses("Bronx Science robotics", ident({ school: "Bronx High School of Science" }));
+  assert.ok(!bronx.some((t) => /\b(of|the)$/.test(t) && t !== "bronx high school of science"));
 });
 test("known limits: a two-letter Latin name part is not a token", () => {
   allows("Li and Bo want a camp", ident({ name: "Li Bo" }));

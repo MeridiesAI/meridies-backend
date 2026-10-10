@@ -109,6 +109,21 @@ export const IDENTITY_STOPLIST: ReadonlySet<string> = new Set([
   "north", "south", "east", "west", "northern", "southern", "eastern", "western",
 ]);
 
+/** Filler words: never distinctive, never trimmed into a school alias' edges, never a single-word token. */
+export const IDENTITY_FILLER_WORDS: ReadonlySet<string> = new Set([
+  "of", "the", "for", "and", "at", "in", "on", "a", "an", "de", "la", "el", "del", "des", "du", "le", "les", "y", "&",
+]);
+
+/** A word that says something about the school: not generic, not filler. */
+const isDistinctive = (w: string): boolean => {
+  const c = w.replace(NON_ALNUM, "");
+  return c !== "" && !IDENTITY_STOPLIST.has(c) && !IDENTITY_FILLER_WORDS.has(c);
+};
+const isFiller = (w: string): boolean => {
+  const c = w.replace(NON_ALNUM, "");
+  return c === "" || IDENTITY_FILLER_WORDS.has(c);
+};
+
 const NAME_SEPARATORS = /[\s,._\-'\u2018\u2019\u02bc`\u00b4]+/u;
 const NON_ALNUM = /[^\p{L}\p{N}]/gu;
 
@@ -121,7 +136,7 @@ function keepPart(part: string): boolean {
 /** School and hometown words: 4+ characters, or 2+ when non-ASCII, and not a generic word. */
 function keepPlaceWord(w: string): boolean {
   const len = [...w].length;
-  return (len >= 4 || (len >= 2 && hasNonAsciiLetter(w))) && !IDENTITY_STOPLIST.has(w);
+  return (len >= 4 || (len >= 2 && hasNonAsciiLetter(w))) && !IDENTITY_STOPLIST.has(w) && !IDENTITY_FILLER_WORDS.has(w);
 }
 
 /** True for the part after a hometown's last comma when it is a two-letter code or a full US state name. */
@@ -147,7 +162,11 @@ function addPlace(raw: string | null, out: Set<string>, kind: "school" | "hometo
     const words = s.split(" ");
     const last = words[words.length - 1]!.replace(NON_ALNUM, "");
     const rest = words.slice(0, -1);
-    if (rest.length >= 2 && IDENTITY_STOPLIST.has(last) && rest.some((w) => !IDENTITY_STOPLIST.has(w.replace(NON_ALNUM, "")))) {
+    // Filler words ("of", "the") never count as distinctive and are trimmed from both ends of the alias, so "Academy
+    // of Science" gets none and "Bronx High School of Science" yields "bronx high school".
+    while (rest.length && isFiller(rest[rest.length - 1]!)) rest.pop();
+    while (rest.length && isFiller(rest[0]!)) rest.shift();
+    if (rest.length >= 2 && IDENTITY_STOPLIST.has(last) && rest.some(isDistinctive)) {
       const alias = rest.join(" ");
       out.add(alias);
       const aliasStripped = alias.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();

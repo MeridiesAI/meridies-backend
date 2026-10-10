@@ -890,7 +890,11 @@ column and tables.
   isn't on `IDENTITY_STOPLIST` (generic school words such as "high", "academy",
   "north"), and the school's short form: its name without the last word when
   that word is generic and a distinctive word is left ("Lee High School" also
-  yields "lee high"). The state at the end of a hometown ("Fresno, CA") isn't
+  yields "lee high"). Filler words (`IDENTITY_FILLER_WORDS`: of, the, for, and,
+  at, in, on, a, an, de, la, el, del, des, du, le, les, y, &) never count as
+  distinctive and are trimmed from both ends of the alias, so "Academy of
+  Science" and "The Arts Academy" get no alias and "Bronx High School of Science"
+  yields "bronx high school"; fillers are never single-word tokens. The state at the end of a hometown ("Fresno, CA") isn't
   tokenized by word. Text and tokens are compared after a Unicode fold (NFKC,
   lowercase, invisible format characters and combining marks removed, then the
   letters that don't decompose mapped to ASCII: ø to o, ł to l, đ to d, ß to ss,
@@ -997,7 +1001,9 @@ column and tables.
 - **`RESEARCH_FAKE=fixture`** is for tests. It works only when `NODE_ENV` is
   `development` or `test`: `seamFor` returns the fixtures only then, and
   `src/index.ts` exits at boot with a message naming `RESEARCH_FAKE` if it is
-  set with any other `NODE_ENV` (production, staging, unset). The boot check reads
+  set with `NODE_ENV=production` or with `NODE_ENV` unset. Any other value
+  (staging, say) never gets that far: `env.ts` rejects a `NODE_ENV` that is not
+  `development`, `production` or `test` first, with its own error. The boot check reads
   the raw `process.env.NODE_ENV`, so the default of "development" when it is unset
   does not unlock the fake. The server logs a warning whenever it is on. With it on, research, the match step and the link
   check return canned answers (including a candidate on a blocked domain and one
@@ -1146,7 +1152,7 @@ npm run dev               # http://localhost:4000
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
-| `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. The server refuses to boot if it is set with `NODE_ENV=production`, and logs a warning whenever it is on |
+| `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |
