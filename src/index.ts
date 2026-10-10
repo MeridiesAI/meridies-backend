@@ -1,8 +1,16 @@
 import { buildApp } from "./app.js";
 import { env } from "./env.js";
 import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
+import { researchFakeRefusal } from "./lib/research/bootGuard.js";
 
 const app = buildApp();
+
+// The research test double must never run for real counselors.
+const refusal = researchFakeRefusal(env);
+if (refusal) {
+  app.log.error(refusal);
+  process.exit(1);
+}
 
 await verifyImportWorkerAtBoot(app.log);
 
