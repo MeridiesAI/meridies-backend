@@ -34,6 +34,8 @@ src/
 │   └── rateLimit.ts       # @fastify/rate-limit, per-user then per-IP
 ├── lib/
 │   ├── supabase.ts        # userClient (RLS applies) / serviceClient (bypasses)
+│   ├── access.ts          # counselor approval: the one definition (request gate + jobs)
+│   ├── accessReview.ts    # the emailed one-time review link, its page and email
 │   ├── guards.ts          # requireRole, assertCanView/EditStudent, resolveStudentId
 │   ├── collection.ts      # generates the student-scoped CRUD routes
 │   ├── classRank.ts       # weighted GPA -> percentile, or null. See below
@@ -110,6 +112,7 @@ src/
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
 │   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
@@ -173,6 +176,32 @@ Two things the database enforces that the API must not be trusted to:
   unguessable token. There is no SELECT policy that exposes a pending invite to
   the invitee — `invitation_preview()` and `accept_invitation()` are SECURITY
   DEFINER, so an invite has to be *received*, not discovered.
+- **A counselor is pending until Meridies approves them** (`20261017000001`,
+  spec `docs/superpowers/specs/2026-10-10-counselor-approval-gate-design.md`).
+  `profiles.counselor_approved_at` is not writable by `authenticated`.
+  `private.is_counselor` means "an approved counselor", so policies and
+  functions that ask it refuse a pending or revoked one, and
+  `accept_invitation` refuses a student joining one. Approval is permanent:
+  nothing expires it, and only a revoke removes it. The API gate is in
+  `app.authenticate` (the row it loads per request, never a token claim): a
+  pending counselor gets `403 { code: "account_pending" }` on every route that
+  does not set `config: { allowPending: true }`. New routes are closed by
+  default; open one only for the caller's own account. Jobs on the service
+  client or the import pool skip RLS, so they call `isCounselorApproved` /
+  `approvedCounselorIds` (`lib/access.ts`) when they run, failing closed;
+  `test/unit/service-callsites.test.ts` fails when a new elevated call site
+  has not been reviewed. Approve: the emailed link (`/access-review/:token`,
+  single-use, 7 days; opening it changes nothing, the button approves), or by
+  hand `update profiles set counselor_approved_at = now(),
+  counselor_approved_via = 'team' where id = '<profile id>'`. Revoke, as
+  `postgres`: `select private.revoke_counselor_access('<profile id>');` (also
+  revokes their pending student and firm invitations; members they approved
+  through a firm stay approved, and a revoked account is never auto-approved
+  by a firm invitation). A counselor who accepts a firm invitation is approved
+  only when the inviter is, at that moment, an approved owner or admin. Known
+  limit: a pending counselor can still write rows that are only their own
+  (their own folders and files) by talking to Supabase directly, because those
+  policies key on ownership; none reach a student or send email.
 
 ### Three rules the schema encodes, and why they are not the obvious shape
 
@@ -1140,11 +1169,15 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   profiles, coherence material, consumers), and research (`research-brief`,
   `research-citations`, `research-extract`, `research-run`,
   `research-boot-guard`: the brief and identity filter, the citation keeper,
-  the answer parser, the match validation and the boot check).
+  the answer parser, the match validation and the boot check), and the
+  counselor approval gate (`access`, `access-review`, `service-callsites`).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and
-  hidden tasks) and `research-api` (the routes, with the test double).
+  hidden tasks), `research-api` (the routes, with the test double) and the
+  approval gate (`approval-db`, `approval-api`, `approval-review`,
+  `approval-jobs`). The harness's `user()` approves the counselors it makes;
+  pass `{ approved: false }` for a pending one.
 - `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
   tests; then a throwaway Supabase with every migration, an RLS-on-every-table
   check, the fixtures, and the persona suites, with the API started under
@@ -1180,6 +1213,7 @@ npm run dev               # http://localhost:4000
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |
 | `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
+| `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |
 
 `GET /health` reports `{ status, database, anthropic, serviceRole }` — presence
 and reachability only, never values, URLs or error text. `database` is a 2s HEAD
