@@ -198,10 +198,18 @@ Two things the database enforces that the API must not be trusted to:
   revokes their pending student and firm invitations; members they approved
   through a firm stay approved, and a revoked account is never auto-approved
   by a firm invitation). A counselor who accepts a firm invitation is approved
-  only when the inviter is, at that moment, an approved owner or admin. Known
-  limit: a pending counselor can still write rows that are only their own
-  (their own folders and files) by talking to Supabase directly, because those
-  policies key on ownership; none reach a student or send email.
+  only when the inviter is, at that moment, an approved owner or admin.
+  The roster helpers (`is_counselor_of`, `can_edit_student`, and through them
+  `can_view_student`) ask about approval too, and every public table plus
+  `storage.objects` carries a restrictive `approval_gate` policy: an
+  unapproved counselor's database is their own `profiles` row and nothing
+  else. **A migration that creates a table must call
+  `private.attach_approval_gate('public.<table>')`**; `approval-db.test.mjs`
+  fails when a table is missing it. What the gate does not cover: a SECURITY
+  DEFINER function that returns data without going through those helpers.
+  The review link's token is stored only as a hash: the delivery record keeps
+  the email without its link (`sendEmail`'s `recordText`), and request logs
+  drop the token (`lib/requestLog.ts`).
 
 ### Three rules the schema encodes, and why they are not the obvious shape
 
