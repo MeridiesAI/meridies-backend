@@ -101,7 +101,7 @@ test("school and hometown words match, generic words do not", () => {
   const sci = identityTokens(ident({ school: "Science Academy" }));
   assert.deepEqual(sci, ["science academy"]);
   assert.doesNotThrow(() => assertNoIdentity("science research", sci));
-  assert.ok(IDENTITY_STOPLIST.has("high") && IDENTITY_STOPLIST.has("wyoming") && IDENTITY_STOPLIST.has("carolina"));
+  assert.ok(IDENTITY_STOPLIST.has("high") && !IDENTITY_STOPLIST.has("wyoming") && !IDENTITY_STOPLIST.has("park"));
 });
 
 // Finding 4
@@ -175,4 +175,34 @@ test("a focus of 500 characters with the name at position 300 refuses, though on
   assert.throws(() => toResearchBrief(facts, "activities", focus), IdentityLeakError);
   const ok = toResearchBrief(facts, "activities", "z ".repeat(250));
   assert.equal(ok.focus?.length, 200);
+});
+
+// Fix round 2
+test("place words and state names are tokens, generic school words are not", () => {
+  refuses("washington robotics", ident({ school: "Washington High" }));
+  refuses("mountain", ident({ school: "Mountain View High" }));
+  refuses("view", ident({ school: "Mountain View High" }));
+  refuses("valley", ident({ school: "Valley Forge Academy" }));
+  refuses("forge", ident({ school: "Valley Forge Academy" }));
+  refuses("programs near park", ident({ hometown: "Park City" }));
+  // Throws on the word token "york" (the whole string "new york, ny" would not match this text).
+  refuses("programs in New York", ident({ hometown: "New York, NY" }));
+  assert.ok(identityTokens(ident({ hometown: "New York, NY" })).includes("york"));
+});
+test("the state part of 'City, State' is not a word token", () => {
+  const h = ident({ hometown: "Cheyenne, Wyoming" });
+  allows("programs in Wyoming", h);
+  refuses("programs near cheyenne", h);
+  assert.ok(identityTokens(h).includes("cheyenne, wyoming"));
+  allows("programs in WY", ident({ hometown: "Cheyenne, WY" }));
+});
+test("generic-only schools have no word tokens and are caught only as the whole string", () => {
+  assert.deepEqual(identityTokens(ident({ school: "Central High" })), ["central high"]);
+  refuses("central high clubs", ident({ school: "Central High" }));
+  allows("science research in the north", ident({ school: "North Science Academy" }));
+});
+test("no one-character, empty or punctuation-only tokens", () => {
+  assert.ok(!identityTokens(ident({ email: "a@x.com" })).includes("a"));
+  assert.ok(identityTokens(ident({ email: "a@x.com" })).includes("a@x.com"));
+  assert.deepEqual(identityTokens(ident({ school: "...", hometown: "?!" })), []);
 });

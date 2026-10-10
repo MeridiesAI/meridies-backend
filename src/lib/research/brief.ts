@@ -52,19 +52,17 @@ const STATE_NAMES = [
 ];
 
 /**
- * Generic school and place words that are not added as word tokens (the whole school or hometown string still is),
- * so ordinary research text such as "high school" or "math competitions" does not trip the filter.
+ * Words that are generic for a school and say nothing about where it is. They are not added as word tokens (the whole
+ * school or hometown string still is). Place words (city, valley, park, ...) and state names are deliberately NOT here:
+ * too broad a list leaks, too narrow a list only refuses runs.
  */
 export const IDENTITY_STOPLIST: ReadonlySet<string> = new Set([
   "high", "school", "schools", "academy", "college", "university", "institute", "center", "centre", "central",
-  "north", "south", "east", "west", "northern", "southern", "eastern", "western", "senior", "junior", "middle",
-  "upper", "lower", "preparatory", "prep", "saint", "city", "town", "county", "public", "private", "charter",
+  "senior", "junior", "middle", "upper", "lower", "preparatory", "prep", "saint", "public", "private", "charter",
   "magnet", "international", "christian", "catholic", "lutheran", "jewish", "islamic", "technical", "tech",
   "technology", "science", "sciences", "arts", "math", "mathematics", "engineering", "early", "learning",
-  "community", "regional", "memorial", "district", "union", "valley", "park", "lake", "mount", "mountain", "fort",
-  "port", "springs", "heights", "hills", "beach", "island", "river", "creek", "grove", "falls", "united", "states",
-  "american", "national", "state",
-  ...STATE_NAMES, ...STATE_NAMES.flatMap((n) => n.split(" ")),
+  "community", "regional", "memorial", "district", "union", "united", "national", "american",
+  "north", "south", "east", "west", "northern", "southern", "eastern", "western",
 ]);
 
 const NAME_SEPARATORS = /[\s,._\-'\u2018\u2019\u02bc`\u00b4]+/u;
@@ -82,13 +80,23 @@ function keepPlaceWord(w: string): boolean {
   return (len >= 4 || (len >= 2 && hasNonAsciiLetter(w))) && !IDENTITY_STOPLIST.has(w);
 }
 
-function addPlace(raw: string | null, out: Set<string>): void {
+/** True for the part after a hometown's last comma when it is a two-letter code or a full US state name. */
+function isStatePart(p: string): boolean {
+  const t = p.trim();
+  return /^[a-z]{2}$/.test(t) || STATE_NAMES.includes(t);
+}
+
+function addPlace(raw: string | null, out: Set<string>, hometown = false): void {
   const s = fold(raw ?? "").trim().replace(/\s+/g, " ");
   if (!s) return;
   out.add(s);
+  let wordSource = s;
+  const comma = s.lastIndexOf(",");
+  // "City, ST" or "City, State": the state is not tokenized by word (it stays inside the whole-string token).
+  if (hometown && comma >= 0 && isStatePart(s.slice(comma + 1))) wordSource = s.slice(0, comma);
   const stripped = s.replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
   if (stripped) out.add(stripped);
-  for (const w of s.split(/[\s,]+/)) {
+  for (const w of wordSource.split(/[\s,]+/)) {
     for (const c of [w.replace(NON_ALNUM, ""), ...w.split(/[^\p{L}\p{N}]+/u)]) {
       if (c && keepPlaceWord(c)) out.add(c);
     }
@@ -117,7 +125,7 @@ export function identityTokens(id: Facts["identity"]): string[] {
     out.add(email);
     const at = email.lastIndexOf("@");
     const local = at > 0 ? email.slice(0, at) : email;
-    out.add(local);
+    if (keepPart(local)) out.add(local);
     const fusedLocal = local.replace(NON_ALNUM, "");
     if (keepPart(fusedLocal)) out.add(fusedLocal);
     for (const piece of local.split(/[^\p{L}\p{N}]+/u)) {
@@ -125,8 +133,9 @@ export function identityTokens(id: Facts["identity"]): string[] {
     }
   }
   addPlace(id.school, out);
-  addPlace(id.hometown, out);
-  return [...out].filter((t) => t.length > 0);
+  addPlace(id.hometown, out, true);
+  // Never a token that is a single character or has no letter or digit.
+  return [...out].filter((t) => [...t].length >= 2 && /[\p{L}\p{N}]/u.test(t));
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
