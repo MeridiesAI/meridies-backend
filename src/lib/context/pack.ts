@@ -7,6 +7,11 @@ export type Section = {
   name: string;
   label: string;
   items?: string[];
+  /**
+   * Trusted, server-generated text only: labels we wrote plus numbers, dates,
+   * booleans and fixed-enum values. It is emitted as-is, not escaped. Anything
+   * a student, an import or a document supplied belongs in `untrusted`.
+   */
   body: string;
   untrusted?: { source: string; text: string }[];
 };

@@ -36,6 +36,7 @@ import reportRoutes from "./routes/reports.js";
 import importRoutes from "./routes/imports.js";
 import rosterRoutes from "./routes/roster.js";
 import studentRoutes from "./routes/students.js";
+import aiContextRoutes from "./routes/aiContext.js";
 import taskRoutes from "./routes/tasks.js";
 // v10 sync imports: foundations
 // v10 sync imports: overview
@@ -106,6 +107,7 @@ export function buildApp() {
   app.register(authRoutes, { prefix: "/auth" });
   app.register(inviteRoutes, { prefix: "/invites" });
   app.register(studentRoutes, { prefix: "/students" });
+  app.register(aiContextRoutes, { prefix: "/students" });
   app.register(deadlineRoutes, { prefix: "/deadlines" });
   app.register(recordRoutes);
   // Catalog reads (/colleges, /high-schools) sit at the root like recordRoutes.
