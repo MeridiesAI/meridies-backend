@@ -46,12 +46,12 @@ function norm(u: string): string | null {
   return `//${url.host}${url.pathname.replace(/\/$/, "")}${url.search}`;
 }
 
-export async function keepCandidates(
-  candidates: Candidate[],
+export async function keepCandidates<C extends Candidate>(
+  candidates: C[],
   run: { seenUrls: string[] },
   blocked: string[],
   check: (url: string) => Promise<{ status: "ok" | "broken" | "blocked" }>
-): Promise<(Candidate & { checkedAt: string })[]> {
+): Promise<(C & { checkedAt: string })[]> {
   const seen = new Set<string>();
   for (const u of run.seenUrls) {
     const n = norm(u);
@@ -72,7 +72,7 @@ export async function keepCandidates(
     verdicts.set(key, good);
     return good;
   };
-  const out: (Candidate & { checkedAt: string })[] = [];
+  const out: (C & { checkedAt: string })[] = [];
   for (const c of candidates) {
     const sources: Candidate["sources"] = [];
     for (const s of c.sources) {
