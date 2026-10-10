@@ -18,8 +18,8 @@ const DB_URL = process.env.DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:5
 const PSQL = process.env.PSQL ?? "psql";
 const svc = { apikey: SERVICE, Authorization: `Bearer ${SERVICE}`, "Content-Type": "application/json" };
 
-/** A confirmed account with a confirmed role, signed in. */
-export async function user(tag, role = "counselor") {
+/** A confirmed account with a confirmed role, signed in. Counselors are approved unless `approved: false`. */
+export async function user(tag, role = "counselor", { approved = true } = {}) {
   const email = `${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@test.local`;
   const password = `pw-${Math.random().toString(36).slice(2)}-Aa1!`;
   let r = await fetch(`${SB}/auth/v1/admin/users`, { method: "POST", headers: svc, body: JSON.stringify({ email, password, email_confirm: true, user_metadata: { full_name: tag, role } }) });
@@ -29,7 +29,10 @@ export async function user(tag, role = "counselor") {
   const t = await r.json();
   if (!r.ok) throw new Error("login " + JSON.stringify(t));
   await fetch(`${SB}/rest/v1/rpc/confirm_user_role`, { method: "POST", headers: { apikey: ANON, Authorization: `Bearer ${t.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ p_role: role }) });
-  return { id: u.id, email, token: t.access_token };
+  if (role === "counselor" && approved) {
+    await sql(`update public.profiles set counselor_approved_at = now(), counselor_approved_via = 'team' where id = '${u.id}'`);
+  }
+  return { id: u.id, email, password, token: t.access_token };
 }
 
 export async function call(token, method, path, body) {
