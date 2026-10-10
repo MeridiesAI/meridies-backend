@@ -18,6 +18,17 @@ check("an injection in an activity name is present", p.body.text.includes("NAME-
 const bare = p.body.text.replace(/<data source="[^"]*" kind="untrusted">[\s\S]*?<\/data>/g, "");
 check("every NAME-INJECT sits inside a data block or a source attribute", !bare.includes("NAME-INJECT"), bare.slice(0, 300));
 
+const cohFull = await ctx(priv.id, "narrative-coherence");
+check("an essay read from a kept-out file has no body in the context",
+  cohFull.body.text.includes("ESSAY-BODY") && !cohFull.body.text.includes(MARKERS.keptOutEssay));
+
+const { student: unparsed } = await seedStudent(c, "edge");
+await sql(`insert into public.documents (student_id, owner_id, storage_path, filename, kind)
+  values ('${unparsed.id}', '${c.id}', 'ctx/unparsed-${Date.now()}', 'scan.pdf', 'transcript')`);
+const up = await ctx(unparsed.id);
+check("an allowed but unparsed document is reported, not silent",
+  up.body.omitted.some((o) => o.section === "documents" && o.reason === "empty" && o.count === 1), JSON.stringify(up.body.omitted));
+
 const { student: docs } = await seedStudent(c, "documents");
 const d = await ctx(docs.id);
 check("an allowed transcript is included", d.body.text.includes("TRANSCRIPT-TEXT"));
@@ -54,11 +65,14 @@ check("a 100-point GPA keeps its scale", /92(\.0+)? \(100-point scale\)/.test(e.
 
 const owner = await user("ctx-owner");
 const member = await user("ctx-member");
-await firmWith(owner, [member]);
+const member2 = await user("ctx-member-b");
+await firmWith(owner, [member, member2]);
 const theirs = await studentOf(member, "ctx-firm-student");
 const otherMember = await user("ctx-member2");
 await firmWith(otherMember, []);
+const sameFirm = await ctx(theirs.id, "chat", member2.token);
+check("a same-firm counselor who isn't on the student's case gets 404", sameFirm.status === 404, `status ${sameFirm.status}`);
 const nope = await ctx(theirs.id, "chat", otherMember.token);
-check("a counselor without access gets 404", nope.status === 404, `status ${nope.status}`);
+check("a counselor in another firm gets 404", nope.status === 404, `status ${nope.status}`);
 const st = await call(priv.token, "GET", `/students/${priv.id}/ai-context?feature=chat`);
 check("a student gets 403", st.status === 403, `status ${st.status}`);

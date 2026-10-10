@@ -20,3 +20,12 @@ test("budgets match the spec", () => {
 test("only coherence reads essay bodies", () => {
   for (const [f, p] of Object.entries(PROFILES)) assert.equal(p.essayBodies, f === "narrative-coherence");
 });
+
+import { essayBodyReadable } from "../../src/lib/context/sections.js";
+
+test("an essay body is read only when unlinked, or linked to a file that came back and is not kept out", () => {
+  assert.equal(essayBodyReadable(null, null), true);
+  assert.equal(essayBodyReadable("doc-1", { available_to_llm: true }), true);
+  assert.equal(essayBodyReadable("doc-1", { available_to_llm: false }), false);
+  assert.equal(essayBodyReadable("doc-1", null), false, "a linked file RLS hid fails closed");
+});

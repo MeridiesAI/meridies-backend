@@ -9,6 +9,7 @@ export const MARKERS = {
     "PRIVATE-NOTE-MARKER", "STATUS-NOTE-MARKER", "GUARDIAN-MARKER", "ADDRESS-MARKER",
     "2008-03-09", "contact-marker@test.local",
   ],
+  keptOutEssay: "KEEPOUT-ESSAY-MARKER",
   excludedDocs: ["RESUME-TEXT", "LETTER-TEXT", "IEP-TEXT", "FIN-TEXT", "OTHER-TEXT", "ACTLIST-TEXT"],
 };
 
@@ -66,6 +67,11 @@ async function seedFull(counselor, student, ids) {
   ]);
   ids.essay = await sql(`with e as (insert into public.essays (student_id, title, prompt, school, body, status, sort_order)
     values ('${student.id}', 'Common App', 'Describe a challenge', 'All', 'ESSAY-BODY I once built a robot.', 'drafting', 1) returning id) select id from e`);
+  // A second essay read from a file the counselor kept out of AI: its body must never be read.
+  const keptOut = await sql(`with d as (insert into public.documents (student_id, owner_id, storage_path, filename, kind, available_to_llm)
+    values ('${student.id}', '${counselor.id}', 'ctx/keepout-${Date.now()}', 'keepout-essay.docx', 'essay', false) returning id) select id from d`);
+  await sql(`insert into public.essays (student_id, title, body, status, sort_order, document_id)
+    values ('${student.id}', 'Kept out', '${MARKERS.keptOutEssay} private draft', 'drafting', 2, '${keptOut}')`);
 }
 
 async function seedPrivate(counselor, student) {

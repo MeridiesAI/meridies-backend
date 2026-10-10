@@ -243,10 +243,19 @@ const tasks: Loader = async (db, studentId) => {
     rows.map((t) => compact([str(t.title), kv("kind", t.kind), kv("status", t.status), kv("due", t.due_date)]).join("; ")));
 };
 
+/**
+ * An essay body may be read when the essay has no linked file, or its linked file came back and is not
+ * kept out of AI. A linked file that did not come back (hidden by RLS) fails closed.
+ */
+export function essayBodyReadable(documentId: unknown, document: unknown): boolean {
+  if (documentId === null || documentId === undefined) return true;
+  return typeof document === "object" && document !== null && (document as Row).available_to_llm !== false;
+}
+
 const essays: Loader = async (db, studentId, opts) => {
   // The embedded document carries the "keep out of AI" switch of the file an essay was read from.
   const rows = await many(db.from("essays")
-    .select(`${columns("essays", ["title", "prompt", "school", "status", "word_count", "body"])}, document:documents(${columns("documents", ["available_to_llm"])})`)
+    .select(`${columns("essays", ["title", "prompt", "school", "status", "word_count", "body", "document_id"])}, document:documents(${columns("documents", ["available_to_llm"])})`)
     .eq("student_id", studentId).order("sort_order").limit(30));
   if (rows.length === 0) return empty("essays");
   const untrusted: { source: string; text: string }[] = [{
@@ -256,8 +265,7 @@ const essays: Loader = async (db, studentId, opts) => {
   }];
   if (opts.essayBodies) {
     for (const e of rows) {
-      const kept = (e.document as Row | null)?.available_to_llm !== false;
-      if (kept && str(e.body)) untrusted.push({ source: tag("essay", str(e.title)), text: str(e.body) });
+      if (essayBodyReadable(e.document_id, e.document) && str(e.body)) untrusted.push({ source: tag("essay", str(e.title)), text: str(e.body) });
     }
   }
   return { section: { name: "essays", label: "Essays", body: `${rows.length} essays.`, untrusted } };
@@ -276,6 +284,7 @@ const documents: Loader = async (db, studentId, opts) => {
   const omitted: Omitted[] = [];
   let uncategorized = 0;
   let blocked = 0;
+  let unparsed = 0;
   for (const d of rows) {
     const decision = documentAiDecision(
       { kind: str(d.kind), available_to_llm: d.available_to_llm !== false, ai_access: str(d.ai_access) || "default", ferpa_waived: d.ferpa_waived === true },
@@ -288,7 +297,10 @@ const documents: Loader = async (db, studentId, opts) => {
     }
     const parsed = d.parsed_data as Row | null;
     const body = typeof parsed?.text === "string" ? parsed.text.trim() : "";
-    if (!body) continue;
+    if (!body) {
+      unparsed++;
+      continue;
+    }
     if (body.length > DOCUMENT_TEXT_CAP) {
       omitted.push({ section: "documents", reason: "budget" });
       continue;
@@ -299,7 +311,11 @@ const documents: Loader = async (db, studentId, opts) => {
   }
   if (uncategorized > 0) omitted.push({ section: "documents", reason: "not-categorized", count: uncategorized });
   if (blocked > 0) omitted.push({ section: "documents", reason: "not-allowed", count: blocked });
-  if (untrusted.length === 0) return { section: null, omitted };
+  if (unparsed > 0) omitted.push({ section: "documents", reason: "empty", count: unparsed });
+  if (untrusted.length === 0) {
+    if (omitted.length === 0) omitted.push({ section: "documents", reason: "empty" });
+    return { section: null, omitted };
+  }
   return { section: { name: "documents", label: "Documents", items, body: `${items.length} documents.`, untrusted }, omitted };
 };
 

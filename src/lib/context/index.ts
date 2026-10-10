@@ -1,5 +1,5 @@
 import type { FastifyRequest } from "fastify";
-import { notFound } from "../errors.js";
+import { fromPostgrest, notFound } from "../errors.js";
 import { assertCanViewStudent } from "../guards.js";
 import { loadPracticeSettings } from "../practiceSettings.js";
 import { packSections, type Section } from "./pack.js";
@@ -31,7 +31,8 @@ export async function buildStudentContext(request: FastifyRequest, studentId: st
   }, ...results.map((r) => r.facts ?? {}));
   // The login email is deliberately read outside the AI allowlist. It never enters `text`; it feeds the
   // identity filter (what research may not search for) and nothing else.
-  const { data: who } = await request.db.from("profiles").select("email").eq("id", studentId).maybeSingle();
+  const { data: who, error: whoError } = await request.db.from("profiles").select("email").eq("id", studentId).maybeSingle();
+  if (whoError) throw fromPostgrest(whoError);
   facts.identity = { ...facts.identity, email: (who?.email as string | undefined) ?? null };
 
   return {
