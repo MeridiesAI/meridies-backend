@@ -171,6 +171,7 @@ export default async function communicationRoutes(app: FastifyInstance) {
           .from("deliverables")
           .select("title, kind, status, due_date, progress_pct")
           .eq("student_id", student)
+          .eq("visible_to_student", true)
           .neq("status", "complete")
           .order("due_date", { ascending: true, nullsFirst: false })
           .limit(20),

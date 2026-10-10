@@ -450,6 +450,7 @@ export async function loadComposerFacts(db: SupabaseClient, studentId: string, n
       .from("deliverables")
       .select("id")
       .eq("student_id", studentId)
+      .eq("visible_to_student", true)
       .neq("status", "complete")
       .lt("due_date", today)
       .limit(1),

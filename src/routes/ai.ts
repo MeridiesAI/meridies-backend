@@ -936,6 +936,8 @@ export default async function aiRoutes(app: FastifyInstance) {
           .from("deliverables")
           .select("title, kind, status, due_date, progress_pct, last_activity_at")
           .eq("student_id", b.studentId)
+          // The draft goes to a family: counselor-only tasks aren't in it.
+          .eq("visible_to_student", true)
           .neq("status", "complete")
           .order("due_date", { ascending: true, nullsFirst: false })
           .limit(20),

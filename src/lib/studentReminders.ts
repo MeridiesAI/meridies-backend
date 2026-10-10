@@ -130,6 +130,8 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
         .from("deliverables")
         .select("id, title, due_date, status")
         .eq("student_id", sid)
+        // A counselor-only task is never the student's reminder.
+        .eq("visible_to_student", true)
         .eq("due_date", tomorrow)
         .neq("status", "complete")
         .limit(50);
