@@ -113,8 +113,10 @@ const n1 = await call(c4.token, "POST", `/students/${s4.id}/research/activities`
 check("a student named Fixture Student gets recommendations", n1.status === 200 && n1.body.recommendations.length > 0, JSON.stringify(n1.body).slice(0, 200));
 
 // A run whose candidates were all dropped downstream is not served from cache; one that found nothing still is.
-const d1 = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, { focus: "fixture:all-dropped" });
-const d2 = await call(c4.token, "POST", `/students/${s4.id}/research/activities`, { focus: "fixture:all-dropped" });
+// (A second student: the first is named "Fixture Student", and the focus would trip the identity filter on "fixture".)
+const { student: s6 } = await seedStudent(c4, "full");
+const d1 = await call(c4.token, "POST", `/students/${s6.id}/research/activities`, { focus: "fixture:all-dropped" });
+const d2 = await call(c4.token, "POST", `/students/${s6.id}/research/activities`, { focus: "fixture:all-dropped" });
 check("candidates found but all dropped: an empty successful run", d1.status === 200 && d1.body.recommendations.length === 0 && d1.body.cached === false);
 check("…the repeat runs again instead of being served from cache", d2.status === 200 && d2.body.cached === false && d2.body.runId !== d1.body.runId);
 
