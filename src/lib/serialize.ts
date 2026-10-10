@@ -267,6 +267,8 @@ export const toTaskDocument = (r: Row) => {
     sizeBytes: doc ? nnum(doc.size_bytes) : null,
     kind: doc ? str(doc.kind) : null,
     availableToLlm: doc ? Boolean(doc.available_to_llm) : null,
+    aiAccess: doc ? (String(doc.ai_access ?? "default") as "default" | "allowed" | "excluded") : null,
+    ferpaWaived: doc ? Boolean(doc.ferpa_waived) : null,
     /** Where the file is, so whoever can see it can open it (Storage RLS decides). */
     bucket: doc ? nstr(doc.bucket) : null,
     storagePath: doc ? nstr(doc.storage_path) : null,
@@ -366,6 +368,8 @@ export const toDocument = (r: Row) => ({
   source: str(r.source),
   parseStatus: str(r.parse_status),
   availableToLlm: Boolean(r.available_to_llm),
+  aiAccess: String(r.ai_access ?? "default") as "default" | "allowed" | "excluded",
+  ferpaWaived: Boolean(r.ferpa_waived),
   /** Drive / OneDrive file this was imported from; the tracker watches it. */
   externalProvider: nstr(r.external_provider) as "google" | "microsoft" | null,
   externalWebUrl: nstr(r.external_web_url),

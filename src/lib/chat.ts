@@ -7,9 +7,8 @@
  *  1. CHAT_TOOLS — each "student tool" the counselor can focus the assistant on
  *     (narrative coherence, opportunity concierge, …). A tool owns its system
  *     prompt; the client only ever sends the tool's `key`.
- *  2. buildStudentContext — assembles the student's record into a compact,
- *     token-budgeted brief, under the caller's RLS (so private notes the caller
- *     can't see are never in the prompt).
+ *  2. buildSystemPrompt — wraps the student context (built by lib/context, the
+ *     one place that decides what AxIS may read about a student) in the prompt.
  *
  * The essay guardrail still binds: no tool here drafts essay prose, and the
  * base rules forbid it. Essay help stays on the bullets-only /ai/essay-advice.
@@ -17,6 +16,7 @@
 
 import type { FastifyRequest } from "fastify";
 import { DEEP_MODEL, FAST_MODEL } from "./anthropic.js";
+import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "./context/pack.js";
 
 export type ChatToolKey =
   | "general"
@@ -159,106 +159,6 @@ export function chatToolCatalog() {
 }
 
 /**
- * Assemble the student's record into a compact brief. Runs under the caller's
- * RLS-scoped client, so anything the caller can't see (e.g. another counselor's
- * private notes) is never pulled in. Capped so a big roster can't blow the
- * context window.
- */
-export async function buildStudentContext(
-  request: FastifyRequest,
-  studentId: string
-): Promise<{ text: string; sources: string[] } | null> {
-  const db = request.db;
-  const today = new Date().toISOString();
-  const [profile, academics, activities, awards, essays, colleges, notes, polygon, deadlines, meetings] =
-    await Promise.all([
-      db
-        .from("profiles")
-        .select("full_name, grad_year, high_school, hometown, headline, profile")
-        .eq("id", studentId)
-        .maybeSingle(),
-      db.from("student_academics").select("*").eq("student_id", studentId).maybeSingle(),
-      db
-        .from("activities")
-        .select("name, position, organization, category, hours_per_week, description")
-        .eq("student_id", studentId)
-        .order("sort_order")
-        .limit(30),
-      db
-        .from("awards")
-        .select("name, level, year")
-        .eq("student_id", studentId)
-        .order("sort_order")
-        .limit(30),
-      db
-        .from("essays")
-        .select("title, prompt, school, status, word_count")
-        .eq("student_id", studentId)
-        .limit(30),
-      db
-        .from("student_colleges")
-        .select("name, round, fit, status")
-        .eq("student_id", studentId)
-        .order("sort_order")
-        .limit(40),
-      db
-        .from("meeting_notes")
-        .select("meeting_date, title, summary, tags")
-        .eq("student_id", studentId)
-        .order("meeting_date", { ascending: false })
-        .limit(8),
-      db
-        .from("student_polygon_axes")
-        .select("label, score, max_score, note")
-        .eq("student_id", studentId)
-        .order("sort_order"),
-      db
-        .from("deadlines")
-        .select("title, school, type, due_date, level, done")
-        .eq("student_id", studentId)
-        .order("due_date")
-        .limit(20),
-      db
-        .from("meetings")
-        .select("title, starts_at, status, agenda")
-        .eq("student_id", studentId)
-        .gte("starts_at", today)
-        .neq("status", "cancelled")
-        .order("starts_at")
-        .limit(8),
-    ]);
-
-  if (!profile.data) return null;
-
-  // What the answer was grounded in, named the way the AxIS trace names it.
-  const has = (rows: unknown) => Array.isArray(rows) && rows.length > 0;
-  const sources = ["Student profile"];
-  if (has(activities.data) || has(awards.data)) sources.push("Activities and awards");
-  if (has(essays.data)) sources.push("Essays");
-  if (has(colleges.data)) sources.push("College list");
-  if (has(notes.data)) sources.push("Meeting notes");
-  if (has(deadlines.data) || has(meetings.data)) sources.push("Calendar");
-
-  const text = JSON.stringify(
-    {
-      student: profile.data,
-      academics: academics.data,
-      activities: activities.data,
-      awards: awards.data,
-      essays: essays.data,
-      colleges: colleges.data,
-      meetingNotes: notes.data,
-      profileStrength: polygon.data,
-      deadlines: deadlines.data,
-      upcomingMeetings: meetings.data,
-    },
-    null,
-    1
-  ).slice(0, 60_000);
-  return { text, sources };
-}
-
-/**
  * "Across the roster" (a chat with no student): the counselor's students and
  * what is due soon, so a question like "who is behind this week?" is
  * answered from the record rather than from nothing. Same RLS-bound client,
@@ -349,25 +249,22 @@ export async function buildRosterContext(
 export function buildSystemPrompt(
   tool: ChatTool,
   studentContext: string | null,
-  studentName: string | null,
   rosterContext: string | null = null
 ): string {
   const parts = [BASE_CHAT_SYSTEM, "", `Active tool: ${tool.label}. ${tool.guidance}`];
   if (!studentContext && rosterContext) {
     parts.push(
       "",
-      "--- THE COUNSELOR'S ROSTER, NEXT THREE WEEKS (JSON) ---",
-      rosterContext,
-      "--- END ROSTER ---"
+      "--- THE COUNSELOR'S ROSTER, NEXT THREE WEEKS (JSON, inside a data block) ---",
+      wrapUntrusted("roster", rosterContext),
+      "--- END ROSTER ---",
+      "",
+      UNTRUSTED_DATA_RULE
     );
   }
   if (studentContext) {
-    parts.push(
-      "",
-      `--- STUDENT ON FILE${studentName ? `: ${studentName}` : ""} (JSON) ---`,
-      studentContext,
-      "--- END STUDENT ---"
-    );
+    // The context already carries the student's name inside its own data blocks.
+    parts.push("", "--- STUDENT ON FILE ---", studentContext, "--- END STUDENT ---", "", UNTRUSTED_DATA_RULE);
   } else if (tool.needsStudent) {
     parts.push(
       "",

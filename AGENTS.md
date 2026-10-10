@@ -74,11 +74,13 @@ src/
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
 │   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
+│   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── imports.ts         # import requests, held-data queue, status, sweep (thin)
+│   ├── aiContext.ts       # /students/:id/ai-context   what AxIS sees for a student (counselor)
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
@@ -701,7 +703,103 @@ can see, their own id, or `unfiled`.
 
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document
-into a prompt must filter on them (see `routes/tasks.ts`).
+into a prompt must filter on them (see `routes/tasks.ts`, and the context
+layer below). Students don't see waived recommendation letters, IEP/504 or
+counselor-only documents they didn't upload (`documents_student_restricted_select`),
+nor the task-document links of those files (`deliverable_documents_student_restricted_select`),
+nor their names in the activity log (the upload's `progress_events` row omits the filename).
+Only a counselor sets `aiAccess` and `ferpaWaived`, on create and on patch: the
+route answers 403 to anyone else, and the `documents_guard_student_restricted`
+trigger refuses a student's write of either, also through PostgREST. The same
+trigger stops a student filing a document they didn't upload under a restricted kind.
+
+### AI context layer
+
+What AxIS may read about a student is decided in one place, `src/lib/context/`.
+
+**Deploy order.** Apply `20261016000001_context_documents.sql` before deploying
+this code: the documents loader, the essays list and task documents select
+the new columns (`ai_access`, `ferpa_waived`) and fail without them. The
+migration is safe to apply first; the previous code ignores the new columns.
+
+- **Counselors only.** `buildStudentContext` refuses a caller whose role isn't
+  `counselor` (403) before any read, the six `/ai/*` routes that call it have
+  `requireRole("counselor")`, and chat answers 403 before it saves the message
+  or opens the stream when a student id comes with a non-counselor caller (chat
+  without a student id is unchanged). A student's own session never builds a context.
+- **One entry point.** `buildStudentContext(request, studentId, feature, { only }?)`
+  runs on `request.db`, so it never returns more than the counselor can see. A
+  feature is `chat`, `student-ai`, `narrative-coherence`, `college-list` or
+  `activities`; `profiles.ts` gives each its budget (60,000, 40,000, 50,000,
+  24,000 and 24,000 characters) and its sections in priority order. It returns
+  `text`, `used`, `omitted`, `studentName` and `facts`.
+- **Deny by default.** `ai-allowlist.ts` lists the tables and columns AI may
+  read, and every loader selects through `columns(...)`, never `select *` (a
+  unit test fails on any `.select(` in the layer that doesn't). Private notes, status overrides, red flags, guardians,
+  address, birthday, gender, contact email, phone, the aid tables and
+  `profiles.profile` are not on it. The login email is read separately (the one
+  annotated exception to the `columns(...)` rule), only for the `college-list`
+  and `activities` features and only into `facts.identity`, to feed the identity
+  filter; for other features `facts.identity.email` stays null. It never enters `text`.
+- **Free text is data.** Every free-text value a student, an import or a
+  document supplied goes into an escaped `<data kind="untrusted">` block
+  (`wrapUntrusted` in `pack.ts`). That includes names and titles, not only
+  descriptions and bodies. A section's `body` is for server-written labels,
+  numbers, dates and constrained enum values only. `wrapUntrusted` escapes `&`,
+  `<` and `>` in the content, and `"` as well in the `source` attribute. Every
+  system prompt that carries a context also carries `UNTRUSTED_DATA_RULE`.
+  `StudentContext.facts` and `studentName` hold raw student text, so wrap them
+  with `wrapUntrusted` before they enter any prompt.
+- **Budgets drop whole sections, never cut one.** A section that doesn't fit is
+  left out and listed in `omitted` with reason `budget`.
+- **Documents** (`documentAiDecision` in `documentAi.ts`, in this order):
+  keep-out (`available_to_llm = false`) always wins; then a waived
+  recommendation letter (never); then the practice's document-reading setting;
+  then `ai_access` (`excluded` out, `allowed` in); then the kind defaults
+  (transcript, resume, test-report, activity-list); an `other` file is
+  `not-categorized` so the client can ask the counselor to categorize it, and
+  any other kind is out. An allowed document with no parsed text, or with more
+  than 12,000 characters of it, is reported in `omitted` (`empty`, `budget`)
+  rather than dropped silently.
+- **Essays.** The layer's `essays` section selects and renders a body only for
+  a feature that asks for bodies (narrative coherence), and leaves it out when
+  the linked document is kept out of AI or isn't readable by the caller
+  (`essayBodyReadable`); a linked file that didn't come back fails closed. No
+  current consumer reads essay bodies through that section: the Application
+  page's Coherence builds its ticked essays through `coherenceMaterial.ts`
+  (`usableEssay`), which applies the same `essayBodyReadable` rule.
+  `GET /students/:id/ai-context?feature=narrative-coherence` shows the layer's
+  view, not the ticked material a coherence run sends.
+- **Chat and the `student-ai` routes read intake answers.** `intake_responses.answers`
+  is free-form JSON from a counselor-designed form, so what reaches AI is whatever
+  that form asks. It is wrapped as untrusted data (`source: "intake"`) in both profiles.
+- **Narrowing.** `{ only }` narrows a feature's sections and never widens them.
+  Narrative coherence asks for `profile` and `personal` only, and builds its
+  ticked material (essays, activities, awards) through `coherenceMaterial.ts`,
+  which wraps each piece, skips a block that would pass the 80,000-character cap
+  whole, and reports only what was actually sent.
+- **What each consumer returns.** The `/ai/*` student routes
+  (`/ai/profile-summary`, `/ai/narrative-coherence`, `/ai/family-report`,
+  `/ai/school-reframing`, `/ai/college-list`, `/ai/concierge`) and the
+  Application page's Coherence (`POST /application/coherence` and
+  `/coherence/ask`) return `contextUsed: { used, omitted }`. AxIS chat sends a
+  `context` SSE event with the same shape. `ai_runs.input.context` stores it:
+  section names, document file names and reasons, never the text itself.
+- `GET /students/:id/ai-context?feature=` (counselor only, default `chat`)
+  shows what AxIS would see.
+
+**Not on the layer yet** (follow-up work; each still reads the record on its
+own, with the text it reads wrapped as data where the route does so). The list
+covers routes that read a student's record: `/ai/essay-review` (its
+verbatim-quote span matching breaks under escaping, so it needs a different
+defense), `/ai/award-appeal`, `/ai/aid-report`, `/ai/file-filing`,
+`/ai/parent-alert`, and the single-essay routes (`/ai/essay-advice`,
+`/ai/draft-quality`). Profile Update, submission review, email templates and
+college research have their own inputs and are not part of this list.
+On the Application page, the recommended-colleges column
+(`POST /application/college-list/recommendations/axis`) and Activities Build
+(`POST /application/activities-build`) still use a local `studentBrief` in
+`src/routes/applicationAi.ts`.
 
 ### Import pipeline (step 1)
 
@@ -794,9 +892,11 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
   mapping (against a recorded real Scorecard response in `test/fixtures`), the
   essay guardrails, the link guard, payments, class rank, proposals, webhook
-  signatures, heartbeats.
+  signatures, heartbeats, and the context layer (allowlist, packing, feature
+  profiles, coherence material, consumers).
 - `npm run test:integration`: persona suites (`test/integration`) against a
-  local Supabase and a running API, as real counselor and student accounts.
+  local Supabase and a running API, as real counselor and student accounts,
+  including `context-layer` and `context-documents`.
 - `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
   tests; then a throwaway Supabase with every migration, an RLS-on-every-table
   check, the fixtures, and the persona suites. AI calls are not exercised in CI

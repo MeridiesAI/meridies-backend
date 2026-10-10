@@ -129,7 +129,7 @@ export function toRecommendation(r: Row) {
 // ---- Essays ------------------------------------------------------------------
 
 export const ESSAY_SELECT =
-  "*, document:documents(id, filename, mime_type, source, external_provider, external_web_url, available_to_llm, parse_status, bucket, storage_path), supplement_doc:supplement_docs(id, web_url, admission_cycle)";
+  "*, document:documents(id, filename, mime_type, source, external_provider, external_web_url, available_to_llm, ai_access, ferpa_waived, parse_status, bucket, storage_path), supplement_doc:supplement_docs(id, web_url, admission_cycle)";
 
 function fileKindOf(doc: Row | null, url: string | null): "google-doc" | "word" | "pdf" | "image" | "other" {
   if (url && /docs\.google\.com\/document/.test(url)) return "google-doc";

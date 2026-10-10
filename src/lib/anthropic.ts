@@ -14,6 +14,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { env, hasAnthropic } from "../env.js";
+import type { ContextUsage } from "./context/types.js";
 import { HttpError, unavailable } from "./errors.js";
 import { enforceQuota } from "./limits.js";
 import { assertAiAllowed } from "./practiceSettings.js";
@@ -114,6 +115,8 @@ type RunOptions<T> = {
   attachments?: AiAttachment[];
   /** Last line of defence over model output before it is stored or returned. */
   validate?: (value: unknown) => T;
+  /** Which context sections the prompt carried (names only), stored on the audit row. */
+  contextUsage?: ContextUsage;
 };
 
 function userContent(prompt: string, attachments: AiAttachment[] | undefined): Anthropic.MessageParam["content"] {
@@ -164,7 +167,7 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
         model,
         status: "running",
         // Never store the whole prompt: it contains the student's record.
-        input: { promptChars: opts.prompt.length, attachments: opts.attachments?.length ?? 0 },
+        input: { promptChars: opts.prompt.length, attachments: opts.attachments?.length ?? 0, context: opts.contextUsage ?? null },
       })
       .select("id")
       .single();
@@ -247,6 +250,8 @@ export async function streamChat(opts: {
   model?: string;
   maxTokens?: number;
   onDelta: (text: string) => void;
+  /** Which context sections the prompt carried (names only), stored on the audit row. */
+  contextUsage?: ContextUsage | null;
 }): Promise<{ text: string; runId: string | null }> {
   const { request, studentId } = opts;
   const actorId = request.auth.userId;
@@ -273,7 +278,7 @@ export async function streamChat(opts: {
         module: "chat",
         model,
         status: "running",
-        input: { promptChars: opts.messages.reduce((n, m) => n + m.content.length, 0) },
+        input: { promptChars: opts.messages.reduce((n, m) => n + m.content.length, 0), context: opts.contextUsage ?? null },
       })
       .select("id")
       .single();

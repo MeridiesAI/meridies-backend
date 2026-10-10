@@ -21,6 +21,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { isRestrictedDocument } from "../lib/context/documentAi.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
@@ -88,6 +89,7 @@ const importBody = z
       .enum([
         "transcript", "resume", "essay", "test-report", "award-letter",
         "financial", "common-app", "other",
+        "recommendation-letter", "activity-list", "iep-504", "counselor-only",
       ])
       .optional(),
     availableToLlm: z.boolean().optional(),
@@ -307,7 +309,8 @@ export default async function integrationRoutes(app: FastifyInstance) {
         entity_id: data.id as string,
         event: "uploaded",
         actor_id: request.auth.userId,
-        metadata: { filename: download.filename, source: provider },
+        // The student reads this log: a restricted file's name stays out of it.
+        metadata: isRestrictedDocument({ kind: String(data.kind ?? "other") }) ? { source: provider } : { filename: download.filename, source: provider },
       });
 
       return reply.code(201).send(toDocument(data as Row));

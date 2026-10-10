@@ -28,6 +28,11 @@ import {
   NO_PROSE_SYSTEM,
   runStructured,
 } from "../lib/anthropic.js";
+import { buildStudentContext } from "../lib/context/index.js";
+import { columns } from "../lib/context/ai-allowlist.js";
+import { buildCoherenceMaterial, usableEssay } from "../lib/context/coherenceMaterial.js";
+import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
+import { essayBodyReadable } from "../lib/context/sections.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -125,7 +130,7 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
   const [essays, list, acts, honors] = await Promise.all([
     request.db
       .from("essays")
-      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document:documents(available_to_llm)")
+      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document_id, document:documents(available_to_llm)")
       .eq("student_id", studentId)
       .order("sort_order")
       .limit(300),
@@ -136,7 +141,8 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
   if (essays.error) throw fromPostgrest(essays.error);
   if (list.error) throw fromPostgrest(list.error);
   const rows = (essays.data ?? []) as Row[];
-  const excluded = (e: Row) => (e.document as Row | null)?.available_to_llm === false;
+  // Same rule as the context layer: a linked file that is kept out, or didn't come back, is not readable.
+  const excluded = (e: Row) => !essayBodyReadable(e.document_id, e.document);
   const words = (e: Row) => (e.text_status === "unreadable" ? 0 : Number(e.word_count ?? 0));
   const doc = (e: Row): CoherenceDoc => ({ id: String(e.id), title: String(e.title ?? ""), words: words(e), excluded: excluded(e) });
 
@@ -170,6 +176,10 @@ const coherenceBody = z
     supplementEssayIds: z.array(uuid).max(60),
   })
   .strict();
+
+/** Only the student's identity and personal details, from the context layer; essays stay the counselor's ticks. */
+const coherenceBase = (request: FastifyRequest, studentId: string) =>
+  buildStudentContext(request, studentId, "narrative-coherence", { only: ["profile", "personal"] });
 
 const REWRITE = /\b(rewrite|re-write|write|draft|reword|rephrase|paragraph|fix the essay|polish|edit (it|this|the essay))\b/i;
 
@@ -344,10 +354,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const { docs, essays } = await coherenceDocs(request, studentId);
 
       // Read only what is ticked AND on file AND not excluded from AI.
-      const usable = (id: string) => {
-        const e = essays.find((x) => x.id === id);
-        return e && (e.document as Row | null)?.available_to_llm !== false && Number(e.word_count ?? 0) > 0 && e.text_status !== "unreadable" ? e : null;
-      };
+      const usable = (id: string) => usableEssay(essays.find((x) => x.id === id));
       const statement = b.statement && docs.statement && !docs.statement.excluded ? usable(docs.statement.id) : null;
       const supplements = b.supplementEssayIds
         .map(usable)
@@ -355,41 +362,38 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const readActivities = b.activities && docs.activities > 0;
       const readAwards = b.awards && docs.awards > 0;
 
-      const read: string[] = [];
-      if (statement) read.push("Personal statement");
-      const schools = [...new Set(supplements.map((s) => String(s.school || "Other")))];
-      if (schools.length === 1) read.push(`${schools[0]} supplement${supplements.length === 1 ? "" : "s"}`);
-      else if (schools.length > 1) read.push(`Supplements for ${schools.length} schools`);
-      if (readActivities) read.push("Activities list");
-      if (readAwards) read.push("Awards");
-      if (read.length === 0) throw badRequest("No documents are ticked. Pick at least one under Documents.");
+      if (!statement && supplements.length === 0 && !readActivities && !readAwards) {
+        throw badRequest("No documents are ticked. Pick at least one under Documents.");
+      }
 
       const [profile, acts, honors] = await Promise.all([
         request.db.from("profiles").select("full_name").eq("id", studentId).maybeSingle(),
         readActivities
-          ? request.db.from("activities").select("organization, position, category, grade_levels, hours_per_week, weeks_per_year, description, uc_description").eq("student_id", studentId).order("sort_order").limit(30)
+          ? request.db.from("activities").select(columns("activities", ["organization", "position", "category", "grade_levels", "hours_per_week", "weeks_per_year", "description", "uc_description"])).eq("student_id", studentId).order("sort_order").limit(30)
           : Promise.resolve({ data: [] as Row[] }),
         readAwards
-          ? request.db.from("awards").select("name, grade_levels, recognition_levels, uc_criteria, uc_earned").eq("student_id", studentId).order("sort_order").limit(30)
+          ? request.db.from("awards").select(columns("awards", ["name", "grade_levels", "recognition_levels", "uc_criteria", "uc_earned"])).eq("student_id", studentId).order("sort_order").limit(30)
           : Promise.resolve({ data: [] as Row[] }),
       ]);
       const first = firstName(String(profile.data?.full_name ?? ""));
 
-      const material = JSON.stringify(
-        {
-          personalStatement: statement ? clip(statement.body, 12_000) : undefined,
-          supplements: supplements.map((s) => ({
-            school: s.school,
-            title: s.title,
-            prompt: clip(s.prompt, 600),
-            text: clip(s.body, 6_000),
-          })),
-          activities: readActivities ? acts.data : undefined,
-          awards: readAwards ? honors.data : undefined,
-        },
-        null,
-        1
-      ).slice(0, 80_000);
+      const { text: material, sent } = buildCoherenceMaterial({
+        statement,
+        supplements,
+        activities: readActivities ? ((acts.data ?? []) as Row[]) : [],
+        awards: readAwards ? ((honors.data ?? []) as Row[]) : [],
+      });
+      // The labels name only what the prompt actually carried.
+      const read: string[] = [];
+      if (sent.statement) read.push("Personal statement");
+      const schools = [...new Set(sent.supplements.map((x) => String(x.school || "Other")))];
+      if (schools.length === 1) read.push(`${schools[0]} supplement${sent.supplements.length === 1 ? "" : "s"}`);
+      else if (schools.length > 1) read.push(`Supplements for ${schools.length} schools`);
+      if (sent.activities) read.push("Activities list");
+      if (sent.awards) read.push("Awards");
+      if (read.length === 0) throw badRequest("No documents are ticked. Pick at least one under Documents.");
+      const base = await coherenceBase(request, studentId);
+      const contextUsed = { used: base.used, omitted: base.omitted };
 
       type Out = {
         storyline: { label: string; text: string }[];
@@ -409,9 +413,11 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           "Flags: contradictions and gaps between the documents (dates, roles, hours, claims that disagree), most serious first. Name both places each one sits.",
           "Fix: what the student should settle or decide, never the words to write.",
           "Next: up to three bullets on what the counselor does next.",
-          `Address the counselor; the student is ${first}.`,
+          "Address the counselor; the student's name is in the student record below.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
-        prompt: `Read only these documents:\n${material}`,
+        contextUsage: contextUsed,
+        prompt: `${base.text ? `${base.text}\n\n` : ""}Read only these documents:\n${material}`,
         toolName: "coherence_report",
         maxTokens: 3000,
         schema: {
@@ -464,10 +470,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         .insert({
           student_id: studentId,
           criteria: {
-            statement: Boolean(statement),
-            activities: readActivities,
-            awards: readAwards,
-            supplementEssayIds: supplements.map((s) => s.id),
+            statement: sent.statement,
+            activities: sent.activities,
+            awards: sent.awards,
+            supplementEssayIds: sent.supplements.map((x) => x.id),
           },
           read_labels: read,
           storyline,
@@ -497,7 +503,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         if (ins.error) throw fromPostgrest(ins.error);
         flagRows = (ins.data ?? []) as Row[];
       }
-      return reply.code(201).send(toCoherenceReport(report as Row, flagRows));
+      return reply.code(201).send({ ...toCoherenceReport(report as Row, flagRows), contextUsed });
     }
   );
 
@@ -533,6 +539,8 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         };
       }
 
+      const base = await coherenceBase(request, studentId);
+      const contextUsed = { used: base.used, omitted: base.omitted };
       const [{ data: flags }, { data: programs }] = await Promise.all([
         request.db.from("narrative_flags").select("*").eq("report_id", report.id),
         request.db.from("opportunity_matches").select("name, org, program_type, location, deadline").eq("student_id", studentId).neq("status", "dismissed").limit(5),
@@ -543,7 +551,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         flags: ((flags ?? []) as Row[]).map((f) => toFlag(f)),
         next: report.next_steps,
         programs,
-      }).slice(0, 20_000);
+      });
 
       const result = await runStructured<{ bullets: string[] }>({
         request,
@@ -555,8 +563,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           "",
           "Answer the counselor's question about this Narrative Coherence report only, in at most four bullets.",
           "If the report doesn't say, answer that it doesn't.",
+          UNTRUSTED_DATA_RULE,
         ].join("\n"),
-        prompt: `Report:\n${context}\n\nQuestion: ${b.question}`,
+        contextUsage: contextUsed,
+        prompt: `${base.text ? `${base.text}\n\n` : ""}Report:\n${wrapUntrusted("coherence-report", context.slice(0, 20_000))}\n\nQuestion: ${b.question}`,
         toolName: "coherence_answer",
         maxTokens: 800,
         schema: {
@@ -569,6 +579,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       return {
         bullets:
           bullets.length > 0 ? bullets : ["Ask about the storyline, a flag, or activities to add."],
+        contextUsed,
       };
     }
   );
