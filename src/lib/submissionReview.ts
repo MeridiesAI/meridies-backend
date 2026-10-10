@@ -35,6 +35,7 @@ import { readDocumentText } from "./documentText.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
+import { isCounselorApproved } from "./access.js";
 
 type Row = Record<string, unknown>;
 type Svc = NonNullable<ReturnType<typeof serviceClient>>;
@@ -180,6 +181,8 @@ async function documentReadingAllowed(svc: Svc, studentId: string): Promise<bool
   const { data: student } = await svc.from("profiles").select("counselor_id").eq("id", studentId).maybeSingle();
   const counselorId = (student?.counselor_id as string | null) ?? null;
   if (!counselorId) return false;
+  // AxIS reads nothing, and emails nobody, for a counselor who is not approved. Fail closed.
+  if (!(await isCounselorApproved(svc, counselorId).catch(() => false))) return false;
   const { data: counselor } = await svc.from("profiles").select("firm_id").eq("id", counselorId).maybeSingle();
   const firmId = (counselor?.firm_id as string | null) ?? null;
   let builder = svc.from("practice_settings").select("*");

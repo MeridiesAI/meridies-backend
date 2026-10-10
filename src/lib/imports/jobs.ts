@@ -15,6 +15,7 @@ import { brandedEmail, brandedText, sendEmail } from "../email.js";
 import { serviceClient } from "../supabase.js";
 import { env } from "../../env.js";
 import { withWorkerTransaction } from "./db.js";
+import { isCounselorApproved } from "../access.js";
 
 export type ImportJobKind = "commit" | "undo" | "apply";
 export type ImportJobOutcome = { status: string } & Record<string, unknown>;
@@ -164,6 +165,8 @@ type HoldWarning = {
 /** In-app and email, 7 days before held data expires (§5.8). */
 async function warnHoldExpiring(w: HoldWarning, log: Log): Promise<void> {
   const svc = serviceClient();
+  // No warning to an account that can no longer act on it. Unreadable means no.
+  if (svc && !(await isCounselorApproved(svc, w.counselorId).catch(() => false))) return;
   const who = w.importedName ?? "A student";
   const when = new Date(w.heldUntil).toLocaleDateString("en-US", { month: "long", day: "numeric" });
   const title = `${who}'s imported data expires ${when}`;

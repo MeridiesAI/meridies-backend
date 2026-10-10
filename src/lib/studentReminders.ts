@@ -22,6 +22,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { env } from "../env.js";
 import { DEFAULT_SETTINGS, inQuietHours, loadSettings, type AccountabilitySettings } from "./accountability.js";
 import { brandedEmail, brandedText, sendEmail, sendSms } from "./email.js";
+import { approvedCounselorIds } from "./access.js";
 
 type Log = FastifyBaseLogger;
 
@@ -109,6 +110,11 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
       .in("id", ids);
     if (pErr) throw new Error(`profiles read failed (${pErr.code ?? "unknown"})`);
     const byId = new Map((profiles ?? []).map((p) => [String(p.id), p as Row]));
+    // A counselor who is not approved sends nothing, reminders included.
+    const approved = await approvedCounselorIds(
+      svc,
+      (profiles ?? []).map((p) => String(p.counselor_id ?? "")).filter(Boolean)
+    );
 
     const settingsFor = new Map<string, AccountabilitySettings>();
 
@@ -117,6 +123,10 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
       const profile = byId.get(sid);
       if (!profile || profile.role !== "student" || profile.archived_at || !profile.counselor_id) continue;
       const counselorId = String(profile.counselor_id);
+      if (!approved.has(counselorId)) {
+        skipped += 1;
+        continue;
+      }
 
       let settings = settingsFor.get(`${counselorId}:${sid}`);
       if (!settings) {

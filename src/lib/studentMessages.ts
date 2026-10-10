@@ -35,6 +35,7 @@ import {
 } from "./accountability.js";
 import { brandedEmail, brandedText, sendEmail, sendSms } from "./email.js";
 import { badRequest, fromPostgrest, unauthorized, unavailable } from "./errors.js";
+import { isCounselorApproved } from "./access.js";
 
 type Row = Record<string, unknown>;
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -659,6 +660,11 @@ async function sendBlockedReason(
   row: MessageRow,
   settings: AccountabilitySettings
 ): Promise<string | { recipients: Recipient[] }> {
+  // Decided when it leaves, not when it was written: a counselor revoked since
+  // scheduling sends nothing. A read error throws, and the caller holds the row.
+  if (!(await isCounselorApproved(svc, row.counselor_id))) {
+    return "The sender's account is not approved to send messages";
+  }
   const { data: student, error } = await svc
     .from("profiles")
     .select("counselor_id, archived_at")
