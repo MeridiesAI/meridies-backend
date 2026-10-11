@@ -1226,10 +1226,19 @@ npm run dev               # http://localhost:4000
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 | `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |
 
-`GET /health` reports `{ status, database, anthropic, serviceRole }` — presence
+`GET /health` reports `{ status, database, schema, anthropic, serviceRole }` — presence
 and reachability only, never values, URLs or error text. `database` is a 2s HEAD
 probe on `colleges` (cached 5s); when it fails the route returns **503** with
 `status: "degraded"`, so a Railway healthcheck sees an unreachable database.
+
+`schema` is whether the tables and columns this build cannot run without
+exist (`REQUIRED_SCHEMA` in `lib/schemaCheck.ts`); when one is missing the route
+returns **503** too. `railway.json` points Railway's healthcheck at `/health`,
+so a build that is merged before its migration is applied never goes live: the
+previous deployment keeps serving until the migration is in. **A migration that
+adds something every request needs gets a line in `REQUIRED_SCHEMA` in the same
+pull request.** This is the backstop, not the process: apply the migration
+first.
 
 ## Related repos
 

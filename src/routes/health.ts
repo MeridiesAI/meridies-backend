@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { hasServiceRole } from "../env.js";
 import { anthropicKeyWorks } from "../lib/anthropic.js";
+import { missingSchema } from "../lib/schemaCheck.js";
 import { anonClient, serviceClient } from "../lib/supabase.js";
 
 const PROBE_TIMEOUT_MS = 2000;
@@ -49,15 +50,44 @@ async function databaseReachable(log: FastifyInstance["log"]): Promise<boolean> 
   return inFlight;
 }
 
+/**
+ * Whether the tables and columns this build needs exist (lib/schemaCheck.ts).
+ * A schema does not go backwards, so a good answer is kept for the life of
+ * the process; a bad one is asked again after the same short pause as the
+ * database probe, so applying the migration is noticed within seconds.
+ */
+let schemaOk = false;
+let schemaCheckedAt = 0;
+
+async function schemaPresent(log: FastifyInstance["log"]): Promise<boolean> {
+  if (schemaOk) return true;
+  if (Date.now() - schemaCheckedAt < PROBE_CACHE_MS) return false;
+  schemaCheckedAt = Date.now();
+  const missing = await missingSchema(serviceClient() ?? anonClient());
+  schemaOk = missing.length === 0;
+  if (!schemaOk) {
+    log.error({ missing }, "health: the database is missing what this build needs. Apply the migration; this deployment must not serve traffic.");
+  }
+  return schemaOk;
+}
+
 export default async function healthRoutes(app: FastifyInstance) {
   app.get("/health", async (_request, reply) => {
-    const [database, anthropic] = await Promise.all([databaseReachable(app.log), anthropicKeyWorks(app.log)]);
+    const [database, schema, anthropic] = await Promise.all([
+      databaseReachable(app.log),
+      schemaPresent(app.log),
+      anthropicKeyWorks(app.log),
+    ]);
+    const healthy = database && schema;
     // Config presence and reachability only — never values, URLs or error text.
     // `anthropic` is whether the key is accepted, not merely set. AxIS being
-    // down doesn't make the API unhealthy, so only the database sets the code.
-    return reply.code(database ? 200 : 503).send({
-      status: database ? "ok" : "degraded",
+    // down doesn't make the API unhealthy, so only the database and its schema
+    // set the code. Railway's healthcheck reads that code (railway.json): a
+    // build whose migration has not been applied answers 503 and never goes live.
+    return reply.code(healthy ? 200 : 503).send({
+      status: healthy ? "ok" : "degraded",
       database,
+      schema,
       anthropic,
       serviceRole: hasServiceRole,
     });
