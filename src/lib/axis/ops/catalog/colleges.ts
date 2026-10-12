@@ -393,7 +393,7 @@ export const events: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Add a listing to the Events Hub (shared with the counselor's firm by default; share: me keeps it to them).",
-      doc: "{ name, kind: conference|webinar|workshop|college-fair|info-session, host, start_date YYYY-MM-DD, url, end_date?, start_time? HH:MM, end_time?, time_zone? IANA, place?, description?, college_id?, topics? [aid|essays|uc|lists|practice], share?: firm|me }",
+      doc: "{ name, kind: conference|webinar|workshop|college-fair|info-session, host, start_date YYYY-MM-DD, url, end_date?, start_time? HH:MM, end_time?, time_zone? IANA, place?, description?, college_id?, photo_key?, topics? [aid|essays|uc|lists|practice], share?: firm|me }",
       input: z
         .object({
           name: eventFields.name,
@@ -427,7 +427,7 @@ export const events: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change one of the counselor's own Events Hub listings.",
-      doc: "{ event_id, name?, kind?, host?, start_date?, end_date?|null, start_time?|null, end_time?|null, time_zone?, place?, url?, description?|null, college_id?|null, photo_key?|null, topics?, share?: firm|me }",
+      doc: "{ event_id, name?, kind?, host?, start_date?, end_date?|null, start_time?|null, end_time?|null, time_zone? IANA, place?, url?, description?|null, college_id?|null, photo_key?|null, topics?, share?: firm|me }",
       input: z
         .object({
           event_id: uuid,
