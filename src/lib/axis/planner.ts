@@ -14,6 +14,7 @@
  * RAG port, launched before the question was even understood) is folded into
  * the fused document search here, so that work is never wasted.
  */
+import { errInfo } from "./failsafe.js";
 import type { FastifyRequest } from "fastify";
 import { resolveStudentId } from "../guards.js";
 import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems } from "./data.js";
@@ -227,7 +228,7 @@ export async function gatherEvidence(ctx: PlanContext): Promise<Evidence> {
         sources.add(s.source);
         if (out) blocks.push(out);
       } catch (err) {
-        ctx.request.log.warn({ err, step: s.label }, "axis evidence step failed");
+        ctx.request.log.warn({ err: errInfo(err), step: s.label }, "axis evidence step failed");
         skipped.push(s.label);
       }
     })

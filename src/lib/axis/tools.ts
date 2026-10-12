@@ -11,6 +11,7 @@
  * moment its block closes, before the model has finished the rest of its
  * turn; inputs are validated here with zod, since the API no longer does.
  */
+import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -445,7 +446,7 @@ async function execute(ctx: ToolContext, def: ToolDef, input: unknown, parent: A
       return { content: `Invalid input: ${err.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}. Fix it and call again.`, isError: true, fresh: false };
     }
     if (ctl.signal.aborted) return { content: "That lookup took too long and was stopped. Answer with what you have, and say what you couldn't check.", isError: true, fresh: false };
-    ctx.request.log.warn({ err, tool: def.name }, "axis tool failed");
+    ctx.request.log.warn({ err: errInfo(err), tool: def.name }, "axis tool failed");
     const status = err && typeof err === "object" && "statusCode" in err ? (err as { statusCode: number }).statusCode : 0;
     return { content: status === 403 || status === 404 ? "No access to that student." : "That lookup failed.", isError: true, fresh: false };
   } finally {

@@ -84,7 +84,7 @@ export async function axisReadiness(o: {
   try {
     error = await o.probe();
   } catch (err) {
-    o.log?.warn({ err }, "axis schema probe failed");
+    o.log?.warn({ err: errInfo(err) }, "axis schema probe failed");
     return { ok: false, reason: "probe_failed" };
   }
   if (!error) {
@@ -187,5 +187,15 @@ export function runSseTurn(o: {
       finish();
     },
     settled,
+  };
+}
+
+/** What of an error is safe to log: its class, code and status. Never the message, which can quote a tool's input or a student's record. */
+export function errInfo(err: unknown): { name: string; code?: string; status?: number } {
+  const e = (err ?? {}) as { name?: unknown; code?: unknown; status?: unknown };
+  return {
+    name: typeof e.name === "string" ? e.name : typeof err,
+    ...(typeof e.code === "string" ? { code: e.code } : {}),
+    ...(typeof e.status === "number" ? { status: e.status } : {}),
   };
 }

@@ -21,6 +21,7 @@
  * The route then saves the answer, sends `done`, and runs the adjudicator
  * and the memory fold after the counselor can already type again.
  */
+import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { enforceNoProse, NO_PROSE_SYSTEM } from "../anthropic.js";
@@ -203,7 +204,7 @@ export async function runAxisTurn(opts: {
   const [roster, colleges, ctx, history, connected] = await Promise.all([
     loadRoster(request),
     loadCollegeIndex(request).catch((err): CollegeIndex | null => {
-      request.log.warn({ err }, "axis college index unavailable");
+      request.log.warn({ err: errInfo(err) }, "axis college index unavailable");
       return null;
     }),
     loadContext(request, studentId),
@@ -227,7 +228,7 @@ export async function runAxisTurn(opts: {
   // ---- 3. Direct answers ----
   if (u.intent !== "essay") {
     const direct = await compileDirect(u, { request, chatStudentId: studentId, roster, ledger, chatFacts }).catch((err) => {
-      request.log.warn({ err }, "axis direct answer skipped");
+      request.log.warn({ err: errInfo(err) }, "axis direct answer skipped");
       return null;
     });
     if (direct) {

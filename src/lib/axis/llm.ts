@@ -10,6 +10,7 @@
  * here; the schemas use only what structured outputs accepts (no length or
  * numeric bounds, additionalProperties false on every object).
  */
+import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import type { z } from "zod";
@@ -131,7 +132,7 @@ export async function structured<T>(o: {
     return parsed.success ? parsed.data : null;
   } catch (err) {
     await closeRun(run, "failed", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, {}, err instanceof Error ? err.message : "unknown error");
-    o.request.log.warn({ err, module: o.module }, "axis structured call failed");
+    o.request.log.warn({ err: errInfo(err), module: o.module }, "axis structured call failed");
     return null;
   }
 }
