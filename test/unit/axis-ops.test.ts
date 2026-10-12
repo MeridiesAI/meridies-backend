@@ -133,7 +133,9 @@ test("an encoding, a dot segment or a case can't carry a request past the denyli
     await app.close();
   }
   // What the catalog does send still passes, a trailing slash included.
-  for (const url of ["/meetings/", `/tasks/${SAMPLE_UUID}`, `/deadlines?studentId=${SAMPLE_UUID}&q=a%2Fb`]) assert.doesNotThrow(() => assertAllowedCall({ method: "GET", url }), url);
+  for (const url of ["/meetings/", `/tasks/${SAMPLE_UUID}`, `/deadlines?studentId=${SAMPLE_UUID}&q=a%2Fb`, "/colleges/search?q=St.%20Mary..."]) {
+    assert.doesNotThrow(() => assertAllowedCall({ method: "GET", url }), url);
+  }
 });
 
 test("the essay guard reads the decoded path and the whole body", () => {

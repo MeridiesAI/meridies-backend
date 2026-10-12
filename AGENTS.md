@@ -871,7 +871,10 @@ Files live in the private `student-documents` Storage bucket
 (`20261011000001`). An object is readable by its uploader or by anyone who can
 see the `documents` row pointing at it, so Storage is never more generous than
 the file list; uploads go under a student the caller can edit, a folder they
-can see, their own id, or `unfiled`.
+can see, their own id, or `unfiled`. `DELETE /files/documents/:id` removes the
+Storage object too, on the caller's own client after the row is gone (best
+effort: Storage's delete policy lets the uploader remove it, so a file a
+student uploaded stays in the bucket when a counselor deletes its row).
 
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document

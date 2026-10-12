@@ -572,7 +572,7 @@ async function audienceLabel(i: BlastInput, h: Get): Promise<string> {
  * A school or status audience is counted only: which students those are is
  * the route's query over every college list.
  */
-async function blastPeople(i: BlastInput, h: Get): Promise<string[]> {
+async function blastPeople(i: BlastInput, h: OpHelpers): Promise<string[]> {
   if (i.audience_kind === "school" || i.audience_kind === "status") return [];
   const roster = await h.get<unknown[]>("/students");
   if (!Array.isArray(roster)) return [];
