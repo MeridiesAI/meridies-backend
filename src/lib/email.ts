@@ -20,6 +20,7 @@
  * the shared `onboarding@resend.dev`, which only delivers to the account owner.
  */
 
+import { insertDelivery } from "./deliveryInsert.js";
 import { devMailUrl, env, hasResend, hasTwilio } from "../env.js";
 import { serviceClient } from "./supabase.js";
 
@@ -79,11 +80,10 @@ async function recordDelivery(
     logger?.warn({}, "SUPABASE_SERVICE_ROLE_KEY unset — outbound message not logged.");
     return null;
   }
-  const { data, error } = await svc
-    .from("message_deliveries")
-    .insert(row)
-    .select("id")
-    .maybeSingle();
+  const { data, error } = await insertDelivery(
+    async (r) => await svc.from("message_deliveries").insert(r).select("id").maybeSingle(),
+    row
+  );
   if (error) logger?.warn({ err: error.message }, "message_deliveries log insert failed");
   return (data?.id as string | undefined) ?? null;
 }
