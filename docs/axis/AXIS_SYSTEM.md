@@ -6427,3 +6427,14 @@ UI, following the demo's AxIS panel and its rules (no caption lines):
 - Dates are UTC, like the rest of the backend. "Today" for a counselor in California turns over at 4 or 5 pm local time.
 - AGENTS.md lists Haiku 4.5 as the backend default. When this is installed, add under "Anthropic / AI rules": "AxIS runs on Claude Haiku 5.5 for every call (`lib/axis/models.ts`), with effort set per turn; its side calls use structured outputs." The rest of the backend is unchanged.
 
+
+## 14. Changes: AxIS acts, not only answers
+
+Added after version 2 shipped. AxIS can now change things in Meridies, not only propose a Work Queue item or an email draft. The design, the rules and the deploy order are in `AGENTS.md` under "AxIS makes changes"; the code is `src/lib/axis/ops/`. In short:
+
+- Every change is one request to this API's own routes, run in-process (`app.inject`) with the counselor's token, so the route's validation, authorization, side effects and RLS all apply. AxIS holds no database client for writes.
+- The operation catalog (`ops/catalog/*.ts`) is rendered once into the cached system prompt. Two tools reach it: `lookup` (reads that return ids) and `perform_action` (writes).
+- Small, reversible edits run at once and the card offers Undo. Deletes, archives, sends, money, sharing, practice-wide settings and anything irreversible wait for Confirm. Outside content read in the turn, or more than five instant changes, turns the rest into cards; twenty is the cap per turn.
+- The `action` SSE event gains `type: "operation"` (payload: op, area, summary, details, warning, status, undoable, reason). `POST /axis/actions/:id/undo` and `GET /axis/actions?status=all` are new.
+- `propose_action` keeps only the email draft; a Work Queue item is `perform_action work_queue.add`.
+- The lexicon recognises change requests ("delete…", "mark … done", "move … to …", "change … to …") as the `action` intent, so they skip the direct-answer compiler; the Clerk gets six model calls.
