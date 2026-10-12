@@ -149,7 +149,7 @@ export default async function blastRoutes(app: FastifyInstance) {
   /** The popup's dropdowns: every audience that currently means something. */
   app.get(
     "/audiences",
-    { preHandler: [app.authenticate, requireRole("counselor")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("blasts:audiences", 120, 60)] },
     async (request) => {
       const roster = await loadRoster(request);
       const ids = roster.map((r) => r.id as string);
@@ -221,7 +221,7 @@ export default async function blastRoutes(app: FastifyInstance) {
     }
   );
 
-  app.get("/", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request) => {
+  app.get("/", { preHandler: [app.authenticate, requireRole("counselor"), limit("blasts:list", 120, 60)] }, async (request) => {
     const { data, error } = await request.db
       .from("email_blasts")
       .select("*")

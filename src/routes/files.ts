@@ -138,7 +138,7 @@ export async function studentFolderId(
 export default async function fileRoutes(app: FastifyInstance) {
   // ---- Folders --------------------------------------------------------------
 
-  app.get("/folders", { preHandler: app.authenticate }, async (request) => {
+  app.get("/folders", { preHandler: [app.authenticate, limit("files:folders", 240, 60)] }, async (request) => {
     const q = z.object({ studentId: z.string().uuid().optional() }).parse(request.query);
 
     let builder = request.db.from("folders").select("*");
@@ -316,7 +316,7 @@ export default async function fileRoutes(app: FastifyInstance) {
 
   // ---- Documents ------------------------------------------------------------
 
-  app.get("/documents", { preHandler: app.authenticate }, async (request) => {
+  app.get("/documents", { preHandler: [app.authenticate, limit("files:documents", 240, 60)] }, async (request) => {
     const q = z
       .object({
         studentId: z.string().uuid().optional(),
@@ -506,7 +506,7 @@ export default async function fileRoutes(app: FastifyInstance) {
 
   // ---- Upload links ---------------------------------------------------------
 
-  app.get("/links", { preHandler: app.authenticate }, async (request) => {
+  app.get("/links", { preHandler: [app.authenticate, limit("files:links", 240, 60)] }, async (request) => {
     const q = z
       .object({
         studentId: z.string().uuid().optional(),

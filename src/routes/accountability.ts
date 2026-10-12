@@ -73,10 +73,12 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
   /** The alert list: who is behind, and on what. */
   app.get(
     "/overview",
-    { preHandler: [app.authenticate, requireRole("counselor")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("accountability:overview", 120, 60)] },
     async (request) => {
-      const students = await buildBehindList(request, request.auth.userId);
-      const settings = await loadSettings(request, request.auth.userId);
+      const [students, settings] = await Promise.all([
+        buildBehindList(request, request.auth.userId),
+        loadSettings(request, request.auth.userId),
+      ]);
       return { students, settings, quietHoursNow: inQuietHours(settings) };
     }
   );
@@ -267,7 +269,7 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
     }
   );
 
-  app.get("/red-flags", { preHandler: app.authenticate }, async (request) => {
+  app.get("/red-flags", { preHandler: [app.authenticate, limit("red-flags:list", 240, 60)] }, async (request) => {
     const { studentId } = studentQuery.parse(request.query);
 
     let builder = request.db.from("red_flags").select("*");
@@ -414,7 +416,7 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
 
   app.get(
     "/parent-alerts",
-    { preHandler: [app.authenticate, requireRole("counselor")] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("parent-alerts:list", 240, 60)] },
     async (request) => {
       const { studentId } = studentQuery.parse(request.query);
       let builder = request.db.from("parent_alerts").select("*");

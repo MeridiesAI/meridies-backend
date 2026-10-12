@@ -43,7 +43,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
    */
   const read = (name: string, max = 120) => [app.authenticate, limit(name, max, 60)];
 
-  app.get("/colleges", { preHandler: app.authenticate }, async (request) => {
+  app.get("/colleges", { preHandler: read("colleges:list") }, async (request) => {
     const q = z
       .object({
         search: z.string().trim().max(120).optional(),
@@ -146,7 +146,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
    * The university-wide acceptance rate is the number that misleads; this is
    * the one that answers "can this student get into THIS program".
    */
-  app.get("/colleges/:id/majors", { preHandler: app.authenticate }, async (request) => {
+  app.get("/colleges/:id/majors", { preHandler: read("colleges:majors") }, async (request) => {
     const { id } = idParam.parse(request.params);
     const q = z
       .object({
@@ -215,7 +215,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
   // "important" means something different for a student whose school ranks
   // internally and never tells the family.
 
-  app.get("/high-schools", { preHandler: app.authenticate }, async (request) => {
+  app.get("/high-schools", { preHandler: read("high-schools:list") }, async (request) => {
     const q = z
       .object({
         search: z.string().trim().max(120).optional(),

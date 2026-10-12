@@ -283,7 +283,7 @@ export default async function taskRoutes(app: FastifyInstance) {
 
   // ---- Tasks ----------------------------------------------------------------
 
-  app.get("/", { preHandler: app.authenticate }, async (request) => {
+  app.get("/", { preHandler: [app.authenticate, limit("tasks:list", 300, 60)] }, async (request) => {
     const q = z
       .object({
         studentId: z.string().uuid().optional(),

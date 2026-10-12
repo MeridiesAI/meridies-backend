@@ -145,8 +145,7 @@ export default async function managementRoutes(app: FastifyInstance) {
    * assigned to or by them.
    */
   app.get("/", { preHandler: [...counselor, limit("management:read", 120, 60)] }, async (request) => {
-    const ws = await loadWorkspace(request);
-    const consultants = await loadConsultants(request);
+    const [ws, consultants] = await Promise.all([loadWorkspace(request), loadConsultants(request)]);
     const ids = consultants.map((c) => c.id);
 
     let tasks: Row[] = [];
