@@ -1,9 +1,13 @@
 /**
  * What AxIS can do mid-answer, for whatever the evidence planner didn't
- * foresee. Every tool reads on the caller's RLS client, every passage it
- * returns goes through the AI guard and the ledger (so it can be cited), and
- * nothing here writes to a student's record: propose_action files a proposal
- * the counselor confirms with one click.
+ * foresee. Every tool reads on the caller's RLS client, and every passage it
+ * returns goes through the AI guard and the ledger (so it can be cited).
+ *
+ * Two tools change things: `perform_action` runs an operation from the
+ * catalog in lib/axis/ops (through the same API routes the app calls, as the
+ * counselor), either at once or as a card the counselor confirms, and
+ * propose_action files an email draft for the Communication composer.
+ * `lookup` reads the ids those changes need.
  *
  * The list is fixed and ordered so the cached prompt prefix (tools come
  * first) never moves. Each tool streams its input as it is generated
@@ -19,6 +23,7 @@ import { fromPostgrest } from "../errors.js";
 import { resolveStudentId } from "../guards.js";
 import { wrapUntrusted } from "../context/pack.js";
 import type { SectionName } from "../context/profiles.js";
+import type { ContextUsage } from "../context/types.js";
 import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems } from "./data.js";
 import type { RosterIndex } from "./entities.js";
 import { filterAllowedChunks } from "./guard.js";
@@ -27,6 +32,8 @@ import { keywordsOf } from "./nlu.js";
 import { getConnectors, getRetrieval, type ConnectedProvider, type RetrievedChunk } from "./ports.js";
 import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
+import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
+import { markOutside, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
 
 export type ProposedAction = {
   id: string;
@@ -48,6 +55,9 @@ export type ToolContext = {
   /** This turn's lookups, so the same call twice is answered from memory. */
   memo: Map<string, Promise<ToolOutput>>;
   onAction: (a: ProposedAction) => void;
+  /** Shared by every call in the turn: write counts and whether outside content was read. */
+  turn: TurnBudget;
+  onOperation: (e: OperationEvent) => void;
 };
 
 export type ToolOutput = {
@@ -59,7 +69,8 @@ export type ToolOutput = {
 
 export type ToolName =
   | "search_documents" | "read_document" | "search_email" | "search_connected_files" | "find_student"
-  | "get_student_record" | "list_upcoming" | "rank_caseload" | "search_colleges" | "propose_action";
+  | "get_student_record" | "list_upcoming" | "rank_caseload" | "search_colleges" | "propose_action"
+  | "lookup" | "perform_action";
 
 type ToolDef = {
   name: ToolName;
@@ -68,10 +79,20 @@ type ToolDef = {
   label: (input: Record<string, unknown>) => string;
   tool: Anthropic.Beta.BetaTool;
   run: (ctx: ToolContext, input: unknown) => Promise<ToolOutput>;
+  /** Overrides TOOL_TIMEOUT_MS: a change runs a route (and its side effects) and gets longer. */
+  timeoutMs?: number;
 };
 
 /** Per tool call. A tool past it is aborted and the model is told so, rather than the turn hanging. */
 export const TOOL_TIMEOUT_MS = 8_000;
+export const WRITE_TIMEOUT_MS = 20_000;
+
+/** Passages from these came from outside Meridies' own records: text in them must not steer a change. */
+const OUTSIDE = new Set(["upload", "drive", "onedrive", "outlook", "gmail"]);
+
+/** A student record built with the text of uploaded files (its documents section): outside content too. */
+export const readsDocuments = (usage: Pick<ContextUsage, "used"> | null | undefined): boolean =>
+  !!usage?.used.some((u) => u.section === "documents");
 
 const SECTIONS = [
   "profile", "academics", "personal", "activities", "awards", "courses", "testScores", "colleges",
@@ -88,6 +109,7 @@ async function cite(ctx: ToolContext, chunks: RetrievedChunk[], none: string): P
   if (held) notes.push(`${held} result(s) withheld: kept out of AI by the practice's or the file's settings.`);
   if (dropped["other-student"]) notes.push(`${dropped["other-student"]} result(s) skipped: filed under a different student.`);
   if (!kept.length) return { content: [none, ...notes].join("\n"), fresh: false };
+  if (kept.some((c) => OUTSIDE.has(c.source))) markOutside(ctx.turn);
   const before = ctx.ledger.size;
   const { rendered, skipped } = ctx.ledger.add(kept);
   if (skipped) notes.push(`${skipped} more result(s) not shown: this turn's reading budget is spent.`);
@@ -236,6 +258,8 @@ const DEFS: ToolDef[] = [
       if (!target) return { content: "No student given. Use find_student first.", isError: true, fresh: false };
       const id = await resolveStudentId(ctx.request, target, "view");
       const built = await cachedStudentContext(ctx.request, id, ["profile", ...i.sections.filter((s) => s !== "profile")]);
+      // The documents section is the text of uploaded files: from here on a change waits for a click.
+      if (readsDocuments(built)) markOutside(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return { content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`, fresh: !!built.text };
     },
@@ -337,12 +361,12 @@ const DEFS: ToolDef[] = [
     tool: {
       name: "propose_action",
       description:
-        "Propose a task for My Work Queue or an email draft. Nothing is saved or sent until the counselor confirms it. Email drafts are to families or students about logistics and progress, never essay text.",
+        "Draft an email to a student's parents or to the student, for the counselor to open in the Communication composer and send from there. Nothing is sent from here. Logistics and progress only, never essay text. (A Work Queue item is perform_action work_queue.add.)",
       eager_input_streaming: true,
       input_schema: {
         type: "object",
         properties: {
-          type: { type: "string", enum: ["work_item", "email_draft"] },
+          type: { type: "string", enum: ["email_draft"] },
           student_id: { type: "string", description: "Omit for this chat's student." },
           title: { type: "string", description: "work_item: the task. email_draft: the subject line. Up to 300 characters." },
           detail: { type: "string", description: "work_item: notes. email_draft: the body. Up to 2000 characters." },
@@ -381,7 +405,76 @@ const DEFS: ToolDef[] = [
       return { content: `Proposed (id ${action.id}). The counselor sees a card to confirm or dismiss it; tell them it's waiting, don't say it's done.`, fresh: true };
     },
   },
+  {
+    name: "lookup",
+    readOnly: true,
+    label: (i) => `Looking up ${opWords(i.what)}`,
+    tool: {
+      name: "lookup",
+      description:
+        "Read items you may need to change, with their ids: deadlines, tasks, queue items, college list rows, pipeline contacts and stages, colleagues and more. `what` is a name marked (lookup) in the Meridies actions catalog; `input` is its input.",
+      eager_input_streaming: true,
+      input_schema: {
+        type: "object",
+        properties: {
+          what: { type: "string", enum: [...READ_OPS] },
+          input: { type: "object", description: "The lookup's input, exactly as the catalog shows it." },
+        },
+        required: ["what"],
+      },
+    },
+    run: async (ctx, raw) => {
+      const i = z.object({ what: z.string().min(1).max(80), input: z.record(z.unknown()).optional() }).parse(raw);
+      return runRead(opContext(ctx), i.what, i.input ?? {});
+    },
+  },
+  {
+    name: "perform_action",
+    readOnly: false,
+    label: (i) => opLabel(i.action),
+    timeoutMs: WRITE_TIMEOUT_MS,
+    tool: {
+      name: "perform_action",
+      description:
+        "Change something in Meridies for the counselor: create, update, move, complete, archive, delete, send. `action` is an action name from the Meridies actions catalog and `input` its input. Actions marked * (and ~ for some inputs) wait for the counselor's Confirm; the rest take effect at once. Only do what the counselor asked for in their own words.",
+      eager_input_streaming: true,
+      input_schema: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: [...WRITE_OPS] },
+          input: { type: "object", description: "The action's input, exactly as the catalog shows it." },
+        },
+        required: ["action", "input"],
+      },
+    },
+    run: async (ctx, raw) => {
+      const i = z.object({ action: z.string().min(1).max(80), input: z.record(z.unknown()) }).parse(raw);
+      return runWrite(opContext(ctx), i.action, i.input);
+    },
+  },
 ];
+
+function opContext(ctx: ToolContext) {
+  return {
+    request: ctx.request, conversationId: ctx.conversationId, studentId: ctx.studentId, roster: ctx.roster, turn: ctx.turn, signal: ctx.signal,
+    onOperation: ctx.onOperation,
+  };
+}
+
+/** "deadlines.list" -> "deadlines"; "pipeline.stages" -> "pipeline stages". */
+function opWords(name: unknown): string {
+  if (typeof name !== "string") return "items";
+  const [area = "", verb = ""] = name.split(".");
+  const words = `${area} ${verb === "list" ? "" : verb}`.replace(/_/g, " ").trim();
+  return words || "items";
+}
+
+function opLabel(name: unknown): string {
+  const def = typeof name === "string" ? getOp(name) : undefined;
+  if (!def) return "Making a change";
+  const t = def.title.replace(/[.:].*$/, "");
+  return t.length > 60 ? `${t.slice(0, 59)}…` : t;
+}
 
 const BY_NAME = new Map(DEFS.map((d) => [d.name, d]));
 
@@ -434,7 +527,7 @@ async function execute(ctx: ToolContext, def: ToolDef, input: unknown, parent: A
   const ctl = new AbortController();
   const onAbort = () => ctl.abort();
   parent.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => ctl.abort(), TOOL_TIMEOUT_MS);
+  const timer = setTimeout(() => ctl.abort(), def.timeoutMs ?? TOOL_TIMEOUT_MS);
   try {
     const out = await Promise.race([
       def.run({ ...ctx, signal: ctl.signal }, input),
@@ -445,10 +538,17 @@ async function execute(ctx: ToolContext, def: ToolDef, input: unknown, parent: A
     if (err instanceof z.ZodError) {
       return { content: `Invalid input: ${err.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}. Fix it and call again.`, isError: true, fresh: false };
     }
+    if (ctl.signal.aborted && !def.readOnly) {
+      return { content: "That change took too long to answer; it may or may not have gone through. Don't repeat it: tell the counselor to check.", isError: true, fresh: false };
+    }
     if (ctl.signal.aborted) return { content: "That lookup took too long and was stopped. Answer with what you have, and say what you couldn't check.", isError: true, fresh: false };
     ctx.request.log.warn({ err: errInfo(err), tool: def.name }, "axis tool failed");
     const status = err && typeof err === "object" && "statusCode" in err ? (err as { statusCode: number }).statusCode : 0;
-    return { content: status === 403 || status === 404 ? "No access to that student." : "That lookup failed.", isError: true, fresh: false };
+    if (status === 403 || status === 404) {
+      const msg = err instanceof Error && err.message && err.message.length < 200 ? err.message : "No access to that student.";
+      return { content: msg, isError: true, fresh: false };
+    }
+    return { content: def.readOnly ? "That lookup failed." : "That change failed; nothing to retry right now.", isError: true, fresh: false };
   } finally {
     clearTimeout(timer);
     parent.removeEventListener("abort", onAbort);

@@ -16,6 +16,12 @@ export const INTENT_FEATURES: Record<Intent, readonly Feature[]> = {
   essay: [
     [/\b(write|draft|rewrite|redo|polish|finish|continue|compose|ghostwrite|reword|rephrase)\b(?: \w+){0,5} (essay|essays|personal statement|statement|supplement|supplemental|why us|paragraph|intro|introduction|conclusion|hook|opening|ending)\b/, 8],
     [/\bmake (her|his|their|the) (essay|statement|supplement) (better|stronger|sound|flow)\b/, 6],
+    // Editing the prose, which the change verbs below would otherwise send to perform_action as an "update".
+    // Not when the change is to the essay's record ("fix the deadline for her supplement", "edit her essay's title").
+    [/\b(edit|revise|improve|fix|tighten|shorten|lengthen|expand|strengthen|tweak|punch up|trim|cut down)\b(?: (?!(?:deadlines?|due|dates?|status|title|prompt|limit|round|link|url|file|folder)\b)\w+){0,5} (essay|essays|personal statement|statement|supplement|supplemental|why us|paragraph|intro|introduction|conclusion|hook|opening|ending)\b(?! (?:deadlines?|due|dates?|status|title|prompt|word limit|round|link|url|file|folder)\b)/, 8],
+    [/\b(add|put|insert|change|set|update|replace|swap|rewrite)\b(?: \w+){0,4} (paragraph|sentence|line|intro|introduction|conclusion|hook|opening|ending|wording)\b(?: \w+){0,6} (essay|essays|personal statement|statement|supplement|supplemental|why us)\b/, 8],
+    [/\b(add|put|insert|change|set|update|replace|swap)\b(?: \w+){0,4} (essay|essays|personal statement|statement|supplement|supplemental|why us)(?: \w+){0,2} (paragraph|sentence|first line|last line|intro|introduction|conclusion|hook|opening|ending|wording)\b/, 8],
+    [/\b(essay|personal statement|statement|supplement)\b(?: \w+){0,3} (to say|to read|so it (says|reads|opens|starts|ends))\b/, 8],
   ],
   action: [
     [/\b(remind me(?! (what|when|who|which|how|where|why|whether|if|of)\b)|set a reminder|add (a |an )?(task|to do|todo|reminder|item)|create (a |an )?(task|to do|todo|reminder)|on my (list|queue|work queue)|to my (list|queue|work queue))\b/, 7],
@@ -23,6 +29,12 @@ export const INTENT_FEATURES: Record<Intent, readonly Feature[]> = {
     [/\b(email|message|text) (the |her |his |their )?(parents?|family|mom|dad|mother|father|guardians?)\b/, 5],
     [/\bfollow up with\b/, 4],
     [/\bschedule (a |an )?(meeting|call|session|check in)\b/, 5],
+    // A request to change something (perform_action), however it is opened.
+    [/^(?:(?:please|pls|hey|ok|okay|axis|can you|could you|would you|will you|go ahead and|lets|let us|i need you to|i want you to|now)\s+)*(delete|remove|archive|unarchive|restore|update|change|set|mark|move|rename|edit|add|create|schedule|reschedule|cancel|assign|reassign|invite|resend|pin|unpin|record|log|enter|put|close|reopen|tick|dismiss|accept|decline|approve|send|notify|share|hide|unhide|link|attach|file|bump|push|postpone|extend|clear|drop|book|revoke|void|uninvite|untick|uncheck)\b(?! (in|of|on|rates?|reads?|list|lists)\b)/, 8],
+    [/\b(mark|tick off|check off|untick)\b(?: \w+){0,8} (as )?(done|complete|completed|finished|submitted|received|read)\b/, 7],
+    [/\b(move|push|bump|reschedule|postpone)\b(?: \w+){0,8} (to|until|back)\b/, 6],
+    [/\b(change|update|set)\b(?: \w+){0,10} to\b/, 6],
+    [/\b(delete|remove|archive|unarchive)\b/, 4],
   ],
   email: [
     [/\b(email|emails|emailed|inbox|outlook|gmail|thread|replied|reply|replies|respond|responded|wrote back|written back|write back|wrote to me|message from|messages from|sent me|heard back|heard from|hear from|gotten back|got back to|correspondence)\b/, 2.5],

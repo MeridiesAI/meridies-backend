@@ -50,12 +50,15 @@ import {
   THINKING,
   type Effort,
 } from "./models.js";
-import { nextState, understand, type DialogueState, type Understanding } from "./nlu.js";
+import { dampQuestions, nextState, scoreIntents, understand, type DialogueState, type Understanding } from "./nlu.js";
 import { gatherEvidence } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
 import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
-import { isReadOnly, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
+import { isReadOnly, readsDocuments, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
+import { newTurnBudget, recentActionsText, type OperationEvent } from "./ops/run.js";
+import { PROFILES as CONTEXT_PROFILES } from "../context/profiles.js";
+import { tokens } from "./text.js";
 
 export type Emit = (event: string, data: unknown) => void;
 
@@ -79,7 +82,8 @@ export type TurnResult = {
   citations: Citation[];
   trace: { label: string }[];
   sources: string[];
-  actions: ProposedAction[];
+  /** Proposals and changes this turn: email drafts (propose_action) and operations (perform_action). */
+  actions: (ProposedAction | OperationEvent)[];
   understanding: Understanding;
   state: DialogueState;
   /** For the adjudicator, after `done`. */
@@ -119,9 +123,24 @@ export function requestBase(system: Anthropic.Beta.BetaTextBlockParam[], tools: 
 }
 
 /** The student's record or the roster view, with what it's built from. */
-async function loadContext(request: FastifyRequest, studentId: string | null) {
+/**
+ * A change request reads the record without the text of uploaded files: a change never needs a
+ * transcript's wording, and text from a file in the prompt would turn every change into a card
+ * (lib/axis/ops/run.ts). Questions keep the full record.
+ */
+const RECORD_FOR_CHANGES = CONTEXT_PROFILES.chat.sections.filter((s) => s !== "documents");
+
+/** The same test the understanding applies (an action score that outranks the rest), before the roster is loaded. */
+export function looksLikeChange(content: string): boolean {
+  const norm = tokens(content).join(" ");
+  const scores = scoreIntents(norm);
+  dampQuestions(scores, content, norm);
+  return scores.action >= 5 && scores.essay < 6;
+}
+
+async function loadContext(request: FastifyRequest, studentId: string | null, forChange = false) {
   if (studentId) {
-    const c = await cachedStudentContext(request, studentId);
+    const c = await cachedStudentContext(request, studentId, forChange ? RECORD_FOR_CHANGES : undefined);
     return { record: c.text, roster: null, name: c.studentName, usage: { used: c.used, omitted: c.omitted } as ContextUsage, labels: c.used.map((u) => SECTION_LABELS[u.section] ?? u.section) };
   }
   const r = await buildRosterContext(request);
@@ -207,15 +226,18 @@ export async function runAxisTurn(opts: {
       request.log.warn({ err: errInfo(err) }, "axis college index unavailable");
       return null;
     }),
-    loadContext(request, studentId),
+    loadContext(request, studentId, looksLikeChange(content)),
     loadHistory(request, opts.conversationId),
     getConnectors().connected(request).catch(() => []),
   ]);
+  // What the counselor confirmed, dismissed or undid since the last answer. Best effort.
+  const recentActions = recentActionsText(request, opts.conversationId).catch(() => "");
 
   // ---- 2. Understanding ----
   const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state });
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
-  const state = nextState(u, history.state, chatStudent);
+  // A direct or essay answer runs no model over outside content: whatever the last turn read stays in force.
+  const state = { ...nextState(u, history.state, chatStudent), ...(history.state?.outside ? { outside: true } : {}) };
   const ledger = new SourceLedger();
   const trace: { label: string }[] = [];
   const sources = new Set<string>(ctx.labels);
@@ -282,7 +304,12 @@ export async function runAxisTurn(opts: {
   const system = systemBlocks(ctx.record, ctx.roster, history.summary);
   const base = requestBase(system, tools, effort);
   const api = opts.api ?? messagesApi();
-  const actions: ProposedAction[] = [];
+  const actions: (ProposedAction | OperationEvent)[] = [];
+  // Outside content the planner already put in front of the model counts too: changes then wait for a click.
+  // So does the text of uploaded files in the student record the system prompt carries (its documents section).
+  const outside =
+    ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail") ||
+    readsDocuments(ctx.usage);
   const toolCtx: ToolContext = {
     request, conversationId: opts.conversationId, studentId, roster, ledger, connected, retrievalReady: retrievalOn, signal,
     memo: new Map(),
@@ -290,12 +317,20 @@ export async function runAxisTurn(opts: {
       actions.push(a);
       emit("action", a);
     },
+    turn: newTurnBudget(outside, history.state?.outside === true),
+    onOperation: (e) => {
+      actions.push(e);
+      emit("action", e);
+    },
   };
   const exec: LoopOptions["exec"] = async (c, sig) => {
     const out = await runTool(toolCtx, c.name, c.input, sig);
     index.add(out.content);
     return out;
   };
+  // Specialists research; a change is only ever made by the agent answering the counselor.
+  const researchOnly: LoopOptions["exec"] = (c, sig) =>
+    isReadOnly(c.name) ? exec(c, sig) : Promise.resolve({ content: "Specialists only research. Leave changes to the final answer.", isError: true, fresh: false });
   const beforeCall = () => (takePrepaid() ? Promise.resolve() : chargeCall(request));
   const total: Usage = emptyUsage();
   const add = (x: Usage) => {
@@ -322,7 +357,7 @@ export async function runAxisTurn(opts: {
       emit("route", { intent: u.intent, path: "specialists", parts: tasks.map((t) => t.intent), effort });
       const before = ledger.size;
       const res = await runSpecialists({
-        tasks, question: content, api, base: requestBase(system, tools, "low"), evidence: evidence.text, effort: "low", signal, exec, readOnly: isReadOnly, beforeCall, onStep: step,
+        tasks, question: content, api, base: requestBase(system, tools, "low"), evidence: evidence.text, effort: "low", signal, exec: researchOnly, readOnly: isReadOnly, beforeCall, onStep: step,
       });
       add(res.usage);
       findings = renderFindings(res.findings);
@@ -335,7 +370,9 @@ export async function runAxisTurn(opts: {
     const turnMode: Mode = tasks ? "synthesis" : mode;
     const turnProfile = PROFILES[turnMode];
     const turnEffort = tasks ? effortFor(turnProfile, u) : effort;
+    const recent = await recentActions;
     const userParts = [
+      recent,
       evidence.text ? `Evidence gathered for this question:\n${evidence.text}` : "",
       newPassages ? `Passages the specialists found (cite as [S#]):\n${newPassages}` : "",
       findings ? `Specialist findings:\n${findings}` : "",
@@ -378,11 +415,12 @@ export async function runAxisTurn(opts: {
     await closeRun(run, res.stop === "refusal" ? "blocked" : "succeeded", total, {
       stop: res.stop, refusal: res.refusalCategory, calls: res.calls, tools: res.tools, passages: ledger.size, cited: citations.length,
       invalidCitations: invalid.length, sentencesChecked: checks.length, unverified: checks.filter((c) => c.status === "unverified").length,
-      ms: Date.now() - startedAt,
+      ms: Date.now() - startedAt, writes: toolCtx.turn.writes, autoWrites: toolCtx.turn.autoWrites, tainted: toolCtx.turn.tainted,
     });
     await chargeOutput(request, total.output);
     return {
-      path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u, state,
+      path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
+      state: { ...state, outside: toolCtx.turn.sawOutside },
       verify: { wanted: turnProfile.verify && res.stop !== "refusal", checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
     };

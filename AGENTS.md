@@ -83,6 +83,7 @@ src/
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
+│   │   └── ops/           # what AxIS can change: the operation catalog, run through this API as the counselor
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── imports.ts         # import requests, held-data queue, status, sweep (thin)
@@ -696,6 +697,70 @@ would hold every deploy until the migration is in.
   features off for the process and retry the first call once without them
   (`lib/axis/loop.ts`, tested in `axis-loop.test.ts`).
 
+### AxIS makes changes (`src/lib/axis/ops/`)
+
+AxIS can change almost anything a counselor can change in the app. It does it
+the way the app does: every change is one request to this API's own routes,
+run in-process with `app.inject` and the counselor's bearer token
+(`ops/dispatch.ts`). So a change passes `authenticate` and the approval gate,
+the route's zod schema, its own checks and side effects (deadline mirroring,
+assignment emails, throttles) and RLS on its queries, exactly as a click would.
+AxIS gets no client of its own and no service role; it can never do more than
+the counselor could. A rule added to a route later applies to AxIS without
+anyone copying it.
+
+- **The catalog** is `ops/catalog/*.ts`: one `op({...})` per action, grouped by
+  area and listed in `ops/registry.ts` in a fixed order. Each op has a name
+  (`area.verb`), a strict zod input in snake_case, the request it becomes, a
+  card line built from the real target (`describe`, which may read it with a
+  GET), and, for reads, a `reply` that keeps only safe fields (ids, titles,
+  dates; free text wrapped as untrusted data; nothing off the AI allowlist).
+  The catalog text sits at the end of `AXIS_SYSTEM`, so it is in the cached
+  prefix and never moves it.
+- **Two tools**: `lookup` (read ops, runs early like any lookup) and
+  `perform_action` (write ops, never started early, 20 s timeout). The model
+  picks a name from the enum and passes its input; a zod error comes back with
+  the expected signature so it can fix the call once.
+- **Two tiers.** `auto` runs at once and is recorded in `axis_actions` as
+  `executed`, with the reversal (`undo`: another catalog op and its input, from
+  the route's answer or a `snapshot` read before the write) for the card's Undo.
+  `confirm` files a `pending` row and nothing else; the counselor's Confirm
+  (`POST /axis/actions/:id/confirm`) re-validates the stored input against the
+  registry, re-checks edit access to the student and runs it. Confirm is for
+  deleting, archiving, sending or scheduling anything, showing something to a
+  student or family for the first time, money, practice-wide settings and
+  people, and anything that can't be put back. Undo
+  (`POST /axis/actions/:id/undo`) runs only a reversal that names a real write
+  op with valid input, as the counselor.
+- **Guards in code, not in the prompt.** A turn that read outside content
+  (documents, mail, connected files) turns every auto change into a card, so
+  text in a file can't change anything without a click. After five auto changes
+  in one turn the rest wait for Confirm; twenty changes is the limit per turn.
+  Specialists can't write. `dispatch.ts` refuses `/axis`, `/chat`, `/auth`,
+  `/ai`, `/me`, `/account`, `/internal`, `/webhooks`, `/imports`, OAuth and the
+  dispatch cron whatever the catalog says, and any essay or supplement request
+  carrying prose keys (the essay guardrail).
+- **Memory.** Each turn's user message opens with the changes AxIS made or
+  proposed earlier in the chat and what became of them (confirmed, dismissed,
+  undone, failed), so "did that go through?" has an answer.
+- **Never in the catalog:** student-only routes, anything that runs a model,
+  binary uploads, OAuth, imports, account export/deletion, catalog-editor
+  routes, and essay prose.
+
+**Deploy order.** Apply `20261019000001_axis_operations.sql` (widens the
+`axis_actions` type and status checks, payload cap 32 KB). Either order is
+safe: without it an auto change still runs and only its audit row is skipped
+(so it has no Undo), and a confirm change is refused with a message naming the
+migration. It is not in `REQUIRED_SCHEMA` for the same reason as `20261018000001`.
+
+**Adding an op:** write it in the area's catalog file, add the group to
+`registry.ts` if it is new, and run `npm test`: `axis-ops.test.ts` builds a
+valid sample input from the zod schema and checks that every op's request
+reaches a registered route, that inputs are strict, that no essay request
+carries prose, and that the catalog stays under its size budget.
+`test/integration/axis-operations.test.mjs` confirms, refuses and undoes real
+changes against a local Supabase.
+
 ### The essay restriction is a hard product constraint
 
 The product stays well clear of writing, or closely approximating, essay prose.
@@ -806,7 +871,10 @@ Files live in the private `student-documents` Storage bucket
 (`20261011000001`). An object is readable by its uploader or by anyone who can
 see the `documents` row pointing at it, so Storage is never more generous than
 the file list; uploads go under a student the caller can edit, a folder they
-can see, their own id, or `unfiled`.
+can see, their own id, or `unfiled`. `DELETE /files/documents/:id` removes the
+Storage object too, on the caller's own client after the row is gone (best
+effort: Storage's delete policy lets the uploader remove it, so a file a
+student uploaded stays in the bucket when a counselor deletes its row).
 
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document

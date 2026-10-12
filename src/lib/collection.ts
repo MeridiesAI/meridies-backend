@@ -62,6 +62,12 @@ export type CollectionOptions<T extends ZodTypeAny> = {
   /** Optional `?param=` equality filters on the list route. */
   filters?: CollectionFilter[];
   /**
+   * A column the insert sets to the caller's own id, for a table that records
+   * who wrote the row (`meeting_notes.counselor_id`, NOT NULL). Never read
+   * from the body, and never changed by a patch.
+   */
+  authorColumn?: string;
+  /**
    * Called after authorization and before the write lands. The place to assert
    * a relationship the student_id check can't see — e.g. that a nested row's
    * parent really belongs to this student — or to narrow what a role may set.
@@ -132,7 +138,11 @@ export function registerCollection<T extends ZodTypeAny>(
 
       const { data, error } = await request.db
         .from(table)
-        .insert({ ...parsed, student_id: student })
+        .insert({
+          ...parsed,
+          ...(opts.authorColumn ? { [opts.authorColumn]: request.auth.userId } : {}),
+          student_id: student,
+        })
         .select("*")
         .single();
 
@@ -147,6 +157,7 @@ export function registerCollection<T extends ZodTypeAny>(
     { preHandler: [app.authenticate, limit(`${path}:update`, 240, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
+      const { studentId: expected } = listQuery.parse(request.query ?? {});
       const { rest } = splitStudentId(request.body);
       const parsed = (body as ZodTypeAny).parse(rest) as Record<string, unknown>;
 
@@ -158,7 +169,9 @@ export function registerCollection<T extends ZodTypeAny>(
         .eq("id", id)
         .maybeSingle();
       if (readError) throw fromPostgrest(readError);
-      if (!existing) throw notFound();
+      // `?studentId=` names the student the caller means; a row of anyone else is "not found",
+      // so a mixed-up id can't change another student's record.
+      if (!existing || (expected && existing.student_id !== expected)) throw notFound();
 
       await resolveStudentId(request, existing.student_id as string, "edit");
       await opts.beforeWrite?.(request, existing.student_id as string, parsed, "update");
@@ -187,6 +200,7 @@ export function registerCollection<T extends ZodTypeAny>(
     { preHandler: [app.authenticate, limit(`${path}:delete`, 120, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
+      const { studentId: expected } = listQuery.parse(request.query ?? {});
 
       const { data: existing, error: readError } = await request.db
         .from(table)
@@ -194,7 +208,7 @@ export function registerCollection<T extends ZodTypeAny>(
         .eq("id", id)
         .maybeSingle();
       if (readError) throw fromPostgrest(readError);
-      if (!existing) throw notFound();
+      if (!existing || (expected && existing.student_id !== expected)) throw notFound();
 
       await resolveStudentId(request, existing.student_id as string, "edit");
       await opts.beforeDelete?.(request, existing.student_id as string, id);

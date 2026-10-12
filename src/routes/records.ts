@@ -6,7 +6,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { bucketHistory } from "../lib/polygonHistory.js";
@@ -176,6 +176,13 @@ export default async function recordRoutes(app: FastifyInstance) {
   registerCollection(app, {
     path: "notes", table: "meeting_notes", body: noteBody, toDto: toNote,
     orderBy: { column: "meeting_date", ascending: false },
+    // A meeting note is the writing counselor's record: `counselor_id` is NOT
+    // NULL, so the insert stamps the caller. Only a counselor writes one (RLS
+    // says the same through is_counselor_of); a student gets a plain 403.
+    authorColumn: "counselor_id",
+    beforeWrite: async (request) => {
+      if (request.profile.role !== "counselor") throw forbidden("Only a counselor writes meeting notes");
+    },
   });
 
   // ---- Academics (one row per student, so upsert rather than insert) -------

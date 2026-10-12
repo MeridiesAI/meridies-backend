@@ -95,7 +95,8 @@ async function resolveAudience(
       .in("student_id", ids);
     builder =
       audience.audienceKind === "school"
-        ? builder.ilike("name", value)
+        ? // % and _ in a typed school name are characters, not wildcards: no student nobody picked.
+          builder.ilike("name", value.replace(/[%_\\]/g, (c) => `\\${c}`))
         : builder.eq("status", value);
 
     const { data, error } = await builder.limit(5000);

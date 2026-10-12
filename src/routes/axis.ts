@@ -8,6 +8,11 @@
  * events the app already reads keep their names and shapes (status, sources,
  * context, reasoning, delta, done, error); the rest are additive (route,
  * tool, citations, grounding, action, verification).
+ *
+ * An `action` is an email draft (propose_action) or an operation
+ * (perform_action, lib/axis/ops): one that already ran (status executed, with
+ * Undo) or one waiting here for Confirm. Confirm, Dismiss and Undo are the
+ * counselor's clicks; the model can't reach these routes (lib/axis/ops/dispatch.ts).
  */
 import { PassThrough } from "node:stream";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -26,8 +31,17 @@ import {
 } from "../lib/axis/failsafe.js";
 import { foldIfLong, saveState } from "../lib/axis/memory.js";
 import { adjudicate } from "../lib/axis/verify.js";
+import {
+  confirmOperation,
+  recordedIds,
+  TransientOperationError,
+  undoOperation,
+  undoStepOf,
+  type OperationPayload,
+  type OperationStatus,
+} from "../lib/axis/ops/run.js";
 import { hasAnthropic } from "../env.js";
-import { conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
@@ -129,8 +143,9 @@ export default async function axisRoutes(app: FastifyInstance) {
             .single();
           if (saveErr) request.log.warn({ code: saveErr.code }, "axis answer not saved");
           const messageId = (saved?.id as string | undefined) ?? null;
-          if (messageId && turn.actions.length) {
-            await request.db.from("axis_actions").update({ message_id: messageId }).in("id", turn.actions.map((a) => a.id)).then(logSkipped(request.log, "proposal link"));
+          const linked = recordedIds(turn.actions.map((a) => a.id));
+          if (messageId && linked.length) {
+            await request.db.from("axis_actions").update({ message_id: messageId }).in("id", linked).then(logSkipped(request.log, "proposal link"));
           }
           emit("done", { messageId });
           markDone();
@@ -186,19 +201,20 @@ export default async function axisRoutes(app: FastifyInstance) {
     }
   });
 
-  // Proposals awaiting the counselor, newest first.
+  // Proposals awaiting the counselor, newest first; with status=all, everything in a chat (to replay its cards).
   app.get("/actions", { preHandler: counselor }, async (request) => {
-    const q = z.object({ conversationId: z.string().uuid().optional() }).parse(request.query ?? {});
+    const q = z.object({ conversationId: z.string().uuid().optional(), status: z.enum(["pending", "all"]).optional() }).parse(request.query ?? {});
+    if (q.status === "all" && !q.conversationId) throw badRequest("status=all needs a conversationId");
     let query = request.db
       .from("axis_actions")
       .select("id, conversation_id, message_id, student_id, type, payload, status, result, created_at")
-      .eq("status", "pending")
       .order("created_at", { ascending: false })
-      .limit(50);
+      .limit(q.status === "all" ? 200 : 50);
+    if (q.status !== "all") query = query.eq("status", "pending");
     if (q.conversationId) query = query.eq("conversation_id", q.conversationId);
     const { data, error } = await query;
     if (error) throw actionsError(error);
-    return data ?? [];
+    return (data ?? []).map(publicAction);
   });
 
   app.post("/actions/:id/confirm", { preHandler: counselor }, async (request) => {
@@ -216,6 +232,29 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (!claimed) throw conflict("That proposal was already handled.");
     const payload = claimed.payload as Record<string, unknown>;
     const studentId = claimed.student_id as string | null;
+
+    if (claimed.type === "operation") {
+      let outcome;
+      try {
+        outcome = await confirmOperation(request, claimed);
+      } catch (err) {
+        // Nothing changed (an outage, a rate limit): release the claim so Confirm can be clicked again.
+        await request.db.from("axis_actions").update({ status: "pending", decided_at: null }).eq("id", id).eq("status", "confirmed");
+        if (err instanceof TransientOperationError || err instanceof HttpError) throw err;
+        request.log.error({ err }, "axis operation confirm failed");
+        throw new HttpError(500, "That change couldn't be made right now. Try again.");
+      }
+      const { error: saveErr } = await request.db
+        .from("axis_actions")
+        .update({ status: outcome.status, result: outcome.result })
+        .eq("id", id);
+      if (saveErr) request.log.warn({ code: saveErr.code }, "axis operation result not saved");
+      return {
+        id,
+        status: outcome.status,
+        result: outcome.result.ok ? { ok: true, undoable: outcome.result.undoable } : { ok: false, message: outcome.result.message },
+      };
+    }
 
     try {
       if (claimed.type === "work_item") {
@@ -265,4 +304,63 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (!data) throw conflict("That proposal was already handled.");
     return { id, status: "dismissed" };
   });
+
+  // Puts back a change AxIS made (at once, or on Confirm), using the reversal recorded with it.
+  app.post("/actions/:id/undo", { preHandler: [...counselor, limit("ai:axis-undo", 60, 60)] }, async (request) => {
+    const id = idParam(request);
+    const { data: row, error } = await request.db
+      .from("axis_actions")
+      .select("id, type, status, result")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw actionsError(error);
+    if (!row || row.type !== "operation") throw notFound("That change isn't AxIS's to undo.");
+    const was = row.status as OperationStatus;
+    if (was !== "executed" && was !== "confirmed") throw conflict(was === "undone" ? "That change was already undone." : "Only a change that went through can be undone.");
+    // Before claiming: a row with no reversal (one whose Confirm is still running has none yet) is refused
+    // without touching its status, so the claim can't race the Confirm that is about to write its outcome.
+    if (!undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
+    // Claim, so two clicks can't run the reversal twice.
+    const { data: claimed, error: claimErr } = await request.db
+      .from("axis_actions")
+      .update({ status: "undone", decided_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("status", was)
+      .select("id")
+      .maybeSingle();
+    if (claimErr) throw actionsError(claimErr);
+    if (!claimed) throw conflict("That change was already undone.");
+    try {
+      await undoOperation(request, row);
+    } catch (err) {
+      // Hand the claim back only if it is still ours.
+      await request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
+      throw err;
+    }
+    return { id, status: "undone" };
+  });
+}
+
+/**
+ * A row as the app sees it. An operation's stored input stays on the server
+ * (Confirm reads it back from the row); the app gets the card's text, the
+ * status, and whether Undo is available.
+ */
+function publicAction(r: Record<string, unknown>) {
+  if (r.type !== "operation") return r;
+  const p = (r.payload ?? {}) as Record<string, unknown>;
+  const res = (r.result ?? {}) as Record<string, unknown>;
+  const status = String(r.status) as OperationStatus;
+  const payload: OperationPayload = {
+    op: String(p.op ?? ""),
+    area: String(p.area ?? ""),
+    summary: String(p.summary ?? ""),
+    details: Array.isArray(p.details) ? p.details.map(String) : [],
+    warning: typeof p.warning === "string" ? p.warning : null,
+    reason: p.reason === "outside-content" || p.reason === "many-changes" ? p.reason : null,
+    status,
+    undoable: (status === "executed" || status === "confirmed") && !!undoStepOf(res),
+    message: typeof res.message === "string" ? res.message : null,
+  };
+  return { id: r.id, conversation_id: r.conversation_id, message_id: r.message_id, student_id: r.student_id, type: r.type, payload, status, created_at: r.created_at };
 }

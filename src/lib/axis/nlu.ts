@@ -36,6 +36,8 @@ export type DialogueState = {
   students: { id: string; name: string }[];
   colleges: { id: string; name: string }[];
   at: string;
+  /** The last turn read outside content: its answer is in the next turn's history, so that turn's changes wait for a click too. */
+  outside?: boolean;
 };
 
 export type Clause = { text: string; intent: Intent; score: number };
@@ -111,6 +113,19 @@ function pickIntent(scores: Record<Intent, number>, fallback: Intent): { intent:
   return { intent: top, confidence: Math.max(0, Math.min(1, (s1 - s2) / s1)) };
 }
 
+const QUESTION_LEAD = /^(should|shall|is|are|was|were|what|whats|how|why|when|which|who|whom|where|do|does|did|has|have|had|am|would i|could i|can i|should i)\b/;
+const REQUEST_FORM = /^(please |pls |axis )?(can|could|would|will) you\b|\bplease\b|\bgo ahead\b/;
+
+/**
+ * A question asks; it doesn't order a change. "Should I remove Yale from her list?" is advice,
+ * "Change in her GPA since last year?" a lookup. Unless it is put as a request ("can you…",
+ * "please…"), a question's change score is capped below the level that makes it an action.
+ */
+export function dampQuestions(scores: Record<Intent, number>, text: string, norm: string): void {
+  const question = text.trim().endsWith("?") || QUESTION_LEAD.test(norm);
+  if (question && !REQUEST_FORM.test(norm)) scores.action = Math.min(scores.action, 2);
+}
+
 /** Judgement wins a near-tie with a lookup it would need anyway ("should she apply ED given her SAT?"). */
 function resolveTies(scores: Record<Intent, number>): void {
   const max = Math.max(...Object.values(scores));
@@ -158,6 +173,7 @@ export function understand(text: string, ctx: UnderstandContext): Understanding 
   const scores = scoreIntents(norm);
   const adjustCtx = { colleges: colleges.length, students: students.length, attrs: attributes, hasChatStudent: !!ctx.chatStudentId };
   adjust(scores, adjustCtx);
+  dampQuestions(scores, text, norm);
   resolveTies(scores);
   const fallback: Intent = ctx.chatStudentId || students.length ? "record" : "roster";
   const { intent, confidence } = pickIntent(scores, fallback);
@@ -166,6 +182,7 @@ export function understand(text: string, ctx: UnderstandContext): Understanding 
     const cn = tokens(c).join(" ");
     const cs = scoreIntents(cn);
     adjust(cs, { ...adjustCtx, colleges: ctx.colleges ? ctx.colleges.match(c).colleges.length : 0, attrs: attributesOf(cn) });
+    dampQuestions(cs, c, cn);
     resolveTies(cs);
     const picked = pickIntent(cs, intent);
     return { text: c, intent: picked.intent, score: cs[picked.intent] };
