@@ -20,6 +20,7 @@ import {
   toInvitationDetail,
   type ReferredBy,
 } from "../lib/invites.js";
+import { invitationDeliveries } from "../lib/inviteDelivery.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { anonClient } from "../lib/supabase.js";
 import { toInvitation, toMeridiesUser } from "../lib/serialize.js";
@@ -253,11 +254,13 @@ export default async function inviteRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
 
       const rows = (data ?? []) as unknown as Record<string, unknown>[];
-      const referredBy = await referralsFor(
-        request,
-        rows.map((r) => String(r.id))
-      );
-      return rows.map((row) => toInvitationDetail(row, referredBy.get(String(row.id)) ?? null));
+      const ids = rows.map((r) => String(r.id));
+      const [referredBy, deliveries] = await Promise.all([referralsFor(request, ids), invitationDeliveries(request, ids)]);
+      return rows.map((row) => ({
+        ...toInvitationDetail(row, referredBy.get(String(row.id)) ?? null),
+        // The invite email's latest status (B5); null when none is on record.
+        delivery: deliveries.get(String(row.id)) ?? null,
+      }));
     }
   );
 
@@ -285,10 +288,13 @@ export default async function inviteRoutes(app: FastifyInstance) {
         .limit(100);
       if (error) throw fromPostgrest(error);
       const rows = (data ?? []) as unknown as Record<string, unknown>[];
-      const items = await intakeItemsByInvitation(
-        request,
-        rows.filter((r) => r.status === "accepted").map((r) => String(r.id))
-      );
+      const [items, deliveries] = await Promise.all([
+        intakeItemsByInvitation(
+          request,
+          rows.filter((r) => r.status === "accepted").map((r) => String(r.id))
+        ),
+        invitationDeliveries(request, rows.map((r) => String(r.id))),
+      ]);
 
       return rows.map((r) => {
         const detail = toInvitationDetail(r);
@@ -296,6 +302,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
         return {
           ...detail,
           studentId: r.accepted_by ? String(r.accepted_by) : null,
+          delivery: deliveries.get(detail.id) ?? null,
           intakeItems: detail.intakeRequests.map((q) => {
             const item = byRequest?.get(q.id) ?? null;
             return {

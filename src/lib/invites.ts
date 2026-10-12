@@ -94,6 +94,7 @@ export async function createInvitation(
     to: email,
     counselorName: request.profile.full_name ?? null,
     acceptUrl: appJoinUrl(token),
+    invitationId: String((data as unknown as Row).id),
     note: input.note ?? null,
     audience: input.audience ?? "student",
     logger: request.log,
