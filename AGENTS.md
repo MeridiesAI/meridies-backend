@@ -61,6 +61,7 @@ src/
 │   ├── supplementDocs.ts  # supplement Google Docs under drive.file
 │   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
+│   ├── inviteDelivery.ts  # an invitation's (or a composer attempt's) delivery status, as the webhooks left it
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), linkCheck.ts, run.ts
@@ -1158,6 +1159,17 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   (`X-Twilio-Signature`, `TWILIO_AUTH_TOKEN` over `PUBLIC_API_URL`) move
   `message_deliveries` to delivered / bounced / failed; a status never moves
   backwards. With `PUBLIC_API_URL` set, every SMS asks Twilio to report there.
+  What the app shows (`lib/inviteDelivery.ts`): `GET /invites` and
+  `/invites/building` carry `delivery` (`{ status, channel, at, deliveredAt,
+  reason }` or null) per invitation, from `message_deliveries.invitation_id`
+  (`20261018000001`, read on the caller's client under
+  `message_deliveries_invitation_counselor`; the invite email stamps it).
+  `GET /communication/:id/messages` overlays each attempt's live status the
+  same way. The status is the row's own: a row only `sent` is never reported
+  delivered, and `reason` (bounced/failed only) never names a server setting.
+  **Apply `20261018000001` before deploying:** `REQUIRED_SCHEMA` holds the
+  deploy until it is in, since an invite's delivery row is written with the
+  new column.
 - **Data rights.** `GET /account/export` (self) and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
   client, so an export holds exactly what that person can already see (the
