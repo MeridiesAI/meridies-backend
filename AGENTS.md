@@ -82,6 +82,7 @@ src/
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
+│   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
 │   └── errors.ts, chat.ts
 ├── routes/
 │   ├── imports.ts         # import requests, held-data queue, status, sweep (thin)
@@ -93,6 +94,7 @@ src/
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
 │   ├── opportunities.ts, ai.ts, chat.ts
+│   ├── axis.ts            # /axis         AxIS v2 turn (SSE), cache pre-warm, proposals (counselor)
 │   ├── workItems.ts       # /work-items   My Work Queue
 │   ├── pins.ts            # /pins         pinned students, per consultant
 │   ├── outcomes.ts        # /outcomes, /alumni   outcomes, Close cycle, alumni
@@ -639,6 +641,47 @@ explicitly decides otherwise.
 
 `runStructured()` handles quota, the `ai_runs` audit row, token accounting and
 safe error messages. Use it rather than calling the SDK directly.
+
+AxIS runs on Claude Haiku 5.5 for every call (`lib/axis/models.ts`), with effort set per turn; its side calls use structured outputs.
+
+### AxIS v2 (`src/lib/axis/`, `routes/axis.ts`)
+
+The design is `docs/axis/AXIS_SYSTEM.md`. Counselor only (`requireRole("counselor")`
+on every `/axis` route), and every student id, the client's or the model's,
+goes through `resolveStudentId(..., "view")`. Reads run on `request.db`; the
+service client writes only the `ai_runs` audit rows (`lib/axis/llm.ts`).
+Conversations are the `/chat/conversations` rows.
+
+**Deploy order.** Apply `20261018000001_axis_orchestrator.sql` (memory and
+dialogue-state columns, `ai_messages.verification`, `axis_actions`, the
+`axis*` `ai_runs` labels). It is safe to apply before the code, and the code is
+safe to deploy before it: the tables are deliberately **not** in
+`REQUIRED_SCHEMA`, because `/chat` keeps working without them and listing them
+would hold every deploy until the migration is in.
+
+**Fail-safes** (`lib/axis/failsafe.ts`):
+
+- **The fallback signal.** `POST /axis/conversations/:id/messages` answers
+  `503 { error, message, code: "axis_unavailable" }` before the stream opens and
+  before it saves the user's message when `ANTHROPIC_API_KEY` is unset or the
+  migration isn't applied (three zero-row probes; a ready answer is kept for the
+  process, a missing one for 30 s). The app then sends the same message to
+  `/chat/conversations/:id/messages`. `/axis/actions*` answer the same 503 on a
+  schema error; `/axis/warm` always answers 202 and says why it didn't warm.
+- **Limits.** 20 a minute per user on messages (`ai:axis`) and on warm; the
+  first model call of a turn is charged against the 300-call daily quota before
+  the stream opens, so a spent quota is a plain 429 (not a fallback), and each
+  further call is charged as it is made. The pre-warm is charged too.
+- **A turn always ends.** `runSseTurn` puts a 90 s hard timeout over the whole
+  turn (the tool phase has its own 40 s budget), aborts the model stream, the
+  planner and the tools when the counselor closes the panel (the response's
+  `close`), and ends any failure before `done` with one `error` event whose
+  message is ours (`publicMessage`), never the SDK's or Postgres's. After
+  `done`, saving state, the adjudicator and the verification write are logged
+  and skipped on failure; the memory fold runs after the stream has ended.
+- **Model 400s** on the per-message effort or the mode message turn those
+  features off for the process and retry the first call once without them
+  (`lib/axis/loop.ts`, tested in `axis-loop.test.ts`).
 
 ### The essay restriction is a hard product constraint
 
@@ -1196,8 +1239,10 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   profiles, coherence material, consumers), and research (`research-brief`,
   `research-citations`, `research-extract`, `research-run`,
   `research-boot-guard`: the brief and identity filter, the citation keeper,
-  the answer parser, the match validation and the boot check), and the
-  counselor approval gate (`access`, `access-review`, `service-callsites`).
+  the answer parser, the match validation and the boot check), the
+  counselor approval gate (`access`, `access-review`, `service-callsites`),
+  and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and

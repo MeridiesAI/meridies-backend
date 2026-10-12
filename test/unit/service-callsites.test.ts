@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 // one means deciding whether it acts for a counselor outside their own request
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/email.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/axis/llm.ts: writes only the ai_runs audit rows for the caller's own AxIS turn, inside their request.
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/email.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
