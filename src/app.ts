@@ -1,4 +1,6 @@
 import cors from "@fastify/cors";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
 import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
 import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio } from "./env.js";
@@ -101,6 +103,20 @@ export function buildApp() {
   // Paged lists (GET /colleges/search) carry their total and next cursor in headers.
   app.register(cors, { origin: corsOrigins, credentials: true, exposedHeaders: ["X-Total-Count", "X-Next-Cursor"] });
   app.register(rateLimitPlugin);
+  // Interactive API reference at /docs (spec at /docs/json). Registered before
+  // the routes so every route lands in the spec. Most routes validate with zod
+  // inside the handler rather than a Fastify schema, so the spec lists paths
+  // and methods without request bodies.
+  app.register(swagger, {
+    openapi: {
+      info: { title: "Meridies API", version: "0.1.0" },
+      components: {
+        securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" } },
+      },
+      security: [{ bearerAuth: [] }],
+    },
+  });
+  app.register(swaggerUi, { routePrefix: "/docs" });
   app.register(supabaseAuth);
 
   app.register(healthRoutes);
