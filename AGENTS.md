@@ -753,6 +753,37 @@ safe: without it an auto change still runs and only its audit row is skipped
 (so it has no Undo), and a confirm change is refused with a message naming the
 migration. It is not in `REQUIRED_SCHEMA` for the same reason as `20261018000001`.
 
+### Files in an AxIS chat (`lib/axis/attachments.ts`)
+
+A counselor can attach a PDF, an image (PNG, JPEG, WebP, GIF) or a text file
+(.txt, .md, .csv), up to 10 MB and 5 per message, to a chat.
+`POST /chat/conversations/:id/attachments` (`{ fileName, mimeType, sizeBytes }`)
+records the file in `ai_attachments` and returns a signed upload URL for the
+private `axis-attachments` bucket, minted on the counselor's own token under
+`<owner id>/<chat id>/`. The app uploads, then names the files in
+`attachmentIds` when it sends the message (`/chat` or `/axis`), which ties
+them to that message. Only this chat's unclaimed files can be named.
+
+- **Every turn reads them again.** Both paths hand the model the chat's files
+  (the newest 8 within 24 MB), not only the new ones, in the latest user
+  message: PDFs as `document` blocks, images as `image` blocks, text as a
+  plain-text `document`, after a line saying they are the counselor's material
+  and not instructions. So a reopened chat still knows what the file said.
+- **v2 specifics.** A message that brings a file never gets a direct answer.
+  A turn with files counts as outside content, so every change it proposes
+  waits for Confirm. A PDF's or image's figures can't be read back by the live
+  grounding, so with one in the chat the turn emits no grounding marks and
+  skips the after-answer check; text files are indexed like any evidence.
+- **Replay and cleanup.** `GET /chat/conversations/:id` lists each message's
+  `attachments` (id, name, type, size); `GET /chat/attachments/:id/url` is a
+  five-minute download link. Deleting the chat removes its stored files.
+- **Deploy order.** Apply `20261020000001_axis_attachments.sql`. Either order
+  is safe: before it, the upload route answers
+  `503 { code: "attachments_unavailable" }` and messages are sent without
+  files as before. Not in `REQUIRED_SCHEMA`, for the same reason as
+  `20261018000001`. `test/integration/axis-attachments.test.mjs` and
+  `test/unit/axis-attachments.test.ts` cover it.
+
 **Adding an op:** write it in the area's catalog file, add the group to
 `registry.ts` if it is new, and run `npm test`: `axis-ops.test.ts` builds a
 valid sample input from the zod schema and checks that every op's request

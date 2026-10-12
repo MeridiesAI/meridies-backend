@@ -33,6 +33,7 @@ export function fakeDb(tables: Record<string, Row[]>) {
         gte: (c: string, v: unknown) => (filters.push((r) => r[c] != null && cmp(r[c], v) >= 0), chain),
         gt: (c: string, v: unknown) => (filters.push((r) => r[c] != null && cmp(r[c], v) > 0), chain),
         is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), chain),
+        not: (c: string, op: string, v: unknown) => (filters.push((r) => (op === "is" ? (r[c] ?? null) !== v : true)), chain),
         ilike: (c: string, p: string) => (filters.push((r) => new RegExp(`^${p.replace(/%/g, ".*")}$`, "i").test(String(r[c] ?? ""))), chain),
         order: (c: string, o?: { ascending?: boolean }) => ((orderBy = { col: c, asc: o?.ascending !== false }), chain),
         limit: (n: number) => ((lim = n), chain),

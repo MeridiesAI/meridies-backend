@@ -17,6 +17,7 @@
 import { PassThrough } from "node:stream";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { claimAttachments, MAX_FILES_PER_MESSAGE } from "../lib/axis/attachments.js";
 import { TtlLru } from "../lib/axis/cache.js";
 import { runAxisTurn, warmInputs } from "../lib/axis/engine.js";
 import { chargeCall, prewarm } from "../lib/axis/llm.js";
@@ -49,6 +50,8 @@ const messageSchema = z
   .object({
     content: z.string().trim().min(1).max(8000),
     studentId: z.string().uuid().optional(),
+    /** Files uploaded through POST /chat/conversations/:id/attachments for this message. */
+    attachmentIds: z.array(z.string().uuid()).max(MAX_FILES_PER_MESSAGE).optional(),
   })
   .strict();
 
@@ -98,10 +101,13 @@ export default async function axisRoutes(app: FastifyInstance) {
       // The turn's first model call is charged here, so an exhausted daily quota is a plain 429.
       await chargeCall(request);
 
-      const { error: insErr } = await request.db
+      const { data: userMsg, error: insErr } = await request.db
         .from("ai_messages")
-        .insert({ conversation_id: id, owner_id: request.auth.userId, role: "user", content: body.content });
+        .insert({ conversation_id: id, owner_id: request.auth.userId, role: "user", content: body.content })
+        .select("id")
+        .single();
       if (insErr) throw isSchemaMissing(insErr) ? axisUnavailable() : fromPostgrest(insErr);
+      const attached = body.attachmentIds?.length ? await claimAttachments(request, id, userMsg.id as string, body.attachmentIds) : [];
       const { error: convErr } = await request.db
         .from("ai_conversations")
         .update({ student_id: studentId, module: "axis", ...(conv.title ? {} : { title: body.content.slice(0, 60) }) })
@@ -126,7 +132,9 @@ export default async function axisRoutes(app: FastifyInstance) {
         log: request.log,
         onSettled: () => void foldIfLong(request, id).catch((err) => request.log.warn({ err }, "axis memory fold skipped")),
         work: async ({ signal, emit, markDone }) => {
-          const turn = await runAxisTurn({ request, conversationId: id, studentId, content: body.content, emit, signal, prepaidCalls: 1 });
+          const turn = await runAxisTurn({
+            request, conversationId: id, studentId, content: body.content, emit, signal, prepaidCalls: 1, newFiles: attached.length > 0,
+          });
           const { data: saved, error: saveErr } = await request.db
             .from("ai_messages")
             .insert({
