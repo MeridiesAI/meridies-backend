@@ -61,6 +61,7 @@ export async function adjudicate(o: {
   checks: SentenceCheck[];
   ledger: SourceLedger;
   material: string[];
+  signal?: AbortSignal;
 }): Promise<Verification> {
   const figuresChecked = o.checks.reduce((n, c) => n + c.figures.length + c.citations.length, 0);
   const residue = o.checks.filter((c) => c.status !== "grounded");
@@ -88,6 +89,7 @@ export async function adjudicate(o: {
     schema: SCHEMA as unknown as Record<string, unknown>,
     parse: z.object({ rulings: z.array(z.object({ index: z.number().int(), verdict: z.enum(["supported", "unsupported", "general-knowledge"]), reason: z.string() })) }),
     effort: "low",
+    signal: o.signal,
   });
   if (!out) return { checked: false, figuresChecked, unsupported: [] };
   const byIndex = new Map(residue.map((c) => [c.index, c]));

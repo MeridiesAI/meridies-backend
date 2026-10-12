@@ -146,8 +146,16 @@ const ESSAY_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-async function essayAdvice(request: FastifyRequest, studentId: string | null, question: string, record: string | null): Promise<string> {
+async function essayAdvice(
+  request: FastifyRequest,
+  studentId: string | null,
+  question: string,
+  record: string | null,
+  o: { signal: AbortSignal; precharged: boolean }
+): Promise<string> {
   const out = await structured({
+    signal: o.signal,
+    precharged: o.precharged,
     request,
     module: "essay-advice",
     studentId,
@@ -172,8 +180,16 @@ export async function runAxisTurn(opts: {
   emit: Emit;
   signal: AbortSignal;
   api?: MessagesApi;
+  /**
+   * Model calls already charged against the daily quota. The route charges the
+   * first before the stream opens, so an exhausted quota is a plain 429 the app
+   * can show rather than an error mid-stream.
+   */
+  prepaidCalls?: number;
 }): Promise<TurnResult> {
   const { request, studentId, content, emit, signal } = opts;
+  let prepaid = opts.prepaidCalls ?? 0;
+  const takePrepaid = () => (prepaid > 0 ? (prepaid--, true) : false);
   const startedAt = Date.now();
   emit("status", { phase: "thinking" });
 
@@ -234,7 +250,7 @@ export async function runAxisTurn(opts: {
   if (u.intent === "essay") {
     emit("route", { intent: "essay", path: "essay" });
     emit("status", { phase: "answering" });
-    const text = await essayAdvice(request, studentId, content, ctx.record);
+    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, precharged: takePrepaid() });
     emit("delta", { text });
     return {
       path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u, state,
@@ -279,7 +295,7 @@ export async function runAxisTurn(opts: {
     index.add(out.content);
     return out;
   };
-  const beforeCall = () => chargeCall(request);
+  const beforeCall = () => (takePrepaid() ? Promise.resolve() : chargeCall(request));
   const total: Usage = emptyUsage();
   const add = (x: Usage) => {
     total.input += x.input;

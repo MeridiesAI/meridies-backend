@@ -14,6 +14,7 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { wrapUntrusted } from "../context/pack.js";
 import { fromPostgrest } from "../errors.js";
+import { isSchemaMissing } from "./failsafe.js";
 import { stripCitations } from "./ledger.js";
 import { structured } from "./llm.js";
 import type { DialogueState } from "./nlu.js";
@@ -55,12 +56,15 @@ const stateSchema = z.object({
 });
 
 export async function loadHistory(request: FastifyRequest, conversationId: string): Promise<History> {
-  const { data: conv, error } = await request.db
+  const { data: convRow, error } = await request.db
     .from("ai_conversations")
     .select("summary, summary_through, state")
     .eq("id", conversationId)
     .maybeSingle();
-  if (error) throw fromPostgrest(error);
+  // Before 20261018000001 the memory columns don't exist: answer from recent turns alone.
+  if (error && !isSchemaMissing(error)) throw fromPostgrest(error);
+  if (error) request.log.warn({ code: error.code }, "axis memory columns missing; recent turns only");
+  const conv = error ? null : convRow;
   let query = request.db
     .from("ai_messages")
     .select("role, content, created_at")
@@ -78,8 +82,10 @@ export async function loadHistory(request: FastifyRequest, conversationId: strin
   };
 }
 
+/** Never throws: a turn whose state can't be saved has still been answered. */
 export async function saveState(request: FastifyRequest, conversationId: string, state: DialogueState): Promise<void> {
-  await request.db.from("ai_conversations").update({ state }).eq("id", conversationId);
+  const { error } = await request.db.from("ai_conversations").update({ state }).eq("id", conversationId);
+  if (error) request.log.warn({ code: error.code }, "axis state not saved");
 }
 
 const SUMMARY_SCHEMA = {
@@ -95,11 +101,13 @@ const SUMMARY_SCHEMA = {
  * turn simply sends more history.
  */
 export async function foldIfLong(request: FastifyRequest, conversationId: string): Promise<void> {
-  const { data: conv } = await request.db
+  const { data: conv, error: convErr } = await request.db
     .from("ai_conversations")
     .select("summary, summary_through, student_id")
     .eq("id", conversationId)
     .maybeSingle();
+  // No memory columns (migration not applied) or no row: nothing to fold into.
+  if (convErr || !conv) return;
   let query = request.db
     .from("ai_messages")
     .select("role, content, created_at")
@@ -129,5 +137,6 @@ export async function foldIfLong(request: FastifyRequest, conversationId: string
   // Only forward: if two folds race, the later point wins and nothing is folded twice.
   let update = request.db.from("ai_conversations").update({ summary: out.summary.slice(0, 4000), summary_through: through }).eq("id", conversationId);
   update = conv?.summary_through ? update.lt("summary_through", through) : update.is("summary_through", null);
-  await update;
+  const { error: upErr } = await update;
+  if (upErr) request.log.warn({ code: upErr.code }, "axis memory summary not saved");
 }

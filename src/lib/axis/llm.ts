@@ -44,11 +44,14 @@ export async function openRun(request: FastifyRequest, module: AiModule, student
   const svc = serviceClient();
   const startedAt = Date.now();
   if (!svc) return { id: null, startedAt };
-  const { data } = await svc
+  const { data, error } = await svc
     .from("ai_runs")
     .insert({ actor_id: request.auth.userId, student_id: studentId, module, model: AXIS_MODEL, status: "running", input })
     .select("id")
     .single();
+  // An audit row that can't be written (the axis* labels missing from ai_runs_module_check before
+  // 20261018000001) must not cost the counselor their answer; it is logged so it doesn't go unnoticed.
+  if (error) request.log.warn({ code: error.code, module }, "axis ai_runs row not written");
   return { id: (data?.id as string | undefined) ?? null, startedAt };
 }
 
@@ -98,9 +101,13 @@ export async function structured<T>(o: {
   parse: z.ZodType<T>;
   effort?: Effort;
   maxTokens?: number;
+  /** Aborts the call (the counselor left, or the turn ran out of time); an aborted call returns null. */
+  signal?: AbortSignal;
+  /** The daily call was already charged for this one (the route charges a turn's first call before streaming). */
+  precharged?: boolean;
 }): Promise<T | null> {
   await assertAiAllowed(o.request, o.module);
-  await chargeCall(o.request);
+  if (!o.precharged) await chargeCall(o.request);
   const effort = o.effort ?? "low";
   const run = await openRun(o.request, o.module, o.studentId ?? null, { promptChars: o.prompt.length, effort });
   try {
@@ -111,7 +118,7 @@ export async function structured<T>(o: {
       output_config: { effort, format: { type: "json_schema", schema: o.schema } },
       system: o.system,
       messages: [{ role: "user", content: o.prompt }],
-    });
+    }, o.signal ? { signal: o.signal } : undefined);
     const usage = usageOf(msg);
     await chargeOutput(o.request, usage.output);
     if (msg.stop_reason === "refusal" || msg.stop_reason === "max_tokens") {
@@ -142,6 +149,8 @@ export async function prewarm(o: {
   system: Anthropic.Beta.BetaTextBlockParam[];
   tools: Anthropic.Beta.BetaTool[];
 }): Promise<{ cacheWrite: number; cacheRead: number }> {
+  // The pre-warm is a billed call (it writes the cache), so it counts against the daily quota like any other.
+  await chargeCall(o.request);
   const run = await openRun(o.request, "axis-warm", o.studentId, { tools: o.tools.length });
   try {
     const perMessage = featureOn("perMessageEffort");
