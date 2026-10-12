@@ -25,6 +25,9 @@ export const DEEP_MODEL = "claude-sonnet-4-5";
 
 let client: Anthropic | null = null;
 
+/** The shared client, for callers that run their own loop (AxIS). They keep the audit and quota discipline themselves. */
+export const anthropicClient = (): Anthropic => anthropic();
+
 function anthropic(): Anthropic {
   if (!hasAnthropic) {
     throw unavailable("AI features aren't configured yet. Set ANTHROPIC_API_KEY.");
@@ -90,7 +93,9 @@ export type AiModule =
   // A file the student handed in against a task, checked against what was asked.
   | "submission-review"
   | "activity-research"
-  | "research-match";
+  | "research-match"
+  // AxIS on Claude Haiku 5.5 (lib/axis): the turn, the adjudicator, the memory fold, the cache pre-warm.
+  | "axis" | "axis-verify" | "axis-memory" | "axis-warm";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
