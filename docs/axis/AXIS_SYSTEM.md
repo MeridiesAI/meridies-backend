@@ -271,6 +271,8 @@ Other routes:
 
 Conversation list, create, rename and delete stay on `/chat/conversations`.
 
+**Fallback.** Before the stream opens, the messages route answers `503 { error, message, code: "axis_unavailable" }` when `ANTHROPIC_API_KEY` is unset or migration `20261018000001` isn't applied, without saving the message; the app resends it to `/chat/conversations/:id/messages`. A spent daily quota is a 429 before the stream (no fallback). Once streaming, a turn ends within 90 seconds, and any failure before `done` is one `error` event in our words (`src/lib/axis/failsafe.ts`).
+
 ## 7. Code
 
 Files under `src/lib/axis/`, then the route.
