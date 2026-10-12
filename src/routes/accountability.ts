@@ -131,11 +131,20 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
       if (b.quietHoursEnd !== undefined) row.quiet_hours_end = b.quietHoursEnd;
       if (b.timezone !== undefined) row.timezone = b.timezone;
 
-      const { data, error } = await request.db
+      // The scope's unique index is on (counselor_id, coalesce(student_id, zero uuid)), an expression
+      // PostgREST's on_conflict can't name, so an upsert here always failed: find the row, then
+      // update it or insert one.
+      let existing = request.db
         .from("accountability_settings")
-        .upsert(row, { onConflict: "counselor_id,student_id" })
-        .select("*")
-        .single();
+        .select("id")
+        .eq("counselor_id", request.auth.userId);
+      existing = b.studentId ? existing.eq("student_id", b.studentId) : existing.is("student_id", null);
+      const { data: found, error: findErr } = await existing.maybeSingle();
+      if (findErr) throw fromPostgrest(findErr);
+
+      const { data, error } = found
+        ? await request.db.from("accountability_settings").update(row).eq("id", found.id as string).select("*").single()
+        : await request.db.from("accountability_settings").insert(row).select("*").single();
 
       if (error) throw fromPostgrest(error);
       return { ...DEFAULT_SETTINGS, ...(data as object) };
