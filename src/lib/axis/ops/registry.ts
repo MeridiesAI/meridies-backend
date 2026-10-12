@@ -9,11 +9,13 @@
 import type { OpDef, OpGroup, Risk } from "./types.js";
 import { aid, opportunities, scholarships } from "./catalog/aid.js";
 import { applicationEssays, applicationSheets, collegeList } from "./catalog/application.js";
+import { calendar, meetings } from "./catalog/calendar.js";
 import { blasts, emailTemplates, familyReports, messages, narrativeFlags, notifications } from "./catalog/communication.js";
 import { colleges, events, resources } from "./catalog/colleges.js";
 import { deadlines } from "./catalog/deadlines.js";
 import { files } from "./catalog/files.js";
 import { outcomes, recommendations, referrals } from "./catalog/outcomes.js";
+import { academics, courses, meetingNotes, testScores } from "./catalog/records.js";
 import { payments, pipeline } from "./catalog/pipeline.js";
 import { firm, management, settings } from "./catalog/practice.js";
 import { accountability, tasks } from "./catalog/tasks.js";
@@ -24,7 +26,9 @@ import { workQueue } from "./catalog/workQueue.js";
 export const GROUPS: readonly OpGroup[] = [
   students, strengthProfile, pins, preferenceCards,
   invites, newStudents, rosterImports,
+  academics, courses, testScores,
   tasks, deadlines, workQueue, accountability,
+  meetings, calendar, meetingNotes,
   collegeList, applicationEssays, applicationSheets,
   aid, scholarships, opportunities,
   messages, familyReports, narrativeFlags, blasts, emailTemplates, notifications,

@@ -114,13 +114,13 @@ const meetingBody = (i: MeetingInput) =>
     meetingNoteId: i.meeting_note_id,
   });
 
-function meetingDetails(i: MeetingInput & { attendee_ids?: string[] }): string[] {
+function meetingDetails(i: MeetingInput & { attendee_ids?: string[] }, h: { studentName(id: string): string }): string[] {
   const lines: string[] = [];
   if (typeof i.starts_at === "string") lines.push(`Starts: ${whenLabel(i.starts_at)}`);
   if (i.ends_at !== undefined) lines.push(`Ends: ${i.ends_at === null ? "cleared" : whenLabel(i.ends_at)}`);
   const { attendee_ids, ...rest } = i;
   lines.push(...changeLines(rest, MEETING_LABELS));
-  if (attendee_ids) lines.push(`Students invited: ${attendee_ids.length}`);
+  if (attendee_ids) lines.push(`Students invited: ${attendee_ids.map((id) => h.studentName(id)).join(", ") || "only the student it's for"}`);
   return lines;
 }
 
@@ -234,9 +234,9 @@ export const meetings: OpGroup = {
         const others = (i.attendee_ids ?? []).filter((id) => id !== i.student_id).length;
         return `Book "${plainText(i.title, 80)}" with ${h.studentName(i.student_id)}${others ? ` and ${others} more` : ""} on ${whenLabel(i.starts_at)}`;
       },
-      details: (i) => {
+      details: (i, h) => {
         const { title: _title, starts_at: _starts, student_id: _student, ...rest } = i;
-        return meetingDetails(rest);
+        return meetingDetails(rest, h);
       },
       warning: "It creates an event with a Meet or Teams link on your connected Google or Outlook calendar.",
       undo: (_i, body) => {
@@ -260,7 +260,7 @@ export const meetings: OpGroup = {
         if (i.status && Object.keys(i).length === 2) return `Mark ${meetingLabel(m)}${who} as ${i.status}`;
         return `Update ${meetingLabel(m)}${who}`;
       },
-      details: (i) => meetingDetails(i),
+      details: (i, h) => meetingDetails(i, h),
       warning: "On a meeting booked on your Google or Outlook calendar, cancelling or changing the mode removes that calendar event.",
       snapshot: (i, h) => findMeeting(h, i.meeting_id),
       undo: (i, _body, before) => {

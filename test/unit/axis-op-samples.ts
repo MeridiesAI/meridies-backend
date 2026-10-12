@@ -57,6 +57,7 @@ function sample(t: ZodTypeAny, key = ""): unknown {
       }
       const min = checks.find((c) => c.kind === "min")?.value ?? 1;
       const max = checks.find((c) => c.kind === "max")?.value ?? 40;
+      if (/(_id|_ref)$/.test(key) && max >= 36) return SAMPLE_UUID;
       if (/email/i.test(key)) return "someone@example.com";
       if (/url|link|href/i.test(key)) return "https://example.com/page";
       return "x".repeat(Math.min(Math.max(min, 4), max));
