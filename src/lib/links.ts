@@ -296,6 +296,11 @@ export const openPinned: Open = (hop, { method, headers, signal }) =>
             body = res.pipe(inflate);
           }
         }
+        // An abort can land before anyone reads the body; an 'error' with no
+        // listener would crash the process. Readers still see the error (the
+        // async iterator listens for it too).
+        res.on("error", () => undefined);
+        body.on("error", () => undefined);
         resolve({ status: res.statusCode ?? 0, headers: res.headers, body });
       }
     );

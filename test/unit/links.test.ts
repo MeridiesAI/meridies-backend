@@ -170,3 +170,28 @@ test("a name with any private answer is refused before a request is made", async
     restoreOpener();
   }
 });
+
+test("an abort while the body is unread does not crash, and a reader sees it", async () => {
+  const slow = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.write("partial");
+    // never ends
+  });
+  await new Promise<void>((r) => slow.listen(0, "127.0.0.1", r));
+  const slowPort = (slow.address() as AddressInfo).port;
+  try {
+    const controller = new AbortController();
+    const res = await openPinned(
+      { url: new URL(`http://slow.invalid:${slowPort}/`), pinned: [{ address: "127.0.0.1", family: 4 }] },
+      { method: "GET", headers: {}, signal: controller.signal }
+    );
+    controller.abort();
+    await new Promise((r) => setTimeout(r, 50));
+    await assert.rejects(async () => {
+      for await (const _ of res.body) void _;
+    });
+  } finally {
+    slow.closeAllConnections();
+    slow.close();
+  }
+});
