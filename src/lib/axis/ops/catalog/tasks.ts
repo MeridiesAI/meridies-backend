@@ -346,7 +346,8 @@ export const tasks: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Add a step (a dated stage) to a task.",
-      doc: "{ student_id, task_id, name ≤300, detail? ≤2000|null, due_date? YYYY-MM-DD|null, sequence? 0-100 (next unused position, see tasks.get), done? bool }",
+      // Positions are unique per task and the column defaults to 0, so a step without one collides with the first.
+      doc: "{ student_id, task_id, name ≤300, sequence 0-100 (unused: one past the highest # in tasks.get, 0 if none), detail? ≤2000|null, due_date? YYYY-MM-DD|null, done? bool }",
       input: z
         .object({
           student_id: uuid,
@@ -354,7 +355,7 @@ export const tasks: OpGroup = {
           name: z.string().trim().min(1).max(300),
           detail: z.string().trim().max(2000).nullable().optional(),
           due_date: isoDay.nullable().optional(),
-          sequence: z.number().int().min(0).max(100).optional(),
+          sequence: z.number().int().min(0).max(100),
           done: z.boolean().optional(),
         })
         .strict(),
@@ -379,7 +380,7 @@ export const tasks: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change a task's step: name, detail, date, position, or tick it done.",
-      doc: "{ student_id, step_id, name? ≤300, detail? ≤2000|null, due_date? YYYY-MM-DD|null, sequence? 0-100, done? bool }",
+      doc: "{ student_id, step_id, name? ≤300, detail? ≤2000|null, due_date? YYYY-MM-DD|null, sequence? 0-100 (an unused one), done? bool }",
       input: z
         .object({
           student_id: uuid,
@@ -722,7 +723,7 @@ export const accountability: OpGroup = {
       name: "accountability.set_alert_recipients",
       kind: "write",
       risk: (i) => (i.copy_parents === true || i.copy_student === true ? "confirm" : "auto"),
-      title: "Switch a student's parents on or off for messages and alerts, or copy the student on alerts (switching on asks first).",
+      title: "Turn a student's parents on/off for messages and alerts, or copy the student on alerts.",
       doc: "{ student_id, copy_parents? bool, copy_student? bool, note? ≤1000|null }",
       input: z
         .object({
@@ -827,7 +828,7 @@ export const accountability: OpGroup = {
       name: "accountability.add_guardian",
       kind: "write",
       risk: "confirm",
-      title: "Add a parent or guardian to a student (they get messages, alerts and family reports unless switched off).",
+      title: "Add a parent or guardian (they get messages, alerts and family reports unless switched off).",
       doc: "{ student_id, full_name ≤200, email? (email or phone required), phone? ≤40, relationship? ≤60, preferred_channel?: email|sms|both, alerts_enabled?, receives_reports?, is_primary? }",
       input: z
         .object({

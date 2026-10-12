@@ -5,8 +5,9 @@
  * Activities and Awards & Honors sheets.
  *
  * Adding, moving, recording a decision and editing records run at once with an
- * Undo. These ask first: putting a school in Recommended, or taking one out or
- * putting it back (the student sees the column and the reason); removing a
+ * Undo. These ask first: putting a school in Recommended, taking one out or
+ * putting it back (the student sees the column and the reason); accepting a
+ * recommendation onto the list (no single op reverses it); removing a
  * school (the tasks, aid checklist and net price estimates tied to it go with
  * it); deleting an essay or a sheet row; giving an essay a link (the student
  * can open it); filing a document as an essay (its text is copied into a
@@ -255,7 +256,8 @@ export const collegeList: OpGroup = {
     op({
       name: "college_list.accept_recommendation",
       kind: "write",
-      risk: "auto",
+      // No single op puts this back (the list row and the recommendation's state both change), so it asks.
+      risk: "confirm",
       title: "Move a Recommended school onto the student's college list.",
       doc: "{ student_id, recommendation_id (from college_list.list), stage?: interested|applying|applied, intended_major? ≤200 }",
       input: z
@@ -277,8 +279,9 @@ export const collegeList: OpGroup = {
         return `Add recommended ${schoolLabel(r)} to ${whose(h, r, i.student_id)} college list${i.stage ? ` (${STAGE_LABEL[i.stage]})` : ""}`;
       },
       details: (i) => changeLines(i, { intended_major: "Intended major" }),
-      // No undo: the route marks the recommendation "added", and nothing puts it back in the
-      // column; removing the school alone would take it off the list and out of Recommended both.
+      warning: "The school joins the student's college list and leaves Recommended; there is no Undo.",
+      // No undo: the route marks the recommendation "added". Removing the school alone would take it
+      // off the list and out of Recommended both, which is not where it was.
     }),
     op({
       name: "college_list.move",
@@ -855,6 +858,10 @@ const honorBody = (i: Partial<Record<keyof typeof honorFields, unknown>>) =>
     sort_order: i.sort_order,
   });
 
+/** Card lines for a sheet row: an emptied list reads "cleared", not blank. */
+const sheetLines = (i: Record<string, unknown>, labels: Record<string, string>) =>
+  changeLines(Object.fromEntries(Object.entries(i).map(([k, v]) => [k, Array.isArray(v) && v.length === 0 ? null : v])), labels);
+
 const optional = <T extends Record<string, z.ZodTypeAny>>(fields: T) =>
   Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.optional()])) as { [K in keyof T]: z.ZodOptional<T[K]> };
 
@@ -898,7 +905,7 @@ export const applicationSheets: OpGroup = {
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/application/activities", body: { studentId: i.student_id, ...activityBody(i) } }),
       describe: (i, h) => `Add activity ${i.organization ? `"${plainText(i.organization, 80)}"` : "a row"} to ${h.studentName(i.student_id)}'s Activities sheet`,
-      details: (i) => changeLines(i, ACTIVITY_LABELS),
+      details: (i) => sheetLines(i, ACTIVITY_LABELS),
       undo: (i, body) => {
         const id = idOf(body);
         return id ? { op: "application.delete_activity", input: { student_id: i.student_id, activity_id: id } } : null;
@@ -914,7 +921,7 @@ export const applicationSheets: OpGroup = {
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/application/honors", body: { studentId: i.student_id, ...honorBody(i) } }),
       describe: (i, h) => `Add honor ${i.name ? `"${plainText(i.name, 80)}"` : "a row"} to ${h.studentName(i.student_id)}'s Awards & Honors sheet`,
-      details: (i) => changeLines(i, HONOR_LABELS),
+      details: (i) => sheetLines(i, HONOR_LABELS),
       undo: (i, body) => {
         const id = idOf(body);
         return id ? { op: "application.delete_honor", input: { student_id: i.student_id, honor_id: id } } : null;
@@ -933,7 +940,7 @@ export const applicationSheets: OpGroup = {
         const a = await findActivity(h, i.student_id, i.activity_id);
         return `Update ${activityLabel(a)}${a ? ` on ${h.studentName(i.student_id)}'s Activities sheet` : ""}`;
       },
-      details: (i) => changeLines(i, ACTIVITY_LABELS),
+      details: (i) => sheetLines(i, ACTIVITY_LABELS),
       snapshot: (i, h) => findActivity(h, i.student_id, i.activity_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -969,7 +976,7 @@ export const applicationSheets: OpGroup = {
         const a = await findHonor(h, i.student_id, i.honor_id);
         return `Update ${honorLabel(a)}${a ? ` on ${h.studentName(i.student_id)}'s Awards & Honors sheet` : ""}`;
       },
-      details: (i) => changeLines(i, HONOR_LABELS),
+      details: (i) => sheetLines(i, HONOR_LABELS),
       snapshot: (i, h) => findHonor(h, i.student_id, i.honor_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);

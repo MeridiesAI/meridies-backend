@@ -99,7 +99,9 @@ function hasProseKey(v: unknown, depth = 0): boolean {
 
 export function assertAllowedCall(call: OpCall): void {
   const url = call.url;
-  if (!url.startsWith("/") || url.startsWith("//") || url.includes("..") || /[\s\\#]/.test(url) || /^\/[a-z]+:/i.test(url)) {
+  const rawPath = url.split("?")[0]!;
+  // ".." only matters in the path (a search for "St. Mary..." may carry it in the query).
+  if (!url.startsWith("/") || url.startsWith("//") || rawPath.includes("..") || /[\s\\#]/.test(url) || /^\/[a-z]+:/i.test(url)) {
     throw badRequest(REFUSED_PATH);
   }
   const path = canonicalPath(url);

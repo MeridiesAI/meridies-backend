@@ -295,6 +295,7 @@ export const meetings: OpGroup = {
         if (i.status === "cancelled") return `Cancel ${meetingLabel(m)}${who}`;
         if (i.starts_at) return `Move ${m ? `"${plainText(m.title, 80)}"${m.startsAt ? ` (${sameOffset(m.startsAt, i.starts_at)})` : ""}` : "a meeting"}${who} to ${whenDetail(i.starts_at)}`;
         if (i.status && Object.keys(i).length === 2) return `Mark ${meetingLabel(m)}${who} as ${i.status}`;
+        if (i.attendee_ids && Object.keys(i).length === 2) return `Change who's invited to ${meetingLabel(m)}${who}`;
         return `Update ${meetingLabel(m)}${who}`;
       },
       details: (i, h) => meetingDetails(i, h),

@@ -121,7 +121,7 @@ test("an encoding, a dot segment or a case can't carry a request past the denyli
     "/%61i/essay-advice", "/AXIS/warm", "/Me/settings", "/%6de/settings", "/axis%2fwarm", "/students/x%2f..%2f..%2faxis", "/x//axis/warm",
     "/axis;x/warm", "/axis/warm#x", "/students/%252e%252e", "/%00axis", "/students/\u0000",
   ];
-  for (const url of sneaky) assert.throws(() => assertAllowedCall({ method: "POST", url }), undefined, url);
+  for (const url of sneaky) assert.throws(() => assertAllowedCall({ method: "POST", url }), Error, url);
   const app = buildApp();
   await app.ready();
   try {
