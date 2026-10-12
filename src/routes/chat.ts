@@ -19,6 +19,19 @@ import {
   getChatTool,
   REASONING_SCHEMA,
 } from "../lib/chat.js";
+import {
+  ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_TYPES,
+  attachmentUrl,
+  claimAttachments,
+  fileBlocks,
+  listAttachments,
+  MAX_FILES_PER_MESSAGE,
+  removeChatFiles,
+  startUpload,
+  withFiles,
+  type Attachment,
+} from "../lib/axis/attachments.js";
 import { buildStudentContext } from "../lib/context/index.js";
 import type { ContextUsage } from "../lib/context/types.js";
 import { forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
@@ -62,6 +75,16 @@ const messageSchema = z
     content: z.string().trim().min(1).max(8000),
     tool: z.string().max(40).optional(),
     studentId: z.string().uuid().optional(),
+    /** Files uploaded through POST /conversations/:id/attachments for this message. */
+    attachmentIds: z.array(z.string().uuid()).max(MAX_FILES_PER_MESSAGE).optional(),
+  })
+  .strict();
+
+const attachmentSchema = z
+  .object({
+    fileName: z.string().trim().min(1).max(255),
+    mimeType: z.enum(ATTACHMENT_TYPES),
+    sizeBytes: z.number().int().positive().max(ATTACHMENT_MAX_BYTES),
   })
   .strict();
 
@@ -81,7 +104,7 @@ function toConversation(r: Row) {
   };
 }
 
-function toMessage(r: Row) {
+function toMessage(r: Row, files: Attachment[] = []) {
   const trace = Array.isArray(r.trace) ? (r.trace as Row[]) : [];
   return {
     id: s(r.id),
@@ -92,6 +115,8 @@ function toMessage(r: Row) {
     trace: trace.map((t) => ({ label: s(t.label) })).filter((t) => t.label),
     /** The record sections the answer was grounded in. */
     sources: Array.isArray(r.sources) ? (r.sources as unknown[]).map(s) : [],
+    /** Files sent with this message (open one through GET /chat/attachments/:id/url). */
+    attachments: files.map(({ id, fileName, mimeType, sizeBytes }) => ({ id, fileName, mimeType, sizeBytes })),
     createdAt: s(r.created_at),
   };
 }
@@ -164,9 +189,13 @@ export default async function chatRoutes(app: FastifyInstance) {
       .limit(500);
     if (mErr) throw fromPostgrest(mErr);
 
+    const byMessage = new Map<string, Attachment[]>();
+    for (const a of await listAttachments(request, id)) {
+      if (a.messageId) byMessage.set(a.messageId, [...(byMessage.get(a.messageId) ?? []), a]);
+    }
     return {
       ...toConversation(conv as Row),
-      messages: (messages ?? []).map((m) => toMessage(m as Row)),
+      messages: (messages ?? []).map((m) => toMessage(m as Row, byMessage.get(s((m as Row).id)) ?? [])),
     };
   });
 
@@ -188,10 +217,27 @@ export default async function chatRoutes(app: FastifyInstance) {
   // Delete.
   app.delete("/conversations/:id", { preHandler: [app.authenticate] }, async (request, reply) => {
     const id = paramId(request);
+    await removeChatFiles(request, id);
     const { error } = await request.db.from("ai_conversations").delete().eq("id", id);
     if (error) throw fromPostgrest(error);
     return reply.code(204).send();
   });
+
+  // Attach a file: records it and returns a signed upload URL. The app uploads, then names it when it sends.
+  app.post(
+    "/conversations/:id/attachments",
+    { preHandler: [app.authenticate, limit("chat:attachments", 30, 60, "That's a lot of files at once. Give it a moment.")] },
+    async (request, reply) => {
+      const id = paramId(request);
+      const body = attachmentSchema.parse(request.body);
+      return reply.code(201).send(await startUpload(request, id, body));
+    }
+  );
+
+  // A short-lived link to open a file from the chat.
+  app.get("/attachments/:id/url", { preHandler: [app.authenticate, limit("chat:attachment-url", 120, 60)] }, async (request) =>
+    attachmentUrl(request, paramId(request))
+  );
 
   // Send a message → SSE stream: reasoning steps, then the streamed answer.
   app.post(
@@ -221,13 +267,18 @@ export default async function chatRoutes(app: FastifyInstance) {
       const tool = getChatTool(body.tool ?? (conv.module as string));
 
       // Persist the user's turn and keep the conversation's scope/title fresh.
-      const { error: umErr } = await request.db.from("ai_messages").insert({
-        conversation_id: id,
-        owner_id: request.auth.userId,
-        role: "user",
-        content: body.content,
-      });
+      const { data: userMsg, error: umErr } = await request.db
+        .from("ai_messages")
+        .insert({
+          conversation_id: id,
+          owner_id: request.auth.userId,
+          role: "user",
+          content: body.content,
+        })
+        .select("id")
+        .single();
       if (umErr) throw fromPostgrest(umErr);
+      if (body.attachmentIds?.length) await claimAttachments(request, id, s(userMsg.id), body.attachmentIds);
 
       const convPatch: Record<string, unknown> = { student_id: studentId, module: tool.key };
       if (!conv.title) convPatch.title = body.content.slice(0, 60);
@@ -275,6 +326,12 @@ export default async function chatRoutes(app: FastifyInstance) {
             sources = built?.sources ?? [];
           }
           const system = buildSystemPrompt(tool, studentContext, rosterContext);
+          // The chat's files, every turn: a reopened chat still knows what was in them.
+          const files = await fileBlocks(request, id);
+          const last = turns.at(-1);
+          if (files.blocks.length && last?.role === "user" && typeof last.content === "string") {
+            last.content = withFiles(last.content, files);
+          }
           const trace: { label: string }[] = [];
           if (sources.length > 0) send("sources", { sources });
           if (contextUsage) send("context", contextUsage);
@@ -289,7 +346,9 @@ export default async function chatRoutes(app: FastifyInstance) {
               system:
                 system +
                 "\n\nBefore answering, list the concrete steps you will take, grounded in this student's record.",
-              prompt: `The counselor asked: "${body.content}"\nReturn 2–4 short planning steps.`,
+              prompt: `The counselor asked: "${body.content}"${
+                files.names.length ? `\nFiles attached to the chat (you will read them when answering): ${files.names.join(", ")}.` : ""
+              }\nReturn 2–4 short planning steps.`,
               schema: REASONING_SCHEMA as unknown as Record<string, unknown>,
               toolName: "plan",
               ...(contextUsage ? { contextUsage } : {}),

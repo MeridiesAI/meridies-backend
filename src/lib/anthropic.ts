@@ -241,7 +241,11 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
   }
 }
 
-export type ChatTurn = { role: "user" | "assistant"; content: string };
+/** A turn's content is text, or (the latest user turn, carrying the chat's files) content blocks. */
+export type ChatTurn = { role: "user" | "assistant"; content: string | Anthropic.Messages.ContentBlockParam[] };
+
+const turnChars = (c: ChatTurn["content"]) =>
+  typeof c === "string" ? c.length : c.reduce((n, b) => n + (b.type === "text" ? b.text.length : 0), 0);
 
 /**
  * Streaming chat completion. Unlike runStructured this is multi-turn, free-form
@@ -285,7 +289,11 @@ export async function streamChat(opts: {
         module: "chat",
         model,
         status: "running",
-        input: { promptChars: opts.messages.reduce((n, m) => n + m.content.length, 0), context: opts.contextUsage ?? null },
+        input: {
+          promptChars: opts.messages.reduce((n, m) => n + turnChars(m.content), 0),
+          files: opts.messages.reduce((n, m) => n + (typeof m.content === "string" ? 0 : m.content.filter((b) => b.type !== "text").length), 0),
+          context: opts.contextUsage ?? null,
+        },
       })
       .select("id")
       .single();
