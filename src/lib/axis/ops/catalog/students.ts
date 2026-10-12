@@ -219,6 +219,20 @@ export const students: OpGroup = {
   heading: "Students",
   ops: [
     op({
+      name: "students.archived",
+      kind: "read",
+      title: "Students removed (archived) from your roster, with ids, to restore one with students.unarchive.",
+      doc: "{}",
+      input: z.object({}).strict(),
+      request: () => ({ method: "GET", url: "/students?archived=true" }),
+      reply: (body) =>
+        listReply(
+          asArray(body),
+          (r) => `id ${str(r.id)}: ${untrusted(r.fullName, "roster")}${r.gradYear ? ` · class of ${str(r.gradYear)}` : ""}`,
+          "No archived students."
+        ),
+    }),
+    op({
       name: "students.update",
       kind: "write",
       risk: "auto",

@@ -103,3 +103,19 @@ const statuses = new Set((all.body ?? []).map((a) => a.status));
 check("status=all replays every state", ["confirmed", "failed", "undone", "dismissed"].every((x) => statuses.has(x)), [...statuses].join(","));
 const noConv = await call(c.token, "GET", "/axis/actions?status=all");
 check("status=all needs a conversation", noConv.status === 400, `status ${noConv.status}`);
+
+// ---- "Remove a student": archive on Confirm, find them again, restore them ----------------------
+const archiveCard = await propose("students.archive", { student_id: s.id });
+const archived = await call(c.token, "POST", `/axis/actions/${archiveCard}/confirm`, {});
+check("archiving a student runs on Confirm", archived.status === 200 && archived.body.status === "confirmed", JSON.stringify(archived.body));
+const roster = await call(c.token, "GET", "/students");
+check("they leave the roster", Array.isArray(roster.body) && !roster.body.some((r) => r.id === s.id));
+const archivedList = await call(c.token, "GET", "/students?archived=true");
+check("and are listed as archived", Array.isArray(archivedList.body) && archivedList.body.some((r) => r.id === s.id), JSON.stringify(archivedList.body).slice(0, 160));
+const otherArchived = await call(other.token, "GET", "/students?archived=true");
+check("only to their own counselor", Array.isArray(otherArchived.body) && !otherArchived.body.some((r) => r.id === s.id));
+const restoreCard = await propose("students.unarchive", { student_id: s.id });
+const restored = await call(c.token, "POST", `/axis/actions/${restoreCard}/confirm`, {});
+check("restoring runs on Confirm", restored.status === 200 && restored.body.status === "confirmed", JSON.stringify(restored.body));
+const back = await call(c.token, "GET", "/students");
+check("and they are back on the roster", Array.isArray(back.body) && back.body.some((r) => r.id === s.id));

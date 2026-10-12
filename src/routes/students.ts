@@ -42,14 +42,12 @@ const patchStudentSchema = z
   .strict();
 
 export default async function studentRoutes(app: FastifyInstance) {
-  /** The counselor's roster, each with their next open deadline. */
+  /** The counselor's roster, each with their next open deadline. `?archived=true` lists the archived ones instead (to restore one). */
   app.get("/", { preHandler: [app.authenticate, requireRole("counselor"), limit("students:list", 120, 60)] }, async (request) => {
-    const { data: students, error } = await request.db
-      .from("profiles")
-      .select("*")
-      .eq("counselor_id", request.auth.userId)
-      .is("archived_at", null)
-      .order("full_name");
+    const { archived } = z.object({ archived: z.enum(["true", "false"]).optional() }).parse(request.query ?? {});
+    let query = request.db.from("profiles").select("*").eq("counselor_id", request.auth.userId);
+    query = archived === "true" ? query.not("archived_at", "is", null) : query.is("archived_at", null);
+    const { data: students, error } = await query.order("full_name");
 
     if (error) throw fromPostgrest(error);
     const rows = students ?? [];
