@@ -47,6 +47,8 @@ type DeliveryColumns = {
   family_report_id?: string | null;
   recipient_kind?: "guardian" | "student" | "counselor";
   recipient_id?: string | null;
+  /** The invitation an invite email belongs to, so its counselor can read the status. */
+  invitation_id?: string | null;
 };
 
 type SendEmailArgs = DeliveryColumns & {
@@ -157,6 +159,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       blast_id: args.blast_id ?? null,
       parent_alert_id: args.parent_alert_id ?? null,
       family_report_id: args.family_report_id ?? null,
+      ...(args.invitation_id ? { invitation_id: args.invitation_id } : {}),
       recipient_kind: args.recipient_kind ?? "student",
       recipient_id: args.recipient_id ?? null,
       to_email: to,
@@ -432,6 +435,8 @@ type SendInviteArgs = {
   acceptUrl: string;
   /** Null while the invited student has no account yet. */
   studentId?: string | null;
+  /** The invitation row, logged on the delivery so its counselor can read the status. */
+  invitationId?: string | null;
   logger?: Logger;
   /** v10 sync (overview): the counselor's personal note, e.g. what to send. */
   note?: string | null;
@@ -442,7 +447,7 @@ type SendInviteArgs = {
 export async function sendInviteEmail(
   args: SendInviteArgs
 ): Promise<{ id: string | null; sent: boolean }> {
-  const { to, counselorName, acceptUrl, studentId = null, logger, note = null, audience = "student" } = args;
+  const { to, counselorName, acceptUrl, studentId = null, invitationId = null, logger, note = null, audience = "student" } = args;
   const who = counselorName ?? "Your counselor";
 
   const template: BrandedEmail = {
@@ -467,6 +472,7 @@ export async function sendInviteEmail(
     text: brandedText(template),
     template: "invite",
     student_id: studentId,
+    invitation_id: invitationId,
     recipient_kind: "student",
     logger,
   });

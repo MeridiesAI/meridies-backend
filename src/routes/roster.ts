@@ -244,6 +244,7 @@ export default async function rosterRoutes(app: FastifyInstance) {
             to: email,
             counselorName: request.profile.full_name ?? null,
             acceptUrl: appJoinUrl(token),
+            invitationId: String(invitation.id),
             logger: request.log,
           });
 

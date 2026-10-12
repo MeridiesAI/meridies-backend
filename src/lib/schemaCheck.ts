@@ -20,6 +20,9 @@ export const REQUIRED_SCHEMA: Record<string, string[]> = {
   profiles: ["counselor_approved_at", "counselor_approved_via", "counselor_revoked_at"],
   // 20261017000001: the account review link.
   counselor_access_requests: ["token_hash", "superseded_by"],
+  // 20261018000001: every invite email's delivery row is written with it, and
+  // an insert naming a missing column would drop that row (lib/email.ts).
+  message_deliveries: ["invitation_id"],
 };
 
 /** PostgREST's ways of saying "no such column" and "no such table". */
