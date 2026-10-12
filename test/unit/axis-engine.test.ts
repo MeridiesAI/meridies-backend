@@ -157,3 +157,50 @@ test("two parts the planner couldn't find go to specialists in parallel, then on
   const route = events.find(([e]) => e === "route")?.[1] as { path: string; parts: string[] };
   assert.deepEqual([route.path, route.parts], ["specialists", ["email", "documents"]]);
 });
+
+test("a change request goes to the Clerk, runs through the API as the counselor, and the answer follows", async () => {
+  resetFeatures();
+  const base = fakeRequest(TABLES, ME);
+  const db = base.db;
+  const injected: { method: string; url: string; payload?: string }[] = [];
+  const recorded: Record<string, unknown>[] = [];
+  const actionsTable = {
+    insert(row: Record<string, unknown>) {
+      recorded.push(row);
+      return { select: () => ({ single: async () => ({ data: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, error: null }) }) };
+    },
+    select: () => ({ eq: () => ({ order: () => ({ limit: async () => ({ data: [], error: null }) }) }) }),
+  };
+  const request = Object.assign(base, {
+    auth: { userId: ME, token: "counselor-token" },
+    headers: {},
+    db: { from: (t: string) => (t === "axis_actions" ? actionsTable : db.from(t)), rpc: db.rpc.bind(db) },
+    server: {
+      inject: async (call: { method: string; url: string; payload?: string }) => {
+        injected.push(call);
+        return { statusCode: 201, body: JSON.stringify({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }) };
+      },
+    },
+  });
+  const { api, calls } = scriptedApi([
+    { tools: [{ id: "t1", name: "perform_action", input: { action: "work_queue.add", input: { title: "Call the Martinez family" } } }] },
+    { text: "Added it to My Work Queue." },
+  ]);
+  const ev = collect();
+  const res = await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "Add a to-do to call her family", emit: ev.emit, signal: new AbortController().signal, api });
+  assert.equal(res.understanding.intent, "action");
+  const tools = (calls[0]!.params.tools ?? []).map((t) => (t as { name: string }).name);
+  assert.ok(tools.includes("lookup") && tools.includes("perform_action"), tools.join(","));
+  const system = (calls[0]!.params.system as { text: string }[]).map((b) => b.text).join("\n");
+  assert.match(system, /work_queue\.add/, "the catalog is in the cached system prompt");
+  assert.deepEqual(injected.map((c) => [c.method, c.url]), [["POST", "/work-items"]], JSON.stringify(calls[1]?.params.messages.at(-1)));
+  assert.equal(JSON.parse(injected[0]!.payload!).title, "Call the Martinez family");
+  assert.equal(recorded[0]!.status, "executed");
+  const action = ev.events.find(([e]) => e === "action")?.[1] as { type: string; payload: { status: string; undoable: boolean } };
+  assert.equal(action.type, "operation");
+  assert.equal(action.payload.status, "executed");
+  assert.equal(action.payload.undoable, true);
+  assert.equal(ev.text(), "Added it to My Work Queue.");
+  const toolResult = JSON.stringify(calls[1]!.params.messages.at(-1));
+  assert.match(toolResult, /Done: /);
+});
