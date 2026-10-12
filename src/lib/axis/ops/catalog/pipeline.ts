@@ -4,8 +4,10 @@
  * student; no student or family sees it, so adding a card or a stage,
  * editing one and moving a card run at once. Deleting a card or a stage
  * asks, and so does handing a card to a colleague (its owner can bill the
- * family). Inviting the student and emailing the family send mail, so they
- * ask. Everything in the Payment Tracker is money, so all of it asks.
+ * family), and changing the student's email on a card (a pending invitation
+ * stops being tracked by the card, which Undo can't restore). Inviting the
+ * student and emailing the family send mail, so they ask. Everything in the
+ * Payment Tracker is money, so all of it asks.
  *
  * Replies name a card by its student's name, stage, owner and days in stage,
  * never by an email, phone or address.
@@ -23,6 +25,11 @@ const optionalEmail = z.union([z.literal(""), z.string().trim().toLowerCase().em
 const PLACEHOLDER_NAME = /^(new contact|new student|untitled( contact)?|unnamed|name|student name)$/i;
 const contactName = shortText(200).refine((n) => n.length > 0 && !PLACEHOLDER_NAME.test(n), { message: "Give the contact a name first" });
 const stageName = z.string().trim().min(1).max(120);
+/** At least one of these keys is set (the route answers "Nothing to change", or silently does nothing, otherwise). */
+const someOf =
+  (keys: readonly string[]) =>
+  (i: Record<string, unknown>): boolean =>
+    keys.some((k) => i[k] !== undefined);
 
 const contactFields = {
   student_name: contactName,
@@ -96,7 +103,8 @@ const infoInput = z
     birthday: shortText(20).optional(),
     address: shortText(300).optional(),
   })
-  .strict();
+  .strict()
+  .refine(someOf(Object.keys(INFO)), { message: "Set at least one info field" });
 
 // ---- Reading the board --------------------------------------------------------------
 
@@ -122,6 +130,7 @@ const personName = (b: Board | null, id: unknown) => str(b?.consultants.find((c)
 
 /** Card lines read "cleared" for an empty string, which is how these fields are cleared. */
 const blankToNull = (i: Record<string, unknown>) => Object.fromEntries(Object.entries(i).map(([k, v]) => [k, v === "" ? null : v]));
+
 
 const cardLabel = (c: Rec | null) => (c ? `${plainText(c.studentName, 80)}'s card` : "a pipeline card");
 const familyLabel = (c: Rec | null) => (c ? `${plainText(c.studentName, 80)}'s family` : "a family");
@@ -264,7 +273,10 @@ export const pipeline: OpGroup = {
       risk: "auto",
       title: "Rename a pipeline stage or move it to another lifecycle group.",
       doc: "{ stage_id, name? ≤120, lifecycle_group?: prospect|lead|client|current }",
-      input: z.object({ stage_id: uuid, name: stageName.optional(), lifecycle_group: z.enum(LIFECYCLE_GROUPS).optional() }).strict(),
+      input: z
+        .object({ stage_id: uuid, name: stageName.optional(), lifecycle_group: z.enum(LIFECYCLE_GROUPS).optional() })
+        .strict()
+        .refine(someOf(["name", "lifecycle_group"]), { message: "Give a new name or lifecycle_group" }),
       request: (i) => ({ method: "PATCH", url: `/pipeline/stages/${seg(i.stage_id)}`, body: defined({ name: i.name, lifecycleGroup: i.lifecycle_group }) }),
       describe: async (i, h) => {
         const s = findStage(await loadBoard(h), i.stage_id);
@@ -280,6 +292,7 @@ export const pipeline: OpGroup = {
         if ("lifecycle_group" in i) prev.lifecycle_group = b.lifecycleGroup;
         return { op: "pipeline.update_stage", input: prev };
       },
+      reply: () => "Stage updated.",
     }),
     op({
       name: "pipeline.reorder_stages",
@@ -300,9 +313,10 @@ export const pipeline: OpGroup = {
     op({
       name: "pipeline.update_contact",
       kind: "write",
-      risk: "auto",
-      title: "Edit a pipeline card: names, class year, contact details, next step.",
-      doc: "{ contact_id, student_name? ≤200, grad_year? int|null, student_email?, student_phone? ≤40, parent_name? ≤200, parent_email?, parent_phone? ≤40, next_step? ≤300 }",
+      // A new student email unlinks a pending invitation from the card (routes/pipeline.ts), and no route links it back.
+      risk: (i) => (i.student_email !== undefined ? "confirm" : "auto"),
+      title: "Edit a pipeline card: names, class year, contact details, next step. \"\" clears a text field.",
+      doc: "{ contact_id, student_name? ≤200, grad_year? int|null, student_email? (asks first), student_phone? ≤40, parent_name? ≤200, parent_email?, parent_phone? ≤40, next_step? ≤300 }",
       input: z
         .object({
           contact_id: uuid,
@@ -315,7 +329,8 @@ export const pipeline: OpGroup = {
           parent_phone: contactFields.parent_phone.optional(),
           next_step: contactFields.next_step.optional(),
         })
-        .strict(),
+        .strict()
+        .refine(someOf(Object.keys(CONTACT_KEYS)), { message: "Set at least one field to change" }),
       request: (i) => {
         const body: Record<string, unknown> = {};
         for (const [k, dto] of Object.entries(CONTACT_KEYS)) if ((i as Record<string, unknown>)[k] !== undefined) body[dto] = (i as Record<string, unknown>)[k];
@@ -323,15 +338,20 @@ export const pipeline: OpGroup = {
       },
       describe: async (i, h) => `Update ${cardLabel(findContact(await loadBoard(h), i.contact_id))} in the Contact Pipeline`,
       details: (i) => changeLines(blankToNull(i), CONTACT_LABELS),
+      warning: "If this card's student was already invited, the card stops tracking that invitation; invite them again at the new address to link it.",
       snapshot: async (i, h) => findContact(await loadBoard(h), i.contact_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
         if (!b.id) return null;
+        // The route dropped the card's link to its pending invitation; putting the old address back doesn't restore it.
+        const emailChanged = i.student_email !== undefined && i.student_email !== String(b.studentEmail ?? "").toLowerCase();
+        if (emailChanged && b.invitationId && !b.studentId) return null;
         const prev: Record<string, unknown> = { contact_id: i.contact_id };
         for (const [k, dto] of Object.entries(CONTACT_KEYS)) if (k in i) prev[k] = k === "grad_year" ? (b[dto] ?? null) : String(b[dto] ?? "");
         if ("student_name" in prev && !prev.student_name) return null;
         return { op: "pipeline.update_contact", input: prev };
       },
+      reply: () => "Card updated.",
     }),
     op({
       name: "pipeline.update_contact_info",
@@ -359,6 +379,7 @@ export const pipeline: OpGroup = {
         for (const [k, v] of Object.entries(INFO)) if (k in i) prev[k] = typeof info[v.key] === "string" ? info[v.key] : "";
         return { op: "pipeline.update_contact_info", input: prev };
       },
+      reply: () => "Info card updated.",
     }),
     op({
       name: "pipeline.move_contact",
@@ -379,14 +400,15 @@ export const pipeline: OpGroup = {
         const prev = str(asRecord(before).stageId);
         return prev && prev !== i.stage_id ? { op: "pipeline.move_contact", input: { contact_id: i.contact_id, stage_id: prev } } : null;
       },
+      reply: () => "Card moved.",
     }),
     op({
       name: "pipeline.order_contacts",
       kind: "write",
       risk: "auto",
-      title: "Set the top-to-bottom order of cards in one stage column (cards listed from other stages move into it).",
-      doc: "{ stage_id, contact_ids: [card ids, top first] ≤2000 }",
-      input: z.object({ stage_id: uuid, contact_ids: z.array(uuid).max(2000) }).strict(),
+      title: "Order one stage column top to bottom (list every card in it; a card from another stage moves in).",
+      doc: "{ stage_id, contact_ids: [every card id in that column, top first] 1-2000 }",
+      input: z.object({ stage_id: uuid, contact_ids: z.array(uuid).min(1).max(2000) }).strict(),
       request: (i) => ({ method: "PUT", url: "/pipeline/layout", body: { layout: { [i.stage_id]: i.contact_ids } } }),
       describe: async (i, h) => {
         const b = await loadBoard(h);
@@ -425,6 +447,7 @@ export const pipeline: OpGroup = {
         const prev = str(b.ownerId);
         return prev === (i.owner_id ?? null) ? null : { op: "pipeline.set_owner", input: { contact_id: i.contact_id, owner_id: prev } };
       },
+      reply: () => "Owner set.",
     }),
     op({
       name: "pipeline.invite_contact",
@@ -442,7 +465,7 @@ export const pipeline: OpGroup = {
         const c = findContact(await loadBoard(h), i.contact_id);
         return c?.studentEmail ? [`To: ${plainText(c.studentEmail, 320)}`] : ["No student email on the card yet."];
       },
-      warning: "An invitation email goes to the student's address on the card.",
+      warning: "An invitation email goes to the student's address on the card; an earlier pending invitation from you to that address stops working.",
       reply: (body) => {
         const b = asRecord(body);
         return b.emailSent === false ? "The invitation was created, but the email didn't go out." : "Invitation sent.";
@@ -452,21 +475,20 @@ export const pipeline: OpGroup = {
       name: "pipeline.email_contact",
       kind: "write",
       risk: "confirm",
-      title: "Email a pipeline family (the student, the parent, or both) at the addresses on the card.",
-      doc: "{ contact_id, subject ≤300, body ≤20000 ({first}, {me} fill in), to: [student|parent] 1-2, template_id? }",
+      title: "Email a pipeline family (student, parent or both) at the card's addresses; you write the subject and body.",
+      doc: "{ contact_id, subject ≤300, body ≤20000 ({first}, {me} fill in), to: [student|parent] 1-2 }",
       input: z
         .object({
           contact_id: uuid,
           subject: z.string().trim().min(1).max(300),
           body: z.string().trim().min(1).max(20_000),
           to: z.array(z.enum(["student", "parent"])).min(1).max(2),
-          template_id: uuid.optional(),
         })
         .strict(),
       request: (i) => ({
         method: "POST",
         url: `/pipeline/contacts/${seg(i.contact_id)}/email`,
-        body: defined({ subject: i.subject, body: i.body, to: i.to, templateId: i.template_id }),
+        body: { subject: i.subject, body: i.body, to: i.to },
       }),
       describe: async (i, h) => {
         const c = findContact(await loadBoard(h), i.contact_id);
@@ -505,6 +527,10 @@ export const pipeline: OpGroup = {
         return `Delete stage ${stageLabel(s)} from the Contact Pipeline${n && target && target !== s ? ` (its ${n} card${n === 1 ? "" : "s"} move to ${stageLabel(target)})` : ""}`;
       },
       warning: "The stage is deleted for everyone in the practice; its cards move to the stage before it.",
+      reply: (body) => {
+        const to = str(asRecord(body).movedTo);
+        return to ? `Stage deleted; its cards are now in stage id ${to}.` : "Stage deleted.";
+      },
     }),
     op({
       name: "pipeline.delete_contact",
@@ -526,7 +552,9 @@ const METHODS = PAYMENT_METHODS as [PaymentMethod, ...PaymentMethod[]];
 const cents = (min: number) => z.number().int().min(min).max(100_000_000);
 
 function accountLines(a: Rec): string {
-  const lines = [`contact ${str(a.contactId)}: package ${untrusted(a.packageName)} · ${str(a.status)}`];
+  const lines = [
+    `contact ${str(a.contactId)}: package ${untrusted(a.packageName)} ${usd(a.totalCents)} over ${Number(a.installments ?? 1)} · ${str(a.status)} · billed ${usd(a.billedCents)}, paid ${usd(a.paidCents)}, balance ${usd(a.balanceCents)}${Number(a.overdueCents ?? 0) > 0 ? `, overdue ${usd(a.overdueCents)}` : ""}`,
+  ];
   for (const inv of asArray(a.invoices).slice(0, 20)) {
     lines.push(`  invoice ${str(inv.id)}: #${str(inv.number)} ${untrusted(inv.label)} ${usd(inv.amountCents)} due ${str(inv.dueOn)} [${str(inv.state)}]`);
   }
@@ -602,10 +630,17 @@ export const payments: OpGroup = {
       }),
       describe: async (i, h) =>
         `${i.send === false ? "Record an invoice (not emailed) for" : "Send an invoice to"} ${await familyName(h, i.contact_id)}: "${plainText(i.label, 80)}", ${usd(i.amount_cents)} due ${dayLabel(i.due_on)}`,
-      details: (i) => [i.send === false ? "Recorded only; no email goes out." : "Emailed to the parent (or the student when no parent email is on the card)."],
+      details: async (i, h) => {
+        if (i.send === false) return ["Recorded only; no email goes out."];
+        const c = findContact(await loadBoard(h), i.contact_id);
+        const to = c ? str(c.parentEmail) ?? str(c.studentEmail) : null;
+        return [to ? `Emailed to ${plainText(to, 320)}` : c ? "No email on the card, so it is recorded only." : "Emailed to the parent (or the student when no parent email is on the card)."];
+      },
       warning: "The invoice goes on the family's account and, unless send is false, is emailed to them.",
       undo: (_i, body) => {
         const b = asRecord(body);
+        // Voiding an invoice the family already has in their inbox doesn't tell them; that's a decision, not an undo.
+        if (b.emailSent !== false) return null;
         const inv = asArray(asRecord(b.account).invoices).find((r) => str(r.number) === str(b.invoiceNumber));
         const id = inv ? str(inv.id) : null;
         return id ? { op: "payments.void_invoice", input: { invoice_id: id } } : null;

@@ -3,16 +3,18 @@
  * people (routes/firms.ts) and the Data & privacy switches
  * (routes/settings.ts).
  *
- * Editing a Management task or ticking one off runs at once. Assigning a task
- * asks, because it lands on a consultant's desk (and the risk tier can't tell
- * the counselor's own id from a colleague's), and so do deleting a task and
- * the staff email blast. Everything about the firm (starting one, branding,
- * invitations, seats, removing someone) and every privacy switch is
- * practice-wide, so it asks.
+ * Every Management write asks. Assigning a task lands on a consultant's desk,
+ * and editing or ticking one off can change a colleague's list without
+ * telling them: the assigner and the firm's owners/admins may edit tasks on
+ * other people's lists (RLS), and the risk tier only sees a task id, so it
+ * can't tell the counselor's own task from a colleague's. Deleting a task and
+ * the staff email blast ask too. Everything about the firm (starting one,
+ * branding, invitations, seats, removing someone) and every privacy switch
+ * is practice-wide, so it asks.
  *
- * Replies name people by name and seat only: never an email address. An
- * invitation is found by the address the counselor typed, which the reply
- * doesn't repeat.
+ * Replies and card lines name people by name and seat only: never an email
+ * address (an address shows only in a card's details). An invitation is found
+ * by the address the counselor typed, which the reply doesn't repeat.
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
@@ -108,7 +110,7 @@ export const management: OpGroup = {
       kind: "write",
       risk: "confirm",
       title: "Assign a Management task to a consultant (or yourself), or add a subtask under a task with parent_id.",
-      doc: "{ assignee_id, title ≤300, detail? ≤4000, student_id?, parent_id? (subtask: title only), stages? [{name ≤300, due_on YYYY-MM-DD}] ≤12, notify? bool (email them) }",
+      doc: "{ assignee_id, title ≤300, detail? ≤4000, student_id? (assignee's caseload), parent_id? (subtask: same assignee, no stages/student), stages? [{name, due_on YYYY-MM-DD}] ≤12 (2+ = dated subtasks), notify? bool }",
       input: z
         .object({
           assignee_id: uuid,
@@ -122,7 +124,8 @@ export const management: OpGroup = {
             .optional(),
           notify: z.boolean().optional(),
         })
-        .strict(),
+        .strict()
+        .refine((i) => !(i.parent_id && ((i.stages?.length ?? 0) > 0 || i.student_id)), { message: "A subtask is just a title: leave out stages and student_id" }),
       request: (i) => ({
         method: "POST",
         url: "/management/tasks",
@@ -153,22 +156,29 @@ export const management: OpGroup = {
         const last = i.stages?.length ? i.stages[i.stages.length - 1] : null;
         return `${you ? "Add a Management task for yourself" : `Assign a task to ${who}`}: "${plainText(i.title, 80)}"${student}${last ? `, due ${dayLabel(last.due_on)}` : ""}`;
       },
-      details: (i) => [
-        ...(i.detail ? [plainText(i.detail, 600)] : []),
-        ...(i.stages && i.stages.length > 1 ? i.stages.map((s) => `${plainText(s.name, 120)}: due ${dayLabel(s.due_on)}`) : []),
-        ...(i.notify ? ["They get an email about it."] : []),
-      ],
+      details: async (i, h) => {
+        // The route emails only a colleague, never the counselor assigning to themselves.
+        const you = i.notify ? (await loadConsultants(h)).find((c) => c.id === i.assignee_id)?.isYou === true : false;
+        return [
+          ...(i.detail ? [plainText(i.detail, 600)] : []),
+          ...(i.stages && i.stages.length > 1 ? i.stages.map((s) => `${plainText(s.name, 120)}: due ${dayLabel(s.due_on)}`) : []),
+          ...(i.notify && !you ? ["They get an email about it."] : []),
+        ];
+      },
       warning: "It goes onto that consultant's list in Management; with notify, they're emailed.",
       undo: (_i, body) => {
         const id = idOf(asRecord(body).task);
         return id ? { op: "management.delete_task", input: { task_id: id } } : null;
       },
-      reply: (body) => `Assigned (task id ${idOf(asRecord(body).task) ?? "unknown"}).`,
+      reply: (body) => {
+        const b = asRecord(body);
+        return `Assigned (task id ${idOf(b.task) ?? "unknown"})${b.notified === true ? "; they were emailed" : ""}.`;
+      },
     }),
     op({
       name: "management.update_task",
       kind: "write",
-      risk: "auto",
+      risk: "confirm",
       title: "Change a Management task or subtask, or tick it off with done: true.",
       doc: "{ task_id, title? ≤300, detail? ≤4000|null, due_on? YYYY-MM-DD|null, done? bool }",
       input: z
@@ -179,7 +189,8 @@ export const management: OpGroup = {
           due_on: day.nullable().optional(),
           done: z.boolean().optional(),
         })
-        .strict(),
+        .strict()
+        .refine((i) => i.title !== undefined || i.detail !== undefined || i.due_on !== undefined || i.done !== undefined, { message: "Set at least one field to change" }),
       request: (i) => ({ method: "PATCH", url: `/management/tasks/${seg(i.task_id)}`, body: defined({ title: i.title, detail: i.detail, dueOn: i.due_on, done: i.done }) }),
       describe: async (i, h) => {
         const t = await findTask(h, i.task_id);
@@ -187,6 +198,7 @@ export const management: OpGroup = {
         return only && i.done === true ? `Tick off ${taskLabel(t)}` : only && i.done === false ? `Reopen ${taskLabel(t)}` : `Update ${taskLabel(t)}`;
       },
       details: (i) => changeLines(i, { title: "Title", detail: "Notes", due_on: "Due", done: "Done" }),
+      warning: "If the task is on a colleague's list, it changes there too, and they aren't told.",
       snapshot: async (i, h) => (await findTask(h, i.task_id))?.task ?? null,
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -198,6 +210,7 @@ export const management: OpGroup = {
         if ("done" in i) prev.done = b.done === true;
         return { op: "management.update_task", input: prev };
       },
+      reply: () => "Task updated.",
     }),
     op({
       name: "management.delete_task",
@@ -319,7 +332,13 @@ export const firm: OpGroup = {
       input: z.object({ name: z.string().trim().min(1).max(200) }).strict(),
       request: (i) => ({ method: "POST", url: "/firms", body: { name: i.name } }),
       describe: (i) => `Start a firm called "${plainText(i.name, 80)}" with you as owner`,
-      warning: "You become the owner of a new firm, and your pipeline, payments and Management become the firm's. AxIS can't undo it.",
+      details: () => [
+        "You become the firm's owner. An owner can't leave their own firm, and the app has no way to close one.",
+        "Your solo Contact Pipeline, Payment Tracker and Management tasks stay behind: the firm starts with a fresh board.",
+        "The firm's Data & privacy switches start at the defaults (all on), whatever your solo practice had set.",
+        "Your students stay yours.",
+      ],
+      warning: "This can't be undone: you become the owner of a new firm, your solo pipeline and billing don't move into it, and Data & privacy starts at the defaults (all on).",
       reply: (body) => `Firm started (id ${str(asRecord(body).firmId) ?? "unknown"}).`,
     }),
     op({
@@ -337,7 +356,8 @@ export const firm: OpGroup = {
           accent_color: hexColor.nullable().optional(),
           accent_color_source: z.enum(["default", "logo", "banner", "manual"]).optional(),
         })
-        .strict(),
+        .strict()
+        .refine((i) => Object.keys(BRANDING_KEYS).some((k) => (i as Record<string, unknown>)[k] !== undefined), { message: "Set at least one branding field" }),
       request: (i) => {
         const body: Record<string, unknown> = {};
         for (const [k, dto] of Object.entries(BRANDING_KEYS)) if ((i as Record<string, unknown>)[k] !== undefined) body[dto] = (i as Record<string, unknown>)[k];
@@ -358,6 +378,7 @@ export const firm: OpGroup = {
         if ("name" in prev && !prev.name) return null;
         return Object.keys(prev).length ? { op: "firm.update_branding", input: prev } : null;
       },
+      reply: () => "Branding updated.",
     }),
     op({
       name: "firm.invite",
@@ -367,7 +388,8 @@ export const firm: OpGroup = {
       doc: "{ email, seat_role?: admin|counselor|assistant (default counselor) }",
       input: z.object({ email: z.string().trim().toLowerCase().email().max(320), seat_role: z.enum(SEAT_ROLES).optional() }).strict(),
       request: (i) => ({ method: "POST", url: "/firms/mine/invites", body: defined({ email: i.email, seatRole: i.seat_role }) }),
-      describe: async (i, h) => `Invite ${plainText(i.email, 320)} to join ${await firmName(h)} as ${i.seat_role ?? "counselor"}`,
+      describe: async (i, h) => `Invite a consultant to join ${await firmName(h)} as ${i.seat_role ?? "counselor"}`,
+      details: (i) => [`To: ${plainText(i.email, 320)}`],
       warning: "An invitation email goes out now; it's good for 14 days.",
       undo: (_i, body) => {
         const id = idOf(body);
@@ -395,6 +417,7 @@ export const firm: OpGroup = {
         return inv?.email ? [`To: ${plainText(inv.email, 320)}`] : [];
       },
       warning: "The link in their email stops working.",
+      reply: () => "Invitation revoked.",
     }),
     op({
       name: "firm.set_member_role",
@@ -430,7 +453,7 @@ export const firm: OpGroup = {
         if (people.find((c) => c.id === i.profile_id)?.isYou === true) return `Leave ${name}`;
         return `Remove ${m?.fullName ? plainText(m.fullName, 60) : "a member"} from ${name}`;
       },
-      warning: "They lose the firm's shared pipeline, payments and Management; coming back takes a new invitation.",
+      warning: "They (or you, when leaving) lose the firm's shared pipeline, payments and Management; coming back takes a new invitation.",
     }),
   ],
 };
@@ -454,7 +477,8 @@ export const settings: OpGroup = {
       doc: "{ ai_summaries? bool, auto_parse_documents? bool, students_see_shared_reports? bool }",
       input: z
         .object({ ai_summaries: z.boolean().optional(), auto_parse_documents: z.boolean().optional(), students_see_shared_reports: z.boolean().optional() })
-        .strict(),
+        .strict()
+        .refine((i) => Object.keys(PRIVACY_KEYS).some((k) => (i as Record<string, unknown>)[k] !== undefined), { message: "Set at least one switch" }),
       request: (i) => {
         const body: Record<string, unknown> = {};
         for (const [k, dto] of Object.entries(PRIVACY_KEYS)) if ((i as Record<string, unknown>)[k] !== undefined) body[dto] = (i as Record<string, unknown>)[k];
