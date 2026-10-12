@@ -17,12 +17,13 @@
  * existing `/accountability/guardians` collection.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { inQuietHours, loadSettings, nextSendWindow } from "../lib/accountability.js";
 import { runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { beat } from "../lib/heartbeat.js";
+import { toInviteDelivery, type InviteDelivery } from "../lib/inviteDelivery.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
@@ -79,6 +80,41 @@ function toMessage(r: Row) {
     aiDrafted: r.ai_drafted === true,
     createdAt: String(r.created_at),
   };
+}
+
+/**
+ * Each attempt's status as the provider last reported it. The row's own
+ * `attempts` were frozen when it went out (sent or failed); the delivery
+ * webhooks move message_deliveries on to delivered or bounced, so the list
+ * reads those back (counselor RLS on message_deliveries) rather than calling
+ * a row delivered the provider never confirmed. Never fatal.
+ */
+async function liveAttemptStatus(request: FastifyRequest, rows: Row[]): Promise<Map<string, InviteDelivery>> {
+  const ids = rows
+    .flatMap((r) => (Array.isArray(r.attempts) ? (r.attempts as Row[]) : []))
+    .map((a) => (typeof a.deliveryId === "string" ? a.deliveryId : null))
+    .filter((id): id is string => id !== null);
+  if (ids.length === 0) return new Map();
+  const { data, error } = await request.db
+    .from("message_deliveries")
+    .select("id, status, channel, error, sent_at, delivered_at, created_at")
+    .in("id", ids.slice(0, 500));
+  if (error) {
+    request.log.warn({ code: error.code }, "message delivery status unreadable");
+    return new Map();
+  }
+  const out = new Map<string, InviteDelivery>();
+  for (const d of (data ?? []) as Row[]) {
+    const mapped = toInviteDelivery(d);
+    if (mapped) out.set(String(d.id), mapped);
+  }
+  return out;
+}
+
+function withLiveStatus(attempt: unknown, live: Map<string, InviteDelivery>) {
+  const a = (attempt ?? {}) as Row;
+  const d = typeof a.deliveryId === "string" ? live.get(a.deliveryId) : undefined;
+  return d ? { ...a, status: d.status, deliveredAt: d.deliveredAt, error: d.reason ?? a.error ?? null } : a;
 }
 
 export default async function communicationRoutes(app: FastifyInstance) {
@@ -367,7 +403,12 @@ export default async function communicationRoutes(app: FastifyInstance) {
         .order("created_at", { ascending: false })
         .limit(100);
       if (error) throw fromPostgrest(error);
-      return ((data ?? []) as Row[]).map(toMessage);
+      const rows = (data ?? []) as Row[];
+      const live = await liveAttemptStatus(request, rows);
+      return rows.map((r) => {
+        const m = toMessage(r);
+        return { ...m, attempts: m.attempts.map((a) => withLiveStatus(a, live)) };
+      });
     }
   );
 
