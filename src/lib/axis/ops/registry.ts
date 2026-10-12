@@ -7,7 +7,9 @@
  * and the confirmation routes pick it up from here.
  */
 import type { OpDef, OpGroup, Risk } from "./types.js";
+import { aid, opportunities, scholarships } from "./catalog/aid.js";
 import { applicationEssays, applicationSheets, collegeList } from "./catalog/application.js";
+import { blasts, emailTemplates, familyReports, messages, narrativeFlags, notifications } from "./catalog/communication.js";
 import { colleges, events, resources } from "./catalog/colleges.js";
 import { deadlines } from "./catalog/deadlines.js";
 import { files } from "./catalog/files.js";
@@ -24,6 +26,8 @@ export const GROUPS: readonly OpGroup[] = [
   invites, newStudents, rosterImports,
   tasks, deadlines, workQueue, accountability,
   collegeList, applicationEssays, applicationSheets,
+  aid, scholarships, opportunities,
+  messages, familyReports, narrativeFlags, blasts, emailTemplates, notifications,
   colleges, events, resources,
   files,
   outcomes, referrals, recommendations,
