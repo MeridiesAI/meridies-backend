@@ -695,8 +695,14 @@ the figures above it.
 `lib/links.ts` is the only place this API makes an HTTP request to an address a
 user chose, which makes it the only place that can be turned into server-side
 request forgery. It validates scheme, port and credentials, resolves the host and
-rejects the private/loopback/link-local/carrier-NAT ranges, follows redirects
+rejects the private/loopback/link-local/carrier-NAT ranges (and an IPv4
+address carried inside IPv6: mapped, NAT64, 6to4), follows redirects
 **manually** so every hop is re-validated, and caps time, bytes and content type.
+Each hop resolves DNS once and the socket connects only to those checked
+addresses (`pinnedLookup` on a fresh `node:http`/`https` request, `agent:
+false`), so a name that answers a public address to the check and 127.0.0.1 to
+the connection (DNS rebinding) never reaches the second answer; the hostname
+still goes out as the Host header and TLS server name.
 If another feature ever needs to fetch a user-supplied URL, route it through
 there rather than calling `fetch` directly.
 
