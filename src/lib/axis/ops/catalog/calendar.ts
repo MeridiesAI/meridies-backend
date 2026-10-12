@@ -210,7 +210,7 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.list",
       kind: "read",
-      title: "Meetings with ids, oldest first: one student's (and ones they're invited to), or all of the counselor's. Pass from for upcoming ones.",
+      title: "Meetings with ids, oldest first: a student's (incl. invited) or all the counselor's; pass from for upcoming ones.",
       doc: "{ student_id?, status?: scheduled|held|cancelled|no-show, from? ISO datetime, to? ISO datetime, limit? 1–200 }",
       input: z
         .object({
@@ -246,7 +246,7 @@ export const meetings: OpGroup = {
       kind: "write",
       // Asks when it writes to the connected calendar, or when other students (other families) will see it.
       risk: (i) => (i.create_conference || (i.attendee_ids ?? []).some((id) => id !== i.student_id) ? "confirm" : "auto"),
-      title: "Book a meeting with a student. No invitation is sent; create_conference also puts a Meet/Teams event on the connected calendar.",
+      title: "Book a meeting with a student (no invitation is sent; create_conference adds a Meet/Teams calendar event).",
       doc: "{ student_id, title ≤300, starts_at ISO datetime with offset, ends_at?, mode?: google-meet|teams|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? (other students) ≤30, create_conference? (needs ends_at) }",
       input: z
         .object({
@@ -286,7 +286,7 @@ export const meetings: OpGroup = {
       // Cancelling or a mode change can remove the connected-calendar event; attendee changes show the meeting to other families.
       risk: (i) => (i.status === "cancelled" || i.create_conference || i.mode !== undefined || i.attendee_ids !== undefined ? "confirm" : "auto"),
       title: "Change a meeting: move it, retitle, agenda, mode, who's invited, mark it held/no-show, or cancel it.",
-      doc: "{ meeting_id, title?, starts_at? + ends_at? (move both; ISO with offset), mode?, location?|null, join_url?|null, agenda?|null, guardians_invited?, deadline_id?|null, attendee_ids? (full list), status?: scheduled|held|cancelled|no-show, meeting_note_id?|null, create_conference? bool }",
+      doc: "{ meeting_id, title?, starts_at?+ends_at? (move both; ISO with offset), mode?, location?|null, join_url?|null, agenda?|null, guardians_invited?, deadline_id?|null, attendee_ids? (all), status?: scheduled|held|cancelled|no-show, meeting_note_id?|null, create_conference? }",
       input: meetingUpdateInput,
       request: (i) => ({ method: "PATCH", url: `/meetings/${seg(i.meeting_id)}`, body: meetingBody(i) }),
       describe: async (i, h) => {
@@ -513,7 +513,7 @@ export const calendar: OpGroup = {
     op({
       name: "calendar.list",
       kind: "read",
-      title: "Everything dated in a window (deadlines, meetings, task stages, practice events) with kind and ref ids.",
+      title: "Everything dated in a window (deadlines, meetings, tasks and their steps, practice events) with kind and ref ids.",
       doc: "{ from YYYY-MM-DD, to YYYY-MM-DD (≤400 days), tz? IANA zone, student_id?, include_done? bool, include_cancelled? bool }",
       input: z
         .object({
@@ -708,7 +708,7 @@ export const calendar: OpGroup = {
       kind: "write",
       risk: (i) => (i.shared_with_student === true || typeof i.student_id === "string" ? "confirm" : "auto"),
       title: "Change a practice event: title, date, times, notes, student, type, or share it with the student.",
-      doc: "{ event_id, title?, on_date? YYYY-MM-DD, starts_at?|null, ends_at?|null, detail?|null, student_id?|null, type_id?|null, shared_with_student? bool }",
+      doc: "{ event_id (a milestone id from calendar.list), title?, on_date? YYYY-MM-DD, starts_at?|null, ends_at?|null, detail?|null, student_id?|null, type_id?|null, shared_with_student? bool }",
       input: practiceUpdateInput,
       request: (i) => ({ method: "PATCH", url: `/calendar/events/${seg(i.event_id)}`, body: practiceBody(i) }),
       describe: async (i, h) => {

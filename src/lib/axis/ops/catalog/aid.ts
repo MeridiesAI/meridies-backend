@@ -291,7 +291,16 @@ const lettersUrl = (studentId: string) => `/aid/award-letters${qs({ studentId })
 const itemsUrl = (studentId: string) => `/aid/award-letter-items${qs({ studentId })}`;
 const appealsUrl = (studentId: string) => `/aid/appeals${qs({ studentId })}`;
 
-const letterLabel = (l: Row | null) => (l ? `"${plainText(l.school_name, 80)}"${l.academic_year ? ` (${plainText(l.academic_year, 20)})` : ""} award letter` : "an award letter");
+/** `the "Tufts" (2026-27) award letter`, or what the card says when the id isn't one of this student's letters. */
+const letterLabel = (l: Row | null, studentName: string) =>
+  l
+    ? `the "${plainText(l.school_name, 80)}"${l.academic_year ? ` (${plainText(l.academic_year, 20)})` : ""} award letter`
+    : `an award letter that isn't on ${studentName}'s Financial aid`;
+/** A line item's label for a card line (echoed to the model), any dollar amount in it masked. */
+const itemLabel = (it: Row | null, studentName: string) =>
+  it ? `"${plainText(noFigures(it.label), 80)}"` : `a line item that isn't on ${studentName}'s award letters`;
+const appealLabel = (a: Row | null, studentName: string) =>
+  a ? `the award appeal to "${plainText(a.school_name, 80)}"` : `an award appeal that isn't on ${studentName}'s Financial aid`;
 
 export const aid: OpGroup = {
   heading: "Financial aid",
@@ -323,7 +332,7 @@ export const aid: OpGroup = {
             }${l.appeal_deadline ? ` · appeal by ${str(l.appeal_deadline)}` : ""}${l.student_college_id ? ` · student_college_id ${str(l.student_college_id)}` : ""}`;
             const items = asArray(l.items).map(
               (it) =>
-                `  item id ${str(it.id)}: ${untrusted(it.label)} [${str(it.category)}${it.basis ? `, ${str(it.basis)}` : ""}${
+                `  item id ${str(it.id)}: ${untrusted(noFigures(it.label))} [${str(it.category)}${it.basis ? `, ${str(it.basis)}` : ""}${
                   it.renewable === true ? ", renewable" : it.renewable === false ? ", one-time" : ""
                 }]`
             );
@@ -335,18 +344,16 @@ export const aid: OpGroup = {
     op({
       name: "aid.appeals",
       kind: "read",
-      title: "A student's award appeals with ids and status.",
+      title: "A student's award appeals with ids, school and status.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "GET", url: appealsUrl(i.student_id) }),
+      // The basis and circumstances are the family's situation: not for the model.
       reply: (body) =>
         listReply(
           asArray(body),
-          (a) => {
-            const basis = Array.isArray(a.basis) && a.basis.length ? ` · basis ${untrusted((a.basis as unknown[]).map(String).join(", "))}` : "";
-            return `id ${str(a.id)}: ${untrusted(a.school_name)} [${str(a.status)}]${a.award_letter_id ? ` · award letter ${str(a.award_letter_id)}` : ""}${basis}`;
-          },
+          (a) => `id ${str(a.id)}: ${untrusted(a.school_name)} [${str(a.status)}]${a.award_letter_id ? ` · award letter ${str(a.award_letter_id)}` : ""}`,
           "No award appeals on file."
         ),
     }),
@@ -354,8 +361,8 @@ export const aid: OpGroup = {
       name: "aid.update_forms",
       kind: "write",
       risk: "auto",
-      title: "Set FAFSA and CSS Profile status and due dates, SAI estimate or aid types pursued (FAFSA: status and date only).",
-      doc: "{ student_id, fafsa_status?: not-started|in-progress|submitted, fafsa_due_date? YYYY-MM-DD|null, css_status?: not-started|in-progress|submitted|not-required|not-applicable, css_due_date?|null, css_submitted_at?|null, sai_estimate? int|null, aid_types_pursued? [≤60] }",
+      title: "Set the FAFSA's status and due date (nothing else from it), the CSS Profile's status and dates, or the aid types pursued.",
+      doc: "{ student_id, fafsa_status?: not-started|in-progress|submitted, fafsa_due_date? YYYY-MM-DD|null, css_status?: not-started|in-progress|submitted|not-required|not-applicable, css_due_date?|null, css_submitted_at?|null, aid_types_pursued? [≤60, max 20] }",
       input: z.object(formFields).partial().extend({ student_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PUT", url: "/aid/profile", body: { studentId: i.student_id, ...pick(i, FORM_KEYS) } }),
@@ -363,7 +370,6 @@ export const aid: OpGroup = {
         const parts = [
           Object.keys(i).some((k) => k.startsWith("fafsa_")) ? "FAFSA" : null,
           Object.keys(i).some((k) => k.startsWith("css_")) ? "CSS Profile" : null,
-          "sai_estimate" in i ? "SAI estimate" : null,
           "aid_types_pursued" in i ? "aid types pursued" : null,
         ].filter(Boolean);
         const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0] ?? "aid forms";
@@ -377,15 +383,32 @@ export const aid: OpGroup = {
       name: "aid.update_family",
       kind: "write",
       risk: "auto",
-      title: "Set a student's family financials on the aid page: parent AGI, household, dependency, residence, bands, circumstances.",
-      doc: "{ student_id, parent_agi_cents? int|null, household_size? 1-20, number_in_college? 0-20, dependency_status?: dependent|independent, state_of_residence?, income_band?, assets_band?, home_equity?: renting|under-100k|100k-300k|over-300k|declined, family_business?: none|under-100|100-plus|farm|declined, parent_status?: married|divorced-separated|single|remarried|declined, siblings_in_college?: none|one|two-plus|declined, special_circumstances? ≤4000 (null clears any) }",
+      title: "Set a family's aid figures: parent AGI (cents), SAI estimate, household, number in college, dependency, state, income and asset bands.",
+      doc: "{ student_id, parent_agi_cents? int|null, sai_estimate? -1500..1000000|null, household_size? 1-20|null, number_in_college? 0-20|null, dependency_status?: dependent|independent|null, state_of_residence? ≤60|null, income_band? ≤60|null, assets_band? ≤60|null }",
       input: z.object(familyFields).partial().extend({ student_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PUT", url: "/aid/profile", body: { studentId: i.student_id, ...pick(i, FAMILY_KEYS) } }),
-      describe: (i, h) => `Update ${h.studentName(i.student_id)}'s family financials on the Financial aid page`,
-      details: (i) => [...moneyLines(i, { parent_agi_cents: "Parent AGI" }), ...changeLines(i, FAMILY_LABELS)],
+      describe: (i, h) => `Update ${h.studentName(i.student_id)}'s family figures on the Financial aid page`,
+      details: (i) => [...moneyLines(i, { parent_agi_cents: "Parent AGI" }), ...changeLines(i, { sai_estimate: "SAI estimate", ...FAMILY_LABELS })],
       snapshot: (i, h) => h.get(profileUrl(i.student_id)),
       undo: profileUndo("aid.update_family", FAMILY_KEYS),
+    }),
+    op({
+      name: "aid.update_family_situation",
+      kind: "write",
+      risk: "auto",
+      title: "Set a family's situation for aid: home equity, family business, parents' status, siblings in college, special circumstances.",
+      doc: "{ student_id, home_equity?: renting|under-100k|100k-300k|over-300k|declined|null, family_business?: none|under-100|100-plus|farm|declined|null, parent_status?: married|divorced-separated|single|remarried|declined|null, siblings_in_college?: none|one|two-plus|declined|null, special_circumstances? ≤4000|null }",
+      input: z.object(situationFields).partial().extend({ student_id: uuid }).strict(),
+      takesStudent: true,
+      request: (i) => ({ method: "PUT", url: "/aid/profile", body: { studentId: i.student_id, ...pick(i, SITUATION_KEYS) } }),
+      describe: (i, h) => `Update ${h.studentName(i.student_id)}'s family situation on the Financial aid page`,
+      details: (i) => [
+        ...changeLines(Object.fromEntries(Object.entries(i).filter(([k]) => k !== "special_circumstances")), SITUATION_LABELS),
+        ...("special_circumstances" in i ? [`Special circumstances: ${i.special_circumstances ? plainText(i.special_circumstances, 1500) : "cleared"}`] : []),
+      ],
+      snapshot: (i, h) => h.get(profileUrl(i.student_id)),
+      undo: profileUndo("aid.update_family_situation", SITUATION_KEYS),
     }),
     op({
       name: "aid.set_checklist",
@@ -414,18 +437,26 @@ export const aid: OpGroup = {
         const verb = i.done === null ? "Clear the mark on" : i.done ? "Tick" : "Untick";
         return `${verb} "${CELL_LABEL[i.key]}" for ${school} on ${h.studentName(i.student_id)}'s aid checklist`;
       },
-      details: (i) => ("note" in i ? [i.note ? `Note: ${plainText(i.note, 400)}` : "Note: cleared"] : []),
+      details: (i) => ("note" in i ? [i.note ? `Note: ${plainText(i.note, 1000)}` : "Note: cleared"] : []),
+      // The stored mark itself (GET /aid/checklist): its status says exactly what a tick, an untick or no mark puts back.
       snapshot: async (i, h) => {
-        const s = await findSchool(h, i.student_id, i.student_college_id);
-        const cell = s ? asArray(s.checklist).find((c) => c.key === i.key) : undefined;
-        return cell ? { overridden: cell.overridden === true, done: cell.done === true, note: cell.note ?? null } : null;
+        const rows = await h.get<unknown[]>(`/aid/checklist${qs({ studentId: i.student_id })}`);
+        if (!Array.isArray(rows)) return null;
+        const mark = asArray(rows).find((r) => r.student_college_id === i.student_college_id && r.item === CELL_ITEM[i.key]);
+        return { mark: mark ? { status: str(mark.status), note: str(mark.note) } : null };
       },
       undo: (i, _body, before) => {
-        const b = asRecord(before);
-        if (typeof b.overridden !== "boolean") return null;
+        if (!before) return null;
         const base = { student_id: i.student_id, student_college_id: i.student_college_id, key: i.key };
-        if (!b.overridden) return { op: "aid.set_checklist", input: { ...base, done: null } };
-        return { op: "aid.set_checklist", input: { ...base, done: b.done === true, ...("note" in i ? { note: str(b.note) } : {}) } };
+        const raw = asRecord(before).mark;
+        if (raw === null) return { op: "aid.set_checklist", input: { ...base, done: null } };
+        const mark = asRecord(raw);
+        // A mark set some other way (waived, in progress, not applicable) can't be written back by this op.
+        const done = mark.status === CELL_DONE[i.key] ? true : mark.status === "todo" ? false : null;
+        if (done === null) return null;
+        // Dropping the mark (done: null) took its note with it, so the note goes back too.
+        const note = "note" in i || i.done === null ? { note: str(mark.note) } : {};
+        return { op: "aid.set_checklist", input: { ...base, done, ...note } };
       },
     }),
     op({
@@ -433,11 +464,11 @@ export const aid: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Enter a school's award letter for a student (amounts in integer cents).",
-      doc: "{ student_id, school_name ≤300, student_college_id? (aid.overview), academic_year? ≤20, cost_of_attendance_cents?|null, grants_cents?, scholarships_cents?, work_study_cents?, loans_subsidized_cents?, loans_unsubsidized_cents?, parent_loan_cents?, received_at?, appeal_deadline? YYYY-MM-DD, renewal_requirements?, notes? }",
+      doc: "{ student_id, school_name ≤300, student_college_id?, academic_year? ≤20, cost_of_attendance_cents?|null, grants_cents?, scholarships_cents?, work_study_cents?, loans_subsidized_cents?, loans_unsubsidized_cents?, parent_loan_cents?, received_at? YYYY-MM-DD, appeal_deadline? YYYY-MM-DD, renewal_requirements?, notes? }",
       input: z.object(letterFields).partial().extend({ student_id: uuid, school_name: letterFields.school_name }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/aid/award-letters", body: { studentId: i.student_id, ...pick(i, LETTER_KEYS) } }),
-      describe: (i, h) => `Add "${plainText(i.school_name, 80)}" award letter to ${h.studentName(i.student_id)}'s Financial aid`,
+      describe: (i, h) => `Add the "${plainText(i.school_name, 80)}" award letter to ${h.studentName(i.student_id)}'s Financial aid`,
       details: (i) => [...moneyLines(i, LETTER_MONEY), ...changeLines(i, { academic_year: "Academic year", received_at: "Received", appeal_deadline: "Appeal deadline", renewal_requirements: "Renewal requirements", notes: "Notes" })],
       undo: (i, body) => {
         const id = idOf(body);
@@ -453,7 +484,10 @@ export const aid: OpGroup = {
       input: z.object(letterFields).partial().extend({ student_id: uuid, award_letter_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/aid/award-letters/${seg(i.award_letter_id)}`, body: pick(i, LETTER_KEYS) }),
-      describe: async (i, h) => `Update the ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id))} for ${h.studentName(i.student_id)}`,
+      describe: async (i, h) => {
+        const name = h.studentName(i.student_id);
+        return `Update ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id), name)} for ${name}`;
+      },
       details: (i) => [...changeLines(i, LETTER_LABELS), ...moneyLines(i, LETTER_MONEY)],
       snapshot: (i, h) => findIn(h, lettersUrl(i.student_id), i.award_letter_id),
       undo: (i, _body, before) => {
@@ -473,15 +507,18 @@ export const aid: OpGroup = {
       input: z.object({ student_id: uuid, award_letter_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "DELETE", url: `/aid/award-letters/${seg(i.award_letter_id)}` }),
-      describe: async (i, h) => `Delete the ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id))} from ${h.studentName(i.student_id)}'s Financial aid`,
-      warning: "The letter and its line items are deleted from the comparison.",
+      describe: async (i, h) => {
+        const name = h.studentName(i.student_id);
+        return `Delete ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id), name)} from ${name}'s Financial aid`;
+      },
+      warning: "The letter and its line items are deleted from the comparison; an appeal linked to it loses the link.",
     }),
     op({
       name: "aid.add_award_item",
       kind: "write",
       risk: "auto",
       title: "Add a line item (a grant, scholarship, loan…) to an award letter.",
-      doc: "{ student_id, award_letter_id, label ≤200, category: grant|scholarship|work-study|loan|parent-loan|other, amount_cents int, basis?: need|merit|both|unknown, renewable? bool|null, renewal_note? ≤1000, sort_order? 0-999 }",
+      doc: "{ student_id, award_letter_id (aid.award_letters), label ≤200, category: grant|scholarship|work-study|loan|parent-loan|other, amount_cents int, basis?: need|merit|both|unknown, renewable? bool|null, renewal_note? ≤1000, sort_order? 0-999 }",
       input: z
         .object(itemFields)
         .partial()
@@ -489,8 +526,10 @@ export const aid: OpGroup = {
         .strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/aid/award-letter-items", body: { studentId: i.student_id, ...pick(i, ITEM_KEYS) } }),
-      describe: async (i, h) =>
-        `Add "${plainText(i.label, 80)}" (${i.category}) to the ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id))} for ${h.studentName(i.student_id)}`,
+      describe: async (i, h) => {
+        const name = h.studentName(i.student_id);
+        return `Add "${plainText(noFigures(i.label), 80)}" (${i.category}) to ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id), name)} for ${name}`;
+      },
       details: (i) => [...moneyLines(i, { amount_cents: "Amount" }), ...changeLines(i, { basis: "Basis", renewable: "Renewable", renewal_note: "Renewal note" })],
       undo: (i, body) => {
         const id = idOf(body);
@@ -502,13 +541,13 @@ export const aid: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change an award letter's line item: label, category, basis, amount (integer cents), renewal.",
-      doc: "{ student_id, item_id, label?, category?, basis?, amount_cents?, renewable?|null, renewal_note?, sort_order? }",
+      doc: "{ student_id, item_id (aid.award_letters), label? ≤200, category?, basis?, amount_cents? int, renewable?|null, renewal_note? ≤1000, sort_order? 0-999 }",
       input: z.object(itemFields).omit({ award_letter_id: true }).partial().extend({ student_id: uuid, item_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/aid/award-letter-items/${seg(i.item_id)}`, body: pick(i, ITEM_KEYS) }),
       describe: async (i, h) => {
-        const it = await findIn(h, itemsUrl(i.student_id), i.item_id);
-        return `Update ${it ? `"${plainText(it.label, 80)}"` : "a line item"} on an award letter for ${h.studentName(i.student_id)}`;
+        const name = h.studentName(i.student_id);
+        return `Update ${itemLabel(await findIn(h, itemsUrl(i.student_id), i.item_id), name)} on an award letter for ${name}`;
       },
       details: (i) => [...changeLines(i, ITEM_LABELS), ...moneyLines(i, { amount_cents: "Amount" })],
       snapshot: (i, h) => findIn(h, itemsUrl(i.student_id), i.item_id),
@@ -530,8 +569,8 @@ export const aid: OpGroup = {
       takesStudent: true,
       request: (i) => ({ method: "DELETE", url: `/aid/award-letter-items/${seg(i.item_id)}` }),
       describe: async (i, h) => {
-        const it = await findIn(h, itemsUrl(i.student_id), i.item_id);
-        return `Delete ${it ? `"${plainText(it.label, 80)}"` : "a line item"} from an award letter for ${h.studentName(i.student_id)}`;
+        const name = h.studentName(i.student_id);
+        return `Delete ${itemLabel(await findIn(h, itemsUrl(i.student_id), i.item_id), name)} from an award letter for ${name}`;
       },
       warning: "The line item is deleted; the letter's merit, need and renewable totals change with it.",
     }),
@@ -545,7 +584,10 @@ export const aid: OpGroup = {
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/aid/appeals", body: { studentId: i.student_id, ...pick(i, APPEAL_KEYS) } }),
       describe: (i, h) => `Log an award appeal to "${plainText(i.school_name, 80)}" for ${h.studentName(i.student_id)}`,
-      details: (i) => changeLines(i, { status: "Status", basis: "Basis", circumstances: "Circumstances" }),
+      details: (i) => [
+        ...changeLines(i, { status: "Status", basis: "Basis" }),
+        ...("circumstances" in i ? [`Circumstances: ${plainText(i.circumstances, 1500)}`] : []),
+      ],
       undo: (i, body) => {
         const id = idOf(body);
         return id ? { op: "aid.delete_appeal", input: { student_id: i.student_id, appeal_id: id } } : null;
@@ -556,15 +598,18 @@ export const aid: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Update an award appeal: status, basis, circumstances, school or linked letter.",
-      doc: "{ student_id, appeal_id, status?: draft|counselor-review|approved|sent|declined, basis? [], circumstances? ≤8000, school_name?, award_letter_id?|null, student_college_id?|null }",
+      doc: "{ student_id, appeal_id (aid.appeals), status?: draft|counselor-review|approved|sent|declined, basis? [≤80, max 10], circumstances? ≤8000, school_name? ≤300, award_letter_id?|null, student_college_id?|null }",
       input: z.object(appealFields).partial().extend({ student_id: uuid, appeal_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/aid/appeals/${seg(i.appeal_id)}`, body: pick(i, APPEAL_KEYS) }),
       describe: async (i, h) => {
-        const a = await findIn(h, appealsUrl(i.student_id), i.appeal_id);
-        return `Update the award appeal${a ? ` to "${plainText(a.school_name, 80)}"` : ""} for ${h.studentName(i.student_id)}`;
+        const name = h.studentName(i.student_id);
+        return `Update ${appealLabel(await findIn(h, appealsUrl(i.student_id), i.appeal_id), name)} for ${name}`;
       },
-      details: (i) => changeLines(i, APPEAL_LABELS),
+      details: (i) => [
+        ...changeLines(Object.fromEntries(Object.entries(i).filter(([k]) => k !== "circumstances")), APPEAL_LABELS),
+        ...("circumstances" in i ? [`Circumstances: ${plainText(i.circumstances, 1500)}`] : []),
+      ],
       snapshot: (i, h) => findIn(h, appealsUrl(i.student_id), i.appeal_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -584,8 +629,8 @@ export const aid: OpGroup = {
       takesStudent: true,
       request: (i) => ({ method: "DELETE", url: `/aid/appeals/${seg(i.appeal_id)}` }),
       describe: async (i, h) => {
-        const a = await findIn(h, appealsUrl(i.student_id), i.appeal_id);
-        return `Delete the award appeal${a ? ` to "${plainText(a.school_name, 80)}"` : ""} for ${h.studentName(i.student_id)}`;
+        const name = h.studentName(i.student_id);
+        return `Delete ${appealLabel(await findIn(h, appealsUrl(i.student_id), i.appeal_id), name)} for ${name}`;
       },
       warning: "The appeal is deleted, with any letter drafted for it.",
     }),
@@ -627,10 +672,26 @@ const PREFS_LABELS = {
 const scanUrl = (studentId: string) => `/student-aid/${seg(studentId)}/scholarships/scan`;
 const matchesUrl = (studentId: string) => `/aid/scholarships${qs({ studentId })}`;
 
-/** A catalog scholarship from the student's scan (matches, then the ones timing held back). */
-async function findScholarship(h: Get, studentId: string, scholarshipId: string): Promise<Row | null> {
-  const scan = asRecord(await h.get(scanUrl(studentId)));
-  return asArray(scan.matches).find((m) => m.id === scholarshipId) ?? asArray(scan.held).find((m) => m.id === scholarshipId) ?? null;
+/**
+ * A catalog scholarship by id, for the card and the undo: from the student's
+ * scan (matches, then the ones timing held back), else their own list. On the
+ * student's list ("recommended") means a match row that isn't suggested or
+ * dismissed, as lib/studentAid.ts reads it; the list leaves dismissed rows out,
+ * so no row on either read means not recommended. Null when a read failed.
+ */
+async function findScholarship(
+  h: Get,
+  studentId: string,
+  scholarshipId: string
+): Promise<{ row: Row | null; recommended: boolean | null; match: Row | null }> {
+  const [scan, list] = await Promise.all([h.get(scanUrl(studentId)), h.get<unknown[]>(matchesUrl(studentId))]);
+  const s = asRecord(scan);
+  const scanned = asArray(s.matches).find((m) => m.id === scholarshipId) ?? null;
+  const held = asArray(s.held).find((m) => m.id === scholarshipId) ?? null;
+  const match = asArray(list).find((m) => m.scholarship_id === scholarshipId) ?? null;
+  const recommended =
+    scanned && typeof scanned.recommended === "boolean" ? scanned.recommended : match ? match.status !== "suggested" : scan && Array.isArray(list) ? false : null;
+  return { row: scanned ?? held ?? match, recommended, match };
 }
 
 export const scholarships: OpGroup = {
@@ -668,7 +729,7 @@ export const scholarships: OpGroup = {
     op({
       name: "scholarships.list",
       kind: "read",
-      title: "The scholarships on a student's own list (recommended, applying, won…) with match ids.",
+      title: "The scholarship matches on a student's list with match ids and status (saved, applying, applied, awarded are on their side).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
       takesStudent: true,
@@ -677,9 +738,9 @@ export const scholarships: OpGroup = {
         listReply(
           asArray(body),
           (m) =>
-            `id ${str(m.id)}: ${untrusted(m.name)}${m.sponsor ? ` · ${untrusted(m.sponsor)}` : ""} [${str(m.status)}]${m.deadline ? ` · deadline ${str(m.deadline)}` : ""}${
-              m.scholarship_id ? ` · scholarship_id ${str(m.scholarship_id)}` : ""
-            }`,
+            `id ${str(m.id)}: ${untrusted(m.name)}${m.sponsor ? ` · ${untrusted(m.sponsor)}` : ""} [${str(m.status)}${m.status === "suggested" ? ", not on the student's side" : ""}]${
+              m.deadline ? ` · deadline ${str(m.deadline)}` : ""
+            }${m.scholarship_id ? ` · scholarship_id ${str(m.scholarship_id)}` : ""}`,
           "No scholarships on the student's list."
         ),
     }),
@@ -731,44 +792,59 @@ export const scholarships: OpGroup = {
         body: { recommended: i.recommended },
       }),
       describe: async (i, h) => {
-        const s = await findScholarship(h, i.student_id, i.scholarship_id);
-        const what = s ? `"${plainText(s.name, 80)}"` : "a scholarship";
+        const { row } = await findScholarship(h, i.student_id, i.scholarship_id);
+        const what = row ? `"${plainText(row.name, 80)}"` : "a scholarship";
         const name = h.studentName(i.student_id);
         return i.recommended ? `Recommend ${what} to ${name}` : `Take back the recommendation of ${what} from ${name}`;
       },
       details: async (i, h) => {
-        const s = await findScholarship(h, i.student_id, i.scholarship_id);
-        if (!s) return [];
+        const { row: s } = await findScholarship(h, i.student_id, i.scholarship_id);
+        const amount = s ? s.amountCents ?? s.amount_cents : null;
         return [
-          ...(s.sponsor ? [`Sponsor: ${plainText(s.sponsor, 120)}`] : []),
-          ...(s.deadline ? [`Deadline: ${dayLabel(s.deadline)}`] : []),
-          ...(s.amountCents != null ? [`Award: ${dollars(s.amountCents)}`] : []),
+          ...(s?.sponsor ? [`Sponsor: ${plainText(s.sponsor, 120)}`] : []),
+          ...(s?.deadline ? [`Deadline: ${dayLabel(s.deadline)}`] : []),
+          ...(amount != null ? [`Award: ${dollars(amount)}`] : []),
+          ...(s ? [] : ["Scholarship: not found in this student's matches or list; check the id with scholarships.find"]),
           `The student: ${i.recommended ? "sees it on their own scholarship list" : "no longer sees it on their list"}`,
         ];
       },
       warning: "A recommended scholarship shows on the student's own list; taking one back removes it.",
       snapshot: async (i, h) => {
-        const s = await findScholarship(h, i.student_id, i.scholarship_id);
-        return s && typeof s.recommended === "boolean" ? { recommended: s.recommended } : null;
+        const { recommended, match } = await findScholarship(h, i.student_id, i.scholarship_id);
+        return recommended === null ? null : { recommended, matchId: match ? str(match.id) : null, status: match ? str(match.status) : null };
       },
       undo: (i, _body, before) => {
         const b = asRecord(before);
         if (typeof b.recommended !== "boolean" || b.recommended === i.recommended) return null;
+        // A match the counselor had only as a suggestion goes back to being one, not to dismissed.
+        if (i.recommended && b.status === "suggested" && typeof b.matchId === "string") {
+          return { op: "scholarships.set_status", input: { student_id: i.student_id, match_id: b.matchId, status: "suggested" } };
+        }
         return { op: "scholarships.recommend", input: { student_id: i.student_id, scholarship_id: i.scholarship_id, recommended: b.recommended } };
       },
     }),
     op({
       name: "scholarships.set_status",
       kind: "write",
-      risk: (i) => (i.status === "applying" || i.status === "applied" || i.status === "awarded" ? "auto" : "confirm"),
-      title: "Move a scholarship on the student's list (applying, applied, awarded at once; saved, suggested, dismissed ask first).",
+      risk: "confirm",
+      title: "Move a scholarship match on the student's list: saved, applying, applied, awarded (on their side), or suggested, dismissed (off it).",
       doc: "{ student_id, match_id (scholarships.list), status: suggested|saved|applying|applied|awarded|dismissed }",
       input: z.object({ student_id: uuid, match_id: uuid, status: z.enum(MATCH_STATUS) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/aid/scholarships/${seg(i.match_id)}`, body: { status: i.status } }),
       describe: async (i, h) => {
         const m = await findIn(h, matchesUrl(i.student_id), i.match_id);
-        return `Set ${m ? `"${plainText(m.name, 80)}"` : "a scholarship"} to ${i.status} on ${h.studentName(i.student_id)}'s list`;
+        const name = h.studentName(i.student_id);
+        return `Set ${m ? `"${plainText(m.name, 80)}"` : `a scholarship that isn't on ${name}'s list`} to ${i.status} on ${name}'s list`;
+      },
+      details: async (i, h) => {
+        const m = await findIn(h, matchesUrl(i.student_id), i.match_id);
+        const was = m ? str(m.status) : null;
+        const onSide = (s: string | null) => !!s && s !== "suggested" && s !== "dismissed";
+        const lines = was ? [`Now: ${was}`] : [];
+        if (onSide(i.status) && !onSide(was)) lines.push("The student: sees it on their own scholarship list from now on");
+        else if (!onSide(i.status) && onSide(was)) lines.push("The student: no longer sees it on their list");
+        return lines;
       },
       warning: "This changes what the student sees on their own scholarship list.",
       snapshot: async (i, h) => {
@@ -798,7 +874,7 @@ export const opportunities: OpGroup = {
     op({
       name: "opportunities.list",
       kind: "read",
-      title: "A student's program and opportunity recommendations with ids and status (optionally one status).",
+      title: "A student's program and opportunity recommendations with ids and status (sent, saved, applied are on their side).",
       doc: "{ student_id, status?: suggested|counselor-review|approved|sent|saved|applied|dismissed }",
       input: z.object({ student_id: uuid, status: z.enum(OPP_STATUS).optional() }).strict(),
       takesStudent: true,
@@ -813,9 +889,11 @@ export const opportunities: OpGroup = {
     op({
       name: "opportunities.update",
       kind: "write",
-      risk: (i) => (i.status !== undefined && STUDENT_SEES.has(i.status) ? "confirm" : "auto"),
-      title: "Approve, dismiss or edit a program recommendation (status sent, saved or applied asks first: the student then sees it).",
-      doc: "{ student_id, match_id, status?: suggested|counselor-review|approved|sent|saved|applied|dismissed, why_fit? ≤500, summary? ≤500, deadline? YYYY-MM-DD|null }",
+      // A sent recommendation is on the student's side, and an input can't tell whether this one is:
+      // an edit, a dismissal or a status change may be what the student sees next.
+      risk: "confirm",
+      title: "Approve, dismiss or re-status a program recommendation, or edit why it fits, its summary or deadline.",
+      doc: "{ student_id, match_id (opportunities.list), status?: suggested|counselor-review|approved|sent|saved|applied|dismissed, why_fit? ≤500, summary? ≤500, deadline? YYYY-MM-DD|null }",
       input: z
         .object({
           student_id: uuid,
@@ -834,19 +912,28 @@ export const opportunities: OpGroup = {
       }),
       describe: async (i, h) => {
         const m = await findIn(h, oppUrl(i.student_id), i.match_id);
-        const what = m ? `"${plainText(m.name, 80)}"` : "a program recommendation";
         const name = h.studentName(i.student_id);
+        const what = m ? `"${plainText(m.name, 80)}"` : `a program recommendation that isn't on ${name}'s list`;
         const keys = Object.keys(i).filter((k) => k !== "student_id" && k !== "match_id");
         if (keys.length === 1 && i.status === "approved") return `Approve ${what} for ${name}`;
         if (keys.length === 1 && i.status === "dismissed") return `Dismiss ${what} for ${name}`;
         return `Update ${what} for ${name}`;
       },
-      details: (i) => {
-        const lines = changeLines(i, { status: "Status", why_fit: "Why it fits", summary: "Summary", deadline: "Deadline" });
-        if (i.status !== undefined && STUDENT_SEES.has(i.status)) lines.push("The student sees it from now on (without the notification or calendar deadline that Send adds)");
+      details: async (i, h) => {
+        const m = await findIn(h, oppUrl(i.student_id), i.match_id);
+        const lines = changeLines(i, { status: "Status", deadline: "Deadline" });
+        if (i.why_fit !== undefined) lines.push(`Why it fits: ${plainText(i.why_fit, 600)}`);
+        if (i.summary !== undefined) lines.push(`Summary: ${plainText(i.summary, 600)}`);
+        const was = m ? str(m.status) : null;
+        const seesNow = was ? STUDENT_SEES.has(was) : false;
+        const seesAfter = i.status !== undefined ? STUDENT_SEES.has(i.status) : seesNow;
+        if (was) lines.unshift(`Now: ${was}`);
+        if (!seesNow && seesAfter) lines.push("The student: sees it from now on (without the notification or calendar deadline that Send adds)");
+        else if (seesNow && !seesAfter) lines.push("The student: no longer sees it");
+        else if (seesNow) lines.push("The student: already sees this recommendation, and sees the change");
         return lines;
       },
-      warning: "The student sees this recommendation from now on.",
+      warning: "The student sees a recommendation once it is sent; this can change what they see.",
       snapshot: (i, h) => findIn(h, oppUrl(i.student_id), i.match_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -877,16 +964,25 @@ export const opportunities: OpGroup = {
       }),
       describe: (i, h) =>
         `Send ${i.match_ids.length === 1 ? "a program recommendation" : `${i.match_ids.length} program recommendations`} to ${h.studentName(i.student_id)}`,
+      // The notification as routes/opportunities.ts writes it: its title from the matches found for this student, the note as its body.
       details: async (i, h) => {
+        const name = h.studentName(i.student_id);
         const rows = asArray(await h.get<unknown[]>(oppUrl(i.student_id)));
-        const names = i.match_ids.map((id) => {
-          const m = rows.find((r) => r.id === id);
-          return m ? `${plainText(m.name, 80)}${m.deadline ? ` (deadline ${dayLabel(m.deadline)}, added to their calendar)` : ""}` : "an unknown recommendation (not on this student's list)";
-        });
+        const found = i.match_ids.map((id) => rows.find((r) => r.id === id) ?? null);
+        const known = found.filter((m): m is Row => m !== null);
+        const subject = !known.length
+          ? "(none of these is on this student's list, so nothing would be sent)"
+          : known.length === 1
+            ? `Your counselor recommended ${plainText(known[0]!.name, 120)}`
+            : `Your counselor sent ${known.length} program recommendations`;
+        const listed = found.map((m) =>
+          m ? `${plainText(m.name, 80)}${m.deadline ? ` (deadline ${dayLabel(m.deadline)}: "Apply: …" goes on their calendar)` : ""}` : "an id that isn't on this student's list (skipped)"
+        );
         return [
-          `To: Student — ${h.studentName(i.student_id)} (a notification in Meridies)`,
-          `Recommendations: ${names.join("; ")}`,
-          `Message: ${i.note ? plainText(i.note, 1500) : "Open your dashboard to see why each one fits and how to apply."}`,
+          `To: ${name}, the student (an in-app notification; no email or text)`,
+          `Subject: ${subject}`,
+          `Body: ${i.note ?? "Open your dashboard to see why each one fits and how to apply."}`,
+          `Recommendations: ${listed.join("; ")}`,
         ];
       },
       warning: "The student is notified now and each dated recommendation lands on their calendar; it can't be unsent.",

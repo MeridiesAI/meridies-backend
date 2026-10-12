@@ -6,12 +6,20 @@
  * notice) and puts its dated steps on their calendar, so it asks first; a
  * task created hidden (`visible_to_student: false`) tells nobody and runs at
  * once. Sharing a hidden task later, re-sending the assignment and deleting
- * one ask. Editing a task, its steps or its attached files runs at once.
+ * one (or a step, or an attached file) ask. Editing a task or its steps and
+ * attaching files run at once.
  *
- * Accountability: a red flag reaches the student at once and can escalate to
- * the parents, and a parent alert goes to the family, so both ask. So do the
- * alert settings and recipients that decide who hears, and the guardians the
- * alerts go to. Red-flag and parent-alert text never comes back in a lookup.
+ * Accountability: a red flag reaches the student at once and its title and
+ * message escalate to the parents, so raising one asks, and so does closing
+ * one (it can't be reopened). So do the settings and switches that decide who
+ * hears, turning a family contact on, and adding or removing a guardian.
+ * Red-flag text never reaches the model, not even in a card's summary; a
+ * guardian reaches it as an id, a relationship and on/off flags only.
+ *
+ * Writing to the family is the Communication composer's (`messages.send`):
+ * the older parent-alert route (POST /accountability/parent-alerts) is left
+ * out, because it would send outside the Communication history the app shows
+ * and could text parents, which the composer doesn't.
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
@@ -275,7 +283,7 @@ export const tasks: OpGroup = {
         const dated = asArray(t.stages).filter((s) => s.dueDate).length;
         return [
           `Sent to the student by: ${notifyChannels(t.notifyEmail === true, t.notifySms === true)}`,
-          ...(dated ? [`${dated} dated step${dated === 1 ? "" : "s"} go on the student's calendar.`] : []),
+          ...(dated ? [`${dated} dated step${dated === 1 ? " goes" : "s go"} on the student's calendar.`] : []),
           ...(t.instructions ? [`Instructions: ${plainText(t.instructions, 800)}`] : []),
         ];
       },
@@ -626,7 +634,7 @@ export const accountability: OpGroup = {
     op({
       name: "accountability.list_guardians",
       kind: "read",
-      title: "A student's guardians with ids, relationship and whether they get alerts (no contact details).",
+      title: "A student's guardians with ids, relationship and what they receive (no names or contact details).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
       takesStudent: true,
@@ -636,7 +644,7 @@ export const accountability: OpGroup = {
         listReply(
           asArray(body),
           (g) =>
-            `id ${str(g.id)}: ${untrusted(g.relationship || "guardian", "guardian")}${g.is_primary ? ", primary" : ""} · alerts ${g.alerts_enabled ? "on" : "off"} · reports ${g.receives_reports ? "on" : "off"} · prefers ${str(g.preferred_channel) ?? "email"} · ${g.email ? "email on file" : "no email"}, ${g.phone ? "phone on file" : "no phone"}`,
+            `id ${str(g.id)}: ${untrusted(g.relationship || "guardian", "guardian")}${g.is_primary ? ", primary" : ""} · messages and alerts ${g.alerts_enabled ? "on" : "off"} · reports ${g.receives_reports ? "on" : "off"} · prefers ${str(g.preferred_channel) ?? "email"} · ${g.email ? "email on file" : "no email"}, ${g.phone ? "phone on file" : "no phone"}`,
           "No guardians on file."
         ),
     }),
@@ -714,7 +722,7 @@ export const accountability: OpGroup = {
       name: "accountability.set_alert_recipients",
       kind: "write",
       risk: (i) => (i.copy_parents === true || i.copy_student === true ? "confirm" : "auto"),
-      title: "Choose who gets a student's alerts: parents, the student, or both (switching on asks first).",
+      title: "Switch a student's parents on or off for messages and alerts, or copy the student on alerts (switching on asks first).",
       doc: "{ student_id, copy_parents? bool, copy_student? bool, note? ≤1000|null }",
       input: z
         .object({
@@ -730,9 +738,9 @@ export const accountability: OpGroup = {
         url: "/accountability/alert-prefs",
         body: defined({ studentId: i.student_id, copyParents: i.copy_parents, copyStudent: i.copy_student, note: i.note }),
       }),
-      describe: (i, h) => `Change who gets alerts about ${h.studentName(i.student_id)}`,
-      details: (i) => changeLines(i, { copy_parents: "Parents get alerts", copy_student: "Student is copied", note: "Note" }),
-      warning: "Alerts about this student will go to whoever is switched on here.",
+      describe: (i, h) => `Change who hears about ${h.studentName(i.student_id)}`,
+      details: (i) => changeLines(i, { copy_parents: "Parents get messages and alerts", copy_student: "Student copied on alerts", note: "Note (the student can read it)" }),
+      warning: "Messages and alerts about this student go to whoever is switched on here.",
       snapshot: (i, h) => h.get(`/accountability/alert-prefs${qs({ studentId: i.student_id })}`),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -819,7 +827,7 @@ export const accountability: OpGroup = {
       name: "accountability.add_guardian",
       kind: "write",
       risk: "confirm",
-      title: "Add a parent or guardian to a student (they receive alerts and family reports unless switched off).",
+      title: "Add a parent or guardian to a student (they get messages, alerts and family reports unless switched off).",
       doc: "{ student_id, full_name ≤200, email? (email or phone required), phone? ≤40, relationship? ≤60, preferred_channel?: email|sms|both, alerts_enabled?, receives_reports?, is_primary? }",
       input: z
         .object({
@@ -833,7 +841,9 @@ export const accountability: OpGroup = {
           receives_reports: z.boolean().optional(),
           is_primary: z.boolean().optional(),
         })
-        .strict(),
+        .strict()
+        // The table needs a way to reach them (guardians_need_a_channel).
+        .refine((i) => Boolean(i.email) || Boolean(i.phone), { message: "give an email or a phone number", path: ["email"] }),
       takesStudent: true,
       request: (i) => ({
         method: "POST",
@@ -852,7 +862,7 @@ export const accountability: OpGroup = {
       }),
       describe: (i, h) => `Add a guardian (${plainText(i.relationship, 40) || "parent or guardian"}) for ${h.studentName(i.student_id)}`,
       details: (i) => changeLines(i, GUARDIAN_LABELS),
-      warning: "They start receiving this student's alerts and family reports unless those are switched off.",
+      warning: "They start receiving messages, alerts and family reports about this student unless those are switched off.",
       undo: (i, body) => {
         const id = idOf(body);
         return id ? { op: "accountability.remove_guardian", input: { student_id: i.student_id, guardian_id: id } } : null;
@@ -896,13 +906,14 @@ export const accountability: OpGroup = {
       }),
       describe: async (i, h) => {
         const g = await findGuardian(h, i.student_id, i.guardian_id);
-        return `Update ${g ? `a guardian (${relationshipOf(g)})` : "a guardian"} of ${h.studentName(i.student_id)}`;
+        // The route finds the guardian by id whatever student_id says; name the student only when the guardian is theirs.
+        return `Update ${g ? `a guardian (${relationshipOf(g)}) of ${h.studentName(i.student_id)}` : "a guardian"}`;
       },
       details: async (i, h) => {
         const g = await findGuardian(h, i.student_id, i.guardian_id);
         return [...(g ? [`Guardian: ${plainText(g.full_name, 80)}`] : []), ...changeLines(i, GUARDIAN_LABELS)];
       },
-      warning: "Alerts and family reports for this student go by these details.",
+      warning: "Messages, alerts and family reports about this student go by these details.",
       snapshot: (i, h) => findGuardian(h, i.student_id, i.guardian_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -927,13 +938,13 @@ export const accountability: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/accountability/guardians/${seg(i.guardian_id)}` }),
       describe: async (i, h) => {
         const g = await findGuardian(h, i.student_id, i.guardian_id);
-        return `Remove ${g ? `a guardian (${relationshipOf(g)})` : "a guardian"} from ${h.studentName(i.student_id)}'s record`;
+        return `Remove ${g ? `a guardian (${relationshipOf(g)}) from ${h.studentName(i.student_id)}'s record` : "a guardian"}`;
       },
       details: async (i, h) => {
         const g = await findGuardian(h, i.student_id, i.guardian_id);
         return g ? [`Guardian: ${plainText(g.full_name, 80)}`] : [];
       },
-      warning: "They stop receiving this student's alerts and family reports.",
+      warning: "They stop receiving messages, alerts and family reports about this student.",
     }),
   ],
 };

@@ -68,7 +68,7 @@ export type OpContext = {
 export type OpOutput = { content: string; isError?: boolean; fresh: boolean };
 
 /** The row as it is stored. `input` is only ever read back by Confirm, never sent to the app. */
-type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> & { input: Record<string, unknown> };
+export type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> & { input: Record<string, unknown> };
 
 const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const isUuid = (s: unknown): s is string => typeof s === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
