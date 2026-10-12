@@ -3,7 +3,7 @@ import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
 import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio } from "./env.js";
 import { HttpError } from "./lib/errors.js";
-import { loggedUrl } from "./lib/requestLog.js";
+import { loggedUrl, serializeErr } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
 import { startSweepInterval } from "./lib/sweepSchedule.js";
@@ -73,8 +73,10 @@ import profileUpdateRoutes from "./routes/profileUpdates.js";
 export function buildApp() {
   const app = Fastify({
     logger: {
-      // Query values and the account review token are dropped (lib/requestLog.ts).
+      // Query values and the account review token are dropped, and errors keep
+      // only a redacted message, stack and codes (lib/requestLog.ts).
       serializers: {
+        err: serializeErr,
         req(req) {
           return {
             method: req.method,

@@ -179,7 +179,7 @@ export default async function aidRoutes(app: FastifyInstance) {
    * counts gift aid only — the generated column deliberately does not treat a
    * loan as a discount, because a family repaying it later is not aid.
    */
-  app.get("/comparison", { preHandler: app.authenticate }, async (request) => {
+  app.get("/comparison", { preHandler: [app.authenticate, limit("aid:comparison", 240, 60)] }, async (request) => {
     const { studentId } = studentQuery.parse(request.query);
     const student = await resolveStudentId(request, studentId, "view");
 
@@ -255,7 +255,7 @@ export default async function aidRoutes(app: FastifyInstance) {
 
   // ---- Scholarship matches -------------------------------------------------
 
-  app.get("/scholarships", { preHandler: app.authenticate }, async (request) => {
+  app.get("/scholarships", { preHandler: [app.authenticate, limit("aid:scholarships", 240, 60)] }, async (request) => {
     const { studentId } = studentQuery.parse(request.query);
     const student = await resolveStudentId(request, studentId, "view");
 

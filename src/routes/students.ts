@@ -43,7 +43,7 @@ const patchStudentSchema = z
 
 export default async function studentRoutes(app: FastifyInstance) {
   /** The counselor's roster, each with their next open deadline. */
-  app.get("/", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request) => {
+  app.get("/", { preHandler: [app.authenticate, requireRole("counselor"), limit("students:list", 120, 60)] }, async (request) => {
     const { data: students, error } = await request.db
       .from("profiles")
       .select("*")
@@ -59,26 +59,24 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     // One query for every roster member's open deadlines, then pick the
     // earliest per student in memory — N+1 across a 60-student roster is the
-    // difference between a snappy dashboard and a spinner.
-    const { data: deadlines } = await request.db
-      .from("deadlines")
-      .select("*")
-      .in("student_id", ids)
-      .eq("done", false)
-      .order("due_date", { ascending: true, nullsFirst: false });
+    // difference between a snappy dashboard and a spinner. The counselor's own
+    // read on each student (where they have overruled what the work implies)
+    // is fetched alongside, because the sidebar renders it.
+    const [{ data: deadlines }, { data: overrides }] = await Promise.all([
+      request.db
+        .from("deadlines")
+        .select("*")
+        .in("student_id", ids)
+        .eq("done", false)
+        .order("due_date", { ascending: true, nullsFirst: false }),
+      request.db.from("student_status_overrides").select("*").in("student_id", ids),
+    ]);
 
     const next = new Map<string, unknown>();
     for (const d of deadlines ?? []) {
       const sid = d.student_id as string;
       if (!next.has(sid)) next.set(sid, toDeadline(d as never));
     }
-
-    // The counselor's own read on each student, where they have overruled what
-    // the work implies. Fetched with the roster because the sidebar renders it.
-    const { data: overrides } = await request.db
-      .from("student_status_overrides")
-      .select("*")
-      .in("student_id", ids);
 
     const status = new Map<string, unknown>();
     for (const o of overrides ?? []) {

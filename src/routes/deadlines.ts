@@ -50,7 +50,7 @@ function toRow(b: z.infer<typeof deadlinePatch>): Record<string, unknown> {
 }
 
 export default async function deadlineRoutes(app: FastifyInstance) {
-  app.get("/", { preHandler: app.authenticate }, async (request) => {
+  app.get("/", { preHandler: [app.authenticate, limit("deadlines:list", 240, 60)] }, async (request) => {
     const query = z
       .object({
         studentId: z.string().uuid().optional(),

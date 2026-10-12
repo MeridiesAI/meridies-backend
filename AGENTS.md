@@ -65,7 +65,7 @@ src/
 │   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id is missing
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
-│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), linkCheck.ts, run.ts
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
@@ -517,6 +517,19 @@ compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
 one bad row loads nothing. Checked-in files and their sources are listed in
 `scripts/ingest/data/README.md`.
 
+**Events Hub listings** come the same way: `npx tsx --env-file=.env
+scripts/ingest/events-csv.ts --file <csv> [--dry-run]` (columns in
+`src/lib/ingest/events.ts`). Every row is checked with zod against what
+`hub_events` accepts, a file with one bad row loads nothing, and a
+`college_unitid` must already be in the catalog. Rows become Meridies-wide
+listings (`created_by` and `firm_id` null), which every approved counselor
+sees. `hub_events` has no unique constraint, so the loader matches on the
+natural key (name, host, start_date), trimmed and ignoring case, among
+Meridies-wide rows only: a re-run updates in place, never duplicates, never
+touches a counselor's own listing, and deletes nothing. A URL is not the key,
+because a recurring webinar shares one page across dates. Renaming an event in
+the file inserts a new row; remove the old one by hand. Service role from env.
+
 ### Catalog data: yearly refresh
 
 | When | Source | Who | How |
@@ -727,8 +740,14 @@ the figures above it.
 `lib/links.ts` is the only place this API makes an HTTP request to an address a
 user chose, which makes it the only place that can be turned into server-side
 request forgery. It validates scheme, port and credentials, resolves the host and
-rejects the private/loopback/link-local/carrier-NAT ranges, follows redirects
+rejects the private/loopback/link-local/carrier-NAT ranges (and an IPv4
+address carried inside IPv6: mapped, NAT64, 6to4), follows redirects
 **manually** so every hop is re-validated, and caps time, bytes and content type.
+Each hop resolves DNS once and the socket connects only to those checked
+addresses (`pinnedLookup` on a fresh `node:http`/`https` request, `agent:
+false`), so a name that answers a public address to the check and 127.0.0.1 to
+the connection (DNS rebinding) never reaches the second answer; the hostname
+still goes out as the Host header and TLS server name.
 If another feature ever needs to fetch a user-supplied URL, route it through
 there rather than calling `fetch` directly.
 
@@ -1180,7 +1199,13 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - Zod at every boundary, `.strict()` on request bodies
 - Thin route handlers — logic in `src/lib/`
 - Always authenticate **and** authorize
-- Never log secrets; never return stack traces or key hints to a client
+- Never log secrets; never return stack traces or key hints to a client.
+  Every `err` in a log line goes through `serializeErr` (`lib/requestLog.ts`):
+  type, redacted message and stack, `code`/`status` only, so a PostgREST
+  `details` or an SDK's request echo never lands in Railway. `redactText`
+  strips emails, bearer tokens, JWTs, API keys, phone numbers and query
+  values; use it on any free text you log outside `err`, and log a
+  user-supplied URL as `logHost(url)`. Never log a body, a prompt or essay text.
 - Never commit `.env` — keep `.env.example` current
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content

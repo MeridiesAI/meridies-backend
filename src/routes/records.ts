@@ -422,7 +422,7 @@ export default async function recordRoutes(app: FastifyInstance) {
   // reads them; editing mode accepts the ones that carry a replacement, and
   // only grammar marks ever do.
 
-  app.get("/essays/:id/marks", { preHandler: app.authenticate }, async (request) => {
+  app.get("/essays/:id/marks", { preHandler: [app.authenticate, limit("essay-marks:list", 240, 60)] }, async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const q = z
       .object({ status: z.enum(["open", "accepted", "rejected", "stale"]).optional() })

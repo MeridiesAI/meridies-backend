@@ -95,7 +95,8 @@ export function registerCollection<T extends ZodTypeAny>(
   const { path, table, body, toDto } = opts;
   const order = opts.orderBy ?? { column: "sort_order", ascending: true };
 
-  app.get(`/${path}`, { preHandler: app.authenticate }, async (request) => {
+  // Per-student lists the app fans out across a roster: 300, the in-process cap.
+  app.get(`/${path}`, { preHandler: [app.authenticate, limit(`${path}:list`, 300, 60)] }, async (request) => {
     const { studentId } = listQuery.parse(request.query);
     const student = await resolveStudentId(request, studentId, "view");
 

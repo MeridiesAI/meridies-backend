@@ -142,20 +142,21 @@ export default async function workItemRoutes(app: FastifyInstance) {
         : query.eq("counselor_id", me);
     if (q.studentId) query = query.eq("student_id", q.studentId);
     if (q.includeDone !== "true") query = query.eq("done", false);
-    const { data, error } = await query
+    const own = query
       .order("done")
       .order("due_date", { ascending: true, nullsFirst: false })
       .order("created_at", { ascending: false })
       .limit(500);
-    if (error) throw fromPostgrest(error);
-    const items = ((data ?? []) as unknown as Row[]).map((r) => toWorkItem(r, me));
 
-    if (q.includeDerived !== "true" || q.scope === "assigned") return items;
+    if (q.includeDerived !== "true" || q.scope === "assigned") {
+      const { data, error } = await own;
+      if (error) throw fromPostgrest(error);
+      return ((data ?? []) as unknown as Row[]).map((r) => toWorkItem(r, me));
+    }
 
     // Derived rows: reports to approve, meetings to prepare. Skip any a real
-    // item already points at.
-    const linkedReports = new Set(items.map((i) => i.familyReportId).filter(Boolean));
-    const linkedMeetings = new Set(items.map((i) => i.meetingId).filter(Boolean));
+    // item already points at. None of these reads depends on another, so they
+    // go out together rather than one round trip after the next.
     const now = new Date();
     const week = new Date(now.getTime() + 7 * 86_400_000);
 
@@ -175,9 +176,18 @@ export default async function workItemRoutes(app: FastifyInstance) {
       reports = reports.eq("student_id", q.studentId);
       meetings = meetings.eq("student_id", q.studentId);
     }
-    const [r, m] = await Promise.all([reports.limit(100), meetings.order("starts_at").limit(100)]);
+    const [o, r, m, confirmed] = await Promise.all([
+      own,
+      reports.limit(100),
+      meetings.order("starts_at").limit(100),
+      confirmedStudents(request),
+    ]);
+    if (o.error) throw fromPostgrest(o.error);
     if (r.error) throw fromPostgrest(r.error);
     if (m.error) throw fromPostgrest(m.error);
+    const items = ((o.data ?? []) as unknown as Row[]).map((row) => toWorkItem(row, me));
+    const linkedReports = new Set(items.map((i) => i.familyReportId).filter(Boolean));
+    const linkedMeetings = new Set(items.map((i) => i.meetingId).filter(Boolean));
 
     const derived: WorkItemDto[] = [];
     for (const row of (r.data ?? []) as Row[]) {
@@ -203,7 +213,6 @@ export default async function workItemRoutes(app: FastifyInstance) {
     }
     // Setup rows: what is left on a student confirmed from New student. Each
     // clears itself once the record has it (lib/studentSetup.ts).
-    const confirmed = await confirmedStudents(request);
     const setupIds = [...confirmed.keys()].filter((id) => !q.studentId || id === q.studentId);
     const facts = await setupFacts(request, setupIds);
     for (const id of setupIds) {

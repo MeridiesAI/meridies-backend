@@ -108,7 +108,7 @@ export default async function chatRoutes(app: FastifyInstance) {
   app.get("/tools", { preHandler: [app.authenticate] }, async () => chatToolCatalog());
 
   // List the caller's conversations, newest first; optional student filter.
-  app.get("/conversations", { preHandler: [app.authenticate] }, async (request) => {
+  app.get("/conversations", { preHandler: [app.authenticate, limit("chat:conversations", 120, 60)] }, async (request) => {
     const q = z.object({ studentId: z.string().uuid().optional() }).parse(request.query ?? {});
     let query = request.db
       .from("ai_conversations")

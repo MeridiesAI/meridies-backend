@@ -190,14 +190,16 @@ export async function buildBehindList(
   request: DbContext,
   counselorId: string
 ): Promise<BehindStudent[]> {
-  const settings = await loadSettings(request, counselorId);
   const today = new Date().toISOString().slice(0, 10);
 
-  const { data: students } = await request.db
-    .from("profiles")
-    .select("id, full_name, avatar_url")
-    .eq("counselor_id", counselorId)
-    .is("archived_at", null);
+  const [settings, { data: students }] = await Promise.all([
+    loadSettings(request, counselorId),
+    request.db
+      .from("profiles")
+      .select("id, full_name, avatar_url")
+      .eq("counselor_id", counselorId)
+      .is("archived_at", null),
+  ]);
 
   const roster = students ?? [];
   if (roster.length === 0) return [];

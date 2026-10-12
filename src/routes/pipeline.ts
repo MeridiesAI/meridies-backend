@@ -254,13 +254,19 @@ export default async function pipelineRoutes(app: FastifyInstance) {
   /** The whole board: stages (seeded on first open), contacts, consultants. */
   app.get("/", { preHandler: read("pipeline:board") }, async (request) => {
     const ws = await loadWorkspace(request);
-    const seeded = await request.db.rpc("ensure_pipeline_stages");
-    if (seeded.error) throw crmError(seeded.error);
-
-    const stages = await workspaceStages(request, ws);
+    // The stages wait for the seed; the contacts and the consultants don't, so
+    // they go out alongside it.
     let q = request.db.from("pipeline_contacts").select(CONTACT_COLUMNS);
     q = ws.firmId ? q.eq("firm_id", ws.firmId) : q.is("firm_id", null).eq("counselor_id", request.auth.userId);
-    const { data, error } = await q.order("position").order("created_at").limit(2000);
+    const [stages, { data, error }, people] = await Promise.all([
+      (async () => {
+        const seeded = await request.db.rpc("ensure_pipeline_stages");
+        if (seeded.error) throw crmError(seeded.error);
+        return workspaceStages(request, ws);
+      })(),
+      q.order("position").order("created_at").limit(2000),
+      consultants(request),
+    ]);
     if (error) throw crmError(error);
 
     const ctx = {
@@ -272,7 +278,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       workspace: { firmId: ws.firmId, isAdmin: ws.isAdmin },
       stages: stages.map(toStage),
       contacts: ((data ?? []) as unknown as Row[]).map((r) => toContact(r, ctx)),
-      consultants: await consultants(request),
+      consultants: people,
     };
   });
 

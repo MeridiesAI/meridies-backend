@@ -12,6 +12,7 @@
 import pg from "pg";
 import type { Pool, PoolClient } from "pg";
 import { env } from "../../env.js";
+import { redactText } from "../requestLog.js";
 
 export type Queryable = {
   query: (sql: string) => Promise<{ rows: Array<Record<string, unknown>> }>;
@@ -47,7 +48,7 @@ export function importPool(): Pool | null {
     // An idle client dropped by the pooler must not crash the process.
     // Log the code and message only, never the connection string.
     pool.on("error", (err) => {
-      console.error("import worker pool error", { code: (err as { code?: string }).code, message: err.message });
+      console.error("import worker pool error", { code: (err as { code?: string }).code, message: redactText(err.message) });
     });
   }
   return pool;
@@ -105,7 +106,7 @@ export async function verifyImportWorkerAtBoot(log: BootLog): Promise<void> {
     }
   } catch (err) {
     if (err instanceof WrongWorkerRoleError) {
-      log.error({ err: err.message }, "refusing to start: IMPORT_DATABASE_URL is not the import_worker login");
+      log.error({ err: redactText(err.message) }, "refusing to start: IMPORT_DATABASE_URL is not the import_worker login");
       process.exit(1);
     }
     log.error({ err }, "import worker connection failed at boot; imports will retry per job");

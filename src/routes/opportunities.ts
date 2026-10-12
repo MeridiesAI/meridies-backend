@@ -15,7 +15,7 @@ import { limit } from "../lib/limits.js";
 
 export default async function opportunityRoutes(app: FastifyInstance) {
   /** Shared catalog browse. */
-  app.get("/catalog", { preHandler: app.authenticate }, async (request) => {
+  app.get("/catalog", { preHandler: [app.authenticate, limit("opportunities:catalog", 120, 60)] }, async (request) => {
     const q = z
       .object({
         search: z.string().trim().max(120).optional(),
@@ -37,7 +37,7 @@ export default async function opportunityRoutes(app: FastifyInstance) {
     return data ?? [];
   });
 
-  app.get("/matches", { preHandler: app.authenticate }, async (request) => {
+  app.get("/matches", { preHandler: [app.authenticate, limit("opportunities:matches", 240, 60)] }, async (request) => {
     const q = z
       .object({
         studentId: z.string().uuid().optional(),
@@ -59,7 +59,7 @@ export default async function opportunityRoutes(app: FastifyInstance) {
     return data ?? [];
   });
 
-  app.get("/requests", { preHandler: app.authenticate }, async (request) => {
+  app.get("/requests", { preHandler: [app.authenticate, limit("opportunities:requests", 240, 60)] }, async (request) => {
     const q = z.object({ studentId: z.string().uuid().optional() }).parse(request.query);
     const student = await resolveStudentId(request, q.studentId, "view");
 
