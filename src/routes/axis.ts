@@ -13,11 +13,21 @@ import { PassThrough } from "node:stream";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { TtlLru } from "../lib/axis/cache.js";
-import { runAxisTurn, warmInputs, type Emit } from "../lib/axis/engine.js";
-import { prewarm } from "../lib/axis/llm.js";
+import { runAxisTurn, warmInputs } from "../lib/axis/engine.js";
+import { chargeCall, prewarm } from "../lib/axis/llm.js";
+import {
+  axisReadiness,
+  axisUnavailable,
+  isSchemaMissing,
+  logSkipped,
+  probeAxisSchema,
+  runSseTurn,
+  unavailableBody,
+} from "../lib/axis/failsafe.js";
 import { foldIfLong, saveState } from "../lib/axis/memory.js";
 import { adjudicate } from "../lib/axis/verify.js";
-import { conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
+import { hasAnthropic } from "../env.js";
+import { conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
@@ -41,6 +51,9 @@ const confirmSchema = z
 
 const idParam = (request: FastifyRequest) => z.object({ id: z.string().uuid() }).parse(request.params).id;
 
+/** axis_actions comes with 20261018000001: before it is applied these routes answer the fallback 503, not a 500. */
+const actionsError = (error: { code?: string; message?: string }) => (isSchemaMissing(error) ? axisUnavailable() : fromPostgrest(error));
+
 /** One pre-warm per counselor and student per four minutes: the cache entry it writes lives at least five. */
 const warmed = new TtlLru<true>(5_000, 4 * 60 * 1000);
 
@@ -49,7 +62,7 @@ export default async function axisRoutes(app: FastifyInstance) {
 
   app.post(
     "/conversations/:id/messages",
-    { preHandler: [...counselor, limit("ai:axis", 30, 60, "You're sending messages very fast. Give it a moment.")] },
+    { preHandler: [...counselor, limit("ai:axis", 20, 60, "You're sending messages very fast. Give it a moment.")] },
     async (request, reply) => {
       const id = idParam(request);
       const body = messageSchema.parse(request.body);
@@ -61,14 +74,25 @@ export default async function axisRoutes(app: FastifyInstance) {
       const requested = body.studentId ?? (conv.student_id as string | null) ?? null;
       const studentId = requested ? await resolveStudentId(request, requested, "view") : null;
 
+      // The fallback signal: no model key, or the AxIS migration not applied yet. Answered before
+      // anything is written, so the app can send the same message to /chat/conversations/:id/messages.
+      const ready = await axisReadiness({ hasKey: hasAnthropic, probe: () => probeAxisSchema(request.db), log: request.log });
+      if (!ready.ok) {
+        request.log.warn({ reason: ready.reason }, "axis unavailable; client should fall back to /chat");
+        return reply.code(503).send(unavailableBody());
+      }
+      // The turn's first model call is charged here, so an exhausted daily quota is a plain 429.
+      await chargeCall(request);
+
       const { error: insErr } = await request.db
         .from("ai_messages")
         .insert({ conversation_id: id, owner_id: request.auth.userId, role: "user", content: body.content });
-      if (insErr) throw fromPostgrest(insErr);
-      await request.db
+      if (insErr) throw isSchemaMissing(insErr) ? axisUnavailable() : fromPostgrest(insErr);
+      const { error: convErr } = await request.db
         .from("ai_conversations")
         .update({ student_id: studentId, module: "axis", ...(conv.title ? {} : { title: body.content.slice(0, 60) }) })
         .eq("id", id);
+      if (convErr) request.log.warn({ code: convErr.code }, "axis conversation not updated");
 
       const sse = new PassThrough();
       reply.header("Content-Type", "text/event-stream");
@@ -77,24 +101,19 @@ export default async function axisRoutes(app: FastifyInstance) {
       reply.header("X-Accel-Buffering", "no");
       reply.send(sse);
 
-      // The counselor closing the panel stops the model and the tools mid-flight. The response's
-      // close, not the request's: Node closes the request as soon as its body has been read.
-      const abort = new AbortController();
-      reply.raw.on("close", () => {
-        if (!reply.raw.writableFinished) abort.abort();
-      });
-      const emit: Emit = (event, data) => {
-        if (!sse.writableEnded) sse.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-      };
-      // Keeps proxies from closing a stream that is quiet while evidence is gathered.
-      const ping = setInterval(() => {
-        if (!sse.writableEnded) sse.write(": ping\n\n");
-      }, 15_000);
-
-      void (async () => {
-        try {
-          const turn = await runAxisTurn({ request, conversationId: id, studentId, content: body.content, emit, signal: abort.signal });
-          const { data: saved } = await request.db
+      const stream = runSseTurn({
+        sink: {
+          write: (chunk) => void sse.write(chunk),
+          end: () => void sse.end(),
+          get ended() {
+            return sse.writableEnded || sse.destroyed;
+          },
+        },
+        log: request.log,
+        onSettled: () => void foldIfLong(request, id).catch((err) => request.log.warn({ err }, "axis memory fold skipped")),
+        work: async ({ signal, emit, markDone }) => {
+          const turn = await runAxisTurn({ request, conversationId: id, studentId, content: body.content, emit, signal, prepaidCalls: 1 });
+          const { data: saved, error: saveErr } = await request.db
             .from("ai_messages")
             .insert({
               conversation_id: id,
@@ -108,37 +127,40 @@ export default async function axisRoutes(app: FastifyInstance) {
             })
             .select("id")
             .single();
+          if (saveErr) request.log.warn({ code: saveErr.code }, "axis answer not saved");
           const messageId = (saved?.id as string | undefined) ?? null;
           if (messageId && turn.actions.length) {
-            await request.db.from("axis_actions").update({ message_id: messageId }).in("id", turn.actions.map((a) => a.id));
+            await request.db.from("axis_actions").update({ message_id: messageId }).in("id", turn.actions.map((a) => a.id)).then(logSkipped(request.log, "proposal link"));
           }
           emit("done", { messageId });
-          await saveState(request, id, turn.state).catch((err) => request.log.warn({ err }, "axis state not saved"));
+          markDone();
 
-          // After done: the counselor can already type. Only what the code couldn't confirm goes to the adjudicator.
-          const { wanted, checks, material, ledger } = turn.verify;
-          if (wanted && checks.some((c) => c.status !== "grounded")) {
-            const v = await adjudicate({ request, studentId, checks, ledger, material });
-            if (v.checked) {
+          // After done nothing may turn the answer into an error: each step is logged and skipped.
+          try {
+            await saveState(request, id, turn.state);
+            // Only what the code couldn't confirm goes to the adjudicator.
+            const { wanted, checks, material, ledger } = turn.verify;
+            if (wanted && checks.some((c) => c.status !== "grounded")) {
+              const v = await adjudicate({ request, studentId, checks, ledger, material, signal });
+              if (v.checked) {
+                emit("verification", v);
+                if (messageId) await request.db.from("ai_messages").update({ verification: v }).eq("id", messageId).then(logSkipped(request.log, "verification"));
+              }
+            } else if (wanted && checks.length && messageId) {
+              const v = { checked: true, figuresChecked: checks.reduce((n, c) => n + c.figures.length + c.citations.length, 0), unsupported: [] };
               emit("verification", v);
-              if (messageId) await request.db.from("ai_messages").update({ verification: v }).eq("id", messageId);
+              await request.db.from("ai_messages").update({ verification: v }).eq("id", messageId).then(logSkipped(request.log, "verification"));
             }
-          } else if (wanted && checks.length && messageId) {
-            const v = { checked: true, figuresChecked: checks.reduce((n, c) => n + c.figures.length + c.citations.length, 0), unsupported: [] };
-            emit("verification", v);
-            await request.db.from("ai_messages").update({ verification: v }).eq("id", messageId);
+          } catch (err) {
+            request.log.warn({ err }, "axis after-answer step skipped");
           }
-        } catch (err) {
-          if (!abort.signal.aborted) {
-            request.log.error({ err, conversationId: id }, "axis stream failed");
-            emit("error", { message: publicMessage(err, "AxIS is unavailable right now. Try again in a few minutes.").slice(0, 300) });
-          }
-        } finally {
-          clearInterval(ping);
-          sse.end();
-          void foldIfLong(request, id).catch((err) => request.log.warn({ err }, "axis memory fold skipped"));
-        }
-      })();
+        },
+      });
+      // The counselor closing the panel stops the model and the tools mid-flight. The response's
+      // close, not the request's: Node closes the request as soon as its body has been read.
+      reply.raw.on("close", () => {
+        if (!reply.raw.writableFinished) stream.clientClosed();
+      });
       return reply;
     }
   );
@@ -147,6 +169,7 @@ export default async function axisRoutes(app: FastifyInstance) {
   app.post("/warm", { preHandler: [...counselor, limit("ai:axis-warm", 20, 60)] }, async (request, reply) => {
     const { studentId: requested } = warmSchema.parse(request.body ?? {});
     const studentId = requested ? await resolveStudentId(request, requested, "view") : null;
+    if (!hasAnthropic) return reply.code(202).send({ warmed: false, reason: "unavailable" });
     const key = `${request.auth.userId}:${studentId ?? "roster"}`;
     if (warmed.get(key)) return reply.code(202).send({ warmed: false, reason: "recent" });
     warmed.set(key, true);
@@ -155,9 +178,11 @@ export default async function axisRoutes(app: FastifyInstance) {
       const r = await prewarm({ request, studentId, system, tools });
       return reply.code(202).send({ warmed: true, cacheWriteTokens: r.cacheWrite, cacheReadTokens: r.cacheRead });
     } catch (err) {
-      warmed.delete(key);
+      // A pre-warm is an optimisation: whatever went wrong, the panel opens and the first question still works.
+      const quota = err instanceof HttpError && err.statusCode === 429;
+      if (!quota) warmed.delete(key);
       request.log.warn({ err }, "axis prewarm failed");
-      return reply.code(202).send({ warmed: false, reason: "unavailable" });
+      return reply.code(202).send({ warmed: false, reason: quota ? "quota" : "unavailable" });
     }
   });
 
@@ -172,7 +197,7 @@ export default async function axisRoutes(app: FastifyInstance) {
       .limit(50);
     if (q.conversationId) query = query.eq("conversation_id", q.conversationId);
     const { data, error } = await query;
-    if (error) throw fromPostgrest(error);
+    if (error) throw actionsError(error);
     return data ?? [];
   });
 
@@ -187,7 +212,7 @@ export default async function axisRoutes(app: FastifyInstance) {
       .eq("status", "pending")
       .select("id, student_id, type, payload")
       .maybeSingle();
-    if (error) throw fromPostgrest(error);
+    if (error) throw actionsError(error);
     if (!claimed) throw conflict("That proposal was already handled.");
     const payload = claimed.payload as Record<string, unknown>;
     const studentId = claimed.student_id as string | null;
@@ -236,7 +261,7 @@ export default async function axisRoutes(app: FastifyInstance) {
       .eq("status", "pending")
       .select("id")
       .maybeSingle();
-    if (error) throw fromPostgrest(error);
+    if (error) throw actionsError(error);
     if (!data) throw conflict("That proposal was already handled.");
     return { id, status: "dismissed" };
   });
