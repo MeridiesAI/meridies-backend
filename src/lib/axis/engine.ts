@@ -26,7 +26,7 @@ import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { enforceNoProse, NO_PROSE_SYSTEM } from "../anthropic.js";
-import { buildRosterContext } from "../chat.js";
+import { buildRosterContext, signerLine } from "../chat.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../context/pack.js";
 import type { ContextUsage } from "../context/types.js";
 import { HttpError, unavailable } from "../errors.js";
@@ -93,13 +93,20 @@ export type TurnResult = {
 };
 
 /** The cached system prompt: the stable rules (shared by every counselor), then today and this student or roster. */
-export function systemBlocks(record: string | null, roster: string | null, summary: string | null, now = new Date()): Anthropic.Beta.BetaTextBlockParam[] {
+export function systemBlocks(
+  record: string | null,
+  roster: string | null,
+  summary: string | null,
+  now = new Date(),
+  signer: string | null = null
+): Anthropic.Beta.BetaTextBlockParam[] {
   const today = now.toISOString().slice(0, 10);
-  const context = record
+  const body = record
     ? `Today is ${today}.\n\n--- STUDENT ON FILE ---\n${record}\n--- END STUDENT ---`
     : roster
       ? `Today is ${today}. No student is selected; questions are about the roster.\n\n--- ROSTER, NEXT THREE WEEKS ---\n${wrapUntrusted("roster", roster)}\n--- END ROSTER ---`
       : `Today is ${today}. No student is selected.`;
+  const context = signer ? `${body}\n\n${signer}` : body;
   const blocks: Anthropic.Beta.BetaTextBlockParam[] = [
     { type: "text", text: AXIS_SYSTEM, cache_control: { type: "ephemeral", ttl: "1h" } },
     { type: "text", text: context, cache_control: { type: "ephemeral", ttl: "1h" } },
@@ -313,7 +320,7 @@ export async function runAxisTurn(opts: {
   for (const t of history.turns) if (t.role === "user" && typeof t.content === "string") index.add(t.content);
 
   const tools = toolList(connected, retrievalOn);
-  const system = systemBlocks(ctx.record, ctx.roster, history.summary);
+  const system = systemBlocks(ctx.record, ctx.roster, history.summary, new Date(), signerLine(request.profile));
   const base = requestBase(system, tools, effort);
   const api = opts.api ?? messagesApi();
   const actions: (ProposedAction | OperationEvent)[] = [];
@@ -451,5 +458,5 @@ export async function runAxisTurn(opts: {
 /** The pre-warm's inputs: the tools and the two cached system blocks a turn about this student would send. */
 export async function warmInputs(request: FastifyRequest, studentId: string | null) {
   const [ctx, connected] = await Promise.all([loadContext(request, studentId), getConnectors().connected(request).catch(() => [])]);
-  return { system: systemBlocks(ctx.record, ctx.roster, null), tools: toolList(connected, retrievalReady()) };
+  return { system: systemBlocks(ctx.record, ctx.roster, null, new Date(), signerLine(request.profile)), tools: toolList(connected, retrievalReady()) };
 }

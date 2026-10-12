@@ -250,12 +250,31 @@ export async function buildRosterContext(
  * student brief (when a student is in scope). This is the whole reason tool
  * prompts live server-side — the client only picks a tool key.
  */
+/**
+ * Who AxIS is drafting for. Without it a drafted email ends "Warm regards,
+ * [Counselor name]" although the signed-in counselor's name is on file.
+ */
+export function signerLine(profile: { full_name?: string | null; title?: string | null } | null | undefined): string {
+  const name = profile?.full_name?.trim();
+  if (!name) {
+    return "Anything you draft for the counselor ends with a sign-off and no name line; never write a bracketed placeholder like [Counselor name].";
+  }
+  const title = profile?.title?.trim();
+  return [
+    `The counselor you work for is ${name}${title ? ` (${title})` : ""}.`,
+    `Sign anything you draft for them (an email, a text, a note) as ${name}, never with a placeholder like [Counselor name] or [Your name].`,
+    "Take the student's and family's names from the record the same way; a bracketed placeholder only for a name that truly isn't on file.",
+  ].join(" ");
+}
+
 export function buildSystemPrompt(
   tool: ChatTool,
   studentContext: string | null,
-  rosterContext: string | null = null
+  rosterContext: string | null = null,
+  signer: string | null = null
 ): string {
   const parts = [BASE_CHAT_SYSTEM, "", `Active tool: ${tool.label}. ${tool.guidance}`];
+  if (signer) parts.push("", signer);
   if (!studentContext && rosterContext) {
     parts.push(
       "",
