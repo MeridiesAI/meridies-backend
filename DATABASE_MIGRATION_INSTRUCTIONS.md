@@ -199,3 +199,25 @@ Check:
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;  -- expect 0
 select to_regclass('public.research_runs'), to_regclass('public.recommendations');   -- both non-null
 ```
+
+---
+
+# AxIS: files in a chat (one more migration)
+
+Apply after every earlier file (`supabase db push` once the history repair in
+the context repo's MASTER_TODO X12 is done, or paste it into the SQL editor). It
+adds a table and a private bucket and deletes nothing. Either order is safe:
+until it is applied, attaching a file in AxIS says files aren't switched on yet,
+and messages go out without files as before.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261020000001_axis_attachments.sql` | `ai_attachments` (owner-only RLS, the approval gate) and the private **`axis-attachments`** Storage bucket (10 MB; PDF, PNG, JPEG, WebP, GIF, plain text, Markdown, CSV) with its `storage.objects` policies, each counselor writing only under their own id |
+
+Check:
+
+```sql
+select to_regclass('public.ai_attachments');                                          -- non-null
+select id, public from storage.buckets where id = 'axis-attachments';                  -- 1 row, public = false
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
+```
