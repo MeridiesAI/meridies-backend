@@ -21,6 +21,7 @@
  * The route then saves the answer, sends `done`, and runs the adjudicator
  * and the memory fold after the counselor can already type again.
  */
+import { fileBlocks, withFiles, type FileBlocks } from "./attachments.js";
 import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
@@ -206,6 +207,8 @@ export async function runAxisTurn(opts: {
    * can show rather than an error mid-stream.
    */
   prepaidCalls?: number;
+  /** This message brought files: it goes to the model, never to a direct answer from the record. */
+  newFiles?: boolean;
 }): Promise<TurnResult> {
   const { request, studentId, content, emit, signal } = opts;
   let prepaid = opts.prepaidCalls ?? 0;
@@ -220,7 +223,7 @@ export async function runAxisTurn(opts: {
       ? getRetrieval().search(request, { query: content, studentId, k: 8, signal }).catch((): RetrievedChunk[] => [])
       : Promise.resolve<RetrievedChunk[]>([]);
   const chatFacts = studentId ? studentFacts(request, studentId).catch(() => null) : undefined;
-  const [roster, colleges, ctx, history, connected] = await Promise.all([
+  const [roster, colleges, ctx, history, connected, files] = await Promise.all([
     loadRoster(request),
     loadCollegeIndex(request).catch((err): CollegeIndex | null => {
       request.log.warn({ err: errInfo(err) }, "axis college index unavailable");
@@ -229,7 +232,15 @@ export async function runAxisTurn(opts: {
     loadContext(request, studentId, looksLikeChange(content)),
     loadHistory(request, opts.conversationId),
     getConnectors().connected(request).catch(() => []),
+    // The chat's files, every turn: a reopened chat still knows what was in them.
+    fileBlocks(request, opts.conversationId).catch((err): FileBlocks => {
+      request.log.warn({ err: errInfo(err) }, "axis attachments skipped");
+      return { blocks: [], names: [], texts: [] };
+    }),
   ]);
+  const hasFiles = files.blocks.length > 0;
+  // A PDF or an image can't be read back by the live grounding, so its figures aren't checked against it.
+  const opaqueFiles = files.blocks.some((b) => b.type !== "text" && !(b.type === "document" && b.source.type === "text"));
   // What the counselor confirmed, dismissed or undid since the last answer. Best effort.
   const recentActions = recentActionsText(request, opts.conversationId).catch(() => "");
 
@@ -248,7 +259,7 @@ export async function runAxisTurn(opts: {
   if (ctx.usage) emit("context", ctx.usage);
 
   // ---- 3. Direct answers ----
-  if (u.intent !== "essay") {
+  if (u.intent !== "essay" && !opts.newFiles) {
     const direct = await compileDirect(u, { request, chatStudentId: studentId, roster, ledger, chatFacts }).catch((err) => {
       request.log.warn({ err: errInfo(err) }, "axis direct answer skipped");
       return null;
@@ -298,6 +309,7 @@ export async function runAxisTurn(opts: {
   index.add(ctx.roster);
   for (const r of evidence.raw) index.add(r);
   index.add(content);
+  for (const t of files.texts) index.add(t);
   for (const t of history.turns) if (t.role === "user" && typeof t.content === "string") index.add(t.content);
 
   const tools = toolList(connected, retrievalOn);
@@ -308,6 +320,7 @@ export async function runAxisTurn(opts: {
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
   // So does the text of uploaded files in the student record the system prompt carries (its documents section).
   const outside =
+    hasFiles ||
     ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail") ||
     readsDocuments(ctx.usage);
   const toolCtx: ToolContext = {
@@ -344,7 +357,9 @@ export async function runAxisTurn(opts: {
   const kinds = new Set(ledger.all().map((p) => p.kind));
   const covered = (i: string) => (i === "documents" ? kinds.has("upload") || kinds.has("drive") || kinds.has("onedrive") : i === "email" ? kinds.has("outlook") || kinds.has("gmail") : true);
   const tasks = specialistTasks(u, covered);
+  if (hasFiles) step(`Reading ${files.names.length === 1 ? files.names[0] : `${files.names.length} attached files`}`);
   const run: Run = await openRun(request, "axis", studentId, {
+    files: files.names.length,
     intent: u.intent, confidence: Math.round(u.confidence * 100) / 100, path: tasks ? "specialists" : "agent", effort,
     evidenceSteps: evidence.trace.length, skipped: evidence.skipped.length,
   });
@@ -384,7 +399,7 @@ export async function runAxisTurn(opts: {
     const messages: Anthropic.Beta.BetaMessageParam[] = [
       ...fitHistory(history.turns.slice(0, history.turns.at(-1)?.role === "user" ? -1 : undefined), fixedChars),
       ...(featureOn("perMessageEffort") ? [effortMessage(turnEffort)] : []),
-      { role: "user", content: userParts.join("\n\n") },
+      { role: "user", content: withFiles(userParts.join("\n\n"), files) as Anthropic.Beta.BetaMessageParam["content"] },
       ...(featureOn("systemMessages") ? [modeMessage(modeLine(turnMode))] : []),
     ];
 
@@ -395,7 +410,7 @@ export async function runAxisTurn(opts: {
       deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, beforeCall,
       onText: (d) => {
         emit("delta", { text: d });
-        grounder.push(d);
+        if (!opaqueFiles) grounder.push(d);
       },
       onToolStart: (c) => {
         const label = toolLabel(c.name, c.input);
@@ -421,7 +436,7 @@ export async function runAxisTurn(opts: {
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: { ...state, outside: toolCtx.turn.sawOutside },
-      verify: { wanted: turnProfile.verify && res.stop !== "refusal", checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
+      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
     };
   } catch (err) {
