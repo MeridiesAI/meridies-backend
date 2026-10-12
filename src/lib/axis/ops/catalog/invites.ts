@@ -4,8 +4,9 @@
  * revoking one asks first, and so does sending a roster import. The Building
  * profile flow on Overview (new-student onboarding) is here too: ticking an
  * item received runs at once; sending one back emails the student and
- * confirming a student can't be taken back, so both ask. Replies never carry
- * an email address: a lookup filters on the address the counselor gave and
+ * confirming a student can't be taken back, so both ask. Replies and card
+ * summaries never carry an email address (only card details do, which the
+ * model never sees): a lookup filters on the address the counselor gave and
  * answers with ids and names.
  */
 import { z } from "zod";
@@ -27,26 +28,41 @@ const requestItem = z
 type RequestItem = z.infer<typeof requestItem>;
 const toRequests = (rs: RequestItem[]) => rs.map((r) => ({ id: r.id, label: r.label, provided: r.provided ?? false }));
 
+// The route takes any text for grade and time zone, but the app's New student
+// page offers a fixed set (meridies-app lib/constants GRADE_LEVELS, TIMEZONES)
+// and shows nothing for a value outside it, so the model picks from those.
+const GRADES = ["9th", "10th", "11th", "12th"] as const;
+const ZONES = { ET: "ET · Eastern", CT: "CT · Central", MT: "MT · Mountain", PT: "PT · Pacific", AKT: "AKT · Alaska", HT: "HT · Hawaii" } as const;
+type Zone = keyof typeof ZONES;
+const ZONE_CODES = Object.keys(ZONES) as [Zone, ...Zone[]];
+
+/** A stored time zone back to its code; undefined when it is none of the app's (then there is no undo). */
+const zoneCode = (v: unknown): Zone | null | undefined => {
+  if (v == null || v === "") return null;
+  return (Object.entries(ZONES) as [Zone, string][]).find(([code, label]) => v === label || v === code)?.[0];
+};
+
 const basics = {
   full_name: z.string().trim().min(1).max(200).nullable(),
-  grade_level: z.string().trim().max(40).nullable(),
+  grade_level: z.enum(GRADES).nullable(),
   grad_year: z.number().int().min(2000).max(2100).nullable(),
-  timezone: z.string().trim().max(80).nullable(),
+  timezone: z.enum(ZONE_CODES).nullable(),
   intake_requests: z.array(requestItem).max(30),
 };
 
-const basicsBody = (i: { full_name?: string | null; grade_level?: string | null; grad_year?: number | null; timezone?: string | null; intake_requests?: RequestItem[] }) =>
+const basicsBody = (i: { full_name?: string | null; grade_level?: string | null; grad_year?: number | null; timezone?: Zone | null; intake_requests?: RequestItem[] }) =>
   defined({
     fullName: i.full_name,
     gradeLevel: i.grade_level,
     gradYear: i.grad_year,
-    timezone: i.timezone,
+    timezone: i.timezone === undefined ? undefined : i.timezone === null ? null : ZONES[i.timezone],
     intakeRequests: i.intake_requests ? toRequests(i.intake_requests) : undefined,
   });
 
 const LABELS = { full_name: "Name", grade_level: "Grade", grad_year: "Class of", timezone: "Time zone" };
 
-const REQUESTS_DOC = "[{ id: transcript|resume|scores|activities|awards|schedule|custom-<slug>, label ≤120, provided? }]";
+const BASICS_DOC = "full_name? ≤200, grade_level?: 9th|10th|11th|12th, grad_year? 2000-2100, timezone?: ET|CT|MT|PT|AKT|HT";
+const REQUESTS_DOC = "[{ id: transcript|resume|scores|activities|awards|schedule|questions|custom-<slug> ≤80, label ≤120, provided? }]";
 
 type Invitation = {
   id?: string;
@@ -60,6 +76,7 @@ type Invitation = {
   timezone?: string | null;
   intakeRequests?: { id?: string; label?: string; provided?: boolean }[];
   dismissedAt?: string | null;
+  confirmedAt?: string | null;
 };
 
 /** GET /invites holds the latest 200; there is no single-invitation GET. */
@@ -81,6 +98,19 @@ const whoOf = (inv: Invitation | null) => {
   const name = inv ? (str(inv.fullName) ?? str(inv.acceptedByName)) : null;
   return name ? plainText(name, 80) : "a student";
 };
+
+/** The Building profile card and a name for it: the card has no joined student's name, the invitation list does. */
+async function cardAndName(h: Get, id: string): Promise<{ card: Invitation | null; who: string }> {
+  const card = await findCard(h, id);
+  if (card && (str(card.fullName) ?? str(card.acceptedByName))) return { card, who: whoOf(card) };
+  return { card, who: whoOf(await findInvitation(h, id)) };
+}
+
+/** Whether the New student card is off Overview, for the dismiss/restore undo; null when unreadable. */
+async function dismissedState(h: Get, id: string): Promise<{ dismissed: boolean } | null> {
+  const inv = await findInvitation(h, id);
+  return inv ? { dismissed: !!inv.dismissedAt } : null;
+}
 
 const requestLabel = (inv: Invitation | null, requestId: string) => {
   const q = (inv?.intakeRequests ?? []).find((r) => r.id === requestId);
@@ -106,18 +136,30 @@ export const invites: OpGroup = {
     op({
       name: "invites.list",
       kind: "read",
-      title: "Your invitations with ids and status; pass the address the counselor gave to find one (addresses are never shown).",
-      doc: "{ status?: pending|accepted|revoked, email? }",
-      input: z.object({ status: z.enum(["pending", "accepted", "revoked"]).optional(), email: email.optional() }).strict(),
+      title: "Your invitations with ids and status. Give an address the counselor named, or an id, to see one with its requests.",
+      doc: "{ status?: pending|accepted|revoked, email?, invitation_id? }",
+      input: z
+        .object({ status: z.enum(["pending", "accepted", "revoked"]).optional(), email: email.optional(), invitation_id: uuid.optional() })
+        .strict(),
       request: () => ({ method: "GET", url: "/invites" }),
       reply: (body, i) =>
         listReply(
-          asArray(body).filter((r) => (!i.status || r.status === i.status) && (!i.email || String(r.email ?? "").toLowerCase() === i.email)),
+          asArray(body).filter(
+            (r) =>
+              (!i.status || r.status === i.status) &&
+              (!i.email || String(r.email ?? "").toLowerCase() === i.email) &&
+              (!i.invitation_id || r.id === i.invitation_id)
+          ),
           (r) => {
             const name = str(r.fullName) ?? str(r.acceptedByName);
-            return `id ${str(r.id)}: ${str(r.status)}${r.expired ? " (expired)" : ""}${r.dismissedAt ? ", off Overview" : ""}${r.confirmedAt ? ", confirmed" : ""} · ${name ? untrusted(name, "invitation") : "no name on it"}${r.acceptedBy ? ` · student ${str(r.acceptedBy)}` : ""} · ${r.audience === "family" ? "family link" : `via ${str(r.source) ?? "single"}`} · sent ${str(r.createdAt)?.slice(0, 10) ?? ""}`;
+            const delivery = str(asRecord(r.delivery).status);
+            const line = `id ${str(r.id)}: ${str(r.status)}${r.expired ? " (expired)" : ""}${r.dismissedAt ? ", off Overview" : ""}${r.confirmedAt ? ", confirmed" : ""} · ${name ? untrusted(name, "invitation") : "no name on it"}${r.acceptedBy ? ` · student ${str(r.acceptedBy)}` : ""} · ${r.audience === "family" ? "family link" : `via ${str(r.source) ?? "single"}`} · sent ${str(r.createdAt)?.slice(0, 10) ?? ""}${delivery ? ` · email ${delivery}` : ""}`;
+            // The requests (what invites.update replaces as a whole) only for one invitation looked up by address or id.
+            if (!i.email && !i.invitation_id) return line;
+            const asks = asArray(r.intakeRequests).map((q) => `\n  request_id ${requestIdText(q.id)}: ${untrusted(q.label, "request")}${q.provided ? " (received)" : ""}`);
+            return `${line}${asks.join("") || "\n  no requests"}`;
           },
-          i.email ? "No invitation to that address." : "No invitations."
+          i.email || i.invitation_id ? "No invitation matches that." : "No invitations."
         ),
     }),
     op({
@@ -125,7 +167,7 @@ export const invites: OpGroup = {
       kind: "write",
       risk: "confirm",
       title: "Invite a new student by email, optionally asking for documents (send_requests puts the ask in the email).",
-      doc: `{ email, full_name?, grade_level?, grad_year? YYYY, timezone?, note? ≤1000, intake_requests? ${REQUESTS_DOC}, send_requests? bool }`,
+      doc: `{ email, ${BASICS_DOC}, note? ≤1000, intake_requests? ${REQUESTS_DOC}, send_requests? bool }`,
       input: z
         .object({
           email,
@@ -192,8 +234,8 @@ export const invites: OpGroup = {
       name: "invites.update",
       kind: "write",
       risk: (i) => (i.intake_requests !== undefined ? "confirm" : "auto"),
-      title: "Change what an invitation (New student card) says: name, grade, class year, time zone, or the full list of requests.",
-      doc: "{ invitation_id, full_name?|null, grade_level?|null, grad_year? YYYY|null, timezone?|null, intake_requests? [{ id, label ≤120, provided? }] (the whole list) }",
+      title: "Change what an invitation (New student card) says: name, grade, class year, time zone, or the whole list of requests.",
+      doc: `{ invitation_id, ${BASICS_DOC} (each may be null), intake_requests? [{ id, label, provided? }] (replaces the whole list; read it with invites.list { invitation_id }) }`,
       input: z
         .object({
           invitation_id: uuid,
@@ -203,14 +245,22 @@ export const invites: OpGroup = {
           timezone: basics.timezone.optional(),
           intake_requests: basics.intake_requests.optional(),
         })
-        .strict(),
+        .strict()
+        .refine((o) => Object.keys(o).some((k) => k !== "invitation_id" && o[k as keyof typeof o] !== undefined), "Give at least one field to change"),
       request: (i) => ({ method: "PATCH", url: `/invites/${seg(i.invitation_id)}`, body: basicsBody(i) }),
       describe: async (i, h) => `Update the invitation for ${whoOf(await findInvitation(h, i.invitation_id))}`,
-      details: (i) => [
-        ...changeLines(i, LABELS),
-        ...(i.intake_requests ? [`Requests: ${plainText(i.intake_requests.map((r) => `${r.label}${r.provided ? " (received)" : ""}`).join(", "), 600) || "none"}`] : []),
-      ],
-      warning: "If the student has joined, each new request becomes a task on their To-Do, and one marked provided completes theirs.",
+      details: async (i, h) => {
+        const lines = changeLines(i, LABELS);
+        if (!i.intake_requests) return lines;
+        lines.push(`Requests: ${plainText(i.intake_requests.map((r) => `${r.label}${r.provided ? " (received)" : ""}`).join(", "), 600) || "none"}`);
+        const inv = await findInvitation(h, i.invitation_id);
+        const kept = new Set(i.intake_requests.map((r) => r.id));
+        const dropped = (inv?.intakeRequests ?? []).filter((q) => q.id && !kept.has(q.id)).map((q) => q.label ?? q.id);
+        if (dropped.length) lines.push(`Takes off: ${plainText(dropped.join(", "), 400)}`);
+        return lines;
+      },
+      warning:
+        "If the student has joined, each new request becomes a task on their To-Do and one marked provided completes theirs; a request taken off leaves its task where it is.",
       snapshot: (i, h) => findInvitation(h, i.invitation_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -221,6 +271,13 @@ export const invites: OpGroup = {
         const prev: Record<string, unknown> = { invitation_id: i.invitation_id };
         for (const [k, dto] of Object.entries(from)) if (k in i) prev[k] = b[dto] ?? null;
         if ("intake_requests" in prev && !Array.isArray(prev.intake_requests)) prev.intake_requests = [];
+        if ("timezone" in prev) {
+          // Stored as the app's label; a value that isn't one of them can't be put back through this op.
+          const code = zoneCode(prev.timezone);
+          if (code === undefined) return null;
+          prev.timezone = code;
+        }
+        // A grade outside the app's set fails the op's input check, and the step is dropped (no undo).
         return Object.keys(prev).length > 1 ? { op: "invites.update", input: prev } : null;
       },
       reply: () => "Invitation updated.",
@@ -249,7 +306,8 @@ export const invites: OpGroup = {
       input: z.object({ invitation_id: uuid }).strict(),
       request: (i) => ({ method: "PATCH", url: `/invites/${seg(i.invitation_id)}`, body: { dismissed: false } }),
       describe: async (i, h) => `Put ${whoOf(await findInvitation(h, i.invitation_id))} back on Overview`,
-      undo: (i) => ({ op: "invites.dismiss", input: { invitation_id: i.invitation_id } }),
+      snapshot: (i, h) => dismissedState(h, i.invitation_id),
+      undo: (i, _body, before) => (asRecord(before).dismissed === true ? { op: "invites.dismiss", input: { invitation_id: i.invitation_id } } : null),
       reply: () => "Back on Overview.",
     }),
     op({
@@ -262,7 +320,8 @@ export const invites: OpGroup = {
       request: (i) => ({ method: "PATCH", url: `/invites/${seg(i.invitation_id)}`, body: { dismissed: true } }),
       describe: async (i, h) => `Take ${whoOf(await findInvitation(h, i.invitation_id))} off Overview`,
       warning: "The card leaves Overview; the invitation link keeps working.",
-      undo: (i) => ({ op: "invites.restore", input: { invitation_id: i.invitation_id } }),
+      snapshot: (i, h) => dismissedState(h, i.invitation_id),
+      undo: (i, _body, before) => (asRecord(before).dismissed === false ? { op: "invites.restore", input: { invitation_id: i.invitation_id } } : null),
     }),
     op({
       name: "invites.revoke",
@@ -319,10 +378,8 @@ export const newStudents: OpGroup = {
         body: { receive: { requestId: i.request_id, received: i.received } },
       }),
       describe: async (i, h) => {
-        const card = await findCard(h, i.invitation_id);
-        return i.received
-          ? `Mark ${requestLabel(card, i.request_id)} received from ${whoOf(card)}`
-          : `Untick ${requestLabel(card, i.request_id)} for ${whoOf(card)}`;
+        const { card, who } = await cardAndName(h, i.invitation_id);
+        return i.received ? `Mark ${requestLabel(card, i.request_id)} received from ${who}` : `Untick ${requestLabel(card, i.request_id)} for ${who}`;
       },
       snapshot: async (i, h) => {
         const card = await findCard(h, i.invitation_id);
@@ -350,8 +407,8 @@ export const newStudents: OpGroup = {
         body: { sendBack: { requestId: i.request_id, note: i.note } },
       }),
       describe: async (i, h) => {
-        const card = await findCard(h, i.invitation_id);
-        return `Send ${requestLabel(card, i.request_id)} back to ${whoOf(card)}`;
+        const { card, who } = await cardAndName(h, i.invitation_id);
+        return `Send ${requestLabel(card, i.request_id)} back to ${who}`;
       },
       details: (i) => [`Note to the student: ${plainText(i.note, 500)}`],
       warning: "The student gets a notification and an email with your note, and the files they attached come off the request.",
@@ -364,7 +421,7 @@ export const newStudents: OpGroup = {
       doc: "{ invitation_id }",
       input: z.object({ invitation_id: uuid }).strict(),
       request: (i) => ({ method: "PATCH", url: `/invites/${seg(i.invitation_id)}`, body: { confirmed: true } }),
-      describe: async (i, h) => `Confirm ${whoOf(await findCard(h, i.invitation_id))} as a student`,
+      describe: async (i, h) => `Confirm ${(await cardAndName(h, i.invitation_id)).who} as a student`,
       warning: "This can't be undone: the card becomes a normal student card and their setup steps start.",
     }),
   ],

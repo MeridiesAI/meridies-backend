@@ -62,6 +62,12 @@ export type CollectionOptions<T extends ZodTypeAny> = {
   /** Optional `?param=` equality filters on the list route. */
   filters?: CollectionFilter[];
   /**
+   * A column the insert sets to the caller's own id, for a table that records
+   * who wrote the row (`meeting_notes.counselor_id`, NOT NULL). Never read
+   * from the body, and never changed by a patch.
+   */
+  authorColumn?: string;
+  /**
    * Called after authorization and before the write lands. The place to assert
    * a relationship the student_id check can't see — e.g. that a nested row's
    * parent really belongs to this student — or to narrow what a role may set.
@@ -132,7 +138,11 @@ export function registerCollection<T extends ZodTypeAny>(
 
       const { data, error } = await request.db
         .from(table)
-        .insert({ ...parsed, student_id: student })
+        .insert({
+          ...parsed,
+          ...(opts.authorColumn ? { [opts.authorColumn]: request.auth.userId } : {}),
+          student_id: student,
+        })
         .select("*")
         .single();
 

@@ -55,7 +55,7 @@ import { gatherEvidence } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
 import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
-import { isReadOnly, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
+import { isReadOnly, readsDocuments, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
 import { newTurnBudget, recentActionsText, type OperationEvent } from "./ops/run.js";
 
 export type Emit = (event: string, data: unknown) => void;
@@ -288,7 +288,10 @@ export async function runAxisTurn(opts: {
   const api = opts.api ?? messagesApi();
   const actions: (ProposedAction | OperationEvent)[] = [];
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
-  const outside = ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail");
+  // So does the text of uploaded files in the student record the system prompt carries (its documents section).
+  const outside =
+    ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail") ||
+    readsDocuments(ctx.usage);
   const toolCtx: ToolContext = {
     request, conversationId: opts.conversationId, studentId, roster, ledger, connected, retrievalReady: retrievalOn, signal,
     memo: new Map(),

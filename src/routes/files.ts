@@ -486,7 +486,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       const { data: existing } = await request.db
         .from("documents")
-        .select("id, student_id, owner_id")
+        .select("id, student_id, owner_id, bucket, storage_path")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That document isn't on file");
@@ -498,8 +498,23 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       const { error } = await request.db.from("documents").delete().eq("id", id);
       if (error) throw fromPostgrest(error);
-      // The Storage object is the client's to remove: it uploaded it under its
-      // own token and this API never held a handle to it.
+      // The file goes with its row, on the caller's own client, so Storage's
+      // delete policy decides: whoever uploaded it can remove it (a file the
+      // student uploaded stays in Storage, unreachable without its row). Best
+      // effort, after the row, and never while another row still points at it.
+      const path = typeof existing.storage_path === "string" ? existing.storage_path : "";
+      if (path) {
+        const bucket = String(existing.bucket ?? "student-documents");
+        const { count } = await request.db
+          .from("documents")
+          .select("id", { count: "exact", head: true })
+          .eq("bucket", bucket)
+          .eq("storage_path", path);
+        if (count === 0) {
+          const removed = await request.db.storage.from(bucket).remove([path]).catch(() => null);
+          if (!removed || removed.error) request.log.warn("document file left in storage");
+        }
+      }
       return { deleted: true };
     }
   );

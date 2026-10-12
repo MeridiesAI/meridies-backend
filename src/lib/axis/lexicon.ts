@@ -16,6 +16,12 @@ export const INTENT_FEATURES: Record<Intent, readonly Feature[]> = {
   essay: [
     [/\b(write|draft|rewrite|redo|polish|finish|continue|compose|ghostwrite|reword|rephrase)\b(?: \w+){0,5} (essay|essays|personal statement|statement|supplement|supplemental|why us|paragraph|intro|introduction|conclusion|hook|opening|ending)\b/, 8],
     [/\bmake (her|his|their|the) (essay|statement|supplement) (better|stronger|sound|flow)\b/, 6],
+    // Editing the prose, which the change verbs below would otherwise send to perform_action as an "update".
+    // Not when the change is to the essay's record ("fix the deadline for her supplement", "edit her essay's title").
+    [/\b(edit|revise|improve|fix|tighten|shorten|lengthen|expand|strengthen|tweak|punch up|trim|cut down)\b(?: (?!(?:deadlines?|due|dates?|status|title|prompt|limit|round|link|url|file|folder)\b)\w+){0,5} (essay|essays|personal statement|statement|supplement|supplemental|why us|paragraph|intro|introduction|conclusion|hook|opening|ending)\b(?! (?:deadlines?|due|dates?|status|title|prompt|word limit|round|link|url|file|folder)\b)/, 8],
+    [/\b(add|put|insert|change|set|update|replace|swap|rewrite)\b(?: \w+){0,4} (paragraph|sentence|line|intro|introduction|conclusion|hook|opening|ending|wording)\b(?: \w+){0,6} (essay|essays|personal statement|statement|supplement|supplemental|why us)\b/, 8],
+    [/\b(add|put|insert|change|set|update|replace|swap)\b(?: \w+){0,4} (essay|essays|personal statement|statement|supplement|supplemental|why us)(?: \w+){0,2} (paragraph|sentence|first line|last line|intro|introduction|conclusion|hook|opening|ending|wording)\b/, 8],
+    [/\b(essay|personal statement|statement|supplement)\b(?: \w+){0,3} (to say|to read|so it (says|reads|opens|starts|ends))\b/, 8],
   ],
   action: [
     [/\b(remind me(?! (what|when|who|which|how|where|why|whether|if|of)\b)|set a reminder|add (a |an )?(task|to do|todo|reminder|item)|create (a |an )?(task|to do|todo|reminder)|on my (list|queue|work queue)|to my (list|queue|work queue))\b/, 7],

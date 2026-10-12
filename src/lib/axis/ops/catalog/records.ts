@@ -3,7 +3,15 @@
  * test scores, the academics row and meeting notes. Each is data the
  * counselor and the student already keep; nothing is sent when one changes,
  * so adding and editing run at once with an Undo. Deleting asks, and so does
- * sharing a meeting note with the student.
+ * a meeting note shared with the student (on create or update): the student
+ * can then read it.
+ *
+ * A meeting note's full text (`body`) is not on the AI allowlist, so no op
+ * writes or reads it; replies carry only the date, title, summary and tags.
+ *
+ * The update and delete routes act on the row's real student whatever
+ * `student_id` says; it is only how the card finds the row to name it. A row
+ * that isn't on that student's list is named as such, never guessed.
  *
  * Not here, on purpose: the Activities and Honors sheets are the
  * application catalog's (the /application routes, with the sheet's row cap);
@@ -55,8 +63,9 @@ const quoted = (v: unknown, fallback: string) => {
 const sortOrder = z.number().int().min(0).max(999);
 const trimmed = (max: number) => z.string().trim().max(max);
 
-/** Card name for a student, only once the row was found on that student's list. */
-const whose = (row: Row | null, studentId: string, h: { studentName(id: string): string }) => (row ? ` for ${h.studentName(studentId)}` : "");
+/** Card name for a student once the row was found on that student's list; otherwise says it wasn't. */
+const whose = (row: Row | null, studentId: string, h: { studentName(id: string): string }) =>
+  row ? ` for ${h.studentName(studentId)}` : ` (not found on ${h.studentName(studentId)}'s record; check the id)`;
 
 // ---- Courses (/courses) ---------------------------------------------------------------
 
@@ -181,7 +190,7 @@ export const courses: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/courses/${seg(i.course_id)}` }),
       describe: async (i, h) => {
         const c = await findRow(h, coursesUrl(i.student_id), i.course_id);
-        return `Delete ${c ? quoted(c.name, "a course") : "a course"}${c ? ` from ${h.studentName(i.student_id)}'s record` : ""}`;
+        return `Delete ${c ? quoted(c.name, "a course") : "a course"}${c ? ` from ${h.studentName(i.student_id)}'s record` : whose(c, i.student_id, h)}`;
       },
       warning: "The course is removed from the student's record.",
     }),
@@ -304,7 +313,7 @@ export const testScores: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/test-scores/${seg(i.score_id)}` }),
       describe: async (i, h) => {
         const s = await findRow(h, scoresUrl(i.student_id), i.score_id);
-        return `Delete ${scoreName(s)}${s ? ` from ${h.studentName(i.student_id)}'s record` : ""}`;
+        return `Delete ${scoreName(s)}${s ? ` from ${h.studentName(i.student_id)}'s record` : whose(s, i.student_id, h)}`;
       },
       warning: "The score is removed from the student's record.",
     }),
@@ -392,18 +401,29 @@ export const academics: OpGroup = {
 
 // ---- Meeting notes (/notes) -----------------------------------------------------------
 
+const noteFields = {
+  // Optional in the route's schema; the table refuses an empty title.
+  title: trimmed(300).min(1),
+  meeting_date: z.string().date(),
+  summary: trimmed(4000),
+  tags: z.array(trimmed(40)).max(20),
+  visibility: z.enum(["private", "shared"]),
+};
+
 const noteUpdateInput = z
   .object({
     note_id: uuid,
     student_id: uuid,
-    // Optional in the route's PATCH schema; the table refuses an empty title.
-    title: trimmed(300).min(1).optional(),
-    meeting_date: z.string().date().optional(),
-    summary: trimmed(4000).optional(),
-    tags: z.array(trimmed(40)).max(20).optional(),
-    visibility: z.enum(["private", "shared"]).optional(),
+    title: noteFields.title.optional(),
+    meeting_date: noteFields.meeting_date.optional(),
+    summary: noteFields.summary.optional(),
+    tags: noteFields.tags.optional(),
+    visibility: noteFields.visibility.optional(),
   })
   .strict();
+
+/** The route's body (snake_case, like the table). Never `body`: the note's full text stays off AI. */
+const noteBody = (i: Row) => defined({ title: i.title, meeting_date: i.meeting_date, summary: i.summary, tags: i.tags, visibility: i.visibility });
 
 const NOTE_LABELS = { title: "Title", meeting_date: "Meeting date", summary: "Summary", tags: "Tags", visibility: "Visibility" };
 const notesUrl = (studentId: string) => `/notes${qs({ studentId })}`;
@@ -432,6 +452,33 @@ export const meetingNotes: OpGroup = {
         ),
     }),
     op({
+      name: "meeting_notes.create",
+      kind: "write",
+      risk: (i) => (i.visibility === "shared" ? "confirm" : "auto"),
+      title: "Log a meeting note for a student: title, date, summary, tags (private unless shared with the student).",
+      doc: "{ student_id, title ≤300, meeting_date? YYYY-MM-DD (default today), summary? ≤4000, tags? [≤40 each, ≤20], visibility?: private|shared }",
+      input: z
+        .object({
+          student_id: uuid,
+          title: noteFields.title,
+          meeting_date: noteFields.meeting_date.optional(),
+          summary: noteFields.summary.optional(),
+          tags: noteFields.tags.optional(),
+          visibility: noteFields.visibility.optional(),
+        })
+        .strict(),
+      takesStudent: true,
+      request: (i) => ({ method: "POST", url: "/notes", body: { studentId: i.student_id, ...noteBody(i) } }),
+      describe: (i, h) =>
+        `${i.visibility === "shared" ? "Share" : "Add"} the meeting note "${plainText(i.title, 80)}"${i.meeting_date ? ` (${dayLabel(i.meeting_date)})` : ""} ${i.visibility === "shared" ? "with" : "for"} ${h.studentName(i.student_id)}`,
+      details: (i) => changeLines(defined({ summary: i.summary, tags: i.tags, visibility: i.visibility }), NOTE_LABELS),
+      warning: "The student can read a shared note.",
+      undo: (i, body) => {
+        const id = idOf(body);
+        return id ? { op: "meeting_notes.delete", input: { note_id: id, student_id: i.student_id } } : null;
+      },
+    }),
+    op({
       name: "meeting_notes.update",
       kind: "write",
       risk: (i) => (i.visibility === "shared" ? "confirm" : "auto"),
@@ -439,14 +486,11 @@ export const meetingNotes: OpGroup = {
       doc: "{ note_id, student_id, title? ≤300, meeting_date? YYYY-MM-DD, summary? ≤4000, tags? [≤40 each, ≤20], visibility?: private|shared }",
       input: noteUpdateInput,
       takesStudent: true,
-      request: (i) => ({
-        method: "PATCH",
-        url: `/notes/${seg(i.note_id)}`,
-        body: defined({ title: i.title, meeting_date: i.meeting_date, summary: i.summary, tags: i.tags, visibility: i.visibility }),
-      }),
+      request: (i) => ({ method: "PATCH", url: `/notes/${seg(i.note_id)}`, body: noteBody(i) }),
       describe: async (i, h) => {
         const n = await findRow(h, notesUrl(i.student_id), i.note_id);
-        if (i.visibility === "shared") return `Share ${noteName(n)} with ${h.studentName(i.student_id)}`;
+        // Name the student only when the note is theirs: the share goes to whoever the note is about.
+        if (i.visibility === "shared") return `Share ${noteName(n)} with ${n ? h.studentName(i.student_id) : "the student it's about"}${n ? "" : whose(n, i.student_id, h)}`;
         return `Update ${noteName(n)}${whose(n, i.student_id, h)}`;
       },
       details: (i) => changeLines(i, NOTE_LABELS),

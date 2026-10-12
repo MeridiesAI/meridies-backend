@@ -19,9 +19,9 @@ import { ZodError } from "zod";
 import { HttpError } from "../../errors.js";
 import { resolveStudentId } from "../../guards.js";
 import { wrapUntrusted } from "../../context/pack.js";
-import { dispatch, failureMessage, isTransient } from "./dispatch.js";
+import { assertAllowedCall, dispatch, failureMessage, isTransient } from "./dispatch.js";
 import { getOp, headingOf, riskOf } from "./registry.js";
-import type { OpDef, OpHelpers, UndoStep } from "./types.js";
+import type { OpCall, OpDef, OpHelpers, UndoStep } from "./types.js";
 
 export const MAX_WRITES_PER_TURN = 20;
 export const MAX_AUTO_WRITES_PER_TURN = 5;
@@ -73,6 +73,53 @@ type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> &
 const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const isUuid = (s: unknown): s is string => typeof s === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
 
+/**
+ * A catalog hook (describe, details, snapshot, undo, reply) run so that its
+ * failure, thrown or rejected, sync or async, is a null rather than a thrown
+ * turn. After a write has gone through this matters most: a throw there would
+ * read as "failed" to the model (which may then repeat the change) or release
+ * a Confirm claim (so a second click would run it twice).
+ */
+async function safely<T>(f: () => T | Promise<T>): Promise<T | null> {
+  try {
+    return await f();
+  } catch {
+    return null;
+  }
+}
+function safelySync<T>(f: () => T): T | null {
+  try {
+    return f();
+  } catch {
+    return null;
+  }
+}
+
+/** The row's payload must fit the 32 KB CHECK (20261019000001); bytes, not characters. */
+export const PAYLOAD_MAX_BYTES = 30_000;
+const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v), "utf8");
+
+/** Drops card detail lines (newest last first) until the stored payload fits; null when even the input alone doesn't. */
+export function fitPayload(p: StoredPayload): StoredPayload | null {
+  if (bytes(p) <= PAYLOAD_MAX_BYTES) return p;
+  const details = p.details.slice();
+  while (details.length) {
+    details.pop();
+    const trimmed = { ...p, details: [...details, "(More detail than a card holds; see the request.)"] };
+    if (bytes(trimmed) <= PAYLOAD_MAX_BYTES) return trimmed;
+  }
+  const bare = { ...p, details: [] };
+  return bytes(bare) <= PAYLOAD_MAX_BYTES ? bare : null;
+}
+
+const notRun = (why: string): OpOutput => ({ content: `Not done: ${why}`, isError: true, fresh: false });
+const STOPPED = "the answer was stopped before this change ran. Nothing was changed.";
+const writeLimit = (): OpOutput => ({
+  content: `That's ${MAX_WRITES_PER_TURN} changes in one message, the limit. Stop here and tell the counselor what is left to do.`,
+  isError: true,
+  fresh: false,
+});
+
 export function helpers(request: FastifyRequest, roster: OpContext["roster"] | null): OpHelpers {
   return {
     studentName: (id) => (id && roster?.get(id)?.name) || "the student",
@@ -102,11 +149,22 @@ function zodText(err: ZodError, def: OpDef): string {
 }
 
 /** A reversal that names a real write op with a valid input; anything else is dropped. */
-function validUndo(step: UndoStep | null | undefined): UndoStep | null {
-  if (!step) return null;
-  const def = getOp(step.op);
+function validUndo(step: unknown): UndoStep | null {
+  if (!step || typeof step !== "object") return null;
+  const s = step as Partial<UndoStep>;
+  if (typeof s.op !== "string") return null;
+  const def = getOp(s.op);
   if (!def || def.kind !== "write") return null;
-  return def.input.safeParse(step.input).success ? step : null;
+  return def.input.safeParse(s.input).success ? (s as UndoStep) : null;
+}
+
+/** The reversal stored on a row's result, if it is one Undo would run. */
+export const undoStepOf = (result: unknown): UndoStep | null =>
+  validUndo(result && typeof result === "object" ? (result as { undo?: unknown }).undo : null);
+
+/** The reversal a catalog op computes after its write. Never throws: the write already happened. */
+function reversalOf(def: OpDef, input: Record<string, unknown>, body: unknown, before: unknown): UndoStep | null {
+  return safelySync(() => validUndo(def.undo?.(input, body, before)));
 }
 
 function defaultReply(body: unknown): string {
@@ -140,8 +198,10 @@ async function insertAction(
     .select("id")
     .single();
   if (error) {
-    // 23514: the CHECK from 20261018000001 doesn't know 'operation' yet (20261019000001 not applied).
-    const schemaMissing = error.code === "23514" || error.code === "42P01" || error.code === "PGRST205";
+    // 23514 from the type/status CHECK of 20261018000001, which doesn't know 'operation' yet
+    // (20261019000001 not applied). The payload size CHECK raises 23514 too, and isn't a missing migration.
+    const checkFailed = error.code === "23514" && !/payload/i.test(String((error as { message?: string }).message ?? ""));
+    const schemaMissing = checkFailed || error.code === "42P01" || error.code === "PGRST205";
     request.log.warn({ code: error.code }, "axis operation not recorded");
     return { id: null, schemaMissing };
   }
@@ -160,9 +220,13 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
     throw err;
   }
   await studentFor(ctx, def, input, "view");
-  const res = await dispatch(ctx.request, def.request(input));
+  const call = def.request(input);
+  // `lookup` starts before the model's turn is complete and is answered from memory on a repeat:
+  // only a GET may run that way, whatever a catalog entry says.
+  if (call.method !== "GET") return { content: `${name} isn't a lookup AxIS can run.`, isError: true, fresh: false };
+  const res = await dispatch(ctx.request, call);
   if (res.status >= 400) return { content: failureMessage(res), isError: true, fresh: false };
-  const content = def.reply ? def.reply(res.body, input) : "Done.";
+  const content = def.reply ? (safelySync(() => def.reply!(res.body, input)) ?? "That lookup's answer couldn't be read.") : "Done.";
   return { content: content || "Nothing found.", fresh: !!content };
 }
 
@@ -170,9 +234,7 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
 export async function runWrite(ctx: OpContext, name: string, raw: unknown): Promise<OpOutput> {
   const def = getOp(name);
   if (!def || def.kind !== "write") return { content: `There is no action called ${name}. Use an action name from the catalog.`, isError: true, fresh: false };
-  if (ctx.turn.writes >= MAX_WRITES_PER_TURN) {
-    return { content: `That's ${MAX_WRITES_PER_TURN} changes in one message, the limit. Stop here and tell the counselor what is left to do.`, isError: true, fresh: false };
-  }
+  if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
   let input: Record<string, unknown>;
   try {
     input = prepareInput(def, raw, ctx.studentId);
@@ -180,12 +242,21 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
     if (err instanceof ZodError) return { content: zodText(err, def), isError: true, fresh: false };
     throw err;
   }
+  // The request this becomes, checked now: a card for a path AxIS may not call (or essay prose) is never filed.
+  const call: OpCall = def.request(input);
+  assertAllowedCall(call);
   const studentId = await studentFor(ctx, def, input, "edit");
   const h = helpers(ctx.request, ctx.roster);
   // Labels are best effort: a failed lookup of the target falls back to the op's title, never fails the change.
-  const summary = clipText((await Promise.resolve(def.describe?.(input, h)).catch(() => null)) ?? def.title, 300);
-  const details = ((await Promise.resolve(def.details?.(input, h)).catch(() => null)) ?? []).slice(0, 12).map((d) => clipText(d, 1600));
+  const described = await safely(() => def.describe?.(input, h));
+  const summary = clipText(typeof described === "string" && described.trim() ? described : def.title, 300);
+  const detailLines = await safely(() => def.details?.(input, h));
+  const details = (Array.isArray(detailLines) ? detailLines : []).slice(0, 12).map((d) => clipText(String(d), 1600));
 
+  // From here to the reservation below nothing awaits, so calls running side by side in one round
+  // can't all pass the checks before any of them counts.
+  if (ctx.signal.aborted) return notRun(STOPPED);
+  if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
   let risk = riskOf(def, input);
   let reason: OperationPayload["reason"] = null;
   if (risk === "auto" && ctx.turn.tainted) {
@@ -196,11 +267,13 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
     reason = "many-changes";
   }
   ctx.turn.writes++;
+  if (risk === "auto") ctx.turn.autoWrites++;
 
   const warning = risk === "confirm" ? (def.warning ?? null) : null;
-  const stored: StoredPayload = { op: def.name, area: headingOf(def.name), summary, details, warning, reason, input };
+  const stored = fitPayload({ op: def.name, area: headingOf(def.name), summary, details, warning, reason, input });
+  if (!stored) return notRun("that change is too large for AxIS to file or record. Nothing was changed; tell the counselor to make it in the app.");
   const show = (status: OperationStatus, undoable: boolean, message: string | null = null): OperationPayload => ({
-    op: stored.op, area: stored.area, summary, details, warning, reason, status, undoable, message,
+    op: stored.op, area: stored.area, summary, details: stored.details, warning, reason, status, undoable, message,
   });
 
   if (risk === "confirm") {
@@ -222,19 +295,21 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
     };
   }
 
-  ctx.turn.autoWrites++;
-  const before = def.snapshot ? await def.snapshot(input, h).catch(() => null) : undefined;
-  const res = await dispatch(ctx.request, def.request(input));
-  if (res.status >= 400) return { content: `Not done: ${failureMessage(res)}`, isError: true, fresh: false };
-  const undo = validUndo(def.undo?.(input, res.body, before));
+  const before = def.snapshot ? await safely(() => def.snapshot!(input, h)) : undefined;
+  // A call that timed out, or a panel the counselor closed, must not start a change the model was told didn't happen.
+  if (ctx.signal.aborted) return notRun(STOPPED);
+  const res = await dispatch(ctx.request, call);
+  if (res.status >= 400) return notRun(failureMessage(res));
+  // From here on the change has happened: nothing below may throw, or the model would be told it failed.
+  const undo = reversalOf(def, input, res.body, before);
   // Recorded even if the counselor closed the panel: the change happened and the trail must show it.
   const rec = await insertAction(ctx.request, {
     conversationId: ctx.conversationId, studentId, status: "executed", payload: stored, result: { ok: true, ...(undo ? { undo } : {}) },
-  });
+  }).catch((): { id: null; schemaMissing: false } => ({ id: null, schemaMissing: false }));
   if (!ctx.signal.aborted) {
     ctx.onOperation({ id: rec.id ?? `local-${randomUUID()}`, type: "operation", studentId, payload: show("executed", !!(undo && rec.id)) });
   }
-  const extra = def.reply ? def.reply(res.body, input) : defaultReply(res.body);
+  const extra = (def.reply ? safelySync(() => def.reply!(res.body, input)) : null) ?? defaultReply(res.body);
   return { content: `Done: ${wrapUntrusted("action", summary)}.${extra ? ` ${extra}` : ""}`, fresh: true };
 }
 
@@ -269,19 +344,28 @@ export async function confirmOperation(request: FastifyRequest, row: { student_i
     if (err instanceof HttpError && err.statusCode < 500) return { status: "failed", result: { ok: false, message: err.message } };
     throw err;
   }
+  // A request that can't be built, or a path AxIS may not call, will never run: fail the card rather
+  // than hand the claim back for another click.
+  let call: OpCall;
+  try {
+    call = def.request(input);
+    assertAllowedCall(call);
+  } catch (err) {
+    return { status: "failed", result: { ok: false, message: err instanceof HttpError && err.statusCode < 500 ? err.message : "AxIS can no longer do that. Ask again." } };
+  }
   const h = helpers(request, null);
-  const before = def.snapshot ? await def.snapshot(input, h).catch(() => null) : undefined;
-  const res = await dispatch(request, def.request(input));
+  const before = def.snapshot ? await safely(() => def.snapshot!(input, h)) : undefined;
+  const res = await dispatch(request, call);
   if (isTransient(res.status)) throw new TransientOperationError(failureMessage(res));
   if (res.status >= 400) return { status: "failed", result: { ok: false, message: failureMessage(res) } };
-  const undo = validUndo(def.undo?.(input, res.body, before));
+  // The change has happened. A throw from here would release the claim and let a second Confirm run it again.
+  const undo = reversalOf(def, input, res.body, before);
   return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}) } };
 }
 
 /** Runs the reversal stored on an executed or confirmed row. Throws an HttpError the route passes on. */
 export async function undoOperation(request: FastifyRequest, row: { result: unknown }): Promise<void> {
-  const r = (row.result ?? {}) as { undo?: UndoStep };
-  const step = validUndo(r.undo);
+  const step = undoStepOf(row.result);
   if (!step) throw new HttpError(409, "That change can't be undone from here.");
   const def = getOp(step.op)!;
   const input = def.input.parse(step.input) as Record<string, unknown>;
@@ -324,8 +408,9 @@ export async function recentActionsText(request: FastifyRequest, conversationId:
           ? `Email draft: ${String(p.subject ?? "")}`
           : `Work Queue item: ${String(p.title ?? "")}`;
     const status = String(r.status);
-    const failed = status === "failed" && typeof res.message === "string" ? `: ${res.message}` : "";
-    return `- ${STATUS_WORDS[status] ?? status}${failed} · ${wrapUntrusted("action", clipText(what, 200))}`;
+    // The failure reason is a route's text kept on the row (and `result` is writable by the client): data, like the summary.
+    const failed = status === "failed" && typeof res.message === "string" && res.message.trim() ? ` ${wrapUntrusted("reason", clipText(res.message, 300))}` : "";
+    return `- ${STATUS_WORDS[status] ?? "unknown"}${failed} · ${wrapUntrusted("action", clipText(what, 200))}`;
   });
   return `Changes AxIS made or proposed earlier in this chat, newest first:\n${lines.join("\n")}`;
 }

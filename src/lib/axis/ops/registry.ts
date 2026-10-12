@@ -51,10 +51,19 @@ export const headingOf = (name: string): string => HEADING.get(name) ?? "Meridie
 export const READ_OPS: readonly string[] = ALL.filter((d) => d.kind === "read").map((d) => d.name);
 export const WRITE_OPS: readonly string[] = ALL.filter((d) => d.kind === "write").map((d) => d.name);
 
-/** A write's tier for this input. Reads have none; an op without one asks first. */
+/**
+ * A write's tier for this input. Reads have none; an op without one asks first.
+ * Fails closed: anything but an explicit "auto" (a tier function that throws
+ * or answers something else) waits for the counselor's Confirm.
+ */
 export function riskOf(def: OpDef, input: unknown): Risk {
-  if (typeof def.risk === "function") return def.risk(input);
-  return def.risk ?? "confirm";
+  let r: unknown;
+  try {
+    r = typeof def.risk === "function" ? def.risk(input) : def.risk;
+  } catch {
+    return "confirm";
+  }
+  return r === "auto" ? "auto" : "confirm";
 }
 
 let rendered: string | null = null;

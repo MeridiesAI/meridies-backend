@@ -5,11 +5,14 @@
  * firm when shared), a practice resource by the practice only, and a pin or a
  * resource's closing date lands on a student's page the way a deadline does.
  * So adding, editing, saving and pinning run at once with Undo; deleting a
- * listing, a resource or a note asks. The catalog itself is Meridies' (staff
- * and service role only) and has no write here.
+ * listing, a resource or a note asks, and so does a pin to a student that
+ * carries a note (the student reads the note on their page). The catalog
+ * itself is Meridies' (staff and service role only) and has no write here.
+ * `colleges.find` is the one catalog finder: every op that takes a
+ * college_id points at it.
  */
 import { z } from "zod";
-import { CALENDAR_TARGETS, EVENT_KINDS, EVENT_TOPICS, PHOTO_KEYS, REMINDERS } from "../../../eventsHub.js";
+import { CALENDAR_TARGETS, EVENT_KINDS, EVENT_TOPICS, PHOTO_KEYS, REMINDERS, isTimeZone } from "../../../eventsHub.js";
 import { op, type OpGroup, type UndoStep } from "../types.js";
 import { asArray, asRecord, changeLines, day, dayLabel, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
 
@@ -51,7 +54,8 @@ async function findTip(h: Get, collegeId: string, tipId: string): Promise<Tip | 
   return hit ? (asRecord(hit) as Tip) : null;
 }
 
-const tipLabel = (t: Tip | null) => (t ? `"${plainText(t.source, 80)}"${t.sessionDate ? ` (${dayLabel(t.sessionDate)})` : ""}` : "a webinar note");
+const tipLabel = (t: Tip | null) =>
+  t ? `webinar note "${plainText(t.source, 80)}"${t.sessionDate ? ` (${dayLabel(t.sessionDate)})` : ""}` : "a webinar note (not found on that college; check the ids)";
 
 const tipFields = {
   source: z.string().trim().min(1).max(200),
@@ -72,8 +76,8 @@ export const colleges: OpGroup = {
     op({
       name: "colleges.find",
       kind: "read",
-      title: "Find catalog colleges by name or alias (e.g. \"UCLA\") to get their ids.",
-      doc: "{ query ≤120, states? [two-letter codes], limit? 1-100 }",
+      title: "Find a school in the Meridies college catalog by name or alias (e.g. \"UCLA\"): the college_id every action takes.",
+      doc: "{ query ≤120 (the school's name), states? [two-letter codes], limit? 1-100 }",
       input: z
         .object({
           query: z.string().trim().min(1).max(120),
@@ -85,8 +89,12 @@ export const colleges: OpGroup = {
       reply: (body) =>
         listReply(
           asArray(body),
-          (c) => `id ${str(c.id)}: ${untrusted(`${str(c.name) ?? ""}${c.city || c.state ? ` (${[str(c.city), str(c.state)].filter(Boolean).join(", ")})` : ""}`, "catalog")}`,
-          "No college in the catalog matches."
+          (c) => {
+            const aka = Array.isArray(c.aka) ? c.aka.map(String).filter(Boolean).slice(0, 2) : [];
+            const where = [str(c.city), str(c.state)].filter(Boolean).join(", ");
+            return `id ${str(c.id)}: ${untrusted(`${str(c.name) ?? ""}${aka.length ? ` (also ${aka.join(", ")})` : ""}${where ? ` · ${where}` : ""}`, "catalog")}`;
+          },
+          "No school in the catalog matches. Try the official name; a school not in the catalog can still go on a college list by name."
         ),
     }),
     op({
@@ -144,11 +152,12 @@ export const colleges: OpGroup = {
           source_url: tipFields.source_url.optional(),
           share: share.optional(),
         })
-        .strict(),
+        .strict()
+        .refine((x) => Object.keys(toTipBody(x)).length > 0, "Give at least one field to change"),
       request: (i) => ({ method: "PATCH", url: `/colleges/webinar-tips/${seg(i.tip_id)}`, body: toTipBody(i) }),
       describe: async (i, h) => {
         const [t, name] = await Promise.all([findTip(h, i.college_id, i.tip_id), collegeName(h, i.college_id)]);
-        return `Update webinar advice ${tipLabel(t)}${t && name ? ` on ${name}` : ""}`;
+        return `Update ${tipLabel(t)}${t && name ? ` on ${name}` : ""}`;
       },
       details: (i) => changeLines(i, TIP_LABELS),
       snapshot: (i, h) => findTip(h, i.college_id, i.tip_id),
@@ -177,7 +186,7 @@ export const colleges: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/colleges/webinar-tips/${seg(i.tip_id)}` }),
       describe: async (i, h) => {
         const [t, name] = await Promise.all([findTip(h, i.college_id, i.tip_id), collegeName(h, i.college_id)]);
-        return `Delete webinar advice ${tipLabel(t)}${t && name ? ` from ${name}` : ""}`;
+        return `Delete ${tipLabel(t)}${t && name ? ` from ${name}` : ""}`;
       },
       warning: "The note is deleted for you and anyone in your firm it was shared with.",
     }),
@@ -185,7 +194,7 @@ export const colleges: OpGroup = {
       name: "colleges.research_folder",
       kind: "write",
       risk: "auto",
-      title: "Find (or make) the Files › Policy & research folder for a link's or file's school; returns its id.",
+      title: "Find (or make) the Files › Policy & research folder for a link's or file's school; then files.add_link with its folder_id.",
       doc: "{ url? (the link), filename? ≤300 } (one of them)",
       input: z
         .object({
@@ -253,7 +262,7 @@ const eventFields = {
   end_date: day.nullable(),
   start_time: hhmm.nullable(),
   end_time: hhmm.nullable(),
-  time_zone: z.string().trim().min(1).max(64),
+  time_zone: z.string().trim().min(1).max(64).refine(isTimeZone, "Use an IANA time zone, e.g. America/New_York"),
   place: z.string().trim().min(1).max(200),
   url: httpUrl,
   description: z.string().trim().max(1000).nullable(),
@@ -299,9 +308,29 @@ const toEventBody = (i: Record<string, unknown>) =>
     share: i.share,
   });
 
+/**
+ * The route's date and time rules (routes/events.ts checkTimes), so a listing it would
+ * refuse is refused here with the field named. On an update only what the input
+ * itself can show: the route checks the rest against the stored listing.
+ */
+function checkEventTimes(
+  i: { start_date?: string; end_date?: string | null; start_time?: string | null; end_time?: string | null },
+  ctx: z.RefinementCtx,
+  creating: boolean
+) {
+  if (i.end_date && i.start_date && i.end_date < i.start_date) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["end_date"], message: "An event can't end before it starts" });
+  }
+  if (!creating) return;
+  if (i.end_time && !i.start_time) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["start_time"], message: "Give a start time with the end time" });
+  if (i.start_time && i.end_time && !i.end_date && i.end_time <= i.start_time) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["end_time"], message: "The end time has to be after the start time" });
+  }
+}
+
 /** Card lines for a listing's fields, the college by name rather than id. */
 async function eventLines(i: Record<string, unknown>, h: Get): Promise<string[]> {
-  const lines = changeLines(i, EVENT_LABELS);
+  const lines = changeLines(Array.isArray(i.topics) && !i.topics.length ? { ...i, topics: "none" } : i, EVENT_LABELS);
   if ("college_id" in i && i.college_id !== undefined) {
     lines.push(`College: ${i.college_id === null ? "cleared" : ((await collegeName(h, String(i.college_id))) ?? "a catalog college")}`);
   }
@@ -363,8 +392,8 @@ export const events: OpGroup = {
       name: "events.create",
       kind: "write",
       risk: "auto",
-      title: "Add a listing to the Events Hub (for the counselor's firm, or just them with share: me).",
-      doc: "{ name, kind: conference|webinar|workshop|college-fair|info-session, host, start_date YYYY-MM-DD, url, end_date?, start_time? HH:MM, end_time?, time_zone?, place?, description?, college_id?, topics? [aid|essays|uc|lists|practice], share?: firm|me }",
+      title: "Add a listing to the Events Hub (shared with the counselor's firm by default; share: me keeps it to them).",
+      doc: "{ name, kind: conference|webinar|workshop|college-fair|info-session, host, start_date YYYY-MM-DD, url, end_date?, start_time? HH:MM, end_time?, time_zone? IANA, place?, description?, college_id?, topics? [aid|essays|uc|lists|practice], share?: firm|me }",
       input: z
         .object({
           name: eventFields.name,
@@ -383,9 +412,10 @@ export const events: OpGroup = {
           topics: eventFields.topics.optional(),
           share: share.optional(),
         })
-        .strict(),
+        .strict()
+        .superRefine((i, ctx) => checkEventTimes(i, ctx, true)),
       request: (i) => ({ method: "POST", url: "/events", body: toEventBody(i) }),
-      describe: (i) => `Add "${plainText(i.name, 80)}" (${dayLabel(i.start_date)}) to the Events Hub${i.share === "me" ? ", just for you" : ""}`,
+      describe: (i) => `Add "${plainText(i.name, 80)}" (${dayLabel(i.start_date)}) to the Events Hub${i.share === "me" ? ", just for you" : i.share === "firm" ? ", for your firm" : ""}`,
       details: (i, h) => eventLines(defined({ host: i.host, place: i.place, url: i.url, start_time: i.start_time, college_id: i.college_id, share: i.share }), h),
       undo: (_i, body) => {
         const id = idOf(body);
@@ -417,7 +447,9 @@ export const events: OpGroup = {
           topics: eventFields.topics.optional(),
           share: share.optional(),
         })
-        .strict(),
+        .strict()
+        .superRefine((i, ctx) => checkEventTimes(i, ctx, false))
+        .refine((x) => Object.keys(toEventBody(x)).length > 0, "Give at least one field to change"),
       request: (i) => ({ method: "PATCH", url: `/events/${seg(i.event_id)}`, body: toEventBody(i) }),
       describe: async (i, h) => `Update ${eventLabel(await findEvent(h, i.event_id))} in the Events Hub`,
       details: (i, h) => eventLines(i, h),
@@ -536,7 +568,8 @@ async function findPin(h: Get, pinId: string, target: { student_id?: string; col
 const resourceFields = {
   category: z.enum(CATEGORIES),
   title: z.string().trim().min(1).max(200),
-  url: z.string().trim().url().max(2000),
+  // The route resolves and checks the address (lib/links.ts); only http(s) passes.
+  url: httpUrl,
   description: z.string().trim().max(1200),
   opens_on: day.nullable(),
   closes_on: day.nullable(),
@@ -668,7 +701,8 @@ export const resources: OpGroup = {
           audience: resourceFields.audience.optional(),
           state_scope: resourceFields.state_scope.optional(),
         })
-        .strict(),
+        .strict()
+        .refine((x) => Object.keys(toResourceBody(x)).length > 0, "Give at least one field to change"),
       request: (i) => ({ method: "PATCH", url: `/resources/${seg(i.resource_id)}`, body: toResourceBody(i) }),
       describe: async (i, h) => `Update ${resourceLabel(await findResource(h, i.resource_id))} in your practice's resources`,
       details: (i) => changeLines(i, RESOURCE_LABELS),
@@ -708,14 +742,16 @@ export const resources: OpGroup = {
     op({
       name: "resources.pin_to_student",
       kind: "write",
-      risk: "auto",
-      title: "Pin a resource to a student's page.",
-      doc: "{ resource_id, student_id, note? ≤500 }",
+      // The student reads the pin and its note on their page: a note is words shown to them, so it asks first.
+      risk: (i) => (i.note ? "confirm" : "auto"),
+      title: "Pin a resource to a student's page (the student sees it; with a note it waits for Confirm).",
+      doc: "{ resource_id, student_id, note? ≤500 (shown to the student) }",
       input: pinTarget.extend({ student_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: `/resources/${seg(i.resource_id)}/pins`, body: defined({ studentId: i.student_id, note: i.note }) }),
       describe: async (i, h) => `Pin ${resourceLabel(await findResource(h, i.resource_id))} to ${h.studentName(i.student_id)}'s page`,
-      details: (i) => (i.note ? [`Note: ${plainText(i.note, 400)}`] : []),
+      details: (i) => (i.note ? [`Note: ${plainText(i.note, 500)}`] : []),
+      warning: "The student sees this resource and your note on their page.",
       reply: (body) => `Pinned (pin id ${str(asRecord(body).pinId) ?? "unknown"}).`,
       undo: (i, body) => {
         const pin = str(asRecord(body).pinId);
@@ -734,7 +770,7 @@ export const resources: OpGroup = {
         const [r, name] = await Promise.all([findResource(h, i.resource_id), collegeName(h, i.college_id)]);
         return `Pin ${resourceLabel(r)} to ${name ?? "a college"}`;
       },
-      details: (i) => (i.note ? [`Note: ${plainText(i.note, 400)}`] : []),
+      details: (i) => (i.note ? [`Note: ${plainText(i.note, 500)}`] : []),
       reply: (body) => `Pinned (pin id ${str(asRecord(body).pinId) ?? "unknown"}).`,
       undo: (i, body) => {
         const pin = str(asRecord(body).pinId);
@@ -746,7 +782,7 @@ export const resources: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Unpin a resource from a student or a college (the resource itself stays).",
-      doc: "{ pin_id, student_id? | college_id? (exactly one: where the pin is) }",
+      doc: "{ pin_id (from resources.student_pins or college_pins), student_id? | college_id? (exactly one: where the pin is) }",
       input: z
         .object({ pin_id: uuid, student_id: uuid.optional(), college_id: uuid.optional() })
         .strict()
@@ -754,7 +790,8 @@ export const resources: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/resources/pins/${seg(i.pin_id)}` }),
       describe: async (i, h) => {
         const p = await findPin(h, i.pin_id, i);
-        const what = resourceLabel(p?.resource ?? null);
+        if (!p) return `Unpin a resource (pin ${i.pin_id}, not found ${i.student_id ? "on that student's page" : "on that college"})`;
+        const what = resourceLabel(p.resource ?? null);
         if (i.student_id) return `Unpin ${what} from ${h.studentName(i.student_id)}'s page`;
         return `Unpin ${what} from ${(await collegeName(h, i.college_id)) ?? "a college"}`;
       },

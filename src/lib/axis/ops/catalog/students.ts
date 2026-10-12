@@ -4,9 +4,12 @@
  * student page: the info card, the headline, the counselor's own status read
  * and private note, the strength profile, the preference card sort, and the
  * counselor's pins. Nothing here sends a message, so most edits run at once.
- * Contact details ask first, because messages and parent alerts follow them;
- * so do removing a student from the roster (archiving), clearing or deleting
- * things, and replacing the private note, whose text AxIS is never shown.
+ * Contact details ask first, because messages and reminders follow them; so
+ * do removing a student from the roster (archiving) and putting one back
+ * (automatic reminders and parent alerts resume), clearing or deleting
+ * things, and anything that replaces a note AxIS is never shown (the private
+ * note, and the note on the counselor's status read). A parent's contact
+ * details are the guardian ops' (accountability.*_guardian), by guardian id.
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers, type UndoStep } from "../types.js";
@@ -45,13 +48,13 @@ const personalFields = {
   marital_status: z.enum(["single", "married"]).nullable(),
 };
 
+// The info card's parent fields are left out on purpose: they edit "the first
+// guardian on file" (and create one when there is none), which is the guardian
+// ops' job by guardian id (accountability.add_guardian / update_guardian).
 const contactFields = {
   email: z.union([z.string().trim().email().max(320), z.literal("")]).nullable(),
   phone: optText(40),
   address: optText(400),
-  parent_name: optText(200),
-  parent_email: z.union([z.string().trim().email().max(254), z.literal("")]).nullable(),
-  parent_phone: optText(40),
 };
 
 /** Input key -> the info card's key, which the PATCH body and the GET response share. */
@@ -74,9 +77,6 @@ const INFO_KEYS: Record<string, string> = {
   email: "email",
   phone: "phone",
   address: "address",
-  parent_name: "parentName",
-  parent_email: "parentEmail",
-  parent_phone: "parentPhone",
 };
 
 const INFO_LABELS: Record<string, string> = {
@@ -98,9 +98,6 @@ const INFO_LABELS: Record<string, string> = {
   email: "Contact email",
   phone: "Phone",
   address: "Address",
-  parent_name: "Parent name",
-  parent_email: "Parent email",
-  parent_phone: "Parent phone",
 };
 
 const infoBody = (i: Record<string, unknown>) => {
@@ -113,8 +110,6 @@ const infoBody = (i: Record<string, unknown>) => {
 function infoUndo(name: string, i: Record<string, unknown>, before: unknown): UndoStep | null {
   const b = asRecord(before);
   if (!b.studentId) return null;
-  // A parent the write created can't be removed through this route.
-  if (["parent_name", "parent_email", "parent_phone"].some((k) => k in i) && !b.guardianId) return null;
   const prev: Record<string, unknown> = { student_id: i.student_id };
   for (const [k, dto] of Object.entries(INFO_KEYS)) {
     if (!(k in i)) continue;
@@ -126,6 +121,27 @@ function infoUndo(name: string, i: Record<string, unknown>, before: unknown): Un
 }
 
 const infoSnapshot = (i: { student_id: string }, h: Get) => h.get(infoUrl(i.student_id));
+
+/** At least one value to change besides the student: the route answers 400 otherwise. */
+const someField = (o: Record<string, unknown>) => Object.keys(o).some((k) => k !== "student_id" && o[k] !== undefined);
+const SOME_FIELD = "Give at least one field to change";
+
+// ---- The roster ----
+
+/** The roster's name, or the record's for a student who isn't on it (one archived). Card text only. */
+async function nameOf(h: OpHelpers, id: string): Promise<string> {
+  const known = h.studentName(id);
+  if (known !== "the student") return known;
+  const info = await h.get<unknown>(infoUrl(id));
+  return plainText(str(asRecord(info).fullName), 80) || known;
+}
+
+/** Whether the student is on the active roster (GET /students lists only those), or null when it can't be read. */
+async function rosterState(h: Get, id: string): Promise<{ active: boolean } | null> {
+  const rows = await h.get<unknown>("/students");
+  if (!Array.isArray(rows)) return null;
+  return { active: asArray(rows).some((r) => r.id === id) };
+}
 
 // ---- Status override and private note ----
 
@@ -229,20 +245,24 @@ export const students: OpGroup = {
         if (i.hometown !== undefined) prev.hometown = typeof p.hometown === "string" ? p.hometown : "";
         return { op: "students.update", input: prev };
       },
+      // The route answers with the whole profile (login email included): never echo it.
+      reply: () => "Saved.",
     }),
     op({
       name: "students.update_academics",
       kind: "write",
       risk: "auto",
       title: "Change a student's high school, class year, GPA, class rank, SAT/ACT, rigor or intended majors.",
-      doc: "{ student_id, high_school?|null, grad_year? YYYY|null, gpa_weighted? 0-110|null, gpa_unweighted?|null, class_rank? ≤80|null, sat? 400-1600|null, act? 1-36|null, rigor? ≤300|null, intended_majors? [≤80] ≤10 }",
-      input: z.object(academicFields).partial().extend({ student_id: uuid }).strict(),
+      doc: "{ student_id, high_school?|null, grad_year? \"YYYY\"|null, gpa_weighted? 0-110|null, gpa_unweighted?|null, class_rank? ≤80|null, sat? 400-1600|null, act? 1-36|null, rigor? ≤300|null, intended_majors? [≤80] ≤10 (whole list) }",
+      input: z.object(academicFields).partial().extend({ student_id: uuid }).strict().refine(someField, SOME_FIELD),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: infoUrl(i.student_id), body: infoBody(i) }),
       describe: (i, h) => `Update ${h.studentName(i.student_id)}'s school and academics`,
       details: (i) => changeLines(i, INFO_LABELS),
       snapshot: infoSnapshot,
       undo: (i, _body, before) => infoUndo("students.update_academics", i, before),
+      // The route answers with the whole info card (contact details, birthday): never echo it.
+      reply: () => "Saved.",
     }),
     op({
       name: "students.update_personal",
@@ -250,45 +270,54 @@ export const students: OpGroup = {
       risk: "auto",
       title: "Change a student's personal details: gender, birthday, citizenship, first-gen, living with parent, marital status.",
       doc: "{ student_id, gender?: female|male|non-binary|undisclosed, birthday? YYYY-MM-DD, citizenship?: us-citizen|permanent-resident|international, first_gen? bool, living_with_parent? bool, marital_status?: single|married }, each nullable",
-      input: z.object(personalFields).partial().extend({ student_id: uuid }).strict(),
+      input: z.object(personalFields).partial().extend({ student_id: uuid }).strict().refine(someField, SOME_FIELD),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: infoUrl(i.student_id), body: infoBody(i) }),
       describe: (i, h) => `Update ${h.studentName(i.student_id)}'s personal details`,
       details: (i) => changeLines(i, INFO_LABELS),
       snapshot: infoSnapshot,
       undo: (i, _body, before) => infoUndo("students.update_personal", i, before),
+      reply: () => "Saved.",
     }),
     op({
       name: "students.update_contact",
       kind: "write",
       risk: "confirm",
-      title: "Change where a student or their parent is reached: contact email, phone, address, parent name/email/phone.",
-      doc: "{ student_id, email? (\"\" = use login email), phone? ≤40, address? ≤400, parent_name? ≤200, parent_email?, parent_phone? ≤40 } (each may be null)",
-      input: z.object(contactFields).partial().extend({ student_id: uuid }).strict(),
+      title: "Change where the student is reached: contact email, phone, address. (A parent's details: accountability.update_guardian.)",
+      doc: "{ student_id, email? (\"\" or null = their login email), phone? ≤40|null, address? ≤400|null }",
+      input: z.object(contactFields).partial().extend({ student_id: uuid }).strict().refine(someField, SOME_FIELD),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: infoUrl(i.student_id), body: infoBody(i) }),
+      // The summary reaches the model: it names the student and nothing they can be reached at.
       describe: (i, h) => `Update ${h.studentName(i.student_id)}'s contact details`,
       details: (i) => changeLines(i, INFO_LABELS),
-      warning: "Messages, reminders and parent alerts go to these details from now on.",
+      warning: "Messages and reminders to the student go to these details from now on.",
       snapshot: infoSnapshot,
       undo: (i, _body, before) => infoUndo("students.update_contact", i, before),
     }),
     op({
       name: "students.set_status",
       kind: "write",
-      risk: "auto",
+      // Always asks: the route replaces the note on the current status (a note
+      // left out is cleared), and AxIS is never shown that note, so it can't keep it.
+      risk: "confirm",
       title: "Set your own read on a student (on track, at risk, ahead), with an optional private note. Only counselors see it.",
-      doc: "{ student_id, status: on-track|at-risk|ahead, note? ≤2000|null } (leaving note out clears any note there)",
+      doc: "{ student_id, status: on-track|at-risk|ahead, note? ≤2000|null } (replaces the note on the current status; leaving it out clears it)",
       input: z.object({ student_id: uuid, status: z.enum(STATUSES), note: z.string().trim().max(2000).nullable().optional() }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PUT", url: `${studentUrl(i.student_id)}/status`, body: defined({ status: i.status, note: i.note }) }),
       describe: (i, h) => `Mark ${h.studentName(i.student_id)} as ${STATUS_WORDS[i.status]}`,
       details: async (i, h) => {
-        if (i.note) return [`Note: ${plainText(i.note, 600)}`];
-        if (i.note === null || i.note === "") return ["Note: cleared"];
         const s = await statusOf(h, i.student_id);
-        return str(s?.override?.note) ? ["The note on your current status is cleared."] : [];
+        const was = str(s?.override?.status);
+        const hadNote = !!str(s?.override?.note);
+        return [
+          ...(was ? [`Now: ${STATUS_WORDS[was] ?? was}${hadNote ? ", with a note" : ""}`] : []),
+          i.note ? `Note: ${plainText(i.note, 600)}` : "Note: none",
+          ...(hadNote ? [i.note ? "Your current note is replaced." : "Your current note is cleared."] : []),
+        ];
       },
+      warning: "Your current status and its note are replaced.",
       snapshot: (i, h) => statusOf(h, i.student_id),
       undo: (i, _body, before) => statusUndo(i.student_id, before),
       reply: () => "Status saved.",
@@ -348,26 +377,34 @@ export const students: OpGroup = {
       name: "students.archive",
       kind: "write",
       risk: "confirm",
-      title: "Remove a student from the roster (archives them; nothing is deleted and they can be restored).",
+      title: "Remove a student from your roster (archives them: nothing is deleted, and students.unarchive restores them).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "DELETE", url: studentUrl(i.student_id) }),
-      describe: (i, h) => `Remove ${h.studentName(i.student_id)} from your roster`,
-      warning: "They leave your roster and Overview, and messages scheduled for them won't go out. Their record is kept.",
-      undo: (i) => ({ op: "students.unarchive", input: { student_id: i.student_id } }),
+      describe: async (i, h) => `Remove ${await nameOf(h, i.student_id)} from your roster`,
+      warning:
+        "They leave your roster, Overview and AxIS's student list; scheduled messages to them that come due are cancelled, and automatic reminders and parent alerts stop. Their record is kept.",
+      // Only a student who was on the roster goes back on it.
+      snapshot: (i, h) => rosterState(h, i.student_id),
+      undo: (i, _body, before) => (asRecord(before).active === true ? { op: "students.unarchive", input: { student_id: i.student_id } } : null),
+      reply: () => "Removed from the roster.",
     }),
     op({
       name: "students.unarchive",
       kind: "write",
-      risk: "auto",
-      title: "Put a removed (archived) student back on the roster.",
+      // Back on the roster, the scheduled sweep chases them again: a red flag
+      // that came due while they were off it can alert their parents.
+      risk: "confirm",
+      title: "Put a removed (archived) student back on your roster.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: studentUrl(i.student_id), body: { archived: false } }),
-      describe: (i, h) => `Put ${h.studentName(i.student_id)} back on your roster`,
-      undo: (i) => ({ op: "students.archive", input: { student_id: i.student_id } }),
+      describe: async (i, h) => `Put ${await nameOf(h, i.student_id)} back on your roster`,
+      warning: "Automatic reminders and parent alerts resume for them; an overdue red flag can alert their parents on the next sweep.",
+      snapshot: (i, h) => rosterState(h, i.student_id),
+      undo: (i, _body, before) => (asRecord(before).active === false ? { op: "students.archive", input: { student_id: i.student_id } } : null),
       reply: () => "Back on the roster.",
     }),
   ],
@@ -419,7 +456,11 @@ export const strengthProfile: OpGroup = {
         const id = added ? str(added.id) : null;
         return id ? { op: "strength_profile.remove_axis", input: { student_id: i.student_id, axis_id: id } } : null;
       },
-      reply: () => "Axis saved.",
+      reply: (body, i) => {
+        const b = asRecord(body);
+        const hit = [...asArray(b.axes), ...asArray(b.hidden)].find((a) => sameLabel(a.label, i.label));
+        return hit ? `Axis saved: id ${str(hit.id)}.` : "Axis saved.";
+      },
     }),
     op({
       name: "strength_profile.update_axis",
@@ -435,7 +476,8 @@ export const strengthProfile: OpGroup = {
           score: z.number().min(0).max(100).nullable().optional(),
           hidden: z.boolean().optional(),
         })
-        .strict(),
+        .strict()
+        .refine((o) => o.label !== undefined || o.score !== undefined || o.hidden !== undefined, "Give label, score or hidden"),
       takesStudent: true,
       request: (i) => ({
         method: "PATCH",
@@ -566,7 +608,7 @@ export const preferenceCards: OpGroup = {
       reply: (body) =>
         listReply(
           asArray(body),
-          (c) => `id ${str(c.id)}: [${untrusted(c.categoryLabel ?? c.category, "catalog")}] ${untrusted(c.prompt, "catalog")}`,
+          (c) => `id ${str(c.id)}: [${untrusted(str(c.categoryLabel) ?? str(c.category), "catalog")}] ${untrusted(c.prompt, "catalog")}`,
           "The deck is empty.",
           150
         ),
@@ -595,7 +637,8 @@ export const preferenceCards: OpGroup = {
     op({
       name: "students.clear_card_rating",
       kind: "write",
-      risk: "auto",
+      // The rating is usually the student's own answer from their card sort: removing it asks.
+      risk: "confirm",
       title: "Take a student's rating off a preference card (back to unsorted).",
       doc: "{ student_id, card_id }",
       input: z.object({ student_id: uuid, card_id: uuid }).strict(),
@@ -605,6 +648,11 @@ export const preferenceCards: OpGroup = {
         const prompt = await cardPrompt(h, i.card_id);
         return `Clear ${h.studentName(i.student_id)}'s rating of ${prompt ? `"${plainText(prompt, 80)}"` : "a preference card"}`;
       },
+      details: async (i, h) => {
+        const r = await ratingOf(h, i.student_id, i.card_id);
+        return r ? [r.rating ? `Rated now: ${RATING_WORDS[r.rating] ?? r.rating}` : "This card isn't rated now."] : [];
+      },
+      warning: "The rating is removed; the card goes back to unsorted.",
       snapshot: (i, h) => ratingOf(h, i.student_id, i.card_id),
       undo: (i, _body, before) => {
         const step = ratingUndo(i.student_id, i.card_id, before);

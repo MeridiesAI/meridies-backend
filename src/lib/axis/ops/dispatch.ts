@@ -20,37 +20,91 @@ import type { OpCall } from "./types.js";
 
 export type Dispatched = { status: number; body: unknown };
 
+/** Tested against the canonical path (decoded, lower case, no query), so an encoding or a case can't slip past. */
 const NEVER: readonly RegExp[] = [
-  /^\/axis(\/|\?|$)/,
-  /^\/chat(\/|\?|$)/,
-  /^\/auth(\/|\?|$)/,
-  /^\/ai(\/|\?|$)/,
-  /^\/me(\/|\?|$)/,
-  /^\/account(\/|\?|$)/,
-  /^\/access-review(\/|\?|$)/,
-  /^\/internal(\/|\?|$)/,
-  /^\/webhooks(\/|\?|$)/,
-  /^\/communication\/internal(\/|\?|$)/,
-  /^\/integrations\/[^/]+\/(authorize|complete)(\/|\?|$)/,
-  /^\/imports(\/|\?|$)/,
-  /^\/health(\/|\?|$)/,
+  /^\/axis(\/|$)/,
+  /^\/chat(\/|$)/,
+  /^\/auth(\/|$)/,
+  /^\/ai(\/|$)/,
+  /^\/me(\/|$)/,
+  /^\/account(\/|$)/,
+  /^\/access-review(\/|$)/,
+  /^\/internal(\/|$)/,
+  /^\/webhooks(\/|$)/,
+  /^\/communication\/internal(\/|$)/,
+  /^\/integrations\/[^/]+\/(authorize|complete)(\/|$)/,
+  /^\/imports(\/|$)/,
+  /^\/health(\/|$)/,
+  // Essay marks: accepting one splices its replacement into the student's essay.
+  /^\/essays(\/|$)/,
 ];
 
-/** Keys that would carry essay text. Refused on any request whose path mentions an essay or a supplement. */
-const PROSE_KEYS = new Set(["body", "text", "content", "draft", "html", "prose", "essay", "essayText", "paragraph"]);
+/**
+ * Keys that would carry essay text, compared lower case without `_` or `-`, at
+ * any depth of the body. Refused on any request whose path mentions an essay
+ * or a supplement.
+ */
+const PROSE_KEYS = new Set([
+  "body", "text", "content", "draft", "html", "prose", "essay", "essaytext", "paragraph", "markdown", "plaintext",
+  "replacement", "suggestedreplacement",
+]);
 const ESSAY_PATH = /essay|supplement/i;
+const REFUSED_PATH = "That request path isn't allowed.";
+
+/** A catalog path segment once decoded: ids, words, hyphens. Nothing that could move the router somewhere else. */
+const SEGMENT = /^[a-z0-9_~-][a-z0-9._~-]*$/i;
+
+/**
+ * The path as the router will match it: every segment percent-decoded and
+ * lower-cased, the query string dropped. Throws for anything a catalog path
+ * never needs (dot segments, encoded slashes or dots, `;`, `%` left after
+ * decoding, empty segments), because the router and the URL parser undo
+ * encodings the denylist would otherwise have to anticipate one by one:
+ * `/%61xis` routes to `/axis`, `/x/%2e%2e/axis` and `/./axis` normalise to it.
+ */
+export function canonicalPath(url: string): string {
+  const q = url.indexOf("?");
+  const raw = q === -1 ? url : url.slice(0, q);
+  const segs = raw.split("/");
+  if (segs[0] !== "") throw badRequest(REFUSED_PATH);
+  const out: string[] = [];
+  for (let i = 1; i < segs.length; i++) {
+    const s = segs[i]!;
+    if (s === "") {
+      // One trailing slash is harmless (the app ignores it); an empty segment anywhere else is not.
+      if (i === segs.length - 1 && i > 1) continue;
+      throw badRequest(REFUSED_PATH);
+    }
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(s);
+    } catch {
+      throw badRequest(REFUSED_PATH);
+    }
+    if (decoded === "." || decoded === ".." || !SEGMENT.test(decoded)) throw badRequest(REFUSED_PATH);
+    out.push(decoded.toLowerCase());
+  }
+  if (!out.length) throw badRequest(REFUSED_PATH);
+  return `/${out.join("/")}`;
+}
+
+/** A prose key anywhere in the body (nested objects and arrays included). */
+function hasProseKey(v: unknown, depth = 0): boolean {
+  if (depth > 8 || !v || typeof v !== "object") return false;
+  if (Array.isArray(v)) return v.some((x) => hasProseKey(x, depth + 1));
+  return Object.entries(v as Record<string, unknown>).some(
+    ([k, x]) => PROSE_KEYS.has(k.toLowerCase().replace(/[_-]/g, "")) || hasProseKey(x, depth + 1)
+  );
+}
 
 export function assertAllowedCall(call: OpCall): void {
   const url = call.url;
-  if (!url.startsWith("/") || url.startsWith("//") || url.includes("..") || /[\s\\]/.test(url) || /^\/[a-z]+:/i.test(url)) {
-    throw badRequest("That request path isn't allowed.");
+  if (!url.startsWith("/") || url.startsWith("//") || url.includes("..") || /[\s\\#]/.test(url) || /^\/[a-z]+:/i.test(url)) {
+    throw badRequest(REFUSED_PATH);
   }
-  const path = url.split("?")[0]!;
+  const path = canonicalPath(url);
   if (NEVER.some((re) => re.test(path))) throw forbidden("AxIS can't do that.");
-  if (ESSAY_PATH.test(path) && call.body && typeof call.body === "object") {
-    const keys = Object.keys(call.body as Record<string, unknown>);
-    if (keys.some((k) => PROSE_KEYS.has(k))) throw forbidden("AxIS doesn't write essay text.");
-  }
+  if (ESSAY_PATH.test(path) && hasProseKey(call.body)) throw forbidden("AxIS doesn't write essay text.");
 }
 
 /** The counselor's request, replayed through the API. Never throws for an HTTP status; throws for a refused path. */

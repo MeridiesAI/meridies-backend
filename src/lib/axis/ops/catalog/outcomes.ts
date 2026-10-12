@@ -6,10 +6,12 @@
  * Close cycle, which turns every senior into an alum and locks the cycle's
  * rows for good. A referral is the counselor's own record until it is
  * invited: sending the family an intake invitation emails them, so it asks.
- * Accepting a recommendation adds the school to the college list or files a
- * task only the counselor sees, which is what the counselor asked for, so it
- * runs at once, as does dismissing one. Running research calls a model and
- * is not here.
+ * Naming the referred family on an existing referral asks too: it can't be
+ * put back to "asked", and on an invited referral it drops the invitation
+ * link. The referred family's email goes to the card, never to the model.
+ * A research recommendation's status can't be put back once it is accepted
+ * or dismissed (and accepting a college puts it on the list the student
+ * sees), so both ask. Running research calls a model and is not here.
  */
 import { z } from "zod";
 import { HOOKS, RESULTS, ROUNDS } from "../../../outcomes.js";
@@ -20,7 +22,11 @@ type Get = Pick<OpHelpers, "get">;
 
 // ---- Admission outcomes and alumni -----------------------------------------------
 
-const cycle = z.string().regex(/^\d{4}-\d{4}$/, "A cycle reads like 2026-2027");
+/** "2026-2027": the route checks the shape; close_admission_cycle also wants consecutive years. */
+const cycle = z
+  .string()
+  .regex(/^\d{4}-\d{4}$/, "A cycle reads like 2026-2027")
+  .refine((c) => Number(c.slice(5)) === Number(c.slice(0, 4)) + 1, "A cycle is two consecutive years, like 2026-2027");
 
 const fields = {
   student_id: uuid.nullable(),
@@ -174,7 +180,8 @@ export const outcomes: OpGroup = {
           hooks: fields.hooks.optional(),
           intended_major: fields.intended_major.optional(),
         })
-        .strict(),
+        .strict()
+        .refine((x) => !x.enrolled || x.result === "admitted", { path: ["enrolled"], message: "Only an admission can be marked enrolled" }),
       request: (i) => ({ method: "POST", url: "/outcomes", body: outcomeBody(i) }),
       describe: (i, h) =>
         `Record ${whoOf({ studentId: i.student_id, studentName: i.student_name }, h)}: ${i.result}${i.enrolled ? " and enrolled" : ""} at ${plainText(i.college_name, 80)} (${i.round ?? "RD"}${i.cycle ? `, ${i.cycle}` : ""})`,
@@ -209,7 +216,9 @@ export const outcomes: OpGroup = {
           hooks: fields.hooks.optional(),
           intended_major: fields.intended_major.optional(),
         })
-        .strict(),
+        .strict()
+        .refine((x) => Object.keys(outcomeBody(x)).length > 0, "Give at least one field to change")
+        .refine((x) => !(x.enrolled && x.result !== undefined && x.result !== "admitted"), { path: ["enrolled"], message: "Only an admission can be marked enrolled" }),
       request: (i) => ({ method: "PATCH", url: `/outcomes/${seg(i.outcome_id)}`, body: outcomeBody(i) }),
       describe: async (i, h) => `Update ${outcomeLabel(await findOutcome(h, i.outcome_id), h)}`,
       details: (i, h) => [...outcomeIdLines(i, h), ...changeLines(i, OUTCOME_LABELS)],
@@ -240,21 +249,28 @@ export const outcomes: OpGroup = {
       name: "outcomes.close_cycle",
       kind: "write",
       risk: "confirm",
-      title: "Close an admission cycle: record the seniors' decisions, lock the cycle and make the seniors alumni.",
-      doc: "{ cycle YYYY-YYYY (outcomes.cycles gives the current one) }",
+      title: "Close an admission cycle: record the seniors' decisions, lock the cycle and make the seniors alumni. Only when asked.",
+      doc: "{ cycle YYYY-YYYY (use the current one from outcomes.cycles unless the counselor names another) }",
       input: z.object({ cycle }).strict(),
       request: (i) => ({ method: "POST", url: "/outcomes/close-cycle", body: { cycle: i.cycle } }),
       describe: async (i, h) => {
         const c = asRecord(await h.get("/outcomes/cycles"));
-        const seniors = c.current === i.cycle && typeof c.seniors === "number" ? c.seniors : null;
-        return `Close the ${i.cycle} cycle: ${seniors === null ? "every" : seniors} senior${seniors === 1 ? "" : "s"} in the class of ${i.cycle.slice(5)} become${seniors === 1 ? "s" : ""} alumni`;
+        const classOf = i.cycle.slice(5);
+        if (str(c.current) && c.current !== i.cycle) {
+          // Not the cycle the app offers to close: say so, because it turns a whole other class into alumni.
+          return `Close the ${i.cycle} cycle, NOT the current ${str(c.current)} one: every student in the class of ${classOf} on your roster becomes an alum`;
+        }
+        const n = typeof c.seniors === "number" ? c.seniors : null;
+        const who = n === null ? `every senior in the class of ${classOf} becomes an alum` : `${n} senior${n === 1 ? "" : "s"} in the class of ${classOf} become${n === 1 ? "s an alum" : " alumni"}`;
+        return `Close the ${i.cycle} cycle: ${who}`;
       },
-      details: () => [
-        "Records every decision on the seniors' college lists as an admission outcome",
-        "Locks the cycle's outcomes so they can't be edited or deleted",
-        "Moves each senior to Alumni, with where they enrolled",
+      details: (i) => [
+        `Takes every student on your roster in the class of ${i.cycle.slice(5)} who isn't an alum yet`,
+        "Records every decision on their college lists as an admission outcome",
+        "Locks your outcomes for the cycle so they can't be edited or deleted",
+        "Moves each of them to Alumni, with where they enrolled",
       ],
-      warning: "This changes every senior in that class at once, and a closed cycle can't be reopened.",
+      warning: "This changes a whole class at once, and a closed cycle can't be reopened or its outcomes edited.",
     }),
     op({
       name: "alumni.update",
@@ -269,7 +285,8 @@ export const outcomes: OpGroup = {
           institution_name: z.string().trim().min(1).max(300).nullable().optional(),
           program: z.string().trim().max(200).nullable().optional(),
         })
-        .strict(),
+        .strict()
+        .refine((x) => x.college_id !== undefined || x.institution_name !== undefined || x.program !== undefined, "Give at least one field to change"),
       takesStudent: true,
       request: (i) => ({
         method: "PATCH",
@@ -303,6 +320,18 @@ const findReferral = async (h: Get, id: string): Promise<Referral | null> => {
   const hit = asArray(await h.get<unknown[]>("/referrals")).find((r) => r.id === id);
   return hit ? (hit as Referral) : null;
 };
+/**
+ * The referred family, as routes/referrals.ts cleans it: the surname without a trailing
+ * "family", and an email it would accept. Checked here so a bad one is named before the
+ * card is filed.
+ */
+const familyName = z
+  .string()
+  .trim()
+  .max(200)
+  .refine((v) => v.replace(/\s+family$/i, "").trim().length > 0, "Give the family's surname");
+const familyEmail = z.string().trim().max(320).email("Give a valid email address");
+
 const familyOf = (r: Referral | null) => (r?.familyName ? `the ${plainText(r.familyName, 60)} family` : "the referred family");
 const referrerOf = (r: Referral | null) => (r?.referrerLabel ? `the ${plainText(r.referrerLabel, 60)}` : "a family");
 
@@ -319,8 +348,9 @@ export const referrals: OpGroup = {
       reply: (body) =>
         listReply(
           asArray(body),
+          // The referred family's email is never shown here: only whether there is one.
           (r) =>
-            `id ${str(r.id)}: [${str(r.status)}] from ${untrusted(r.referrerLabel, "roster")} (student ${str(r.fromStudentId)})${r.familyName ? ` → ${untrusted(r.familyName)} family` : " → nobody named yet"}`,
+            `id ${str(r.id)}: [${str(r.status)}] from ${untrusted(r.referrerLabel, "roster")} (student ${str(r.fromStudentId)})${r.familyName ? ` → ${untrusted(r.familyName)} family` : " → nobody named yet"}${r.contactEmail ? " (email on file)" : ""}`,
           "No referrals."
         ),
     }),
@@ -328,16 +358,17 @@ export const referrals: OpGroup = {
       name: "referrals.ask",
       kind: "write",
       risk: "auto",
-      title: "Record that a student's family was asked for a referral (with a name and email: who they named).",
-      doc: "{ student_id, family_name? ≤200, contact_email? ≤320 (give both or neither), ask_message_id? }",
+      title: "Record that a student's family was asked for a referral; with family_name and contact_email, a new referral of who they named.",
+      doc: "{ student_id, family_name? ≤200, contact_email? (give both or neither), ask_message_id? (from messages.list) }",
       input: z
         .object({
           student_id: uuid,
-          family_name: z.string().trim().max(200).optional(),
-          contact_email: z.string().trim().max(320).optional(),
+          family_name: familyName.optional(),
+          contact_email: familyEmail.optional(),
           ask_message_id: uuid.optional(),
         })
-        .strict(),
+        .strict()
+        .refine((x) => (x.family_name === undefined) === (x.contact_email === undefined), "Give family_name and contact_email together, or neither"),
       takesStudent: true,
       request: (i) => ({
         method: "POST",
@@ -345,10 +376,11 @@ export const referrals: OpGroup = {
         body: defined({ studentId: i.student_id, familyName: i.family_name, contactEmail: i.contact_email, askMessageId: i.ask_message_id }),
       }),
       describe: (i, h) =>
-        i.family_name || i.contact_email
-          ? `Record that ${h.studentName(i.student_id)}'s family referred the ${plainText(i.family_name, 60)} family`
+        i.family_name
+          ? `Record that ${h.studentName(i.student_id)}'s family referred the ${plainText(i.family_name.replace(/\s+family$/i, ""), 60)} family`
           : `Record that ${h.studentName(i.student_id)}'s family was asked for a referral`,
       details: (i) => (i.contact_email ? [`Email: ${plainText(i.contact_email, 320)}`] : []),
+      reply: (body) => (idOf(body) ? `Referral id ${idOf(body)}.` : ""),
       // A second plain ask refreshes the open one instead of adding a row: undo only removes a row this ask created.
       snapshot: async (i, h) => asArray(await h.get<unknown[]>(`/referrals${qs({ studentId: i.student_id })}`)).map((r) => str(r.id)),
       undo: (_i, body, before) => {
@@ -360,17 +392,24 @@ export const referrals: OpGroup = {
     op({
       name: "referrals.introduce",
       kind: "write",
-      risk: "auto",
-      title: "Record who the family named: the referred family's surname and email.",
-      doc: "{ referral_id, family_name ≤200, contact_email ≤320 }",
-      input: z.object({ referral_id: uuid, family_name: z.string().max(200), contact_email: z.string().max(320) }).strict(),
+      // An asked referral can't go back to "asked", and an invited one loses its invitation link.
+      risk: "confirm",
+      title: "On an existing referral (from referrals.list), record who the family named: surname and email.",
+      doc: "{ referral_id, family_name ≤200, contact_email }",
+      input: z.object({ referral_id: uuid, family_name: familyName, contact_email: familyEmail }).strict(),
       request: (i) => ({
         method: "PATCH",
         url: `/referrals/${seg(i.referral_id)}`,
         body: { familyName: i.family_name, contactEmail: i.contact_email },
       }),
-      describe: async (i, h) => `Record the ${plainText(i.family_name, 60)} family as referred by ${referrerOf(await findReferral(h, i.referral_id))}`,
+      describe: async (i, h) => {
+        const r = await findReferral(h, i.referral_id);
+        const invited = r?.status === "invited" || r?.status === "signed";
+        const was = r?.familyName ? ` (was ${familyOf(r)}${invited ? `, already ${r.status}` : ""})` : "";
+        return `Record the ${plainText(i.family_name.replace(/\s+family$/i, ""), 60)} family as referred by ${referrerOf(r)}${was}`;
+      },
       details: (i) => [`Email: ${plainText(i.contact_email, 320)}`],
+      warning: "The referral can't go back to asked; if the family was already invited, it is detached from that invitation.",
       snapshot: (i, h) => findReferral(h, i.referral_id),
       // Only an introduced referral goes back exactly: this clears an invitation link and can't restore an ask.
       undo: (i, _body, before) => {
@@ -423,13 +462,19 @@ const findRec = async (h: Get, studentId: string, id: string): Promise<Rec | nul
   return hit ? (hit as Rec) : null;
 };
 
+/** The card names the suggestion only when it is found under that student; otherwise it says so rather than guess. */
+const recLabel = (r: Rec | null, id: string, student: string) =>
+  r ? `"${plainText(r.title, 80)}" for ${student}` : `research suggestion ${id} (not among ${student}'s; check the ids)`;
+
+const recInput = z.object({ recommendation_id: uuid, student_id: uuid }).strict();
+
 export const recommendations: OpGroup = {
   heading: "Research recommendations",
   ops: [
     op({
       name: "recommendations.list",
       kind: "read",
-      title: "A student's research recommendations (colleges or activities) with ids and status.",
+      title: "A student's research suggestions (colleges or activities, from Research) with ids and status.",
       doc: "{ student_id, feature?: college_list|activities }",
       input: z.object({ student_id: uuid, feature: z.enum(["college_list", "activities"]).optional() }).strict(),
       takesStudent: true,
@@ -444,38 +489,38 @@ export const recommendations: OpGroup = {
     op({
       name: "recommendations.accept",
       kind: "write",
-      risk: "auto",
-      title: "Accept a suggestion: a college goes on the student's list; an activity becomes a task only you see.",
-      doc: "{ recommendation_id, student_id }",
-      input: z.object({ recommendation_id: uuid, student_id: uuid }).strict(),
+      // The suggestion can't be put back once accepted, and a college lands on the list the student sees.
+      risk: "confirm",
+      title: "Accept a research suggestion: a college goes on the student's college list; an activity becomes a task only you see.",
+      doc: "{ recommendation_id (from recommendations.list), student_id }",
+      input: recInput,
       takesStudent: true,
       request: (i) => ({ method: "POST", url: `/recommendations/${seg(i.recommendation_id)}/accept` }),
       describe: async (i, h) => {
         const r = await findRec(h, i.student_id, i.recommendation_id);
-        const what = r ? `"${plainText(r.title, 80)}"` : "a recommendation";
         const into = r?.feature === "college_list" ? ": add it to their college list" : r?.feature === "activities" ? ": add it as a task only you see" : "";
-        return `Accept ${what} for ${h.studentName(i.student_id)}${into}`;
+        return `Accept ${recLabel(r, i.recommendation_id, h.studentName(i.student_id))}${into}`;
       },
+      warning: "Accepted suggestions can't be put back; a college shows on the student's college list.",
       reply: (body) => {
         const a = asRecord(asRecord(body).acceptedAs);
         return a.type === "student_college"
-          ? `Accepted: added to the college list (row id ${str(a.id) ?? "unknown"}).`
+          ? `Accepted: added to the college list (student_college_id ${str(a.id) ?? "unknown"}).`
           : `Accepted: added as a task hidden from the student (task id ${str(a.id) ?? "unknown"}).`;
       },
     }),
     op({
       name: "recommendations.dismiss",
       kind: "write",
-      risk: "auto",
-      title: "Dismiss a suggestion.",
-      doc: "{ recommendation_id, student_id }",
-      input: z.object({ recommendation_id: uuid, student_id: uuid }).strict(),
+      // A dismissed suggestion can't be brought back, and research runs are capped per practice.
+      risk: "confirm",
+      title: "Dismiss a research suggestion.",
+      doc: "{ recommendation_id (from recommendations.list), student_id }",
+      input: recInput,
       takesStudent: true,
       request: (i) => ({ method: "POST", url: `/recommendations/${seg(i.recommendation_id)}/dismiss` }),
-      describe: async (i, h) => {
-        const r = await findRec(h, i.student_id, i.recommendation_id);
-        return `Dismiss ${r ? `"${plainText(r.title, 80)}"` : "a recommendation"} for ${h.studentName(i.student_id)}`;
-      },
+      describe: async (i, h) => `Dismiss ${recLabel(await findRec(h, i.student_id, i.recommendation_id), i.recommendation_id, h.studentName(i.student_id))}`,
+      warning: "A dismissed suggestion can't be brought back.",
     }),
   ],
 };

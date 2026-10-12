@@ -3,17 +3,23 @@
  *
  * A meeting is a session with a student; the student sees it on their
  * calendar, and no email or text goes out when one is booked, moved or
- * cancelled (the API sends no invitation). Booking or moving one therefore
- * runs at once. `create_conference` puts an event with a real Meet / Teams
- * link on the counselor's connected Google or Outlook calendar, so that asks,
- * and so do cancelling (which removes that event) and deleting.
+ * cancelled: the API sends no invitation, and the Google / Outlook event it
+ * can create has no attendees and is written with `sendUpdates=none`
+ * (lib/suiteApi.ts). Booking or moving one therefore runs at once.
+ * `create_conference` puts an event with a real Meet / Teams link on the
+ * counselor's connected Google or Outlook calendar, so that asks, and so do
+ * cancelling and changing the mode (either removes that event), deleting, and
+ * inviting other students (each one then sees the meeting, its title and
+ * agenda).
  *
  * The Calendar's event types and practice events ("Planning milestone") are
  * the counselor's own. A practice event shared with a student shows on that
- * student's calendar, so sharing one asks.
+ * student's calendar, so sharing one, or moving a shared one to another
+ * student, asks.
  *
  * The meetings routes take UTC times only; an op accepts any ISO time with an
- * offset and sends it as UTC.
+ * offset and sends it as UTC. Cards show a time as the model wrote it, with
+ * its offset (and the UTC time beside it), so it is never a bare clock time.
  */
 import { z } from "zod";
 import { BUILTIN_TYPES, isTimeZone } from "../../../calendarFeed.js";
@@ -28,14 +34,42 @@ type Row = Record<string, unknown>;
 /** Any ISO time, as the UTC form the meetings routes accept (they refuse an offset). */
 const utc = (iso: string): string => new Date(iso).toISOString();
 
+const ISO_PARTS = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/i;
+
+/** The offset in minutes east of UTC an ISO string was written in, or null for Z / none. */
+function offsetMinutes(iso: string): number | null {
+  const m = ISO_PARTS.exec(iso);
+  if (!m?.[3] || m[3].toUpperCase() === "Z") return null;
+  const [, sign, hh, mm] = /^([+-])(\d{2}):?(\d{2})$/.exec(m[3])!;
+  const n = Number(hh) * 60 + Number(mm);
+  return n === 0 ? null : sign === "-" ? -n : n;
+}
+
 /** "Nov 3, 2026 at 16:00 UTC-05:00", read off the ISO string as written. */
 function whenLabel(iso: unknown): string {
   const s = str(iso);
   if (!s) return "";
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/.exec(s);
+  const m = ISO_PARTS.exec(s);
   if (!m) return plainText(s, 40);
-  const zone = !m[3] || m[3] === "Z" || m[3] === "+00:00" ? "UTC" : `UTC${m[3]}`;
+  const off = offsetMinutes(s);
+  const zone = off === null ? "UTC" : `UTC${m[3]!.length === 5 ? `${m[3]!.slice(0, 3)}:${m[3]!.slice(3)}` : m[3]}`;
   return `${dayLabel(m[1])} at ${m[2]} ${zone}`;
+}
+
+/** The same instant written in the offset `like` was written in (so an old and a new time read alike). */
+function sameOffset(iso: unknown, like: string): string {
+  const s = str(iso);
+  if (!s || Number.isNaN(Date.parse(s))) return "";
+  const off = offsetMinutes(like);
+  if (off === null) return whenLabel(new Date(s).toISOString());
+  const local = new Date(Date.parse(s) + off * 60_000).toISOString().slice(0, 16);
+  const abs = Math.abs(off);
+  return whenLabel(`${local}${off < 0 ? "-" : "+"}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`);
+}
+
+/** The card's full form: as written, plus the UTC time when it was written with an offset. */
+function whenDetail(iso: string): string {
+  return offsetMinutes(iso) === null ? whenLabel(iso) : `${whenLabel(iso)} (${whenLabel(utc(iso))})`;
 }
 
 /** The update that puts back exactly the keys `i` changed, or null when the old values don't pass the op's own input. */
@@ -72,7 +106,8 @@ const meetingFields = {
   title: z.string().trim().min(1).max(300),
   mode: z.enum(MODES),
   location: z.string().trim().max(300).nullable(),
-  join_url: z.string().url().max(2000).nullable(),
+  // The table refuses anything but http(s) (meetings.join_url check).
+  join_url: z.string().url().max(2000).regex(/^https?:\/\//, "Use an http(s) link").nullable(),
   starts_at: isoDateTime,
   ends_at: isoDateTime.nullable(),
   agenda: z.string().trim().max(4000).nullable(),
@@ -116,8 +151,8 @@ const meetingBody = (i: MeetingInput) =>
 
 function meetingDetails(i: MeetingInput & { attendee_ids?: string[] }, h: { studentName(id: string): string }): string[] {
   const lines: string[] = [];
-  if (typeof i.starts_at === "string") lines.push(`Starts: ${whenLabel(i.starts_at)}`);
-  if (i.ends_at !== undefined) lines.push(`Ends: ${i.ends_at === null ? "cleared" : whenLabel(i.ends_at)}`);
+  if (typeof i.starts_at === "string") lines.push(`Starts: ${whenDetail(i.starts_at)}`);
+  if (i.ends_at !== undefined) lines.push(`Ends: ${typeof i.ends_at === "string" ? whenDetail(i.ends_at) : "cleared"}`);
   const { attendee_ids, ...rest } = i;
   lines.push(...changeLines(rest, MEETING_LABELS));
   if (attendee_ids) lines.push(`Students invited: ${attendee_ids.map((id) => h.studentName(id)).join(", ") || "only the student it's for"}`);
@@ -175,7 +210,7 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.list",
       kind: "read",
-      title: "Meetings with ids: one student's (and ones they're invited to), or the counselor's whole calendar.",
+      title: "Meetings with ids, oldest first: one student's (and ones they're invited to), or all of the counselor's. Pass from for upcoming ones.",
       doc: "{ student_id?, status?: scheduled|held|cancelled|no-show, from? ISO datetime, to? ISO datetime, limit? 1–200 }",
       input: z
         .object({
@@ -209,9 +244,10 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.create",
       kind: "write",
-      risk: (i) => (i.create_conference ? "confirm" : "auto"),
-      title: "Book a meeting with a student (create_conference also puts a Meet/Teams event on the connected calendar).",
-      doc: "{ student_id, title ≤300, starts_at ISO datetime, ends_at?, mode?: google-meet|teams|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? ≤30, create_conference? (needs ends_at, google-meet|teams) }",
+      // Asks when it writes to the connected calendar, or when other students (other families) will see it.
+      risk: (i) => (i.create_conference || (i.attendee_ids ?? []).some((id) => id !== i.student_id) ? "confirm" : "auto"),
+      title: "Book a meeting with a student. No invitation is sent; create_conference also puts a Meet/Teams event on the connected calendar.",
+      doc: "{ student_id, title ≤300, starts_at ISO datetime with offset, ends_at?, mode?: google-meet|teams|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? (other students) ≤30, create_conference? (needs ends_at) }",
       input: z
         .object({
           student_id: uuid,
@@ -232,13 +268,13 @@ export const meetings: OpGroup = {
       request: (i) => ({ method: "POST", url: "/meetings", body: { studentId: i.student_id, ...meetingBody(i) } }),
       describe: (i, h) => {
         const others = (i.attendee_ids ?? []).filter((id) => id !== i.student_id).length;
-        return `Book "${plainText(i.title, 80)}" with ${h.studentName(i.student_id)}${others ? ` and ${others} more` : ""} on ${whenLabel(i.starts_at)}`;
+        return `Book "${plainText(i.title, 80)}" with ${h.studentName(i.student_id)}${others ? ` and ${others} more` : ""} on ${whenDetail(i.starts_at)}`;
       },
       details: (i, h) => {
         const { title: _title, starts_at: _starts, student_id: _student, ...rest } = i;
         return meetingDetails(rest, h);
       },
-      warning: "It creates an event with a Meet or Teams link on your connected Google or Outlook calendar.",
+      warning: "Every student invited sees the meeting, its title and agenda on their calendar; with a Meet or Teams link, the event also goes on your connected Google or Outlook calendar.",
       undo: (_i, body) => {
         const id = idOf(body);
         return id ? { op: "meetings.delete", input: { meeting_id: id } } : null;
@@ -247,21 +283,22 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.update",
       kind: "write",
-      risk: (i) => (i.status === "cancelled" || i.create_conference || i.mode !== undefined ? "confirm" : "auto"),
+      // Cancelling or a mode change can remove the connected-calendar event; attendee changes show the meeting to other families.
+      risk: (i) => (i.status === "cancelled" || i.create_conference || i.mode !== undefined || i.attendee_ids !== undefined ? "confirm" : "auto"),
       title: "Change a meeting: move it, retitle, agenda, mode, who's invited, mark it held/no-show, or cancel it.",
-      doc: "{ meeting_id, title?, starts_at? + ends_at? (move both), mode?, location?, join_url?, agenda?, guardians_invited?, deadline_id?, attendee_ids?, status?: scheduled|held|cancelled|no-show, meeting_note_id?, create_conference? (|null clears) }",
+      doc: "{ meeting_id, title?, starts_at? + ends_at? (move both; ISO with offset), mode?, location?|null, join_url?|null, agenda?|null, guardians_invited?, deadline_id?|null, attendee_ids? (full list), status?: scheduled|held|cancelled|no-show, meeting_note_id?|null, create_conference? bool }",
       input: meetingUpdateInput,
       request: (i) => ({ method: "PATCH", url: `/meetings/${seg(i.meeting_id)}`, body: meetingBody(i) }),
       describe: async (i, h) => {
         const m = await findMeeting(h, i.meeting_id);
         const who = m?.studentId ? ` with ${h.studentName(m.studentId)}` : "";
         if (i.status === "cancelled") return `Cancel ${meetingLabel(m)}${who}`;
-        if (i.starts_at) return `Move ${meetingLabel(m)}${who} to ${whenLabel(i.starts_at)}`;
+        if (i.starts_at) return `Move ${m ? `"${plainText(m.title, 80)}"${m.startsAt ? ` (${sameOffset(m.startsAt, i.starts_at)})` : ""}` : "a meeting"}${who} to ${whenDetail(i.starts_at)}`;
         if (i.status && Object.keys(i).length === 2) return `Mark ${meetingLabel(m)}${who} as ${i.status}`;
         return `Update ${meetingLabel(m)}${who}`;
       },
       details: (i, h) => meetingDetails(i, h),
-      warning: "On a meeting booked on your Google or Outlook calendar, cancelling or changing the mode removes that calendar event.",
+      warning: "On a meeting booked on your Google or Outlook calendar, cancelling or changing the mode removes that event. Students added to the meeting see it, its title and agenda.",
       snapshot: (i, h) => findMeeting(h, i.meeting_id),
       undo: (i, _body, before) => {
         const b = asRecord(before) as Row & Meeting;
@@ -463,8 +500,8 @@ const practiceUpdateInput = z
 
 async function practiceDetails(i: Row, h: Get & { studentName(id: string | null | undefined): string }): Promise<string[]> {
   const lines = changeLines(defined(i), PRACTICE_LABELS);
-  if (i.starts_at !== undefined) lines.push(`Starts: ${i.starts_at === null ? "cleared (all day)" : whenLabel(i.starts_at)}`);
-  if (i.ends_at !== undefined) lines.push(`Ends: ${i.ends_at === null ? "cleared" : whenLabel(i.ends_at)}`);
+  if (i.starts_at !== undefined) lines.push(`Starts: ${typeof i.starts_at === "string" ? whenDetail(i.starts_at) : "cleared (all day)"}`);
+  if (i.ends_at !== undefined) lines.push(`Ends: ${typeof i.ends_at === "string" ? whenDetail(i.ends_at) : "cleared"}`);
   if (i.student_id !== undefined) lines.push(`Student: ${i.student_id === null ? "none (practice-wide)" : h.studentName(str(i.student_id))}`);
   if (i.type_id !== undefined) lines.push(`Event type: ${i.type_id === null ? "none" : await typeLabel(h, String(i.type_id))}`);
   return lines;

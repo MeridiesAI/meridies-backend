@@ -4,15 +4,18 @@
  * family financials, checklist marks, award letters and appeals are the
  * counselor's record, so writing them runs at once, figures included (the
  * counselor supplies them). The FAFSA carries its status and due date and
- * nothing else, as the route's own schema does. Whatever puts something on
- * the student's side asks first: recommending a scholarship or taking it
- * back, and sending or revealing a program recommendation (which notifies
- * the student). Deletes ask.
+ * nothing else, as the route's own schema does. Whatever can change what the
+ * student sees asks first, because what they see depends on a row's current
+ * status, which an input can't know: recommending a scholarship or taking it
+ * back, moving one on their list, and any change to a program recommendation
+ * (sending one also notifies the student). Deletes ask.
  *
- * Aid figures are not on the AI allowlist: replies name letters, schools,
- * scholarships and programs, never a dollar amount, a family circumstance or
- * a note. Cards (the counselor's eyes only) do show the figures being set.
- * An appeal's letter text is left to /ai/award-appeal and the counselor.
+ * Aid figures are not on the AI allowlist: replies and card lines name
+ * letters, schools, scholarships and programs, never a dollar amount, a family
+ * circumstance (an appeal's basis included) or a note, and a dollar amount
+ * typed into a label is masked. Card details (the counselor's eyes only) do
+ * show the figures being set. An appeal's letter text is left to
+ * /ai/award-appeal and the counselor.
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
@@ -72,18 +75,22 @@ async function findIn(h: Get, url: string, id: string): Promise<Row | null> {
   return hit ?? null;
 }
 
+/** A label a person typed, with any dollar amount in it masked, for a reply the model reads. */
+const noFigures = (v: unknown): unknown =>
+  typeof v === "string" ? v.replace(/\$\s?\d[\d,]*(?:\.\d+)?(?:\s?[kKmM]\b)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|usd)\b/gi, "$…") : v;
+
 // ---- Aid profile: forms and family financials --------------------------------
 
 const FAFSA_STATUS = ["not-started", "in-progress", "submitted"] as const;
 const CSS_STATUS = ["not-started", "in-progress", "submitted", "not-required", "not-applicable"] as const;
 
+/** The forms: FAFSA status and due date only (v8), the CSS Profile beside it, and which aid the family is pursuing. */
 const formFields = {
   fafsa_status: z.enum(FAFSA_STATUS),
   fafsa_due_date: date.nullable(),
   css_status: z.enum(CSS_STATUS),
   css_due_date: date.nullable(),
   css_submitted_at: date.nullable(),
-  sai_estimate: z.number().int().min(-1_500).max(1_000_000).nullable(),
   aid_types_pursued: z.array(z.string().trim().max(60)).max(20),
 };
 const FORM_KEYS = Object.keys(formFields);
@@ -93,23 +100,19 @@ const FORM_LABELS = {
   css_status: "CSS Profile status",
   css_due_date: "CSS Profile due",
   css_submitted_at: "CSS Profile submitted on",
-  sai_estimate: "SAI estimate",
   aid_types_pursued: "Aid types pursued",
 };
 
+/** The family's figures and household (route columns of the same names). */
 const familyFields = {
   parent_agi_cents: z.number().int().min(0).max(100_000_000_000).nullable(),
+  sai_estimate: z.number().int().min(-1_500).max(1_000_000).nullable(),
   household_size: z.number().int().min(1).max(20).nullable(),
   number_in_college: z.number().int().min(0).max(20).nullable(),
   dependency_status: z.enum(["dependent", "independent"]).nullable(),
   state_of_residence: z.string().trim().max(60).nullable(),
   income_band: z.string().trim().max(60).nullable(),
   assets_band: z.string().trim().max(60).nullable(),
-  home_equity: z.enum(["renting", "under-100k", "100k-300k", "over-300k", "declined"]).nullable(),
-  family_business: z.enum(["none", "under-100", "100-plus", "farm", "declined"]).nullable(),
-  parent_status: z.enum(["married", "divorced-separated", "single", "remarried", "declined"]).nullable(),
-  siblings_in_college: z.enum(["none", "one", "two-plus", "declined"]).nullable(),
-  special_circumstances: z.string().trim().max(4000).nullable(),
 };
 const FAMILY_KEYS = Object.keys(familyFields);
 const FAMILY_LABELS = {
@@ -119,6 +122,18 @@ const FAMILY_LABELS = {
   state_of_residence: "State of residence",
   income_band: "Income band",
   assets_band: "Assets band",
+};
+
+/** The family's situation: the CSS-Profile-style questions and the special circumstances. */
+const situationFields = {
+  home_equity: z.enum(["renting", "under-100k", "100k-300k", "over-300k", "declined"]).nullable(),
+  family_business: z.enum(["none", "under-100", "100-plus", "farm", "declined"]).nullable(),
+  parent_status: z.enum(["married", "divorced-separated", "single", "remarried", "declined"]).nullable(),
+  siblings_in_college: z.enum(["none", "one", "two-plus", "declined"]).nullable(),
+  special_circumstances: z.string().trim().max(4000).nullable(),
+};
+const SITUATION_KEYS = Object.keys(situationFields);
+const SITUATION_LABELS = {
   home_equity: "Home equity",
   family_business: "Family business",
   parent_status: "Parents",
@@ -144,11 +159,15 @@ function profileUndo(name: string, keys: readonly string[]) {
 // ---- The per-school checklist on the Financial aid page ------------------------
 
 const CELL_KEYS = ["css", "verification", "award"] as const;
-const CELL_LABEL: Record<(typeof CELL_KEYS)[number], string> = {
+type CellKey = (typeof CELL_KEYS)[number];
+const CELL_LABEL: Record<CellKey, string> = {
   css: "CSS Profile submitted",
   verification: "Verification docs",
   award: "Award letter received",
 };
+/** lib/studentAid.ts ITEM_FOR: the stored mark's checklist item, and the status a tick writes. */
+const CELL_ITEM: Record<CellKey, string> = { css: "css-profile", verification: "verification", award: "award-letter" };
+const CELL_DONE: Record<CellKey, string> = { css: "submitted", verification: "submitted", award: "received" };
 
 type Cell = { key?: string; done?: boolean; applicable?: boolean; note?: string | null; overridden?: boolean };
 type School = { studentCollegeId?: string; name?: string; checklist?: Cell[] };

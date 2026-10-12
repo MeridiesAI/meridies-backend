@@ -15,10 +15,13 @@
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
-import { asArray, asRecord, changeLines, day, dayLabel, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
+import { asArray, asRecord, changeLines, dayLabel, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
 
 type Row = Record<string, unknown>;
 type Getter = Pick<OpHelpers, "get">;
+
+/** The routes' own date check (`z.string().date()`): a real calendar day, so 2026-02-30 is refused here, not after a Confirm. */
+const isoDay = z.string().date("YYYY-MM-DD, a real date");
 
 // ---- Tasks -------------------------------------------------------------------
 
@@ -53,7 +56,7 @@ const stageIn = z
   .object({
     name: z.string().trim().min(1).max(300),
     detail: z.string().trim().max(2000).optional(),
-    due_date: day.nullable().optional(),
+    due_date: isoDay.nullable().optional(),
   })
   .strict();
 
@@ -143,7 +146,7 @@ export const tasks: OpGroup = {
           title: z.string().trim().min(1).max(300),
           kind: z.enum(KINDS).optional(),
           instructions: z.string().trim().max(8000).optional(),
-          due_date: day.nullable().optional(),
+          due_date: isoDay.nullable().optional(),
           stages: z.array(stageIn).max(20).optional(),
           document_ids: z.array(uuid).max(20).optional(),
           notify_email: z.boolean().optional(),
@@ -186,7 +189,8 @@ export const tasks: OpGroup = {
         if (i.instructions) out.push(`Instructions: ${plainText(i.instructions, 800)}`);
         return out;
       },
-      warning: "The student is sent the assignment now (in-app, and by email or text as shown).",
+      // Shown whenever the card asks, including a hidden task that waits only because the turn read outside content.
+      warning: "Unless it is hidden, the student is sent the assignment now (in-app, and by email or text as shown).",
       reply: (body) => {
         const b = asRecord(body);
         const n = asRecord(b.notification);
@@ -213,7 +217,7 @@ export const tasks: OpGroup = {
           instructions: z.string().trim().max(8000).nullable().optional(),
           kind: z.enum(KINDS).optional(),
           status: z.enum(STATUSES).optional(),
-          due_date: day.nullable().optional(),
+          due_date: isoDay.nullable().optional(),
           target_words: z.number().int().min(0).max(100_000).nullable().optional(),
           current_words: z.number().int().min(0).max(100_000).optional(),
           progress_pct: z.number().int().min(0).max(100).optional(),
@@ -276,8 +280,11 @@ export const tasks: OpGroup = {
         ];
       },
       warning: "The student is sent the assignment and sees it on their To-Do. A shared task can't be hidden again.",
+      // The route answers with `notification` only when the task was hidden; a task already shared sends nothing.
       reply: (body) => {
-        const n = asRecord(asRecord(body).notification);
+        const b = asRecord(body);
+        if (!("notification" in b)) return "The student could already see this task; nothing was sent.";
+        const n = asRecord(b.notification);
         return `Shared; email ${n.email ? "sent" : "not sent"}, text ${str(n.sms) ?? "skipped"}.`;
       },
     }),
@@ -324,7 +331,7 @@ export const tasks: OpGroup = {
         const t = await findTask(h, i.task_id);
         return `Delete task ${taskLabel(t)}${t?.studentId ? ` for ${h.studentName(str(t.studentId))}` : ""}`;
       },
-      warning: "The task, its steps, attached-file links and activity history are deleted. Deadlines it already put on the calendar stay.",
+      warning: "The task, its steps, attached-file links and activity history are deleted. Deadlines it put on the calendar, and red flags raised on it, stay.",
     }),
     op({
       name: "tasks.add_step",
@@ -338,7 +345,7 @@ export const tasks: OpGroup = {
           task_id: uuid,
           name: z.string().trim().min(1).max(300),
           detail: z.string().trim().max(2000).nullable().optional(),
-          due_date: day.nullable().optional(),
+          due_date: isoDay.nullable().optional(),
           sequence: z.number().int().min(0).max(100).optional(),
           done: z.boolean().optional(),
         })
@@ -371,7 +378,7 @@ export const tasks: OpGroup = {
           step_id: uuid,
           name: z.string().trim().min(1).max(300).optional(),
           detail: z.string().trim().max(2000).nullable().optional(),
-          due_date: day.nullable().optional(),
+          due_date: isoDay.nullable().optional(),
           sequence: z.number().int().min(0).max(100).optional(),
           done: z.boolean().optional(),
         })
@@ -382,12 +389,20 @@ export const tasks: OpGroup = {
         url: `/tasks/stages/${seg(i.step_id)}`,
         body: defined({ name: i.name, detail: i.detail, due_date: i.due_date, sequence: i.sequence, done: i.done }),
       }),
+      // The route finds the step by id whatever student_id says; name the student only when the step is theirs.
       describe: async (i, h) => {
         const s = await findStage(h, i.student_id, i.step_id);
-        const what = s ? `step "${plainText(s.name, 80)}"` : "a task step";
-        return `${i.done === true && Object.keys(i).length === 3 ? "Tick off" : "Update"} ${what} for ${h.studentName(i.student_id)}`;
+        const what = s ? `step "${plainText(s.name, 80)}" for ${h.studentName(i.student_id)}` : "a task step";
+        return `${i.done === true && Object.keys(i).length === 3 ? "Tick off" : "Update"} ${what}`;
       },
-      details: (i) => changeLines(i, STAGE_LABELS),
+      details: async (i, h) => {
+        const out = changeLines(i, STAGE_LABELS);
+        if ("due_date" in i) {
+          const s = await findStage(h, i.student_id, i.step_id);
+          if (s?.deadlineId) out.push("The calendar deadline this step made keeps its date.");
+        }
+        return out;
+      },
       snapshot: (i, h) => findStage(h, i.student_id, i.step_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -413,7 +428,7 @@ export const tasks: OpGroup = {
       describe: async (i, h) => {
         const s = await findStage(h, i.student_id, i.step_id);
         const t = s ? await findTask(h, str(s.deliverableId)) : null;
-        return `Remove ${s ? `step "${plainText(s.name, 80)}"` : "a task step"}${t ? ` from ${taskLabel(t)}` : ""} for ${h.studentName(i.student_id)}`;
+        return `Remove ${s ? `step "${plainText(s.name, 80)}"` : "a task step"}${t ? ` from ${taskLabel(t)}` : ""}${s ? ` for ${h.studentName(i.student_id)}` : ""}`;
       },
       warning: "The step is removed from the task. A calendar deadline it created stays.",
     }),
@@ -494,7 +509,7 @@ export const tasks: OpGroup = {
 const SEVERITIES = ["critical", "high", "medium"] as const;
 const CHANNELS = ["email", "sms", "both"] as const;
 
-const SETTINGS_LABELS = {
+const SETTINGS_LABELS: Record<string, string> = {
   enabled: "Alerts on",
   stall_after_days: "Stalled after (days)",
   escalate_after_hours: "Red flags escalate after (hours)",
@@ -513,7 +528,7 @@ const GUARDIAN_LABELS = {
   email: "Email",
   phone: "Phone",
   preferred_channel: "Prefers",
-  alerts_enabled: "Gets alerts",
+  alerts_enabled: "Gets family messages and alerts",
   receives_reports: "Gets family reports",
   is_primary: "Primary",
 };
@@ -532,29 +547,60 @@ async function findGuardian(h: Getter, studentId: string, id: string): Promise<R
 
 const relationshipOf = (g: Row | null) => plainText(g?.relationship, 40) || "guardian";
 
-/** Who a parent alert would reach, decided the way the route decides it. Card only. */
-async function alertRecipientLines(h: Getter, studentId: string, guardianId: string | undefined, studentName: string): Promise<string[]> {
-  const [prefs, guardians] = await Promise.all([
-    h.get<unknown>(`/accountability/alert-prefs${qs({ studentId })}`),
-    h.get<unknown[]>(`/accountability/guardians${qs({ studentId })}`),
-  ]);
-  const p = asRecord(prefs);
-  const copyParents = p.copyParents !== false;
-  const copyStudent = p.copyStudent === true;
-  const out: string[] = [];
-  if (copyParents) {
-    const enabled = asArray(guardians).filter((g) => g.alerts_enabled === true);
-    const g = guardianId ? enabled.find((x) => x.id === guardianId) : [...enabled].sort((a, b) => Number(b.is_primary === true) - Number(a.is_primary === true))[0];
-    out.push(g ? `To: ${plainText(g.full_name, 80)} (${relationshipOf(g)})` : "To: no guardian with alerts on");
-  } else {
-    out.push("To: parents are switched off for this student");
-  }
-  if (copyStudent) out.push(`Copy: ${studentName}`);
-  return out;
+/** A student's deadline, for a card line (the routes have no single-deadline GET). */
+async function findStudentDeadline(h: Getter, studentId: string, id: string): Promise<Row | null> {
+  const rows = await h.get<unknown[]>(`/deadlines${qs({ studentId, includeDone: "true" })}`);
+  return asArray(rows).find((r) => r.id === id) ?? null;
 }
 
+/** A time zone Intl knows (America/New_York): an unknown one would break quiet hours for every alert. */
+const timeZone = z
+  .string()
+  .trim()
+  .max(60)
+  .refine((tz) => {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: tz });
+      return true;
+    } catch {
+      return false;
+    }
+  }, "an IANA time zone, e.g. America/New_York");
+
+/**
+ * What a NEW settings row holds for every key the request leaves out: the
+ * table's column defaults, which are not the code's (no quiet hours instead
+ * of 21-8), and for a student's first override not the counselor's own values.
+ */
+const TABLE_DEFAULTS: Record<string, unknown> = {
+  enabled: true,
+  stall_after_days: 7,
+  escalate_after_hours: 72,
+  min_days_between_alerts: 7,
+  auto_send_parent_alerts: false,
+  alert_on_low_quality: true,
+  quiet_hours_start: null,
+  quiet_hours_end: null,
+  timezone: "America/New_York",
+};
+
+/** The settings that apply now, and whether the write will update its own row or create one. */
+async function settingsScope(h: Getter, studentId: string | undefined): Promise<{ effective: Row; ownRow: boolean } | null> {
+  const s = asRecord(await h.get(`/accountability/settings${qs({ studentId })}`));
+  if (!("stall_after_days" in s)) return null;
+  // GET answers the row that applies: the student's own, else the counselor's, else the defaults (no id).
+  const ownRow = studentId ? s.student_id === studentId : typeof s.id === "string" && s.student_id == null;
+  return { effective: s, ownRow };
+}
+
+/** Keys a new row changes without being asked: left out, and the table default differs from what applies now. */
+const silentChanges = (i: Record<string, unknown>, effective: Row) =>
+  SETTINGS_KEYS.filter((k) => !(k in i) && TABLE_DEFAULTS[k] !== (effective[k] ?? null));
+
+const settingValue = (v: unknown) => (v == null ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : plainText(v, 60));
+
 export const accountability: OpGroup = {
-  heading: "Red flags, parent alerts and guardians",
+  heading: "Red flags, alert settings and guardians",
   ops: [
     op({
       name: "accountability.list_red_flags",
@@ -625,16 +671,21 @@ export const accountability: OpGroup = {
           actionItems: i.action_items,
         }),
       }),
-      describe: (i, h) => `Raise a ${i.severity ?? "critical"} red flag for ${h.studentName(i.student_id)}: "${plainText(i.title, 80)}"`,
-      details: async (i, h) => {
+      // The flag's own words stay on the card (details): red-flag text never goes back to the model, not even in the summary.
+      describe: async (i, h) => {
         const t = i.task_id ? await findTask(h, i.task_id) : null;
+        return `Raise a ${i.severity ?? "critical"} red flag for ${h.studentName(i.student_id)}${t ? ` on ${taskLabel(t)}` : ""}`;
+      },
+      details: async (i, h) => {
+        const dl = i.deadline_id ? await findStudentDeadline(h, i.student_id, i.deadline_id) : null;
         return [
-          ...(t ? [`About task: ${taskLabel(t)}`] : []),
+          ...(dl ? [`About deadline: "${plainText(dl.title, 80)}"${dl.dueDate ? ` (${dayLabel(dl.dueDate)})` : ""}`] : []),
+          `Title: ${plainText(i.title, 300)}`,
           `Message: ${plainText(i.message, 1200)}`,
           ...(i.action_items?.length ? [`To do: ${i.action_items.map((a) => plainText(a, 120)).join("; ")}`] : []),
         ];
       },
-      warning: "The student is notified at once; if the work doesn't move before the escalation timer runs out, it becomes an alert to the parents.",
+      warning: "The student is notified at once. If the work doesn't move before the escalation timer runs out, this title and message go to the parents.",
       // Cancelling stops the escalation; the notice the student already got stays.
       undo: (_i, body) => {
         const id = idOf(body);
@@ -658,56 +709,6 @@ export const accountability: OpGroup = {
         return `${verb} ${f ? `the ${plainText(f.severity, 20)} red flag` : "a red flag"}${t ? ` on ${taskLabel(t)}` : ""}${f ? ` for ${h.studentName(str(f.student_id))}` : ""}${raised ? ` (raised ${raised})` : ""}`;
       },
       warning: "Only an open flag escalates to the parents, and a flag can't be reopened once changed.",
-    }),
-    op({
-      name: "accountability.send_parent_alert",
-      kind: "write",
-      risk: "confirm",
-      title: "Send an alert about a student to their parents (and the student, if copied), by email and/or text.",
-      doc: "{ student_id, subject ≤300, body ≤8000, guardian_id?, red_flag_id?, urgency?: critical|high|normal, action_items? [≤300]≤10, channel?: email|sms|both, override_quiet_hours? bool }",
-      input: z
-        .object({
-          student_id: uuid,
-          subject: z.string().trim().min(1).max(300),
-          body: z.string().trim().min(1).max(8000),
-          guardian_id: uuid.optional(),
-          red_flag_id: uuid.optional(),
-          urgency: z.enum(["critical", "high", "normal"]).optional(),
-          action_items: z.array(z.string().trim().max(300)).max(10).optional(),
-          channel: z.enum(CHANNELS).optional(),
-          override_quiet_hours: z.boolean().optional(),
-        })
-        .strict(),
-      takesStudent: true,
-      request: (i) => ({
-        method: "POST",
-        url: "/accountability/parent-alerts",
-        body: defined({
-          studentId: i.student_id,
-          subject: i.subject,
-          body: i.body,
-          guardianId: i.guardian_id,
-          redFlagId: i.red_flag_id,
-          urgency: i.urgency,
-          actionItems: i.action_items,
-          channel: i.channel,
-          overrideQuietHours: i.override_quiet_hours,
-        }),
-      }),
-      describe: (i, h) => `Send a parent alert about ${h.studentName(i.student_id)}: "${plainText(i.subject, 80)}"`,
-      details: async (i, h) => [
-        ...(await alertRecipientLines(h, i.student_id, i.guardian_id, h.studentName(i.student_id))),
-        `By: ${i.channel ?? "email"}${i.override_quiet_hours ? " (even in quiet hours)" : ""}`,
-        `Subject: ${plainText(i.subject, 300)}`,
-        `Message: ${plainText(i.body, 1200)}`,
-        ...(i.action_items?.length ? [`To do: ${i.action_items.map((a) => plainText(a, 120)).join("; ")}`] : []),
-      ],
-      warning: "This goes to the family now, or at the next send window if it's quiet hours; the alert throttle may hold it back.",
-      reply: (body) => {
-        const b = asRecord(body);
-        const why = str(b.blockedReason);
-        return `Parent alert ${str(b.status) ?? "recorded"} (id ${idOf(body) ?? "unknown"})${why ? `: ${why}` : ""}.`;
-      },
     }),
     op({
       name: "accountability.set_alert_recipients",
@@ -760,7 +761,7 @@ export const accountability: OpGroup = {
           alert_on_low_quality: z.boolean().optional(),
           quiet_hours_start: z.number().int().min(0).max(23).nullable().optional(),
           quiet_hours_end: z.number().int().min(0).max(23).nullable().optional(),
-          timezone: z.string().trim().max(60).optional(),
+          timezone: timeZone.optional(),
         })
         .strict(),
       request: (i) => ({
@@ -780,17 +781,37 @@ export const accountability: OpGroup = {
         }),
       }),
       describe: (i, h) => (i.student_id ? `Change accountability settings for ${h.studentName(i.student_id)}` : "Change your accountability settings for all students"),
-      details: (i) => changeLines(i, SETTINGS_LABELS),
+      details: async (i, h) => {
+        const out = changeLines(i, SETTINGS_LABELS);
+        // A first save writes a new row, and the route fills what wasn't sent from the table's defaults.
+        const scope = await settingsScope(h, i.student_id);
+        const silent = scope && !scope.ownRow ? silentChanges(i, scope.effective) : [];
+        if (silent.length) {
+          out.push(
+            `${i.student_id ? "This student has no settings of their own yet, so these change too" : "You have no saved settings yet, so these change too"}: ${silent
+              .map((k) => `${SETTINGS_LABELS[k]} ${settingValue(TABLE_DEFAULTS[k])} (now ${settingValue(scope!.effective[k])})`)
+              .join("; ")}`
+          );
+        }
+        return out;
+      },
       warning: "These rules decide when students count as behind and when their parents are alerted.",
-      // Only the all-students row puts back cleanly: a student's first override starts from the
-      // database defaults, not the values it inherited, so reverting the changed keys isn't enough.
-      snapshot: (i, h) => (i.student_id ? Promise.resolve(null) : h.get("/accountability/settings")),
+      reply: () => "Settings saved.",
+      snapshot: (i, h) => settingsScope(h, i.student_id),
       undo: (i, _body, before) => {
-        if (i.student_id) return null;
         const b = asRecord(before);
-        if (!("stall_after_days" in b)) return null;
-        const prev: Record<string, unknown> = {};
-        for (const k of SETTINGS_KEYS) if (k in i) prev[k] = b[k] ?? null;
+        const effective = asRecord(b.effective);
+        if (!("stall_after_days" in effective)) return null;
+        const ownRow = b.ownRow === true;
+        // A student's first override can't be taken back: no route deletes it, and a copy of the old
+        // values would stop following the counselor's own settings.
+        if (i.student_id && !ownRow) return null;
+        const keys = SETTINGS_KEYS.filter((k) => k in i);
+        // The counselor's first save also wrote the table's defaults for the rest (no quiet hours): put back what applied.
+        if (!ownRow) keys.push(...silentChanges(i, effective));
+        if (!keys.length) return null;
+        const prev: Record<string, unknown> = i.student_id ? { student_id: i.student_id } : {};
+        for (const k of keys) prev[k] = effective[k] ?? null;
         return { op: "accountability.update_settings", input: prev };
       },
     }),

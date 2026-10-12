@@ -31,7 +31,15 @@ import {
 } from "../lib/axis/failsafe.js";
 import { foldIfLong, saveState } from "../lib/axis/memory.js";
 import { adjudicate } from "../lib/axis/verify.js";
-import { confirmOperation, recordedIds, TransientOperationError, undoOperation, type OperationPayload, type OperationStatus } from "../lib/axis/ops/run.js";
+import {
+  confirmOperation,
+  recordedIds,
+  TransientOperationError,
+  undoOperation,
+  undoStepOf,
+  type OperationPayload,
+  type OperationStatus,
+} from "../lib/axis/ops/run.js";
 import { hasAnthropic } from "../env.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -231,7 +239,7 @@ export default async function axisRoutes(app: FastifyInstance) {
         outcome = await confirmOperation(request, claimed);
       } catch (err) {
         // Nothing changed (an outage, a rate limit): release the claim so Confirm can be clicked again.
-        await request.db.from("axis_actions").update({ status: "pending", decided_at: null }).eq("id", id);
+        await request.db.from("axis_actions").update({ status: "pending", decided_at: null }).eq("id", id).eq("status", "confirmed");
         if (err instanceof TransientOperationError || err instanceof HttpError) throw err;
         request.log.error({ err }, "axis operation confirm failed");
         throw new HttpError(500, "That change couldn't be made right now. Try again.");
@@ -309,6 +317,9 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (!row || row.type !== "operation") throw notFound("That change isn't AxIS's to undo.");
     const was = row.status as OperationStatus;
     if (was !== "executed" && was !== "confirmed") throw conflict(was === "undone" ? "That change was already undone." : "Only a change that went through can be undone.");
+    // Before claiming: a row with no reversal (one whose Confirm is still running has none yet) is refused
+    // without touching its status, so the claim can't race the Confirm that is about to write its outcome.
+    if (!undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
     // Claim, so two clicks can't run the reversal twice.
     const { data: claimed, error: claimErr } = await request.db
       .from("axis_actions")
@@ -322,7 +333,8 @@ export default async function axisRoutes(app: FastifyInstance) {
     try {
       await undoOperation(request, row);
     } catch (err) {
-      await request.db.from("axis_actions").update({ status: was }).eq("id", id);
+      // Hand the claim back only if it is still ours.
+      await request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
       throw err;
     }
     return { id, status: "undone" };
@@ -347,7 +359,7 @@ function publicAction(r: Record<string, unknown>) {
     warning: typeof p.warning === "string" ? p.warning : null,
     reason: p.reason === "outside-content" || p.reason === "many-changes" ? p.reason : null,
     status,
-    undoable: (status === "executed" || status === "confirmed") && !!res.undo,
+    undoable: (status === "executed" || status === "confirmed") && !!undoStepOf(res),
     message: typeof res.message === "string" ? res.message : null,
   };
   return { id: r.id, conversation_id: r.conversation_id, message_id: r.message_id, student_id: r.student_id, type: r.type, payload, status, created_at: r.created_at };

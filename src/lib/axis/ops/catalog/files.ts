@@ -2,11 +2,14 @@
  * Files (routes/files.ts): the counselor's drive of folders, documents and
  * saved links. Making, renaming and tidying folders and titles runs at once.
  * Whatever changes who may see a file or what AI may read from it asks
- * first: filing a document into a folder (a student's own folder shows it to
- * that student), its kind, the AI and FERPA switches, and attaching a link to
- * a student. Deleting asks. Uploads are not here (the file itself goes from
- * the browser to Storage), and a link is saved unread, because reading it
- * calls a model. Replies name files; they never carry what is in them.
+ * first: filing a document into a folder (a student's own folder makes it
+ * that student's, and they see it), its kind (restricted kinds are hidden
+ * from the student), the AI and FERPA switches, and saving or attaching a
+ * link to a student (they see it). Deleting asks. Uploads are not here (the
+ * file itself goes from the browser to Storage), and a link is saved unread,
+ * because reading it calls a model. Replies name files, never what is in
+ * them, and a file or link the counselor kept out of AI isn't named to the
+ * model at all (the card shows its name to the counselor).
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
@@ -53,9 +56,24 @@ const findFolder = (h: Get, id: string) => findIn<Folder>(h, "/files/folders", i
 const findDocument = (h: Get, id: string) => findIn<Doc>(h, "/files/documents", id);
 const findLink = (h: Get, id: string) => findIn<Link>(h, "/files/links", id);
 
-const folderLabel = (f: Folder | null) => (f ? `"${plainText(f.name, 80)}"${f.kind === "student" ? " (student folder)" : ""}` : "a folder");
-const docLabel = (d: Doc | null) => (d ? `"${plainText(d.title || d.filename, 80)}"` : "a file");
-const linkLabel = (l: Link | null) => (l ? `"${plainText(l.title || l.domain || l.url, 80)}"` : "a link");
+const folderLabel = (f: Folder | null) => (f ? `"${plainText(f.name, 80)}"${f.kind === "student" ? " (student folder)" : ""}` : "(not found in your Files)");
+
+const WITHHELD = "(name withheld: kept out of AI)";
+
+/**
+ * A document's name for the card line, which the model reads back too: withheld
+ * when the counselor kept the file out of AI. `details` (card only) name it in full.
+ */
+export function docName(d: { title?: unknown; filename?: unknown; availableToLlm?: unknown } | null): string {
+  if (!d) return "an unidentified file";
+  if (d.availableToLlm === false) return "a file kept out of AI";
+  return `"${plainText(str(d.title) ?? d.filename, 80)}"`;
+}
+const linkName = (l: Link | null) =>
+  !l ? "a link (not found in your Files)" : l.availableToLlm === false ? "a link kept out of AI" : `link "${plainText(l.title || l.domain || l.url, 80)}"`;
+/** The full name, for the card's details only (never sent to the model). */
+const docLine = (d: Doc | null) => (d ? [`File: ${plainText(d.title || d.filename, 160)} (${plainText(d.kind, 40) || "other"})`] : []);
+const linkLine = (l: Link | null) => (l ? [`Link: ${plainText(l.title || l.domain, 120)} ${plainText(l.url, 300)}`.trim()] : []);
 
 function hostOf(url: string): string {
   try {
@@ -69,7 +87,7 @@ function hostOf(url: string): string {
 async function folderLine(h: OpHelpers, id: string | null | undefined, label = "Folder"): Promise<string> {
   if (!id) return `${label}: none (unfiled)`;
   const f = await findFolder(h, id);
-  if (!f) return `${label}: a folder`;
+  if (!f) return `${label}: a folder not found in your Files`;
   return f.kind === "student" && f.studentId
     ? `${label}: ${h.studentName(f.studentId)}'s own folder (the student sees files filed there, except restricted kinds)`
     : `${label}: "${plainText(f.name, 80)}"`;
@@ -103,7 +121,7 @@ export const files: OpGroup = {
           asArray(body),
           (f) => {
             const tag = f.kind === "student" ? "student folder" : f.systemKey ? `practice folder ${str(f.systemKey)}` : "folder";
-            return `id ${str(f.id)}: ${untrusted(f.name)} [${tag}]${f.parentId ? ` in ${str(f.parentId)}` : ""}${f.studentId ? ` · student ${str(f.studentId)}` : ""}`;
+            return `folder_id ${str(f.id)}: ${untrusted(f.name)} [${tag}]${f.parentId ? ` inside folder_id ${str(f.parentId)}` : ""}${f.studentId ? ` · student ${str(f.studentId)}` : ""}`;
           },
           "No folders.",
           120
@@ -112,7 +130,7 @@ export const files: OpGroup = {
     op({
       name: "files.list_documents",
       kind: "read",
-      title: "Documents with ids, by student, folder, or unfiled. Names and settings only, never contents.",
+      title: "Documents with ids: one student's (pass student_id), a folder's, or unfiled. Names and settings, never contents.",
       doc: "{ student_id?, folder_id?, unfiled? bool }",
       input: z.object({ student_id: uuid.optional(), folder_id: uuid.optional(), unfiled: z.boolean().optional() }).strict(),
       request: (i) => ({
@@ -128,7 +146,8 @@ export const files: OpGroup = {
               d.aiAccess === "allowed" ? "AI always allowed" : d.aiAccess === "excluded" ? "AI excluded" : null,
               d.ferpaWaived ? "FERPA waived" : null,
             ].filter(Boolean);
-            return `id ${str(d.id)}: ${untrusted(d.title || d.filename)} [${str(d.kind)}${flags.length ? `, ${flags.join(", ")}` : ""}]${d.folderId ? ` in folder ${str(d.folderId)}` : " (unfiled)"}${d.studentId ? ` · student ${str(d.studentId)}` : ""}`;
+            const name = d.availableToLlm === false ? WITHHELD : untrusted(d.title || d.filename);
+            return `document_id ${str(d.id)}: ${name} [${str(d.kind)}${flags.length ? `, ${flags.join(", ")}` : ""}]${d.folderId ? ` in folder ${str(d.folderId)}` : " (unfiled)"}${d.studentId ? ` · student ${str(d.studentId)}` : ""}`;
           },
           "No documents."
         ),
@@ -144,7 +163,7 @@ export const files: OpGroup = {
         listReply(
           asArray(body),
           (l) =>
-            `id ${str(l.id)}: ${untrusted(l.title || l.domain)}${l.domain ? ` (${untrusted(l.domain)})` : ""} [${str(l.status)}${l.availableToLlm === false ? ", kept out of AI" : ""}]${l.folderId ? ` in folder ${str(l.folderId)}` : ""}${l.studentId ? ` · student ${str(l.studentId)}` : ""}`,
+            `link_id ${str(l.id)}: ${l.availableToLlm === false ? WITHHELD : `${untrusted(l.title || l.domain)}${l.domain ? ` (${untrusted(l.domain)})` : ""}`} [${str(l.status)}${l.availableToLlm === false ? ", kept out of AI" : ""}]${l.folderId ? ` in folder ${str(l.folderId)}` : ""}${l.studentId ? ` · student ${str(l.studentId)}` : ""}`,
           "No saved links."
         ),
     }),
@@ -261,7 +280,7 @@ export const files: OpGroup = {
       }),
       describe: async (i, h) => {
         const d = await findDocument(h, i.document_id);
-        const what = `${docLabel(d)}${d?.studentId ? ` (${h.studentName(d.studentId)})` : ""}`;
+        const what = `${docName(d)}${d?.studentId ? ` (${h.studentName(d.studentId)})` : ""}`;
         const keys = Object.keys(i).filter((k) => k !== "document_id");
         if (keys.length === 1 && keys[0] === "folder_id") {
           if (!i.folder_id) return `Unfile ${what}`;
@@ -274,7 +293,8 @@ export const files: OpGroup = {
         return `Update ${what}`;
       },
       details: async (i, h) => {
-        const lines = changeLines(i, { title: "Title", description: "Description", kind: "Kind" });
+        const lines = [...docLine(await findDocument(h, i.document_id)), ...changeLines(i, { title: "Title", description: "Description", kind: "Kind" })];
+        if (i.kind !== undefined) lines.push("Kind decides what the student sees: iep-504, counselor-only and a FERPA-waived recommendation-letter are hidden from them");
         if ("folder_id" in i) lines.push(await folderLine(h, i.folder_id));
         return [...lines, ...aiLines(i)];
       },
@@ -313,15 +333,17 @@ export const files: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/files/documents/${seg(i.document_id)}` }),
       describe: async (i, h) => {
         const d = await findDocument(h, i.document_id);
-        return `Delete ${docLabel(d)}${d?.studentId ? ` from ${h.studentName(d.studentId)}'s files` : " from Files"}`;
+        return `Delete ${docName(d)}${d?.studentId ? ` from ${h.studentName(d.studentId)}'s files` : " from Files"}`;
       },
-      warning: "The document is removed from Files for you and the student, and from anything that links to it.",
+      details: async (i, h) => docLine(await findDocument(h, i.document_id)),
+      warning: "The file is deleted for you and the student. Tasks it is attached to lose it; an essay filed from it keeps its text.",
     }),
     op({
       name: "files.add_link",
       kind: "write",
-      risk: "auto",
-      title: "Save a web link in Files, for a student or a folder. It is saved unread (not summarized).",
+      // A link filed to a student shows in their files: a URL AxIS chose waits for the counselor.
+      risk: (i) => (typeof i.student_id === "string" ? "confirm" : "auto"),
+      title: "Save a web link in Files, for a student (waits for Confirm: they see it) or a folder. Saved unread.",
       doc: "{ url ≤2000, student_id?, folder_id?, title? ≤300, available_to_llm? bool }",
       input: z
         .object({
@@ -348,6 +370,7 @@ export const files: OpGroup = {
         if (i.available_to_llm === false) lines.push("AI may read it: no (kept out of AI)");
         return lines;
       },
+      warning: "The student sees this link in their files.",
       reply: (body) => `Saved unread (id ${idOf(body) ?? "unknown"}); reading and summarizing it is the counselor's click in Files.`,
       undo: (_i, body) => {
         const id = idOf(body);
@@ -377,10 +400,10 @@ export const files: OpGroup = {
       }),
       describe: async (i, h) => {
         const l = await findLink(h, i.link_id);
-        return `Update link ${linkLabel(l)}${l?.studentId ? ` (${h.studentName(l.studentId)})` : ""}`;
+        return `Update ${linkName(l)}${l?.studentId ? ` (${h.studentName(l.studentId)})` : ""}`;
       },
       details: async (i, h) => {
-        const lines = changeLines(i, { title: "Title", relevance: "Relevance" });
+        const lines = [...linkLine(await findLink(h, i.link_id)), ...changeLines(i, { title: "Title", relevance: "Relevance" })];
         if ("folder_id" in i) lines.push(await folderLine(h, i.folder_id));
         if ("student_id" in i) lines.push(i.student_id ? `Student: ${h.studentName(i.student_id)} (they will see this link)` : "Student: none (taken off the student's files)");
         return [...lines, ...aiLines(i)];
@@ -407,9 +430,10 @@ export const files: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/files/links/${seg(i.link_id)}` }),
       describe: async (i, h) => {
         const l = await findLink(h, i.link_id);
-        return `Delete link ${linkLabel(l)}${l?.studentId ? ` from ${h.studentName(l.studentId)}'s files` : " from Files"}`;
+        return `Delete ${linkName(l)}${l?.studentId ? ` from ${h.studentName(l.studentId)}'s files` : " from Files"}`;
       },
-      warning: "The link and its summary are deleted.",
+      details: async (i, h) => linkLine(await findLink(h, i.link_id)),
+      warning: "The link and its summary are deleted, for the student too if it is in their files.",
     }),
   ],
 };

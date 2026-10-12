@@ -1,15 +1,19 @@
 /**
  * My Work Queue (routes/workItems.ts): the counselor's own list. Nobody else
- * sees an item unless it is assigned to a colleague, so adding, editing and
- * ticking off run at once. Deleting asks, and so does putting an item on a
- * colleague's queue (Management), since that lands on someone else's desk.
+ * sees an item, so adding, editing and ticking off run at once. Deleting
+ * asks. Putting work on a colleague's desk is Management's
+ * (`management.assign_task`), as in the app, so it isn't offered here.
  */
 import { z } from "zod";
 import { op, type OpGroup } from "../types.js";
-import { asArray, asRecord, changeLines, clock, day, dayLabel, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
+import { asArray, asRecord, changeLines, dayLabel, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
 
 const KINDS = ["task", "note", "deadline"] as const;
 const REPEATS = ["none", "daily", "weekly", "monthly"] as const;
+
+/** The route's own checks: a real calendar day, and a 24-hour time (so 25:99 is refused here, not by the API). */
+const isoDay = z.string().date("YYYY-MM-DD, a real date");
+const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "HH:MM, 24-hour");
 
 const LABELS = { title: "Title", detail: "Notes", due_date: "Due", due_time: "Time", repeat: "Repeats", kind: "Kind", done: "Done", student_id: "Student" };
 
@@ -23,7 +27,6 @@ const toBody = (i: Record<string, unknown>) =>
     dueTime: i.due_time,
     repeat: i.repeat,
     done: i.done,
-    assigneeId: i.assignee_id,
   });
 
 type Item = { id?: string; title?: string; detail?: string | null; dueDate?: string | null; dueTime?: string | null; repeat?: string; kind?: string; done?: boolean; studentId?: string | null };
@@ -54,26 +57,29 @@ export const workQueue: OpGroup = {
     op({
       name: "work_queue.add",
       kind: "write",
-      risk: (i) => (i.assignee_id ? "confirm" : "auto"),
-      title: "Add a to-do or note to My Work Queue (or, with assignee_id, to a colleague's queue).",
-      doc: "{ title ≤300, detail? ≤2000, student_id?, kind?: task|note|deadline, due_date? YYYY-MM-DD, due_time? HH:MM, repeat?: none|daily|weekly|monthly, assignee_id? (a colleague, from management.consultants) }",
+      risk: "auto",
+      title: "Add a to-do or note to My Work Queue.",
+      doc: "{ title ≤300, detail? ≤2000, student_id?, kind?: task|note|deadline, due_date? YYYY-MM-DD, due_time? HH:MM, repeat?: none|daily|weekly|monthly (time and repeat need a due_date) }",
       input: z
         .object({
           title: z.string().trim().min(1).max(300),
           detail: z.string().trim().max(2000).nullable().optional(),
           student_id: uuid.nullable().optional(),
           kind: z.enum(KINDS).optional(),
-          due_date: day.nullable().optional(),
-          due_time: clock.nullable().optional(),
+          due_date: isoDay.nullable().optional(),
+          due_time: hhmm.nullable().optional(),
           repeat: z.enum(REPEATS).optional(),
-          assignee_id: uuid.optional(),
         })
-        .strict(),
+        .strict()
+        // The table refuses a time or a repeat without a date.
+        .refine((i) => Boolean(i.due_date) || (!i.due_time && (i.repeat ?? "none") === "none"), {
+          message: "due_time and repeat need a due_date",
+          path: ["due_date"],
+        }),
       request: (i) => ({ method: "POST", url: "/work-items", body: { ...toBody(i), source: "AxIS" } }),
       describe: (i, h) =>
-        `${i.assignee_id ? "Assign to a colleague" : "Add to My Work Queue"}: "${plainText(i.title, 90)}"${i.student_id ? ` (${h.studentName(i.student_id)})` : ""}${i.due_date ? `, due ${dayLabel(i.due_date)}` : ""}`,
+        `Add to My Work Queue: "${plainText(i.title, 90)}"${i.student_id ? ` (${h.studentName(i.student_id)})` : ""}${i.due_date ? `, due ${dayLabel(i.due_date)}` : ""}`,
       details: (i) => (i.detail ? [plainText(i.detail, 400)] : []),
-      warning: "It goes onto your colleague's queue.",
       reply: (body) => `Added (id ${idOf(body) ?? "unknown"}).`,
       undo: (_i, body) => {
         const id = idOf(body);
@@ -85,7 +91,7 @@ export const workQueue: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change a queue item, or tick it off with done: true.",
-      doc: "{ item_id, title?, detail?, student_id?|null, kind?, due_date?|null, due_time?|null, repeat?, done? bool }",
+      doc: "{ item_id, title?, detail?, student_id?|null, kind?, due_date?|null (null also clears time and repeat), due_time? HH:MM|null, repeat?, done? bool }",
       input: z
         .object({
           item_id: uuid,
@@ -93,8 +99,8 @@ export const workQueue: OpGroup = {
           detail: z.string().trim().max(2000).nullable().optional(),
           student_id: uuid.nullable().optional(),
           kind: z.enum(KINDS).optional(),
-          due_date: day.nullable().optional(),
-          due_time: clock.nullable().optional(),
+          due_date: isoDay.nullable().optional(),
+          due_time: hhmm.nullable().optional(),
           repeat: z.enum(REPEATS).optional(),
           done: z.boolean().optional(),
         })
@@ -111,8 +117,11 @@ export const workQueue: OpGroup = {
         const b = asRecord(before);
         if (!b.id) return null;
         const from: Record<string, string> = { title: "title", detail: "detail", student_id: "studentId", kind: "kind", due_date: "dueDate", due_time: "dueTime", repeat: "repeat", done: "done" };
+        // Clearing the date clears its time and repeat too (the route does), so all three come back.
+        const changed = new Set(Object.keys(i));
+        if (i.due_date === null) for (const k of ["due_time", "repeat"]) changed.add(k);
         const prev: Record<string, unknown> = { item_id: i.item_id };
-        for (const [k, dto] of Object.entries(from)) if (k in i) prev[k] = b[dto] ?? null;
+        for (const [k, dto] of Object.entries(from)) if (changed.has(k)) prev[k] = b[dto] ?? null;
         if ("title" in prev && !prev.title) return null;
         if ("repeat" in prev && !prev.repeat) prev.repeat = "none";
         if ("done" in prev) prev.done = prev.done === true;

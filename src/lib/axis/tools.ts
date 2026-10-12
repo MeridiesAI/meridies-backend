@@ -23,6 +23,7 @@ import { fromPostgrest } from "../errors.js";
 import { resolveStudentId } from "../guards.js";
 import { wrapUntrusted } from "../context/pack.js";
 import type { SectionName } from "../context/profiles.js";
+import type { ContextUsage } from "../context/types.js";
 import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems } from "./data.js";
 import type { RosterIndex } from "./entities.js";
 import { filterAllowedChunks } from "./guard.js";
@@ -88,6 +89,10 @@ export const WRITE_TIMEOUT_MS = 20_000;
 
 /** Passages from these came from outside Meridies' own records: text in them must not steer a change. */
 const OUTSIDE = new Set(["upload", "drive", "onedrive", "outlook", "gmail"]);
+
+/** A student record built with the text of uploaded files (its documents section): outside content too. */
+export const readsDocuments = (usage: Pick<ContextUsage, "used"> | null | undefined): boolean =>
+  !!usage?.used.some((u) => u.section === "documents");
 
 const SECTIONS = [
   "profile", "academics", "personal", "activities", "awards", "courses", "testScores", "colleges",
@@ -253,6 +258,8 @@ const DEFS: ToolDef[] = [
       if (!target) return { content: "No student given. Use find_student first.", isError: true, fresh: false };
       const id = await resolveStudentId(ctx.request, target, "view");
       const built = await cachedStudentContext(ctx.request, id, ["profile", ...i.sections.filter((s) => s !== "profile")]);
+      // The documents section is the text of uploaded files: from here on a change waits for a click.
+      if (readsDocuments(built)) ctx.turn.tainted = true;
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return { content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`, fresh: !!built.text };
     },

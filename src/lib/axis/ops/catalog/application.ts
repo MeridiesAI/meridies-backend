@@ -4,22 +4,30 @@
  * Recommended column, essays as records, supplement Google Docs, and the
  * Activities and Awards & Honors sheets.
  *
- * Nothing here sends a message, so adding, moving, recording a decision and
- * editing run at once with an Undo. Removing a school asks: the tasks, aid
- * checklist and net price estimates tied to it go with it. So does deleting an
- * essay or a sheet row, dismissing a recommendation, creating a supplement Doc
- * (Google shares it with the student and emails them) and re-reading the Docs
- * (every essay's saved text is replaced).
+ * Adding, moving, recording a decision and editing records run at once with an
+ * Undo. These ask first: putting a school in Recommended, or taking one out or
+ * putting it back (the student sees the column and the reason); removing a
+ * school (the tasks, aid checklist and net price estimates tied to it go with
+ * it); deleting an essay or a sheet row; giving an essay a link (the student
+ * can open it); filing a document as an essay (its text is copied into a
+ * record the student reads); creating a supplement Doc (Google shares it with
+ * the student and emails them) and re-reading the Docs (every essay's saved
+ * text is replaced).
  *
  * The essay guardrail: no op here carries essay or supplement prose. Essay ops
  * set the record (title, prompt, school, status, word limit, due date, link),
- * never its text, and the sheets' free-text answers in the student's own voice
- * (an activity's description, an honor's "how you earned it") are left out too.
+ * never its text. The sheets' free-text answers, which go into the student's
+ * application as written (an activity's description and UC organization
+ * description, an honor's UC eligibility and "how you earned it"), are left
+ * out too: only names, categories, grades, hours and levels.
+ *
+ * Catalog ids come from colleges.find; a student's files from files.list_documents.
  */
 import { z } from "zod";
 import { GRADES, RECOGNITION, TIMINGS, UC_CATEGORIES, UC_LEVELS } from "../../../studentApplication.js";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
 import { asArray, asRecord, changeLines, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
+import { docName } from "./files.js";
 
 type Row = Record<string, unknown>;
 type Getter = Pick<OpHelpers, "get">;
@@ -82,6 +90,11 @@ async function findEssay(h: Getter, studentId: string, id: string): Promise<Row 
   return asArray(asRecord(body).essays).find((e) => e.id === id) ?? null;
 }
 
+async function findStudentDocument(h: Getter, studentId: string, id: string): Promise<Row | null> {
+  const docs = asArray(await h.get<unknown>(`/files/documents${qs({ studentId })}`));
+  return docs.find((d) => d.id === id) ?? null;
+}
+
 async function loadSheets(h: Getter, studentId: string): Promise<{ activities: Row[]; honors: Row[] } | null> {
   const body = await h.get<unknown>(`/application/sheets${qs({ studentId })}`);
   if (!body) return null;
@@ -97,12 +110,16 @@ async function findHonor(h: Getter, studentId: string, id: string): Promise<Row 
   return (await loadSheets(h, studentId))?.honors.find((r) => r.id === id) ?? null;
 }
 
-/** "Duke University on Maya Chen's list", or a neutral label when the row wasn't found under that student. */
-const schoolLabel = (r: Row | null) => (r ? plainText(r.name, 80) : "a school");
+/**
+ * "Duke University" on "Maya Chen's" list. When the id isn't on that student's
+ * list the card says so ("an unidentified school"), so a Confirm is never
+ * asked for under a name the row doesn't have.
+ */
+const schoolLabel = (r: Row | null) => (r ? plainText(r.name, 80) : "an unidentified school");
 const whose = (h: OpHelpers, r: Row | null, studentId: string) => (r ? `${h.studentName(studentId)}'s` : "the student's");
-const essayLabel = (e: Row | null) => (e ? `"${plainText(e.title, 80)}"` : "an essay");
-const activityLabel = (a: Row | null) => (a ? `"${plainText(str(a.organization) ?? str(a.position) ?? "Untitled activity", 80)}"` : "an activity");
-const honorLabel = (a: Row | null) => (a ? `"${plainText(str(a.title) ?? "Untitled honor", 80)}"` : "an honor");
+const essayLabel = (e: Row | null) => (e ? `"${plainText(e.title, 80)}"` : "an unidentified essay");
+const activityLabel = (a: Row | null) => (a ? `"${plainText(str(a.organization) ?? str(a.position) ?? "Untitled activity", 80)}"` : "an unidentified activity");
+const honorLabel = (a: Row | null) => (a ? `"${plainText(str(a.title) ?? "Untitled honor", 80)}"` : "an unidentified honor");
 
 /** A snapshot value back into the op's input, or undefined when it no longer fits the route's enum. */
 function enumArray<T extends string>(allowed: readonly T[], v: unknown): T[] | undefined {
@@ -146,12 +163,12 @@ export const collegeList: OpGroup = {
         const rows = listReply(
           asArray(b.rows),
           (r) =>
-            `id ${str(r.id)}: ${untrusted(r.name)} [${str(r.stage) ?? "?"}, ${str(r.status) ?? "?"}]${r.round ? ` round ${str(r.round)}` : ""}${r.fit ? `, ${str(r.fit)}` : ""}${r.collegeId ? "" : " (not in the catalog)"}`,
+            `student_college_id ${str(r.id)}: ${untrusted(r.name)} [${str(r.stage) ?? "?"}, ${str(r.status) ?? "?"}]${r.round ? ` round ${str(r.round)}` : ""}${r.fit ? `, ${str(r.fit)}` : ""}${r.collegeId ? "" : " (not in the catalog)"}`,
           "The college list is empty."
         );
         const recs = listReply(
           asArray(b.recommendations),
-          (r) => `recommendation id ${str(r.id)}: ${untrusted(r.name)}${r.fit ? ` (${str(r.fit)})` : ""}, suggested by ${str(r.suggestedBy) ?? "counselor"}`,
+          (r) => `recommendation_id ${str(r.id)}: ${untrusted(r.name)}${r.fit ? ` (${str(r.fit)})` : ""}, suggested by ${str(r.suggestedBy) ?? "counselor"}`,
           "No open recommendations.",
           30
         );
@@ -159,31 +176,11 @@ export const collegeList: OpGroup = {
       },
     }),
     op({
-      name: "college_list.find_college",
-      kind: "read",
-      title: "Find a school in the Meridies college catalog, for its college_id.",
-      doc: "{ query 2-120 (the school's name), state? two-letter code, limit? 1-20 }",
-      input: z
-        .object({
-          query: z.string().trim().min(2).max(120),
-          state: z.string().regex(/^[A-Za-z]{2}$/).optional(),
-          limit: z.number().int().min(1).max(20).optional(),
-        })
-        .strict(),
-      request: (i) => ({ method: "GET", url: `/colleges/search${qs({ q: i.query, states: i.state?.toUpperCase(), limit: i.limit ?? 8 })}` }),
-      reply: (body) =>
-        listReply(
-          asArray(body),
-          (c) => `id ${str(c.id)}: ${untrusted(c.name, "catalog")}${c.city || c.state ? ` · ${[str(c.city), str(c.state)].filter(Boolean).join(", ")}` : ""}`,
-          "No school in the catalog matches. Try the official name, or add it to the list by name."
-        ),
-    }),
-    op({
       name: "college_list.add",
       kind: "write",
       risk: "auto",
       title: "Put a school on a student's college list.",
-      doc: "{ student_id, college_id? (from college_list.find_college) or name? ≤300, round?: ED|ED2|EA|REA|SCEA|RD|rolling|priority, fit?: reach|target|likely, stage?: interested|applying|applied, intended_major? ≤200 }",
+      doc: "{ student_id, college_id? (from colleges.find) or name? ≤300, round?: ED|ED2|EA|REA|SCEA|RD|rolling|priority, fit?: reach|target|likely (likely = Safety), stage?: interested|applying|applied, intended_major? ≤200 }",
       input: z
         .object({
           student_id: uuid,
@@ -222,9 +219,10 @@ export const collegeList: OpGroup = {
     op({
       name: "college_list.recommend",
       kind: "write",
-      risk: "auto",
-      title: "Put a school in a student's Recommended column (the student sees it there).",
-      doc: "{ student_id, college_id? (from college_list.find_college) or name? ≤300, fit?: reach|target|likely, why? ≤600 }",
+      // The student sees the school and the reason in their Recommended column.
+      risk: "confirm",
+      title: "Put a school in a student's Recommended column, with your reason (the student sees both).",
+      doc: "{ student_id, college_id? (from colleges.find) or name? ≤300, fit?: reach|target|likely, why? ≤600 }",
       input: z
         .object({
           student_id: uuid,
@@ -244,7 +242,8 @@ export const collegeList: OpGroup = {
         const name = (i.college_id ? await catalogName(h, i.college_id) : null) ?? (i.college_id ? "a catalog school" : plainText(i.name, 80) || "a school");
         return `Recommend ${name} to ${h.studentName(i.student_id)}`;
       },
-      details: (i) => [...changeLines(i, { fit: "Fit" }), ...(i.why ? [`Why: ${plainText(i.why, 600)}`] : [])],
+      details: (i) => [...changeLines(i, { fit: "Fit" }), ...(i.why ? [`Why (the student reads this): ${plainText(i.why, 600)}`] : [])],
+      warning: "The student sees this school, and the reason if one is given, in their Recommended column.",
       snapshot: async (i, h) => (await loadBoard(h, i.student_id))?.recs.map((r) => str(r.id)) ?? null,
       undo: (i, body, before) => {
         const id = idOf(body);
@@ -278,10 +277,8 @@ export const collegeList: OpGroup = {
         return `Add recommended ${schoolLabel(r)} to ${whose(h, r, i.student_id)} college list${i.stage ? ` (${STAGE_LABEL[i.stage]})` : ""}`;
       },
       details: (i) => changeLines(i, { intended_major: "Intended major" }),
-      undo: (i, body) => {
-        const id = idOf(body);
-        return id ? { op: "college_list.remove", input: { student_id: i.student_id, student_college_id: id } } : null;
-      },
+      // No undo: the route marks the recommendation "added", and nothing puts it back in the
+      // column; removing the school alone would take it off the list and out of Recommended both.
     }),
     op({
       name: "college_list.move",
@@ -333,7 +330,7 @@ export const collegeList: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change a school on the list: round, deadline, fit, intended major, binding, notes, order.",
-      doc: "{ student_id, student_college_id, round?: ED|ED2|EA|REA|SCEA|RD|rolling|priority, fit?: reach|target|likely (likely = Safety), deadline?, custom_deadline? YYYY-MM-DD, intended_major? ≤200, binding? bool, notes? ≤4000, sort_order? } (null clears)",
+      doc: "{ student_id, student_college_id, round?: ED|ED2|EA|REA|SCEA|RD|rolling|priority, fit?: reach|target|likely (likely = Safety), deadline? YYYY-MM-DD (the school's), custom_deadline? YYYY-MM-DD (yours), intended_major? ≤200, binding? bool, notes? ≤4000, sort_order? 0-999 } (null clears)",
       input: z
         .object({
           ...schoolRef,
@@ -444,8 +441,9 @@ export const collegeList: OpGroup = {
     op({
       name: "college_list.update_recommendation",
       kind: "write",
-      risk: (i) => (i.status === "dismissed" ? "confirm" : "auto"),
-      title: "Dismiss a Recommended school, put a dismissed one back (status open), or change its fit.",
+      // Dismissing takes it out of the student's column; reopening shows it (and its reason) again.
+      risk: (i) => (i.status !== undefined ? "confirm" : "auto"),
+      title: "Dismiss a Recommended school or put one back (both wait for Confirm), or change its fit.",
       doc: "{ student_id, recommendation_id (from college_list.list), status?: open|dismissed, fit?: reach|target|likely|null }",
       input: z
         .object({
@@ -469,7 +467,7 @@ export const collegeList: OpGroup = {
         return `Update ${name} in ${whose(h, r, i.student_id)} Recommended column`;
       },
       details: (i) => changeLines(i, { fit: "Fit" }),
-      warning: "The school leaves the Recommended column, for the student too.",
+      warning: "This changes what the student sees in their Recommended column.",
       snapshot: (i, h) => findRec(h, i.student_id, i.recommendation_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -536,7 +534,7 @@ export const applicationEssays: OpGroup = {
         const byCatalog = new Map(colleges.map((c) => [str(c.collegeId) ?? "", c.name]));
         const essays = listReply(
           asArray(b.essays),
-          (e) => `id ${str(e.id)}: [${str(e.status) ?? "?"}] ${untrusted(e.title)}${e.school ? ` · ${untrusted(e.school)}` : ""} · ${Number(e.wordCount ?? 0)} words`,
+          (e) => `essay_id ${str(e.id)}: [${str(e.status) ?? "?"}] ${untrusted(e.title)}${e.school ? ` · ${untrusted(e.school)}` : ""} · ${Number(e.wordCount ?? 0)} words`,
           "No essays on file."
         );
         const schools = listReply(colleges, (c) => `student_college_id ${str(c.id)}: ${untrusted(c.name)}`, "The college list is empty.");
@@ -554,26 +552,11 @@ export const applicationEssays: OpGroup = {
       },
     }),
     op({
-      name: "essays.list_documents",
-      kind: "read",
-      title: "A student's files with ids, to file one as an essay (files kept out of AI aren't listed).",
-      doc: "{ student_id }",
-      input: z.object({ student_id: uuid }).strict(),
-      takesStudent: true,
-      request: (i) => ({ method: "GET", url: `/files/documents${qs({ studentId: i.student_id })}` }),
-      reply: (body) => {
-        const all = asArray(body);
-        const shown = all.filter((d) => d.availableToLlm === true && d.aiAccess !== "excluded" && d.ferpaWaived !== true);
-        const list = listReply(shown, (d) => `id ${str(d.id)}: ${untrusted(str(d.title) ?? d.filename)} [${str(d.kind) ?? "other"}]`, "No files are filed to this student.");
-        const held = all.length - shown.length;
-        return held > 0 ? `${list}\n(${held} file(s) kept out of AI are not listed.)` : list;
-      },
-    }),
-    op({
       name: "essays.create",
       kind: "write",
-      risk: "auto",
-      title: "Add an essay record (personal statement or supplement) to the Application page; never its text.",
+      // A link on the record is one the student can open: a URL AxIS chose waits for the counselor.
+      risk: (i) => (typeof i.external_url === "string" ? "confirm" : "auto"),
+      title: "Add an essay record (personal statement or supplement); never its text. With a link it waits for Confirm.",
       doc: "{ student_id, essay_kind?: personal-statement|supplement|other, title? ≤300, prompt? ≤2000, student_college_id?, college_supplement_id?, word_limit? 1-20000, external_url? https, status?, due_date? YYYY-MM-DD }",
       input: z
         .object({
@@ -617,6 +600,7 @@ export const applicationEssays: OpGroup = {
         return `Add ${what} to ${h.studentName(i.student_id)}'s Application page`;
       },
       details: async (i, h) => [...(await schoolLine(h, i.student_id, i.student_college_id)), ...changeLines(i, ESSAY_LABELS)],
+      warning: "The student sees the essay record on their Application page and can open its link.",
       undo: (i, body) => {
         const id = idOf(body);
         return id ? { op: "essays.delete", input: { student_id: i.student_id, essay_id: id } } : null;
@@ -625,9 +609,11 @@ export const applicationEssays: OpGroup = {
     op({
       name: "essays.from_document",
       kind: "write",
-      risk: "auto",
+      // The file's text is copied into the essay record, which the student reads (an excerpt and the
+      // word count) even when the file itself is one they can't see (counselor-only, IEP/504, a waived letter).
+      risk: "confirm",
       title: "File a document already in the student's Files as an essay (its word count is read from the file).",
-      doc: "{ student_id, document_id (from essays.list_documents), essay_kind?: personal-statement|supplement|other, student_college_id?, college_supplement_id?, title? ≤300 }",
+      doc: "{ student_id, document_id (from files.list_documents), essay_kind?: personal-statement|supplement|other, student_college_id?, college_supplement_id?, title? ≤300 }",
       input: z
         .object({
           student_id: uuid,
@@ -652,11 +638,18 @@ export const applicationEssays: OpGroup = {
         }),
       }),
       describe: async (i, h) => {
-        const docs = asArray(await h.get<unknown>(`/files/documents${qs({ studentId: i.student_id })}`));
-        const d = docs.find((r) => r.id === i.document_id);
-        return `File ${d ? `"${plainText(str(d.title) ?? d.filename, 80)}"` : "a document"} as an essay for ${h.studentName(i.student_id)}`;
+        const d = await findStudentDocument(h, i.student_id, i.document_id);
+        return `File ${d ? docName(d) : "an unidentified document"} as an essay for ${h.studentName(i.student_id)}`;
       },
-      details: async (i, h) => [...(await schoolLine(h, i.student_id, i.student_college_id)), ...changeLines(i, { essay_kind: "Kind", title: "Title" })],
+      details: async (i, h) => {
+        const d = await findStudentDocument(h, i.student_id, i.document_id);
+        return [
+          ...(d ? [`File: ${plainText(str(d.title) ?? d.filename, 120)} (${str(d.kind) ?? "other"})`] : ["File: not found among this student's files"]),
+          ...(await schoolLine(h, i.student_id, i.student_college_id)),
+          ...changeLines(i, { essay_kind: "Kind", title: "Title" }),
+        ];
+      },
+      warning: "The file's text is copied into an essay record the student can read on their Application page.",
       reply: (body) => {
         const b = asRecord(body);
         return `Filed as an essay (id ${idOf(body) ?? "unknown"}).${b.textStatus === "unreadable" ? " Its text couldn't be read, so the word count is 0." : ""}`;
@@ -685,14 +678,14 @@ export const applicationEssays: OpGroup = {
         const doc = asRecord(b.doc);
         const essays = asArray(b.essays);
         const share = doc.shareStatus === "shared" ? "shared with the student" : doc.shareStatus === "failed" ? "not shared (Google refused the share)" : "not shared (no email on file)";
-        return `Created the Doc (${share}) with ${essays.length} essay record(s): ${essays.map((e) => `id ${str(e.id)} ${untrusted(e.title, "catalog")}`).join("; ") || "none"}.`;
+        return `Created the Doc (${share}) with ${essays.length} essay record(s): ${essays.map((e) => `essay_id ${str(e.id)} ${untrusted(e.title, "catalog")}`).join("; ") || "none"}.`;
       },
     }),
     op({
       name: "essays.update",
       kind: "write",
-      risk: "auto",
-      title: "Change an essay record (title, prompt, school, limit, link, status, due date); never its text.",
+      risk: (i) => (typeof i.external_url === "string" ? "confirm" : "auto"),
+      title: "Change an essay record (title, prompt, school, limit, link, status, due date); never its text. A new link waits.",
       doc: "{ student_id, essay_id, essay_kind?, title? ≤300, prompt? ≤2000|null, student_college_id?|null, word_limit?|null, external_url? https|null, status?: not-started|drafting|review|final, due_date?|null, sort_order? }",
       input: z
         .object({
@@ -730,6 +723,7 @@ export const applicationEssays: OpGroup = {
         return `Update ${essayLabel(e)}${e ? ` on ${h.studentName(i.student_id)}'s Application page` : ""}`;
       },
       details: async (i, h) => [...(await schoolLine(h, i.student_id, i.student_college_id)), ...changeLines(i, ESSAY_LABELS)],
+      warning: "The student can open the essay's new link from their Application page.",
       snapshot: (i, h) => findEssay(h, i.student_id, i.essay_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -738,7 +732,11 @@ export const applicationEssays: OpGroup = {
         if ("essay_kind" in i) prev.essay_kind = b.essayKind ?? "supplement";
         if ("title" in i) prev.title = str(b.title) ?? "Untitled essay";
         if ("prompt" in i) prev.prompt = textOrNull(b.prompt);
-        if ("student_college_id" in i) prev.student_college_id = b.studentCollegeId ?? null;
+        if ("student_college_id" in i) {
+          // A school typed on an older record has no list row to point back at; clearing would lose it.
+          if (!b.studentCollegeId && str(b.school)) return null;
+          prev.student_college_id = b.studentCollegeId ?? null;
+        }
         if ("word_limit" in i) prev.word_limit = b.wordLimit ?? null;
         if ("external_url" in i) {
           // The DTO's url is the Doc's or the file's when there is one, so the old link is only known for a plain link.
@@ -782,7 +780,7 @@ export const applicationEssays: OpGroup = {
         const e = await findEssay(h, i.student_id, i.essay_id);
         return `Delete ${essayLabel(e)}${e ? ` from ${h.studentName(i.student_id)}'s Application page` : ""}`;
       },
-      warning: "The essay record and the text saved in it are deleted; a file or Google Doc it came from stays.",
+      warning: "The essay record, its saved text and versions, and any task tied to it are deleted; a file or Google Doc it came from stays.",
     }),
   ],
 };
@@ -799,7 +797,6 @@ const activityFields = {
   weeks_per_year: z.number().int().min(0).max(52).nullable(),
   continuing: z.boolean().nullable(),
   uc_category: z.enum(UC_CATEGORIES).nullable(),
-  uc_org_description: z.string().max(2000).nullable(),
   sort_order: z.number().int().min(0).max(999),
 };
 
@@ -809,7 +806,6 @@ const honorFields = {
   recognition_levels: z.array(z.enum(RECOGNITION)).max(4),
   uc_type: z.enum(["academic", "non-academic"]).nullable(),
   uc_level: z.enum(UC_LEVELS).nullable(),
-  uc_criteria: z.string().max(2000).nullable(),
   sort_order: z.number().int().min(0).max(999),
 };
 
@@ -823,7 +819,6 @@ const ACTIVITY_LABELS = {
   weeks_per_year: "Weeks/year",
   continuing: "Continuing",
   uc_category: "UC category",
-  uc_org_description: "UC organization description",
   sort_order: "Order",
 };
 
@@ -833,7 +828,6 @@ const HONOR_LABELS = {
   recognition_levels: "Recognition",
   uc_type: "UC type",
   uc_level: "UC level",
-  uc_criteria: "UC eligibility",
   sort_order: "Order",
 };
 
@@ -848,7 +842,6 @@ const activityBody = (i: Partial<Record<keyof typeof activityFields, unknown>>) 
     weeks_per_year: i.weeks_per_year,
     continuing: i.continuing,
     uc_category: i.uc_category,
-    uc_org_description: i.uc_org_description,
     sort_order: i.sort_order,
   });
 
@@ -859,7 +852,6 @@ const honorBody = (i: Partial<Record<keyof typeof honorFields, unknown>>) =>
     recognition_levels: i.recognition_levels,
     uc_type: i.uc_type,
     uc_level: i.uc_level,
-    uc_criteria: i.uc_criteria,
     sort_order: i.sort_order,
   });
 
@@ -882,14 +874,14 @@ export const applicationSheets: OpGroup = {
         const activities = listReply(
           asArray(b.activities),
           (a) =>
-            `activity id ${str(a.id)}: ${untrusted(a.organization)}${str(a.position) ? ` · ${untrusted(a.position)}` : ""}${str(a.category) ? ` [${untrusted(a.category)}]` : ""}${Array.isArray(a.gradeLevels) && a.gradeLevels.length ? ` grades ${a.gradeLevels.map(String).join(", ")}` : ""}`,
+            `activity_id ${str(a.id)}: ${untrusted(a.organization)}${str(a.position) ? ` · ${untrusted(a.position)}` : ""}${str(a.category) ? ` [${untrusted(a.category)}]` : ""}${Array.isArray(a.gradeLevels) && a.gradeLevels.length ? ` grades ${a.gradeLevels.map(String).join(", ")}` : ""}`,
           "No activities.",
           30
         );
         const honors = listReply(
           asArray(b.honors),
           (a) =>
-            `honor id ${str(a.id)}: ${untrusted(a.title)}${Array.isArray(a.gradeLevels) && a.gradeLevels.length ? ` grades ${a.gradeLevels.map(String).join(", ")}` : ""}${Array.isArray(a.recognitionLevels) && a.recognitionLevels.length ? ` · ${a.recognitionLevels.map(String).join(", ")}` : ""}`,
+            `honor_id ${str(a.id)}: ${untrusted(a.title)}${Array.isArray(a.gradeLevels) && a.gradeLevels.length ? ` grades ${a.gradeLevels.map(String).join(", ")}` : ""}${Array.isArray(a.recognitionLevels) && a.recognitionLevels.length ? ` · ${a.recognitionLevels.map(String).join(", ")}` : ""}`,
           "No honors.",
           30
         );
@@ -900,8 +892,8 @@ export const applicationSheets: OpGroup = {
       name: "application.add_activity",
       kind: "write",
       risk: "auto",
-      title: "Add a row to a student's Activities sheet (no description: that is the student's own words).",
-      doc: "{ student_id, organization? ≤300, position? ≤300, category? ≤100, grade_levels? [9|10|11|12|PG], timing? [school|break|year], hours_per_week? 0-168, weeks_per_year? 0-52, continuing? bool, uc_category?, sort_order? }",
+      title: "Add a row to a student's Activities sheet (no descriptions: those are the student's own words).",
+      doc: "{ student_id, organization? ≤300, position? ≤300, category? ≤100, grade_levels? [9|10|11|12|PG], timing? [school|break|year] (one), hours_per_week? 0-168, weeks_per_year? 0-52, continuing? bool, uc_category?: coursework-other|educational-prep|extracurricular|volunteer|work, sort_order? 0-999 }",
       input: z.object({ student_id: uuid, ...optional(activityFields) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/application/activities", body: { studentId: i.student_id, ...activityBody(i) } }),
@@ -916,8 +908,8 @@ export const applicationSheets: OpGroup = {
       name: "application.add_honor",
       kind: "write",
       risk: "auto",
-      title: "Add a row to a student's Awards & Honors sheet.",
-      doc: "{ student_id, name? ≤300, grade_levels? [9|10|11|12|PG], recognition_levels? [school|state-regional|national|international], uc_type?: academic|non-academic, uc_level?, uc_criteria? ≤2000, sort_order? }",
+      title: "Add a row to a student's Awards & Honors sheet (no UC write-ups: those are the student's own words).",
+      doc: "{ student_id, name? ≤300, grade_levels? [9|10|11|12|PG], recognition_levels? [school|state-regional|national|international], uc_type?: academic|non-academic, uc_level?: school|city-community|state|regional|national|international, sort_order? 0-999 }",
       input: z.object({ student_id: uuid, ...optional(honorFields) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/application/honors", body: { studentId: i.student_id, ...honorBody(i) } }),
@@ -933,7 +925,7 @@ export const applicationSheets: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change a row on a student's Activities sheet.",
-      doc: "{ student_id, activity_id, any add_activity field, uc_category?: coursework-other|educational-prep|extracurricular|volunteer|work, uc_org_description? ≤2000 } (null clears)",
+      doc: "{ student_id, activity_id, any add_activity field } (null clears; grade_levels/timing [] clear)",
       input: z.object({ student_id: uuid, activity_id: uuid, ...optional(activityFields) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/application/activities/${seg(i.activity_id)}`, body: activityBody(i) }),
@@ -960,7 +952,6 @@ export const applicationSheets: OpGroup = {
         if ("weeks_per_year" in i) prev.weeks_per_year = b.weeksPerYear ?? null;
         if ("continuing" in i) prev.continuing = b.continuing ?? null;
         if ("uc_category" in i) prev.uc_category = b.ucCategory ?? null;
-        if ("uc_org_description" in i) prev.uc_org_description = textOrNull(b.ucOrgDescription);
         if ("sort_order" in i) prev.sort_order = typeof b.sortOrder === "number" ? b.sortOrder : 0;
         return { op: "application.update_activity", input: prev };
       },
@@ -970,7 +961,7 @@ export const applicationSheets: OpGroup = {
       kind: "write",
       risk: "auto",
       title: "Change a row on a student's Awards & Honors sheet.",
-      doc: "{ student_id, honor_id, any add_honor field, uc_level?: school|city-community|state|regional|national|international } (null clears)",
+      doc: "{ student_id, honor_id, any add_honor field } (null clears; grade_levels/recognition_levels [] clear)",
       input: z.object({ student_id: uuid, honor_id: uuid, ...optional(honorFields) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/application/honors/${seg(i.honor_id)}`, body: honorBody(i) }),
@@ -997,7 +988,6 @@ export const applicationSheets: OpGroup = {
         }
         if ("uc_type" in i) prev.uc_type = b.ucType ?? null;
         if ("uc_level" in i) prev.uc_level = b.ucLevel ?? null;
-        if ("uc_criteria" in i) prev.uc_criteria = textOrNull(b.ucEligibility);
         if ("sort_order" in i) prev.sort_order = typeof b.sortOrder === "number" ? b.sortOrder : 0;
         return { op: "application.update_honor", input: prev };
       },
