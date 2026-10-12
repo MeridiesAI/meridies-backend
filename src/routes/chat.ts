@@ -15,6 +15,7 @@ import { runStructured, streamChat, type ChatTurn } from "../lib/anthropic.js";
 import {
   buildRosterContext,
   buildSystemPrompt,
+  signerLine,
   chatToolCatalog,
   getChatTool,
   REASONING_SCHEMA,
@@ -325,7 +326,7 @@ export default async function chatRoutes(app: FastifyInstance) {
             rosterContext = built?.text ?? null;
             sources = built?.sources ?? [];
           }
-          const system = buildSystemPrompt(tool, studentContext, rosterContext);
+          const system = buildSystemPrompt(tool, studentContext, rosterContext, signerLine(request.profile));
           // The chat's files, every turn: a reopened chat still knows what was in them.
           const files = await fileBlocks(request, id);
           const last = turns.at(-1);
