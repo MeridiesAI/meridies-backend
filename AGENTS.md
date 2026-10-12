@@ -1154,7 +1154,13 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - Zod at every boundary, `.strict()` on request bodies
 - Thin route handlers — logic in `src/lib/`
 - Always authenticate **and** authorize
-- Never log secrets; never return stack traces or key hints to a client
+- Never log secrets; never return stack traces or key hints to a client.
+  Every `err` in a log line goes through `serializeErr` (`lib/requestLog.ts`):
+  type, redacted message and stack, `code`/`status` only, so a PostgREST
+  `details` or an SDK's request echo never lands in Railway. `redactText`
+  strips emails, bearer tokens, JWTs, API keys, phone numbers and query
+  values; use it on any free text you log outside `err`, and log a
+  user-supplied URL as `logHost(url)`. Never log a body, a prompt or essay text.
 - Never commit `.env` — keep `.env.example` current
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content

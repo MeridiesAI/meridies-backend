@@ -16,6 +16,7 @@ import { serviceClient } from "../supabase.js";
 import { env } from "../../env.js";
 import { withWorkerTransaction } from "./db.js";
 import { isCounselorApproved } from "../access.js";
+import { redactText } from "../requestLog.js";
 
 export type ImportJobKind = "commit" | "undo" | "apply";
 export type ImportJobOutcome = { status: string } & Record<string, unknown>;
@@ -43,7 +44,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 function errInfo(err: unknown): { code: string | undefined; message: string } {
   return {
     code: (err as { code?: string } | null)?.code,
-    message: err instanceof Error ? err.message : String(err),
+    message: redactText(err instanceof Error ? err.message : String(err)),
   };
 }
 

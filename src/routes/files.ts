@@ -24,6 +24,7 @@ import { z } from "zod";
 import { runStructured } from "../lib/anthropic.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, normalizeLink } from "../lib/links.js";
+import { logHost } from "../lib/requestLog.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
@@ -714,7 +715,7 @@ async function readLink(request: FastifyRequest, row: Row) {
   try {
     page = await fetchReadablePage(String(row.url));
   } catch (err) {
-    request.log.warn({ url: row.url, err }, "link read failed");
+    request.log.warn({ host: logHost(row.url), err }, "link read failed");
     return fail(publicMessage(err, "Couldn't read that link"));
   }
 
@@ -785,7 +786,7 @@ async function readLink(request: FastifyRequest, row: Row) {
       },
     });
   } catch (err) {
-    request.log.error({ url: row.url, err }, "link digest failed");
+    request.log.error({ host: logHost(row.url), err }, "link digest failed");
     return fail(publicMessage(err, "Couldn't summarize that page"));
   }
 
