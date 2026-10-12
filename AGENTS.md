@@ -63,7 +63,7 @@ src/
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
-│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), linkCheck.ts, run.ts
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
@@ -512,6 +512,19 @@ compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
 <policies|requirements|major-admit-rates> --file <csv> [--dry-run]`. A file with
 one bad row loads nothing. Checked-in files and their sources are listed in
 `scripts/ingest/data/README.md`.
+
+**Events Hub listings** come the same way: `npx tsx --env-file=.env
+scripts/ingest/events-csv.ts --file <csv> [--dry-run]` (columns in
+`src/lib/ingest/events.ts`). Every row is checked with zod against what
+`hub_events` accepts, a file with one bad row loads nothing, and a
+`college_unitid` must already be in the catalog. Rows become Meridies-wide
+listings (`created_by` and `firm_id` null), which every approved counselor
+sees. `hub_events` has no unique constraint, so the loader matches on the
+natural key (name, host, start_date), trimmed and ignoring case, among
+Meridies-wide rows only: a re-run updates in place, never duplicates, never
+touches a counselor's own listing, and deletes nothing. A URL is not the key,
+because a recurring webinar shares one page across dates. Renaming an event in
+the file inserts a new row; remove the old one by hand. Service role from env.
 
 ### Catalog data: yearly refresh
 

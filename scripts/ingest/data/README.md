@@ -12,3 +12,13 @@ Load: `npx tsx scripts/ingest/curated-csv.ts --dataset policies --file scripts/i
 
 Add a file per dataset and cycle (e.g. `common-app-requirements-2026-27.csv`,
 `uc-admits-by-discipline-fall-2025.csv`) and list it here.
+
+## Events Hub listings
+
+`scripts/ingest/events-csv.ts` loads Meridies-wide Events Hub listings
+(`hub_events`) from a curator's CSV; columns are documented in
+`src/lib/ingest/events.ts`, and `test/fixtures/events-sample.csv` shows the
+shape (its rows are fake). Every listing needs the organizer's own page as
+`url`. Name files by season (e.g. `events-2026-fall.csv`) and list them here.
+
+Load: `npx tsx --env-file=.env scripts/ingest/events-csv.ts --file <csv> [--dry-run]`

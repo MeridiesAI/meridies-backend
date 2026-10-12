@@ -1,0 +1,4 @@
+name,kind,host,start_date,end_date,start_time,end_time,time_zone,place,url,description,college_unitid,photo_key,topics
+Fixture Aid Webinar (not a real event),webinar,Fixture Host Association,2099-01-15,,16:00,17:00,America/New_York,Online,https://example.org/fixture-aid-webinar,"Sample row for tests, not a real listing.",,webinar,aid;practice
+Fixture Counselor Conference (not real),Conference,Fixture Counselors Network,2099-03-02,2099-03-04,09:00,17:00,America/Chicago,"Chicago, IL",https://example.org/fixture-conference,,,conference,essays;lists
+Fixture Campus Info Session (not real),info-session,Fixture University Admissions,2099-04-10,,,,America/Los_Angeles,Online,https://example.org/fixture-info-session,,110635,,uc
