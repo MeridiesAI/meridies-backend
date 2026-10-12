@@ -19,7 +19,7 @@ import { ZodError } from "zod";
 import { HttpError } from "../../errors.js";
 import { resolveStudentId } from "../../guards.js";
 import { wrapUntrusted } from "../../context/pack.js";
-import { assertAllowedCall, dispatch, failureMessage, isTransient } from "./dispatch.js";
+import { assertAllowedCall, counselorMessage, dispatch, failureMessage, isTransient } from "./dispatch.js";
 import { getOp, headingOf, riskOf } from "./registry.js";
 import type { OpCall, OpDef, OpHelpers, UndoStep } from "./types.js";
 
@@ -28,13 +28,27 @@ export const MAX_AUTO_WRITES_PER_TURN = 5;
 
 /** Shared by every tool call in one turn (the object is passed by reference). */
 export type TurnBudget = {
-  /** Outside content (documents, mail, connected files) reached the model this turn. */
+  /** Changes wait for a click: outside content reached the model this turn, or the turn before. */
   tainted: boolean;
+  /** This turn itself read outside content (documents, mail, connected files, web-derived lookups). Carried to the next turn. */
+  sawOutside: boolean;
   writes: number;
   autoWrites: number;
 };
 
-export const newTurnBudget = (tainted = false): TurnBudget => ({ tainted, writes: 0, autoWrites: 0 });
+/** `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history. */
+export const newTurnBudget = (outside = false, inherited = false): TurnBudget => ({
+  tainted: outside || inherited,
+  sawOutside: outside,
+  writes: 0,
+  autoWrites: 0,
+});
+
+/** Marks the turn as having read outside content. */
+export function markOutside(turn: TurnBudget): void {
+  turn.tainted = true;
+  turn.sawOutside = true;
+}
 
 export type OperationStatus = "pending" | "executed" | "confirmed" | "dismissed" | "failed" | "undone";
 
@@ -167,7 +181,9 @@ function reversalOf(def: OpDef, input: Record<string, unknown>, body: unknown, b
   return safelySync(() => validUndo(def.undo?.(input, body, before)));
 }
 
-function defaultReply(body: unknown): string {
+/** Only a create names an id: an update echoes the row it changed, and "new id" would read as a second row. */
+function defaultReply(body: unknown, method: string): string {
+  if (method !== "POST") return "";
   const id = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).id : null;
   return typeof id === "string" || typeof id === "number" ? `New id ${String(id)}.` : "";
 }
@@ -272,6 +288,10 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   const warning = risk === "confirm" ? (def.warning ?? null) : null;
   const stored = fitPayload({ op: def.name, area: headingOf(def.name), summary, details, warning, reason, input });
   if (!stored) return notRun("that change is too large for AxIS to file or record. Nothing was changed; tell the counselor to make it in the app.");
+  // A card the counselor confirms must show all of it (a message's whole body): never a trimmed one.
+  if (risk === "confirm" && stored.details !== details) {
+    return notRun("it is too long to show whole on a confirmation card. Shorten it (a shorter message, fewer details) and file it again.");
+  }
   const show = (status: OperationStatus, undoable: boolean, message: string | null = null): OperationPayload => ({
     op: stored.op, area: stored.area, summary, details: stored.details, warning, reason, status, undoable, message,
   });
@@ -309,7 +329,7 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   if (!ctx.signal.aborted) {
     ctx.onOperation({ id: rec.id ?? `local-${randomUUID()}`, type: "operation", studentId, payload: show("executed", !!(undo && rec.id)) });
   }
-  const extra = (def.reply ? safelySync(() => def.reply!(res.body, input)) : null) ?? defaultReply(res.body);
+  const extra = (def.reply ? safelySync(() => def.reply!(res.body, input)) : null) ?? defaultReply(res.body, call.method);
   return { content: `Done: ${wrapUntrusted("action", summary)}.${extra ? ` ${extra}` : ""}`, fresh: true };
 }
 
@@ -356,8 +376,8 @@ export async function confirmOperation(request: FastifyRequest, row: { student_i
   const h = helpers(request, null);
   const before = def.snapshot ? await safely(() => def.snapshot!(input, h)) : undefined;
   const res = await dispatch(request, call);
-  if (isTransient(res.status)) throw new TransientOperationError(failureMessage(res));
-  if (res.status >= 400) return { status: "failed", result: { ok: false, message: failureMessage(res) } };
+  if (isTransient(res.status)) throw new TransientOperationError(counselorMessage(res));
+  if (res.status >= 400) return { status: "failed", result: { ok: false, message: counselorMessage(res) } };
   // The change has happened. A throw from here would release the claim and let a second Confirm run it again.
   const undo = reversalOf(def, input, res.body, before);
   return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}) } };
@@ -371,7 +391,8 @@ export async function undoOperation(request: FastifyRequest, row: { result: unkn
   const input = def.input.parse(step.input) as Record<string, unknown>;
   const res = await dispatch(request, def.request(input));
   if (isTransient(res.status)) throw new TransientOperationError(failureMessage(res));
-  if (res.status >= 400) throw new HttpError(res.status === 404 ? 409 : res.status, `Couldn't undo: ${failureMessage(res)}`);
+  // 401 would read as "signed out" in the app; the token just authenticated, so it is a refusal like any other.
+  if (res.status >= 400) throw new HttpError(res.status === 404 || res.status === 401 ? 409 : res.status, `Couldn't undo: ${failureMessage(res)}`);
 }
 
 // ---- What AxIS remembers between turns ----------------------------------------------------

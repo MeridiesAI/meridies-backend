@@ -155,7 +155,7 @@ export const courses: OpGroup = {
       doc: "{ course_id, student_id, name?, type?, status?, grade?, school_year?, sort_order? }",
       input: courseUpdateInput,
       takesStudent: true,
-      request: (i) => ({ method: "PATCH", url: `/courses/${seg(i.course_id)}`, body: courseBody(i) }),
+      request: (i) => ({ method: "PATCH", url: `/courses/${seg(i.course_id)}${qs({ studentId: i.student_id })}`, body: courseBody(i) }),
       describe: async (i, h) => {
         const c = await findRow(h, coursesUrl(i.student_id), i.course_id);
         return `Update ${c ? quoted(c.name, "a course") : "a course"}${whose(c, i.student_id, h)}`;
@@ -187,7 +187,7 @@ export const courses: OpGroup = {
       doc: "{ course_id, student_id }",
       input: z.object({ course_id: uuid, student_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "DELETE", url: `/courses/${seg(i.course_id)}` }),
+      request: (i) => ({ method: "DELETE", url: `/courses/${seg(i.course_id)}${qs({ studentId: i.student_id })}` }),
       describe: async (i, h) => {
         const c = await findRow(h, coursesUrl(i.student_id), i.course_id);
         return `Delete ${c ? quoted(c.name, "a course") : "a course"}${c ? ` from ${h.studentName(i.student_id)}'s record` : whose(c, i.student_id, h)}`;
@@ -279,7 +279,7 @@ export const testScores: OpGroup = {
       doc: "{ score_id, student_id, exam?, kind?, score?, taken_on? YYYY-MM-DD, sort_order? }",
       input: scoreUpdateInput,
       takesStudent: true,
-      request: (i) => ({ method: "PATCH", url: `/test-scores/${seg(i.score_id)}`, body: scoreBody(i) }),
+      request: (i) => ({ method: "PATCH", url: `/test-scores/${seg(i.score_id)}${qs({ studentId: i.student_id })}`, body: scoreBody(i) }),
       describe: async (i, h) => {
         const s = await findRow(h, scoresUrl(i.student_id), i.score_id);
         return `Update ${scoreName(s)}${whose(s, i.student_id, h)}`;
@@ -310,7 +310,7 @@ export const testScores: OpGroup = {
       doc: "{ score_id, student_id }",
       input: z.object({ score_id: uuid, student_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "DELETE", url: `/test-scores/${seg(i.score_id)}` }),
+      request: (i) => ({ method: "DELETE", url: `/test-scores/${seg(i.score_id)}${qs({ studentId: i.student_id })}` }),
       describe: async (i, h) => {
         const s = await findRow(h, scoresUrl(i.student_id), i.score_id);
         return `Delete ${scoreName(s)}${s ? ` from ${h.studentName(i.student_id)}'s record` : whose(s, i.student_id, h)}`;
@@ -486,7 +486,7 @@ export const meetingNotes: OpGroup = {
       doc: "{ note_id, student_id, title? ≤300, meeting_date? YYYY-MM-DD, summary? ≤4000, tags? [≤40 each, ≤20], visibility?: private|shared }",
       input: noteUpdateInput,
       takesStudent: true,
-      request: (i) => ({ method: "PATCH", url: `/notes/${seg(i.note_id)}`, body: noteBody(i) }),
+      request: (i) => ({ method: "PATCH", url: `/notes/${seg(i.note_id)}${qs({ studentId: i.student_id })}`, body: noteBody(i) }),
       describe: async (i, h) => {
         const n = await findRow(h, notesUrl(i.student_id), i.note_id);
         // Name the student only when the note is theirs: the share goes to whoever the note is about.
@@ -520,7 +520,7 @@ export const meetingNotes: OpGroup = {
       doc: "{ note_id, student_id }",
       input: z.object({ note_id: uuid, student_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "DELETE", url: `/notes/${seg(i.note_id)}` }),
+      request: (i) => ({ method: "DELETE", url: `/notes/${seg(i.note_id)}${qs({ studentId: i.student_id })}` }),
       describe: async (i, h) => {
         const n = await findRow(h, notesUrl(i.student_id), i.note_id);
         return `Delete ${noteName(n)}${whose(n, i.student_id, h)}`;

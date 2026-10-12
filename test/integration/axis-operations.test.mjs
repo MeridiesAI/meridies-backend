@@ -66,7 +66,7 @@ check("and nothing was written for them", Array.isArray(strangerDl.body) && !str
 
 const gone = await propose("deadlines.delete", { deadline_id: dl.body.id });
 const g = await call(c.token, "POST", `/axis/actions/${gone}/confirm`, {});
-check("a target that's already gone reports the route's reason", g.status === 200 && g.body.status === "failed" && typeof g.body.result.message === "string", JSON.stringify(g.body));
+check("a target that's already gone says so in words for the counselor", g.status === 200 && g.body.status === "failed" && /no longer exists/.test(g.body.result.message) && !/lookup|the counselor/i.test(g.body.result.message), JSON.stringify(g.body));
 
 const unknown = await propose("nothing.here", {});
 const u = await call(c.token, "POST", `/axis/actions/${unknown}/confirm`, {});

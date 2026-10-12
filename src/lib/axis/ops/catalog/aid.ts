@@ -77,7 +77,9 @@ async function findIn(h: Get, url: string, id: string): Promise<Row | null> {
 
 /** A label a person typed, with any dollar amount in it masked, for a reply the model reads. */
 const noFigures = (v: unknown): unknown =>
-  typeof v === "string" ? v.replace(/\$\s?\d[\d,]*(?:\.\d+)?(?:\s?[kKmM]\b)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|usd)\b/gi, "$…") : v;
+  typeof v === "string"
+    ? v.replace(/\$\s?\d[\d,]*(?:\.\d+)?(?:\s?[kKmM]\b)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|usd)\b|\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/gi, "$…")
+    : v;
 
 // ---- Aid profile: forms and family financials --------------------------------
 
@@ -295,12 +297,12 @@ const appealsUrl = (studentId: string) => `/aid/appeals${qs({ studentId })}`;
 const letterLabel = (l: Row | null, studentName: string) =>
   l
     ? `the "${plainText(l.school_name, 80)}"${l.academic_year ? ` (${plainText(l.academic_year, 20)})` : ""} award letter`
-    : `an award letter that isn't on ${studentName}'s Financial aid`;
+    : `an award letter not on ${studentName}'s Financial aid`;
 /** A line item's label for a card line (echoed to the model), any dollar amount in it masked. */
 const itemLabel = (it: Row | null, studentName: string) =>
-  it ? `"${plainText(noFigures(it.label), 80)}"` : `a line item that isn't on ${studentName}'s award letters`;
+  it ? `"${plainText(noFigures(it.label), 80)}"` : `a line item not on ${studentName}'s award letters`;
 const appealLabel = (a: Row | null, studentName: string) =>
-  a ? `the award appeal to "${plainText(a.school_name, 80)}"` : `an award appeal that isn't on ${studentName}'s Financial aid`;
+  a ? `the award appeal to "${plainText(a.school_name, 80)}"` : `an award appeal not on ${studentName}'s Financial aid`;
 
 export const aid: OpGroup = {
   heading: "Financial aid",
@@ -483,7 +485,7 @@ export const aid: OpGroup = {
       doc: "{ student_id, award_letter_id, school_name?, academic_year?, cost_of_attendance_cents?|null, grants_cents?, scholarships_cents?, work_study_cents?, loans_subsidized_cents?, loans_unsubsidized_cents?, parent_loan_cents?, received_at?|null, appeal_deadline?|null, renewal_requirements?, notes?, student_college_id?|null }",
       input: z.object(letterFields).partial().extend({ student_id: uuid, award_letter_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "PATCH", url: `/aid/award-letters/${seg(i.award_letter_id)}`, body: pick(i, LETTER_KEYS) }),
+      request: (i) => ({ method: "PATCH", url: `/aid/award-letters/${seg(i.award_letter_id)}${qs({ studentId: i.student_id })}`, body: pick(i, LETTER_KEYS) }),
       describe: async (i, h) => {
         const name = h.studentName(i.student_id);
         return `Update ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id), name)} for ${name}`;
@@ -506,10 +508,11 @@ export const aid: OpGroup = {
       doc: "{ student_id, award_letter_id }",
       input: z.object({ student_id: uuid, award_letter_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "DELETE", url: `/aid/award-letters/${seg(i.award_letter_id)}` }),
+      request: (i) => ({ method: "DELETE", url: `/aid/award-letters/${seg(i.award_letter_id)}${qs({ studentId: i.student_id })}` }),
       describe: async (i, h) => {
         const name = h.studentName(i.student_id);
-        return `Delete ${letterLabel(await findIn(h, lettersUrl(i.student_id), i.award_letter_id), name)} from ${name}'s Financial aid`;
+        const l = await findIn(h, lettersUrl(i.student_id), i.award_letter_id);
+        return `Delete ${letterLabel(l, name)}${l ? ` from ${name}'s Financial aid` : ""}`;
       },
       warning: "The letter and its line items are deleted from the comparison; an appeal linked to it loses the link.",
     }),
@@ -544,7 +547,7 @@ export const aid: OpGroup = {
       doc: "{ student_id, item_id (aid.award_letters), label? ≤200, category?, basis?, amount_cents? int, renewable?|null, renewal_note? ≤1000, sort_order? 0-999 }",
       input: z.object(itemFields).omit({ award_letter_id: true }).partial().extend({ student_id: uuid, item_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "PATCH", url: `/aid/award-letter-items/${seg(i.item_id)}`, body: pick(i, ITEM_KEYS) }),
+      request: (i) => ({ method: "PATCH", url: `/aid/award-letter-items/${seg(i.item_id)}${qs({ studentId: i.student_id })}`, body: pick(i, ITEM_KEYS) }),
       describe: async (i, h) => {
         const name = h.studentName(i.student_id);
         return `Update ${itemLabel(await findIn(h, itemsUrl(i.student_id), i.item_id), name)} on an award letter for ${name}`;
@@ -567,7 +570,7 @@ export const aid: OpGroup = {
       doc: "{ student_id, item_id }",
       input: z.object({ student_id: uuid, item_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "DELETE", url: `/aid/award-letter-items/${seg(i.item_id)}` }),
+      request: (i) => ({ method: "DELETE", url: `/aid/award-letter-items/${seg(i.item_id)}${qs({ studentId: i.student_id })}` }),
       describe: async (i, h) => {
         const name = h.studentName(i.student_id);
         return `Delete ${itemLabel(await findIn(h, itemsUrl(i.student_id), i.item_id), name)} from an award letter for ${name}`;
@@ -601,7 +604,7 @@ export const aid: OpGroup = {
       doc: "{ student_id, appeal_id (aid.appeals), status?: draft|counselor-review|approved|sent|declined, basis? [≤80, max 10], circumstances? ≤8000, school_name? ≤300, award_letter_id?|null, student_college_id?|null }",
       input: z.object(appealFields).partial().extend({ student_id: uuid, appeal_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "PATCH", url: `/aid/appeals/${seg(i.appeal_id)}`, body: pick(i, APPEAL_KEYS) }),
+      request: (i) => ({ method: "PATCH", url: `/aid/appeals/${seg(i.appeal_id)}${qs({ studentId: i.student_id })}`, body: pick(i, APPEAL_KEYS) }),
       describe: async (i, h) => {
         const name = h.studentName(i.student_id);
         return `Update ${appealLabel(await findIn(h, appealsUrl(i.student_id), i.appeal_id), name)} for ${name}`;
@@ -627,7 +630,7 @@ export const aid: OpGroup = {
       doc: "{ student_id, appeal_id }",
       input: z.object({ student_id: uuid, appeal_id: uuid }).strict(),
       takesStudent: true,
-      request: (i) => ({ method: "DELETE", url: `/aid/appeals/${seg(i.appeal_id)}` }),
+      request: (i) => ({ method: "DELETE", url: `/aid/appeals/${seg(i.appeal_id)}${qs({ studentId: i.student_id })}` }),
       describe: async (i, h) => {
         const name = h.studentName(i.student_id);
         return `Delete ${appealLabel(await findIn(h, appealsUrl(i.student_id), i.appeal_id), name)} for ${name}`;

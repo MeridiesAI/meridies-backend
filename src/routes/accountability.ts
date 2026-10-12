@@ -142,9 +142,17 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
       const { data: found, error: findErr } = await existing.maybeSingle();
       if (findErr) throw fromPostgrest(findErr);
 
+      // A first save starts from what applies now (the student's counselor-wide settings, or ours),
+      // so the keys the request leaves out keep their values instead of falling to the column
+      // defaults (no quiet hours, alerts back on).
+      let seed: Record<string, unknown> = {};
+      if (!found) {
+        const now = await loadSettings(request, request.auth.userId, b.studentId ?? undefined);
+        seed = Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map((k) => [k, (now as Record<string, unknown>)[k]]));
+      }
       const { data, error } = found
         ? await request.db.from("accountability_settings").update(row).eq("id", found.id as string).select("*").single()
-        : await request.db.from("accountability_settings").insert(row).select("*").single();
+        : await request.db.from("accountability_settings").insert({ ...seed, ...row }).select("*").single();
 
       if (error) throw fromPostgrest(error);
       return { ...DEFAULT_SETTINGS, ...(data as object) };

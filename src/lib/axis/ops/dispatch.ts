@@ -37,6 +37,21 @@ const NEVER: readonly RegExp[] = [
   /^\/health(\/|$)/,
   // Essay marks: accepting one splices its replacement into the student's essay.
   /^\/essays(\/|$)/,
+  // Routes that run a model. AxIS is the model; it never calls another one through the API.
+  /^\/colleges\/search\/ai(\/|$)/,
+  /^\/colleges\/research$/,
+  /^\/resources\/ask(\/|$)/,
+  /^\/students\/[^/]+\/research(\/|$)/,
+  /^\/application\/coherence(\/|$)/,
+  /^\/application\/college-list\/recommendations\/axis(\/|$)/,
+  /^\/application\/activities-build(\/|$)/,
+  /^\/invites\/mass\/sort(\/|$)/,
+  /^\/student-aid\/[^/]+\/scholarships\/ask(\/|$)/,
+  /^\/tasks\/[^/]+\/(review|tracker)(\/|$)/,
+  /^\/profile-updates(\/|$)/,
+  /^\/email-templates\/draft(\/|$)/,
+  /^\/communication\/[^/]+\/draft(\/|$)/,
+  /^\/files\/links\/[^/]+\/read(\/|$)/,
 ];
 
 /**
@@ -120,6 +135,8 @@ export async function dispatch(request: FastifyRequest, call: OpCall): Promise<D
       authorization: `Bearer ${request.auth.token}`,
       // Marks the request as AxIS's in the logs; routes don't branch on it.
       "x-meridies-axis": "1",
+      // The counselor's address, so request logs and IP-keyed limits see who asked, not 127.0.0.1.
+      ...(request.ip ? { "x-forwarded-for": request.ip } : {}),
       ...(request.headers["user-agent"] ? { "user-agent": String(request.headers["user-agent"]) } : {}),
       ...(hasBody ? { "content-type": "application/json" } : {}),
     },
@@ -156,6 +173,27 @@ export function failureMessage(res: Dispatched): string {
   if (res.status === 409) return msg ?? "That conflicts with the current state.";
   if (res.status === 429) return msg ?? "Too many requests just now. Try again in a minute.";
   return "That change failed on our side.";
+}
+
+/** Generic route answers that say nothing to a person ("Not found", "Invalid request"). */
+const BARE = /^(not found|invalid request|database error|request failed|unauthorized|forbidden)\.?$/i;
+
+/**
+ * What a refused Confirm or Undo tells the counselor on the card. The route's own
+ * words when they say something; otherwise a sentence written for a person, never the
+ * model-facing hints above (ids, lookups, "the counselor").
+ */
+export function counselorMessage(res: Dispatched): string {
+  const b = (res.body && typeof res.body === "object" ? res.body : {}) as Record<string, unknown>;
+  const raw = typeof b.error === "string" && b.error.trim() ? b.error.trim().slice(0, 300) : null;
+  const msg = raw && !BARE.test(raw) ? raw : null;
+  if (res.status === 401) return "Your session has expired. Sign in again, then ask AxIS again.";
+  if (res.status === 403) return msg ?? "You don't have permission to make that change.";
+  if (res.status === 404) return msg ?? "What this change was about no longer exists, so nothing was changed.";
+  if (res.status === 409) return msg ?? "That no longer matches what's on file, so nothing was changed.";
+  if (res.status === 429) return msg ?? "Too many changes just now. Try again in a minute.";
+  if (res.status >= 500) return "That change couldn't be made right now. Try again.";
+  return msg ?? "That change was refused, so nothing was changed. Ask AxIS again.";
 }
 
 /** A status the counselor could retry later (rate limit, outage), as opposed to a refusal. */

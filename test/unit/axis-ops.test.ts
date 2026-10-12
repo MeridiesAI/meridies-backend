@@ -475,10 +475,20 @@ test("change requests are understood as actions, questions are not", () => {
     "please archive Jordan",
     "Add Tufts to her college list",
     "remove Yale from her list",
+    "Can you delete her SAT deadline?",
+    "Could you move the Chens meeting to Friday?",
   ]) {
     assert.equal(understand(text, ctx).intent, "action", text);
   }
-  for (const text of ["What's her GPA?", "When is her Common App due?", "Should she apply early to Tufts?"]) {
+  for (const text of [
+    "What's her GPA?",
+    "When is her Common App due?",
+    "Should she apply early to Tufts?",
+    "Should I remove Yale from her list?",
+    "Change in her GPA since last year?",
+    "Accept rates at her schools?",
+    "complete list of her activities",
+  ]) {
     assert.notEqual(understand(text, ctx).intent, "action", text);
   }
   assert.equal(understand("Finish her personal statement", ctx).intent, "essay", "the essay guard outranks a change request");

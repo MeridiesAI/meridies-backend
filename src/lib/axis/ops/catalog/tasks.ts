@@ -576,23 +576,6 @@ const timeZone = z
     }
   }, "an IANA time zone, e.g. America/New_York");
 
-/**
- * What a NEW settings row holds for every key the request leaves out: the
- * table's column defaults, which are not the code's (no quiet hours instead
- * of 21-8), and for a student's first override not the counselor's own values.
- */
-const TABLE_DEFAULTS: Record<string, unknown> = {
-  enabled: true,
-  stall_after_days: 7,
-  escalate_after_hours: 72,
-  min_days_between_alerts: 7,
-  auto_send_parent_alerts: false,
-  alert_on_low_quality: true,
-  quiet_hours_start: null,
-  quiet_hours_end: null,
-  timezone: "America/New_York",
-};
-
 /** The settings that apply now, and whether the write will update its own row or create one. */
 async function settingsScope(h: Getter, studentId: string | undefined): Promise<{ effective: Row; ownRow: boolean } | null> {
   const s = asRecord(await h.get(`/accountability/settings${qs({ studentId })}`));
@@ -602,11 +585,6 @@ async function settingsScope(h: Getter, studentId: string | undefined): Promise<
   return { effective: s, ownRow };
 }
 
-/** Keys a new row changes without being asked: left out, and the table default differs from what applies now. */
-const silentChanges = (i: Record<string, unknown>, effective: Row) =>
-  SETTINGS_KEYS.filter((k) => !(k in i) && TABLE_DEFAULTS[k] !== (effective[k] ?? null));
-
-const settingValue = (v: unknown) => (v == null ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : plainText(v, 60));
 
 export const accountability: OpGroup = {
   heading: "Red flags, alert settings and guardians",
@@ -790,20 +768,8 @@ export const accountability: OpGroup = {
         }),
       }),
       describe: (i, h) => (i.student_id ? `Change accountability settings for ${h.studentName(i.student_id)}` : "Change your accountability settings for all students"),
-      details: async (i, h) => {
-        const out = changeLines(i, SETTINGS_LABELS);
-        // A first save writes a new row, and the route fills what wasn't sent from the table's defaults.
-        const scope = await settingsScope(h, i.student_id);
-        const silent = scope && !scope.ownRow ? silentChanges(i, scope.effective) : [];
-        if (silent.length) {
-          out.push(
-            `${i.student_id ? "This student has no settings of their own yet, so these change too" : "You have no saved settings yet, so these change too"}: ${silent
-              .map((k) => `${SETTINGS_LABELS[k]} ${settingValue(TABLE_DEFAULTS[k])} (now ${settingValue(scope!.effective[k])})`)
-              .join("; ")}`
-          );
-        }
-        return out;
-      },
+      // A first save copies what applies now and changes only these keys (routes/accountability.ts).
+      details: (i) => changeLines(i, SETTINGS_LABELS),
       warning: "These rules decide when students count as behind and when their parents are alerted.",
       reply: () => "Settings saved.",
       snapshot: (i, h) => settingsScope(h, i.student_id),
@@ -816,8 +782,6 @@ export const accountability: OpGroup = {
         // values would stop following the counselor's own settings.
         if (i.student_id && !ownRow) return null;
         const keys = SETTINGS_KEYS.filter((k) => k in i);
-        // The counselor's first save also wrote the table's defaults for the rest (no quiet hours): put back what applied.
-        if (!ownRow) keys.push(...silentChanges(i, effective));
         if (!keys.length) return null;
         const prev: Record<string, unknown> = i.student_id ? { student_id: i.student_id } : {};
         for (const k of keys) prev[k] = effective[k] ?? null;

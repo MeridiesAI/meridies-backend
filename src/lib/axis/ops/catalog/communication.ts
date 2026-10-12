@@ -290,7 +290,7 @@ const REPORT_STATUS = ["draft", "sent", "archived"] as const;
 const REPORT_MAX = 6000;
 
 const findReport = (h: Get, id: string) => findIn(h, "/reports/family?limit=500", id);
-const reportLabel = (r: Row | null) => (r ? `"${plainText(r.title, 80)}"` : "that isn't on your roster's family reports");
+const reportLabel = (r: Row | null) => (r ? `"${plainText(r.title, 80)}"` : "(not found among your roster's family reports)");
 
 /** The family's side of a report recorded as sent: who reads it, and how. */
 const reportAudience = (studentName: string) =>
@@ -393,6 +393,8 @@ export const familyReports: OpGroup = {
         if (!b.id) return null;
         const prev: Row = { report_id: i.report_id };
         for (const k of ["title", "summary", "body", "highlights", "status"] as const) if (k in i) prev[k] = b[k] ?? null;
+        // The list serializes a missing summary or body as "": put back the null it was.
+        for (const k of ["summary", "body"] as const) if (prev[k] === "") prev[k] = null;
         if ("title" in prev && !prev.title) return null;
         if ("status" in prev && !prev.status) return null;
         if ("highlights" in prev && !Array.isArray(prev.highlights)) prev.highlights = [];
@@ -816,8 +818,17 @@ export const emailTemplates: OpGroup = {
       request: (i) => ({ method: "DELETE", url: `/email-templates/${seg(i.template_id)}` }),
       describe: async (i, h) => `Delete email template ${templateLabel(await findTemplate(h, i.template_id))}`,
       warning: "The template is deleted.",
-      snapshot: (i, h) => findTemplate(h, i.template_id),
-      // Put back as a new template with the same text. Not when another template now has its subject: saving would rewrite that one instead.
+      snapshot: async (i, h) => {
+        const t = await findTemplate(h, i.template_id);
+        if (!t || (t.set !== "families" && t.set !== "staff")) return null;
+        const rows = await h.get<unknown[]>(`/email-templates?set=${t.set}`);
+        if (!Array.isArray(rows)) return null;
+        const subject = String(t.subject ?? "").trim();
+        // Another template with the same subject: saving this one back would rewrite that one instead.
+        const twin = subject && asArray(rows).some((r) => r.id !== t.id && String(r.subject ?? "").trim() === subject);
+        return twin ? null : t;
+      },
+      // Put back as a new template with the same set, name, subject and text.
       undo: (_i, _body, before) => {
         const b = asRecord(before) as Template;
         if (!b.id || (b.set !== "families" && b.set !== "staff")) return null;

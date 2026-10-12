@@ -30,7 +30,7 @@ export const INTENT_FEATURES: Record<Intent, readonly Feature[]> = {
     [/\bfollow up with\b/, 4],
     [/\bschedule (a |an )?(meeting|call|session|check in)\b/, 5],
     // A request to change something (perform_action), however it is opened.
-    [/^(?:(?:please|pls|hey|ok|okay|axis|can you|could you|would you|will you|go ahead and|lets|let us|i need you to|i want you to|now)\s+)*(delete|remove|archive|unarchive|restore|update|change|set|mark|move|rename|edit|add|create|schedule|reschedule|cancel|assign|reassign|invite|resend|pin|unpin|record|log|enter|put|close|reopen|complete|tick|dismiss|accept|decline|approve|send|notify|share|hide|unhide|link|attach|file|bump|push|postpone|extend|clear|drop|book|revoke|void|uninvite|untick|uncheck)\b/, 8],
+    [/^(?:(?:please|pls|hey|ok|okay|axis|can you|could you|would you|will you|go ahead and|lets|let us|i need you to|i want you to|now)\s+)*(delete|remove|archive|unarchive|restore|update|change|set|mark|move|rename|edit|add|create|schedule|reschedule|cancel|assign|reassign|invite|resend|pin|unpin|record|log|enter|put|close|reopen|tick|dismiss|accept|decline|approve|send|notify|share|hide|unhide|link|attach|file|bump|push|postpone|extend|clear|drop|book|revoke|void|uninvite|untick|uncheck)\b(?! (in|of|on|rates?|reads?|list|lists)\b)/, 8],
     [/\b(mark|tick off|check off|untick)\b(?: \w+){0,8} (as )?(done|complete|completed|finished|submitted|received|read)\b/, 7],
     [/\b(move|push|bump|reschedule|postpone)\b(?: \w+){0,8} (to|until|back)\b/, 6],
     [/\b(change|update|set)\b(?: \w+){0,10} to\b/, 6],

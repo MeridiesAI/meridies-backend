@@ -205,10 +205,8 @@ test("a change request goes to the Clerk, runs through the API as the counselor,
   assert.match(toolResult, /Done: /);
 });
 
-test("a student record carrying an uploaded file's text turns an auto change into a card", async () => {
-  resetFeatures();
-  // A counselor of their own, so the context cache can't hand back an earlier test's record.
-  const me = "counselor-docs";
+function docsRig(me: string) {
+  // A counselor of their own per test, so the context cache can't hand back an earlier test's record.
   const tables = {
     ...TABLES,
     profiles: TABLES.profiles.map((p) => ({ ...p, counselor_id: me })),
@@ -241,17 +239,61 @@ test("a student record carrying an uploaded file's text turns an auto change int
       },
     },
   });
-  const { api, calls } = scriptedApi([
-    { tools: [{ id: "t1", name: "perform_action", input: { action: "work_queue.add", input: { title: "Wire the deposit refund" } } }] },
-    { text: "It's waiting for your Confirm." },
-  ]);
+  return { request, injected, recorded };
+}
+
+const addTodo = (title: string) => scriptedApi([
+  { tools: [{ id: "t1", name: "perform_action", input: { action: "work_queue.add", input: { title } } }] },
+  { text: "Done." },
+]);
+
+test("a question whose record carries an uploaded file's text: any change it makes waits for a click", async () => {
+  resetFeatures();
+  const { request, injected, recorded } = docsRig("counselor-docs-q");
+  const { api, calls } = addTodo("Wire the deposit refund");
   const ev = collect();
-  await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "Add a to-do from her resume", emit: ev.emit, signal: new AbortController().signal, api });
+  const res = await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "What does her resume say she should do next?", emit: ev.emit, signal: new AbortController().signal, api });
   const system = (calls[0]!.params.system as { text: string }[]).map((b) => b.text).join("\n");
-  assert.match(system, /Wire the deposit refund/, "the file's text is in the record the model reads");
+  assert.match(system, /Wire the deposit refund/, "a question reads the full record, files included");
   assert.deepEqual(injected.filter((c) => c.method !== "GET"), [], "nothing ran without the counselor's click");
   assert.equal(recorded[0]!.status, "pending");
   const action = ev.events.find(([e]) => e === "action")?.[1] as { payload: { status: string; reason: string } };
-  assert.equal(action.payload.status, "pending");
   assert.equal(action.payload.reason, "outside-content");
+  assert.equal(res.state.outside, true, "the next turn inherits it");
+});
+
+test("a change request reads the record without file text, so the change runs at once", async () => {
+  resetFeatures();
+  const { request, injected, recorded } = docsRig("counselor-docs-c");
+  const { api, calls } = addTodo("Call the Martinez family");
+  const ev = collect();
+  const res = await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "Add a to-do to call her family", emit: ev.emit, signal: new AbortController().signal, api });
+  const system = (calls[0]!.params.system as { text: string }[]).map((b) => b.text).join("\n");
+  assert.doesNotMatch(system, /Wire the deposit refund/, "no file text in a change request's prompt");
+  assert.deepEqual(injected.filter((c) => c.method !== "GET").map((c) => c.url), ["/work-items"]);
+  assert.equal(recorded[0]!.status, "executed");
+  assert.equal(res.state.outside, false);
+});
+
+test("the turn after one that read outside content asks before changing anything", async () => {
+  resetFeatures();
+  const { request, injected, recorded } = docsRig("counselor-docs-n");
+  const prior = { students: [], colleges: [], at: new Date().toISOString(), outside: true };
+  const db = request.db;
+  const withState = Object.assign(request, {
+    db: {
+      ...db,
+      from: (t: string) =>
+        t === "ai_conversations"
+          ? {
+              select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { id: "conv-1", summary: null, summary_through: null, state: prior }, error: null }) }) }),
+            }
+          : db.from(t),
+    },
+  });
+  const { api } = addTodo("Call the Martinez family");
+  const ev = collect();
+  await runAxisTurn({ request: withState, conversationId: "conv-1", studentId: "s1", content: "Add a to-do to call her family", emit: ev.emit, signal: new AbortController().signal, api });
+  assert.deepEqual(injected.filter((c) => c.method !== "GET"), [], "inherited: waits for a click");
+  assert.equal(recorded[0]!.status, "pending");
 });

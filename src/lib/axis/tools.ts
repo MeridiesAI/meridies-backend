@@ -33,7 +33,7 @@ import { getConnectors, getRetrieval, type ConnectedProvider, type RetrievedChun
 import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
-import { runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { markOutside, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
 
 export type ProposedAction = {
   id: string;
@@ -109,7 +109,7 @@ async function cite(ctx: ToolContext, chunks: RetrievedChunk[], none: string): P
   if (held) notes.push(`${held} result(s) withheld: kept out of AI by the practice's or the file's settings.`);
   if (dropped["other-student"]) notes.push(`${dropped["other-student"]} result(s) skipped: filed under a different student.`);
   if (!kept.length) return { content: [none, ...notes].join("\n"), fresh: false };
-  if (kept.some((c) => OUTSIDE.has(c.source))) ctx.turn.tainted = true;
+  if (kept.some((c) => OUTSIDE.has(c.source))) markOutside(ctx.turn);
   const before = ctx.ledger.size;
   const { rendered, skipped } = ctx.ledger.add(kept);
   if (skipped) notes.push(`${skipped} more result(s) not shown: this turn's reading budget is spent.`);
@@ -259,7 +259,7 @@ const DEFS: ToolDef[] = [
       const id = await resolveStudentId(ctx.request, target, "view");
       const built = await cachedStudentContext(ctx.request, id, ["profile", ...i.sections.filter((s) => s !== "profile")]);
       // The documents section is the text of uploaded files: from here on a change waits for a click.
-      if (readsDocuments(built)) ctx.turn.tainted = true;
+      if (readsDocuments(built)) markOutside(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return { content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`, fresh: !!built.text };
     },
