@@ -100,6 +100,6 @@ check("student deletes their account", sdel.status === 204 && (await sql(`select
 // Status
 const st = await fetch(API + "/internal/status", { headers: { Authorization: `Bearer ${CRON_SECRET}` } });
 const sj = await st.json();
-check("status lists every job", sj.jobs?.length === 5, JSON.stringify(sj));
+check("status lists every job", sj.jobs?.length === 6 && sj.jobs.some((j) => j.job === "events-discovery"), JSON.stringify(sj));
 const noauth = await fetch(API + "/internal/status");
 check("status needs the cron secret", noauth.status === 401);

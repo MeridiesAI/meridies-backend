@@ -80,6 +80,9 @@ const envSchema = z.object({
   // ingest (POST /internal/ingest/scorecard, scripts/ingest/scorecard.ts)
   // answers 503 and the catalog stays as it is.
   SCORECARD_API_KEY: blankIsUnset(z.string().min(8).optional()),
+  // Events Hub discovery (POST /internal/events/discover, weekly): how many of
+  // the colleges most listed across rosters it checks per run. Default 30.
+  EVENTS_DISCOVERY_COLLEGES: blankIsUnset(z.coerce.number().int().min(1).max(100).optional()),
 
   // Google / Microsoft OAuth (lib/oauth.ts). All optional: a provider whose
   // client id + secret are unset answers 503 on /integrations/:provider/*, and

@@ -67,6 +67,8 @@ src/
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
+│   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
+│   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -109,6 +111,7 @@ src/
 │   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
 │   ├── collegeAi.ts       # /ai           college research, Build College Lists bar
 │   ├── events.ts          # /events       Events Hub
+│   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
@@ -530,6 +533,46 @@ Meridies-wide rows only: a re-run updates in place, never duplicates, never
 touches a counselor's own listing, and deletes nothing. A URL is not the key,
 because a recurring webinar shares one page across dates. Renaming an event in
 the file inserts a new row; remove the old one by hand. Service role from env.
+Optional `audience` column: `counselor | student | everyone`; blank means
+everyone for an info session, tour, virtual visit or open house, counselor
+for the rest. Loaded rows are `source = 'csv'`, and a curated row always wins
+over a discovered one with the same key.
+
+**Events Hub discovery** (`lib/eventsDiscovery.ts`, `20261021000001`) finds
+colleges' own upcoming events, so the hub isn't empty and students get real
+sign-up links:
+
+- **Which colleges:** the most listed across every roster
+  (`lib/rosterColleges.ts`, the same rule as `/colleges/recommended` and
+  `/events/recommended`), top `EVENTS_DISCOVERY_COLLEGES` (default 30).
+- **How:** `runSystemResearch` (cited research with no user; the ai_runs row
+  has no actor) restricted to the college's own site from
+  `colleges.website`, plus `ADMISSIONS_HOSTS` for a college whose admissions
+  office has its own domain (MIT: mitadmissions.org) and `EVENT_PLATFORMS`.
+  Undergraduate admissions only: graduate, professional and certificate
+  sessions are refused in the prompt and again in code.
+- **What is kept:** a candidate stays only if it validates (known kind, a
+  real date from today to six months out, a recognised time zone), its
+  sign-up link is on the college's site, the run actually saw that page, the
+  page isn't on `research_blocked_domains`, and `checkLink` says it answers
+  (`keepCandidates`). The college's visit page, checked the same way, lands
+  on `colleges.visit_url`: many colleges load tour dates with script, so the
+  student's "Plan a visit" still has somewhere to go.
+- **Where it lands:** Meridies-wide `hub_events`, `source = 'discovered'`,
+  `audience = 'everyone'`, host = the college's name, matched on the CSV
+  loader's key (now also a unique index on Meridies-wide rows). Never
+  overwrites a CSV or hand-entered row; deletes nothing.
+- **When:** weekly `POST /internal/events/discover` (CRON_SECRET, 202, lease
+  `events-discovery`, `ingest_runs` + `job_heartbeats`), capped by a system
+  budget (`consume_quota` on a fixed subject, 400 calls a month). A
+  counselor's **Refresh events** (`POST /events/discover { collegeId }`) runs
+  one college on their own AI quota. No student fact ever goes into a prompt.
+
+**Students see events** at `/me/events` (`routes/myEvents.ts`): upcoming
+Meridies-wide listings whose audience is student or everyone, the colleges on
+their own list first, plus each listed college's visit page; saves go to their
+own calendar (`/me/events/calendar`). RLS (`hub_events_select_student`) says
+the same, so a counselor-only or practice listing never reaches a student.
 
 ### Catalog data: yearly refresh
 
@@ -537,6 +580,7 @@ the file inserts a new row; remove the old one by hand. Service role from env.
 |---|---|---|---|
 | Monthly (cron) | College Scorecard | automatic | `POST /internal/ingest/scorecard` |
 | Weekly (cron) | Library links | automatic | `POST /internal/resources/link-check` |
+| Weekly (cron) | Colleges' upcoming events and visit pages | automatic | `POST /internal/events/discover` |
 | When NCES publishes (usually late summer) | IPEDS Admissions (`ADM<year>.zip`) | engineer | `scripts/ingest/ipeds-admissions.ts --year <year>` |
 | August | Common App requirements grid (new cycle) | counselor team compiles, engineer loads | `curated-csv.ts --dataset requirements` |
 | August–October | UC application, Cal State Apply (dates, requirements) | counselor team | `requirements`, and update the library rows' `opens_on`/`closes_on`/`cycle` in a migration |

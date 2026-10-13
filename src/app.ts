@@ -70,6 +70,7 @@ import pipelineRoutes from "./routes/pipeline.js";
 import calendarRoutes from "./routes/calendar.js";
 // SV Demo v2: the student view
 import meRoutes from "./routes/me.js";
+import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 
 export function buildApp() {
@@ -179,6 +180,7 @@ export function buildApp() {
   // SV Demo v2 routes: the student view. profileUpdateRoutes sits at the root
   // because it also serves the counselor's /students/:id/profile-updates.
   app.register(meRoutes, { prefix: "/me" });
+  app.register(myEventRoutes, { prefix: "/me/events" });
   app.register(profileUpdateRoutes);
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
   app.register(resourceRoutes, { prefix: "/resources" });
