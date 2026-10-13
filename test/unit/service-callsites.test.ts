@@ -9,11 +9,14 @@ import { fileURLToPath } from "node:url";
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
   // lib/axis/llm.ts: writes only the ai_runs audit rows for the caller's own AxIS turn, inside their request.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/email.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/eventsDiscovery.ts: the weekly job acts for no counselor; it writes only Meridies-wide hub_events
+  // rows from colleges' public pages. routes/events.ts: "Refresh events" runs inside an approved
+  // counselor's own request (requireRole) and writes only those same public rows.
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
-  "routes/collegeIntel.ts", "routes/communication.ts", "routes/health.ts", "routes/integrations.ts",
+  "routes/collegeIntel.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
   "routes/internal.ts", "routes/webhooks.ts",
 ];
 

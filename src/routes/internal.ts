@@ -12,6 +12,8 @@
  *     "$API_URL/internal/resources/link-check"
  * and every 5–15 minutes, the import pipeline's sweep:
  *     "$API_URL/internal/imports/sweep"
+ * and weekly, the Events Hub's discovery of colleges' upcoming events:
+ *     "$API_URL/internal/events/discover"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -20,6 +22,7 @@ import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
 import { isStale } from "../lib/heartbeat.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
+import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
 import { serviceClient } from "../lib/supabase.js";
 import { startScorecardIngest } from "../lib/ingest/run.js";
@@ -104,6 +107,30 @@ export default async function internalRoutes(app: FastifyInstance) {
       if (!r.started) {
         if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "A link check is already running" });
         return reply.code(503).send({ started: false, reason: "The link check needs the service role key and its lease" });
+      }
+      return reply.code(202).send({ started: true });
+    }
+  );
+
+  /**
+   * Weekly: the colleges most listed across rosters, each searched on its own
+   * site for upcoming events (lib/eventsDiscovery.ts). 202; the run records
+   * itself in ingest_runs and job_heartbeats.
+   */
+  app.post(
+    "/events/discover",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startEventsDiscovery(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "Event discovery is already running" });
+        const reason =
+          r.reason === "no-key"
+            ? "Set ANTHROPIC_API_KEY to discover events"
+            : r.reason === "no-service-role"
+              ? "Event discovery needs the service role key"
+              : "Event discovery could not take its lease";
+        return reply.code(503).send({ started: false, reason });
       }
       return reply.code(202).send({ started: true });
     }

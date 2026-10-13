@@ -6,7 +6,13 @@
 
 import { serviceClient } from "./supabase.js";
 
-export type Job = "accountability-sweep" | "message-dispatch" | "scorecard-ingest" | "resources-link-check" | "import-sweep";
+export type Job =
+  | "accountability-sweep"
+  | "message-dispatch"
+  | "scorecard-ingest"
+  | "resources-link-check"
+  | "import-sweep"
+  | "events-discovery";
 
 export async function beat(job: Job, ok: boolean, error?: string, log?: { warn: (o: object, m?: string) => void }) {
   const svc = serviceClient();
