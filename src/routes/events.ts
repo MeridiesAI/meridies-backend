@@ -3,7 +3,10 @@
  *
  *   GET    /events                 the feed: upcoming listings, then updates
  *   GET    /events/recommended     three listings, ranked against the roster
- *   GET    /events/colleges        Filter by college: schools the feed has items from
+ *   GET    /events/colleges        Filter by college: schools the feed has items
+ *                                  from, and the roster's most-listed schools
+ *   POST   /events/discover        find one college's upcoming events on its
+ *                                  own site now (lib/eventsDiscovery.ts)
  *   GET    /events/saved           the caller's saves
  *   GET    /events/calendar        saves sent to the Meridies calendar, as
  *                                  Calendar items (kind "event") — the
@@ -15,15 +18,21 @@
  *   PUT    /events/:id/save        Add to Calendar (targets + reminder)
  *   DELETE /events/:id/save
  *
- * Counselor-only. Listings are real rows; the demo's authored listings are not
- * seeded. Updates are `policy_updates`, the catalog's published changes.
+ * Counselor-only (students read theirs at /me/events). Listings are real rows:
+ * a counselor's, a curator's CSV, or found on a college's own site by the
+ * discovery job; the demo's authored listings are not seeded. Updates are `policy_updates`, the catalog's published changes.
  * Google / Outlook / .ics are built by the client from the listing — nothing
  * here touches a connected calendar.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
+import { hasAnthropic } from "../env.js";
+import { runWebResearch } from "../lib/anthropic.js";
+import { DISCOVERY_SYSTEM, blockedDomains, discoverForCollege } from "../lib/eventsDiscovery.js";
+import { collegesOnLists, listRowsFor, rankColleges } from "../lib/rosterColleges.js";
+import { serviceClient } from "../lib/supabase.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
@@ -135,6 +144,27 @@ async function updateRows(request: FastifyRequest, max = 60): Promise<Row[]> {
   return (data ?? []) as Row[];
 }
 
+/** The caller's students and the colleges on their lists (lib/rosterColleges.ts). */
+async function rosterOf(request: FastifyRequest) {
+  const { data: students, error } = await request.db
+    .from("profiles")
+    .select("id, grad_year")
+    .eq("role", "student")
+    .eq("counselor_id", request.auth.userId)
+    .limit(2000);
+  if (error) throw fromPostgrest(error);
+  const rows = (students ?? []) as Row[];
+  const listRows = await listRowsFor(request.db, rows.map((s) => String(s.id)));
+  const byCollege = await collegesOnLists(request.db, listRows);
+  const senior = String(seniorClassYear());
+  return {
+    byCollege,
+    collegeIds: new Set(byCollege.keys()),
+    hasSeniors: rows.some((s) => String(s.grad_year ?? "") === senior),
+    hasUc: listRows.some((r) => /^(uc |university of california)/i.test(String(r.name ?? ""))),
+  };
+}
+
 async function buildFeed(request: FastifyRequest): Promise<FeedItem[]> {
   const [events, updates] = await Promise.all([upcomingRows(request), updateRows(request)]);
   const [listings, colleges] = await Promise.all([
@@ -208,21 +238,8 @@ export default async function eventRoutes(app: FastifyInstance) {
   app.get("/recommended", { preHandler: [...counselor, limit("events:recommended", 60, 60)] }, async (request) => {
     const { count } = z.object({ count: z.coerce.number().int().min(1).max(12).optional() }).parse(request.query);
 
-    // The roster as RLS shows it: the caller's students and their lists.
-    const [students, lists] = await Promise.all([
-      request.db.from("profiles").select("id, grad_year").eq("role", "student").eq("counselor_id", request.auth.userId).limit(2000),
-      request.db.from("student_colleges").select("college_id, name").limit(5000),
-    ]);
-    if (students.error) throw fromPostgrest(students.error);
-    if (lists.error) throw fromPostgrest(lists.error);
-
-    const senior = String(seniorClassYear());
-    const listRows = (lists.data ?? []) as Row[];
-    const roster = {
-      collegeIds: new Set(listRows.map((r) => String(r.college_id ?? "")).filter(Boolean)),
-      hasSeniors: ((students.data ?? []) as Row[]).some((s) => String(s.grad_year ?? "") === senior),
-      hasUc: listRows.some((r) => /^(uc |university of california)/i.test(String(r.name ?? ""))),
-    };
+    // The caller's own roster and its lists; a typed school name counts too.
+    const roster = await rosterOf(request);
 
     const listings = await loadEvents(request, await upcomingRows(request));
     const ranked = listings
@@ -233,8 +250,14 @@ export default async function eventRoutes(app: FastifyInstance) {
     return ranked;
   });
 
+  /**
+   * Filter by college: every school the feed has items from, plus the roster's
+   * 30 most-listed schools even before they have events, so "Refresh events"
+   * can be asked of them. `onRoster` marks the latter.
+   */
   app.get("/colleges", { preHandler: [...counselor, limit("events:colleges", 60, 60)] }, async (request) => {
-    const feed = await buildFeed(request);
+    const [feed, roster] = await Promise.all([buildFeed(request), rosterOf(request)]);
+    const top = rankColleges(roster.byCollege, 30);
     const counts = new Map<string, { college: CollegeRef; count: number }>();
     for (const f of feed) {
       const c = f.item.college;
@@ -243,9 +266,51 @@ export default async function eventRoutes(app: FastifyInstance) {
       entry.count += 1;
       counts.set(c.id, entry);
     }
+    const missing = top.filter((id) => !counts.has(id));
+    for (const [id, college] of await collegesById(request, missing)) counts.set(id, { college, count: 0 });
+    const onRoster = new Set(top);
     return [...counts.values()]
-      .map(({ college, count }) => ({ value: college.id, label: college.shortName, slug: college.slug, count }))
+      .map(({ college, count }) => ({
+        value: college.id,
+        label: college.shortName,
+        slug: college.slug,
+        count,
+        onRoster: onRoster.has(college.id),
+      }))
       .sort((a, b) => a.label.localeCompare(b.label));
+  });
+
+  /**
+   * Refresh events: find one college's upcoming events on its own site now,
+   * on the caller's AI quota. Answers what changed; the feed shows the rows.
+   */
+  app.post("/discover", { preHandler: [...counselor, limit("events:discover", 10, 3600)] }, async (request) => {
+    const { collegeId } = z.object({ collegeId: z.string().uuid() }).strict().parse(request.body);
+    if (!hasAnthropic) throw unavailable("Event search isn't set up on this server yet.");
+    const svc = serviceClient();
+    if (!svc) throw unavailable("Event search needs the service role key.");
+
+    const { data: college, error } = await request.db
+      .from("colleges")
+      .select("id, name, website")
+      .eq("id", collegeId)
+      .maybeSingle();
+    if (error) throw fromPostgrest(error);
+    if (!college) throw notFound("That college isn't in the catalog");
+    if (!college.website) throw badRequest(`We don't have ${college.name}'s website on file, so there's nowhere to look.`);
+
+    const outcome = await discoverForCollege(
+      svc,
+      { id: String(college.id), name: String(college.name), website: String(college.website) },
+      {
+        research: ({ domains, question }) =>
+          runWebResearch({ request, module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4 }),
+        blocked: await blockedDomains(svc),
+        log: request.log,
+      }
+    );
+    if (outcome.error && outcome.kept === 0) throw unavailable(`Couldn't look up ${college.name}'s events: ${outcome.error}.`);
+    return { college: { id: String(college.id), name: String(college.name) }, ...outcome };
   });
 
   // ---- Saves ---------------------------------------------------------------------
