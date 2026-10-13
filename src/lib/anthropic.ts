@@ -95,7 +95,9 @@ export type AiModule =
   | "activity-research"
   | "research-match"
   // AxIS on Claude Haiku 5.5 (lib/axis): the turn, the adjudicator, the memory fold, the cache pre-warm.
-  | "axis" | "axis-verify" | "axis-memory" | "axis-warm";
+  | "axis" | "axis-verify" | "axis-memory" | "axis-warm"
+  // Events Hub: finding a college's upcoming events on its own site (lib/eventsDiscovery.ts).
+  | "events-discovery";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
@@ -544,8 +546,7 @@ const RESEARCH_SYSTEM = [
  * a daily-call gate, an ai_runs row, output-token accounting. A refusal or a
  * pause is handled here; the caller gets parts with their citations.
  */
-export async function runWebResearch(opts: {
-  request: FastifyRequest;
+type ResearchOptions = {
   module: AiModule;
   question: string;
   /** Facts or catalog rows the answer should be read against (not instructions). */
@@ -558,22 +559,45 @@ export async function runWebResearch(opts: {
   system?: string;
   studentId?: string | null;
   maxSearches?: number;
-}): Promise<ResearchResult> {
+};
+
+type ResearchLog = { error: (o: object, m?: string) => void };
+
+/**
+ * Cited research for a signed-in user: their AI switch and daily quota first,
+ * then the call, audited under their name.
+ */
+export async function runWebResearch(opts: ResearchOptions & { request: FastifyRequest }): Promise<ResearchResult> {
   // A programming mistake, not a user error: refuse before anything is audited or sent.
   if (opts.domains !== undefined && opts.blockedDomains !== undefined) {
     throw new Error("runWebResearch: pass domains or blockedDomains, not both");
   }
   const { request, module } = opts;
+  await assertAiAllowed(request, module);
+  await enforceQuota(request.auth.userId, "ai_calls", "day", DAILY_AI_CALL_LIMIT, "You've hit today's AI limit. It resets at midnight.");
+  return research(opts, request.auth.userId, request.log);
+}
+
+/**
+ * Cited research a scheduled job runs, with nobody signed in: the ai_runs row
+ * has no actor. The caller owns the budget (a system quota) and must pass only
+ * public facts, never a student's.
+ */
+export async function runSystemResearch(opts: ResearchOptions, log: ResearchLog): Promise<ResearchResult> {
+  if (opts.domains !== undefined && opts.blockedDomains !== undefined) {
+    throw new Error("runSystemResearch: pass domains or blockedDomains, not both");
+  }
+  return research({ ...opts, studentId: null }, null, log);
+}
+
+async function research(opts: ResearchOptions, actorId: string | null, log: ResearchLog): Promise<ResearchResult> {
+  const { module } = opts;
   const domainScope: { allowed_domains?: string[]; blocked_domains?: string[] } =
     opts.domains !== undefined
       ? { allowed_domains: opts.domains }
       : opts.blockedDomains?.length
         ? { blocked_domains: opts.blockedDomains }
         : {};
-  const actorId = request.auth.userId;
-  await assertAiAllowed(request, module);
-  await enforceQuota(actorId, "ai_calls", "day", DAILY_AI_CALL_LIMIT, "You've hit today's AI limit. It resets at midnight.");
-
   const svc = serviceClient();
   const startedAt = Date.now();
   let runId: string | null = null;
@@ -672,12 +696,14 @@ export async function runWebResearch(opts: {
     for (const p of parts) for (const c of p.citations) if (!seen.has(c.url)) seen.set(c.url, c.title);
 
     await finish("succeeded", { input_tokens: inputTokens, output_tokens: outputTokens });
-    await enforceQuota(actorId, "ai_output_tokens", "month", 5_000_000, "Monthly AI usage limit reached.", outputTokens).catch(() => undefined);
+    if (actorId) {
+      await enforceQuota(actorId, "ai_output_tokens", "month", 5_000_000, "Monthly AI usage limit reached.", outputTokens).catch(() => undefined);
+    }
     return { parts, sources: [...seen].map(([url, title]) => ({ url, title })), runId, refused: false, queries: [...queries], seenUrls: [...seenUrls] };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });
-    request.log.error({ module, err }, "AI research failed");
+    log.error({ module, err }, "AI research failed");
     if (err instanceof HttpError) throw err;
     throw unavailable("Research is unavailable right now. Try again shortly.");
   }
