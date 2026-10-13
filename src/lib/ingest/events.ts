@@ -7,6 +7,7 @@
  *
  *   name           required, 1-200 characters
  *   kind           conference | webinar | workshop | college-fair | info-session
+ *                  | campus-tour | virtual-visit | open-house
  *   host           required, the organizer as it names itself
  *   start_date     required, YYYY-MM-DD
  *   end_date       YYYY-MM-DD, not before start_date
@@ -19,6 +20,13 @@
  *   college_unitid IPEDS unitid of the college the event is about (must be in the catalog)
  *   photo_key      webinar | webinar-desk | conference | college-fair | workshop | lecture-hall
  *   topics         semicolon-separated: aid;essays;uc;lists;practice
+ *   audience       counselor | student | everyone. Blank: everyone for an
+ *                  info session, tour, virtual visit or open house (students
+ *                  see those), counselor for the rest (a conference, a
+ *                  counselor workshop).
+ *
+ * Loaded rows are source "csv". A row the discovery job found with the same
+ * key becomes the curator's (the CSV wins); the job never overwrites it after.
  *
  * The natural key is (name, host, start_date), compared trimmed and ignoring
  * case: `hub_events` has no unique constraint to upsert on, and a URL is not
@@ -28,7 +36,7 @@
  */
 
 import { z } from "zod";
-import { EVENT_KINDS, EVENT_TOPICS, PHOTO_KEYS, isTimeZone } from "../eventsHub.js";
+import { AUDIENCES, EVENT_KINDS, EVENT_TOPICS, PHOTO_KEYS, isTimeZone, type Audience } from "../eventsHub.js";
 
 export type EventRow = {
   name: string;
@@ -44,7 +52,12 @@ export type EventRow = {
   description: string | null;
   photo_key: (typeof PHOTO_KEYS)[number] | null;
   topics: (typeof EVENT_TOPICS)[number][];
+  audience: Audience;
+  source: "csv";
 };
+
+/** Kinds students go to: a curator who leaves audience blank means them too. */
+const STUDENT_FACING: ReadonlySet<string> = new Set(["info-session", "campus-tour", "virtual-visit", "open-house"]);
 
 export type MappedEvent = { line: number; key: string; collegeUnitid: number | null; row: EventRow };
 export type EventsMapResult = { ok: MappedEvent[]; errors: string[] };
@@ -87,6 +100,7 @@ const csvRow = z
     college_unitid: opt(z.coerce.number().int().positive("isn't an IPEDS unitid")),
     photo_key: opt(z.preprocess((v) => (typeof v === "string" ? v.trim().toLowerCase() : v), z.enum(PHOTO_KEYS))),
     topics: opt(z.string()),
+    audience: opt(z.preprocess((v) => (typeof v === "string" ? v.trim().toLowerCase() : v), z.enum(AUDIENCES))),
   })
   .passthrough();
 
@@ -139,6 +153,8 @@ export function mapEventRow(raw: Record<string, string>, line: number): { out: M
         description: r.description ?? null,
         photo_key: r.photo_key ?? null,
         topics,
+        audience: r.audience ?? (STUDENT_FACING.has(r.kind) ? "everyone" : "counselor"),
+        source: "csv",
       },
     },
     errors: [],

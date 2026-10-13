@@ -3,9 +3,14 @@
  * the three recommendations from the roster, and the calendar entries a save
  * to the Meridies calendar becomes.
  *
- * Listings are `hub_events` rows a counselor or a Meridies curator entered;
- * updates are `policy_updates`. Nothing here is authored: an empty table is an
- * empty hub.
+ * Listings are `hub_events` rows a counselor entered, a Meridies curator
+ * loaded from a CSV, or the discovery job found on a college's own site
+ * (lib/eventsDiscovery.ts); updates are `policy_updates`. Nothing here is
+ * authored: an empty table is an empty hub.
+ *
+ * `audience` says who a listing is for. Students see Meridies-wide listings
+ * for students or everyone (a college's info session, tour, open house);
+ * counselor-only rows (conferences, a practice's own listings) never reach them.
  */
 
 type Row = Record<string, unknown>;
@@ -14,7 +19,16 @@ const str = (v: unknown): string => (v == null ? "" : String(v));
 const nstr = (v: unknown): string | null => (v == null || v === "" ? null : String(v));
 const arr = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x)) : []);
 
-export const EVENT_KINDS = ["conference", "webinar", "workshop", "college-fair", "info-session"] as const;
+export const EVENT_KINDS = [
+  "conference",
+  "webinar",
+  "workshop",
+  "college-fair",
+  "info-session",
+  "campus-tour",
+  "virtual-visit",
+  "open-house",
+] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 export const EVENT_KIND_LABEL: Record<EventKind, string> = {
@@ -23,7 +37,24 @@ export const EVENT_KIND_LABEL: Record<EventKind, string> = {
   workshop: "Workshop",
   "college-fair": "College fair",
   "info-session": "Info session",
+  "campus-tour": "Campus tour",
+  "virtual-visit": "Virtual visit",
+  "open-house": "Open house",
 };
+
+/** Kinds a student can go to; a conference is the counselor's. */
+export const STUDENT_KINDS = EVENT_KINDS.filter((k) => k !== "conference");
+
+/** The kinds a student plans a visit for; the rest they register for. */
+export const VISIT_KINDS: ReadonlySet<EventKind> = new Set(["campus-tour", "open-house"]);
+
+export const AUDIENCES = ["counselor", "student", "everyone"] as const;
+export type Audience = (typeof AUDIENCES)[number];
+
+/** A listing a student may see: Meridies-wide and meant for students. RLS says the same. */
+export function forStudents(r: Row): boolean {
+  return r.created_by == null && r.firm_id == null && (r.audience === "student" || r.audience === "everyone");
+}
 
 export const EVENT_TOPICS = ["aid", "essays", "uc", "lists", "practice"] as const;
 export const PHOTO_KEYS = ["webinar", "webinar-desk", "conference", "college-fair", "workshop", "lecture-hall"] as const;
@@ -138,6 +169,16 @@ export function toHubEvent(r: Row, viewerId: string, college: CollegeRef | null,
       | "mine",
     mine: r.created_by === viewerId,
     saved,
+    /** Who it is for; students see "student" and "everyone". */
+    audience: (AUDIENCES as readonly string[]).includes(str(r.audience)) ? (str(r.audience) as Audience) : "counselor",
+    /** Where it came from: typed in, loaded from a CSV, or found on the college's own site. */
+    source: (str(r.source) || "manual") as "manual" | "csv" | "discovered",
+    /** The page a discovered listing was cited from. */
+    sourceUrl: nstr(r.source_url),
+    /** When its sign-up link last answered. */
+    lastVerifiedAt: nstr(r.last_verified_at),
+    /** "Plan a visit" for a tour or open house, "Register" otherwise. */
+    cta: (VISIT_KINDS.has(str(r.kind) as EventKind) ? "Plan a visit" : "Register") as "Plan a visit" | "Register",
     createdAt: str(r.created_at),
   };
 }
