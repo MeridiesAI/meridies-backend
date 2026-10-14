@@ -4,6 +4,7 @@ import {
   collegeHost,
   discoveryDomains,
   needsLookup,
+  validOfferings,
   parseAnswer,
   listingName,
   onCollegeSite,
@@ -13,6 +14,7 @@ import {
 import { forStudents, toHubEvent } from "../../src/lib/eventsHub.js";
 import { mapEventsCsv } from "../../src/lib/ingest/events.js";
 import { rankColleges } from "../../src/lib/rosterColleges.js";
+import { distance, rankSimilar } from "../../src/lib/similarColleges.js";
 
 const NOW = new Date("2026-10-13T15:00:00Z");
 
@@ -42,8 +44,8 @@ test("the answer's object gives the visit page and events; a bare array is event
   const o = parseAnswer('```json\n{"visitPage": "https://visit.stanford.edu/", "events": [{"a":1}]}\n```');
   assert.equal(o.visitPage, "https://visit.stanford.edu/");
   assert.equal(o.events.length, 1);
-  assert.deepEqual(parseAnswer('[{"a":1}]'), { visitPage: null, events: [{ a: 1 }] });
-  assert.deepEqual(parseAnswer("nothing found"), { visitPage: null, events: [] });
+  assert.deepEqual(parseAnswer('[{"a":1}]'), { visitPage: null, offerings: [], events: [{ a: 1 }] });
+  assert.deepEqual(parseAnswer("nothing found"), { visitPage: null, offerings: [], events: [] });
 });
 
 test("a sign-up link counts only on the college's site, its subdomains, or an allowed platform", () => {
@@ -140,4 +142,40 @@ test("a college is looked up again only when it never was, or a week has passed"
   assert.equal(needsLookup(null, now), true);
   assert.equal(needsLookup("2026-10-12T12:00:00Z", now), false);
   assert.equal(needsLookup("2026-10-01T12:00:00Z", now), true);
+});
+
+test("the answer carries offerings, and only the college's own undergraduate ones validate", () => {
+  const a = parseAnswer('{"visitPage": null, "offerings": [{"kind":"campus-tour","title":"Campus Tour","schedule":"Daily","signUpUrl":"https://visit.stanford.edu/"}], "events": []}');
+  assert.equal(a.offerings.length, 1);
+  const kept = validOfferings(
+    [
+      ...a.offerings,
+      { kind: "campus-tour", title: "Campus Tour", schedule: "Daily", signUpUrl: "https://visit.stanford.edu/" },
+      { kind: "info-session", title: "MBA Info Session", schedule: null, signUpUrl: "https://gsb.stanford.edu/" },
+      { kind: "party", title: "Party", schedule: null, signUpUrl: "https://visit.stanford.edu/" },
+      { kind: "campus-tour", title: "Elsewhere", schedule: null, signUpUrl: "https://example.com/" },
+    ],
+    "stanford.edu"
+  );
+  assert.deepEqual(kept.map((o) => o.title), ["Campus Tour"]);
+});
+
+test("similar colleges: the closest by admit rate and SAT, the same type preferred, never one already listed", () => {
+  const cornell = { id: "cornell", admitRate: 0.08, satMid: 1500, control: "private" };
+  const rutgers = { id: "rutgers", admitRate: 0.65, satMid: 1340, control: "public" };
+  const brown = { id: "brown", admitRate: 0.05, satMid: 1530, control: "private" };
+  const umich = { id: "umich", admitRate: 0.18, satMid: 1450, control: "public" };
+  const pennState = { id: "psu", admitRate: 0.55, satMid: 1300, control: "public" };
+  const nyu = { id: "nyu", admitRate: 0.6, satMid: 1350, control: "private" };
+  assert.ok(distance(cornell, brown)! < distance(cornell, umich)!);
+  assert.ok(distance(rutgers, pennState)! < distance(rutgers, nyu)!, "a public is closer to a public");
+  const ranked = rankSimilar([cornell, rutgers], [cornell, brown, umich, pennState, nyu], 6);
+  assert.ok(!ranked.some((r) => r.id === "cornell"), "listed colleges are never suggested");
+  assert.equal(ranked.find((r) => r.id === "brown")?.similarTo, "cornell");
+  assert.equal(ranked.find((r) => r.id === "psu")?.similarTo, "rutgers");
+  assert.equal(rankSimilar([cornell], [brown, umich, pennState, nyu], 2).length, 2);
+  // Taking turns: a list of an Ivy and a big public gets schools like both.
+  const ivyish = ["a", "b", "c", "d", "e"].map((id) => ({ id, admitRate: 0.07, satMid: 1510, control: "private" }));
+  const turns = rankSimilar([cornell, rutgers], [...ivyish, pennState, nyu], 4);
+  assert.ok(turns.some((t) => t.similarTo === "rutgers"), JSON.stringify(turns));
 });
