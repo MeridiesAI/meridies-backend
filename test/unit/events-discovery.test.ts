@@ -188,6 +188,7 @@ test("cleanSchedule keeps the college's words and drops notes about the search",
   assert.equal(cleanSchedule("The listing I retrieved showed only past dates."), null);
   assert.equal(cleanSchedule("The visit page doesn't give a schedule; registration is by day."), null);
   assert.equal(cleanSchedule("Weekdays, i.e. Monday to Friday"), "Weekdays, i.e. Monday to Friday");
+  assert.equal(cleanSchedule("About an hour. The page gives no fixed dates."), null);
   assert.equal(cleanSchedule("  "), null);
   assert.equal(cleanSchedule(null), null);
 });

@@ -271,7 +271,7 @@ export type OfferingCandidate = z.infer<typeof offeringSchema>;
  * words, so it is dropped and the card says only where the dates are.
  */
 const FIRST_PERSON = /\b(I|I'm|I've|I'd)\b/;
-const ABOUT_THE_SEARCH = /\b(me|my)\b|\b(retrieved|couldn'?t (see|find|read|load)|could not (see|find|read|load)|the (\w+ )?(page|listing|site|calendar) (says|said|shows|showed|doesn'?t|does not))\b/i;
+const ABOUT_THE_SEARCH = /\b(me|my)\b|\b(retrieved|couldn'?t (see|find|read|load)|could not (see|find|read|load)|the (\w+ )?(page|listing|site|calendar) (says|said|shows|showed|gives|lists|doesn'?t|does not))\b/i;
 
 export function cleanSchedule(schedule: string | null | undefined): string | null {
   const s = schedule?.trim().replace(/\s+/g, " ") ?? "";
