@@ -294,6 +294,14 @@ export async function discoverForCollege(
     });
     if (result.refused) return { ...outcome, error: "research refused" };
 
+    // Looked up: visit_url_checked_at doubles as "last looked up", so the
+    // automatic lookup (lookUpSoon) leaves this college alone for a week
+    // whether or not anything turned up.
+    {
+      const { error: e } = await svc.from("colleges").update({ visit_url_checked_at: new Date().toISOString() }).eq("id", college.id);
+      if (e) throw new Error(`colleges update: ${e.message}`);
+    }
+
     const answer = parseAnswer(answerText(result));
     const raw = answer.events;
     outcome.found = raw.length;
@@ -380,6 +388,71 @@ export async function discoverForCollege(
     const message = err instanceof Error ? err.message : "unknown error";
     deps.log.error({ collegeId: college.id, err: message }, "events discovery: college failed");
     return { ...outcome, error: message.slice(0, 300) };
+  }
+}
+
+// ---- Looking a college up when someone lists it ------------------------------------------
+
+/** A college looked up within this long isn't looked up again on its own. */
+export const LOOKUP_FRESH_DAYS = 7;
+/** Per instance: a college asked about recently isn't asked again, whatever happened. */
+const RETRY_AFTER_MS = 6 * 3600 * 1000;
+/** At most this many lookups at a time per instance. */
+const MAX_IN_FLIGHT = 2;
+
+const attempted = new Map<string, number>();
+let inFlight = 0;
+const queue: DiscoveryCollege[] = [];
+
+/** Never looked up, or not in the last week. */
+export function needsLookup(checkedAt: string | null | undefined, now = Date.now()): boolean {
+  if (!checkedAt) return true;
+  return now - Date.parse(checkedAt) > LOOKUP_FRESH_DAYS * 86_400_000;
+}
+
+/**
+ * Look these colleges up in the background: a student just listed one, or a
+ * counselor's roster has one nobody has looked up this week. Returns the ones
+ * that are being looked up now (queued or running), so the page can say so.
+ * Runs on the weekly job's system budget; never blocks the request.
+ */
+export function lookUpSoon(colleges: DiscoveryCollege[], log: Log): DiscoveryCollege[] {
+  const svc = serviceClient();
+  if (!svc || !hasAnthropic) return [];
+  const now = Date.now();
+  const started: DiscoveryCollege[] = [];
+  for (const c of colleges) {
+    if (!collegeHost(c.website)) continue;
+    const last = attempted.get(c.id);
+    if (last !== undefined && now - last < RETRY_AFTER_MS) {
+      // Already asked for: say so while it's still queued or running.
+      if (queue.some((q) => q.id === c.id) || last > now - 5 * 60_000) started.push(c);
+      continue;
+    }
+    attempted.set(c.id, now);
+    queue.push(c);
+    started.push(c);
+  }
+  drain(svc, log);
+  return started;
+}
+
+function drain(svc: SupabaseClient, log: Log) {
+  while (inFlight < MAX_IN_FLIGHT && queue.length) {
+    const college = queue.shift()!;
+    inFlight += 1;
+    void (async () => {
+      try {
+        const blocked = await blockedDomains(svc);
+        const o = await discoverForCollege(svc, college, { research: systemResearch(log), blocked, log });
+        log.info({ ...o }, "events discovery: looked a college up");
+      } catch (err) {
+        log.error({ collegeId: college.id, err: err instanceof Error ? err.message : "unknown" }, "events discovery: lookup failed");
+      } finally {
+        inFlight -= 1;
+        drain(svc, log);
+      }
+    })();
   }
 }
 

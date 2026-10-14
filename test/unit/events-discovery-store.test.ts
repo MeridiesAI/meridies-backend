@@ -131,7 +131,8 @@ test("the visit page is kept on the college when it checks out, even with no dat
   });
   const out = await discoverForCollege(db as never, college, { research: answer, check: ok, blocked: [], now: NOW, log });
   assert.equal(out.visitUrl, "https://visit.stanford.edu/plan/");
-  assert.equal(db.updates[0]?.visit_url, "https://visit.stanford.edu/plan/");
+  assert.ok(db.updates.some((u) => u.visit_url_checked_at && !("visit_url" in u)), "stamped as looked up");
+  assert.equal(db.updates.find((u) => "visit_url" in u)?.visit_url, "https://visit.stanford.edu/plan/");
 
   const offSite: ResearchFn = async () => ({
     parts: [{ text: JSON.stringify({ visitPage: "https://example.com/visit", events: [] }), citations: [] }],

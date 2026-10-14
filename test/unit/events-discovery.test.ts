@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   collegeHost,
   discoveryDomains,
+  needsLookup,
   parseAnswer,
   listingName,
   onCollegeSite,
@@ -132,4 +133,11 @@ test("roster colleges rank by how many students list them", () => {
   ]);
   assert.deepEqual(rankColleges(by), ["b", "c", "a"]);
   assert.deepEqual(rankColleges(by, 2), ["b", "c"]);
+});
+
+test("a college is looked up again only when it never was, or a week has passed", () => {
+  const now = Date.parse("2026-10-13T12:00:00Z");
+  assert.equal(needsLookup(null, now), true);
+  assert.equal(needsLookup("2026-10-12T12:00:00Z", now), false);
+  assert.equal(needsLookup("2026-10-01T12:00:00Z", now), true);
 });
