@@ -30,7 +30,7 @@ import { z } from "zod";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { hasAnthropic } from "../env.js";
 import { runWebResearch } from "../lib/anthropic.js";
-import { DISCOVERY_SYSTEM, blockedDomains, discoverForCollege } from "../lib/eventsDiscovery.js";
+import { DISCOVERY_SYSTEM, blockedDomains, discoverForCollege, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
 import { collegesOnLists, listRowsFor, rankColleges } from "../lib/rosterColleges.js";
 import { serviceClient } from "../lib/supabase.js";
 import { requireRole } from "../lib/guards.js";
@@ -269,6 +269,24 @@ export default async function eventRoutes(app: FastifyInstance) {
     const missing = top.filter((id) => !counts.has(id));
     for (const [id, college] of await collegesById(request, missing)) counts.set(id, { college, count: 0 });
     const onRoster = new Set(top);
+
+    // The roster's most-listed schools nobody has looked up this week: look
+    // three up now, in the background (lib/eventsDiscovery.ts lookUpSoon).
+    let lookingUp = new Set<string>();
+    if (top.length) {
+      const { data: tops, error: e3 } = await request.db
+        .from("colleges")
+        .select("id, name, website, visit_url_checked_at")
+        .in("id", top);
+      if (e3) throw fromPostgrest(e3);
+      const rank = new Map(top.map((id, i) => [id, i]));
+      const stale = ((tops ?? []) as Row[])
+        .filter((r) => needsLookup(r.visit_url_checked_at as string | null))
+        .sort((a, b) => (rank.get(String(a.id)) ?? 0) - (rank.get(String(b.id)) ?? 0))
+        .slice(0, 3)
+        .map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null }));
+      lookingUp = new Set(lookUpSoon(stale, request.log).map((c) => c.id));
+    }
     return [...counts.values()]
       .map(({ college, count }) => ({
         value: college.id,
@@ -276,6 +294,8 @@ export default async function eventRoutes(app: FastifyInstance) {
         slug: college.slug,
         count,
         onRoster: onRoster.has(college.id),
+        /** Being looked up on its site right now. */
+        lookingUp: lookingUp.has(college.id),
       }))
       .sort((a, b) => a.label.localeCompare(b.label));
   });

@@ -36,6 +36,7 @@ import {
   type SavedState,
 } from "../lib/eventsHub.js";
 import { collegesOnLists, listRowsFor } from "../lib/rosterColleges.js";
+import { lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
 
 type Row = Record<string, unknown>;
 
@@ -109,21 +110,35 @@ export default async function myEventRoutes(app: FastifyInstance) {
     // Each listed college's visit page, found on its own site by the discovery
     // job: somewhere to sign up even when its tour dates aren't listed.
     let visitPages: { college: CollegeRef; url: string; checkedAt: string | null }[] = [];
+    let lookingUp: CollegeRef[] = [];
     if (mine.size) {
       const { data, error } = await request.db
         .from("colleges")
-        .select("id, slug, name, aka, visit_url, visit_url_checked_at")
-        .in("id", [...mine])
-        .not("visit_url", "is", null);
+        .select("id, slug, name, aka, website, visit_url, visit_url_checked_at")
+        .in("id", [...mine]);
       if (error) throw fromPostgrest(error);
-      visitPages = ((data ?? []) as Row[])
+      const listed = (data ?? []) as Row[];
+      visitPages = listed
+        .filter((r) => r.visit_url)
         .map((r) => ({ college: toCollegeRef(r), url: String(r.visit_url), checkedAt: (r.visit_url_checked_at as string | null) ?? null }))
         .sort((a, b) => a.college.shortName.localeCompare(b.college.shortName));
+
+      // A college the student just listed (or nobody has looked up this week):
+      // look it up now, in the background, and say so.
+      const stale = listed.filter((r) => needsLookup(r.visit_url_checked_at as string | null)).slice(0, 3);
+      const started = lookUpSoon(
+        stale.map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null })),
+        request.log
+      );
+      const ids = new Set(started.map((c) => c.id));
+      lookingUp = listed.filter((r) => ids.has(String(r.id))).map(toCollegeRef);
     }
     return {
       forYourColleges: events.filter((e) => e.college && mine.has(e.college.id)),
       more: events.filter((e) => !e.college || !mine.has(e.college.id)),
       visitPages,
+      /** Colleges being looked up right now; their events land in a minute or so. */
+      lookingUp,
       /** How many colleges the student has listed, so the page can say "add colleges" when it's none. */
       listedColleges: mine.size,
     };

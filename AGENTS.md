@@ -567,6 +567,12 @@ sign-up links:
   budget (`consume_quota` on a fixed subject, 400 calls a month). A
   counselor's **Refresh events** (`POST /events/discover { collegeId }`) runs
   one college on their own AI quota. No student fact ever goes into a prompt.
+- **Looked up when listed:** opening the student's Events tab (`/me/events`)
+  or the Events Hub's college filter (`/events/colleges`) starts a
+  background lookup (`lookUpSoon`, system budget, two at a time per
+  instance) for listed colleges not looked up in the past week
+  (`colleges.visit_url_checked_at` doubles as "last looked up"), and the
+  response names them (`lookingUp`) so the page can say so and check back.
 
 **Students see events** at `/me/events` (`routes/myEvents.ts`): upcoming
 Meridies-wide listings whose audience is student or everyone, the colleges on
