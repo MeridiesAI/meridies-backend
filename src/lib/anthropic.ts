@@ -559,6 +559,8 @@ type ResearchOptions = {
   system?: string;
   studentId?: string | null;
   maxSearches?: number;
+  /** Defaults to RESEARCH_MODEL. Events discovery runs on Sonnet (DISCOVERY_MODEL in lib/eventsDiscovery.ts). */
+  model?: string;
 };
 
 type ResearchLog = { error: (o: object, m?: string) => void };
@@ -608,7 +610,7 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
         actor_id: actorId,
         student_id: opts.studentId ?? null,
         module,
-        model: RESEARCH_MODEL,
+        model: opts.model ?? RESEARCH_MODEL,
         status: "running",
         input: {
           promptChars: opts.question.length + (opts.context?.length ?? 0),
@@ -644,7 +646,7 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
     for (let turn = 0; turn < 4; turn++) {
       response = await anthropic().beta.messages.create(
         {
-          model: RESEARCH_MODEL,
+          model: opts.model ?? RESEARCH_MODEL,
           max_tokens: 16000,
           betas: ["server-side-fallback-2026-07-01"],
           fallbacks: "default",

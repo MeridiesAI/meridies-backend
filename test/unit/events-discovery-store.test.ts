@@ -4,11 +4,13 @@ import { discoverForCollege, type ResearchFn } from "../../src/lib/eventsDiscove
 
 type Row = Record<string, unknown>;
 
-/** Just enough of supabase-js for discoverForCollege: hub_events select/insert/update. */
+/** Just enough of supabase-js for discoverForCollege: hub_events, colleges and college_visit_offerings. */
 function fakeDb(rows: Row[]) {
   let nextId = rows.length + 1;
-  /** Updates to rows outside hub_events (the college's visit page). */
+  /** Updates to rows outside hub_events (the college's visit page and last-looked-up stamp). */
   const updates: Row[] = [];
+  /** college_visit_offerings, keyed by college. */
+  const offerings: Row[] = [];
   const query = () => {
     const filters: ((r: Row) => boolean)[] = [];
     const q = {
@@ -22,15 +24,28 @@ function fakeDb(rows: Row[]) {
   return {
     rows,
     updates,
-    from: () => ({
+    offerings,
+    from: (table: string) => ({
       select: () => query(),
-      insert: async (row: Row) => {
-        rows.push({ id: String(nextId++), created_by: null, firm_id: null, ...row });
+      insert: async (row: Row | Row[]) => {
+        if (table === "college_visit_offerings") {
+          offerings.push(...(Array.isArray(row) ? row : [row]));
+          return { error: null };
+        }
+        rows.push({ id: String(nextId++), created_by: null, firm_id: null, ...(row as Row) });
         return { error: null };
       },
+      delete: () => ({
+        eq: async (_col: string, id: string) => {
+          if (table === "college_visit_offerings") {
+            for (let i = offerings.length - 1; i >= 0; i--) if (offerings[i].college_id === id) offerings.splice(i, 1);
+          }
+          return { error: null };
+        },
+      }),
       update: (row: Row) => ({
         eq: async (_col: string, id: string) => {
-          const target = rows.find((r) => r.id === id);
+          const target = table === "hub_events" ? rows.find((r) => r.id === id) : undefined;
           if (target) Object.assign(target, row);
           else updates.push({ id, ...row });
           return { error: null };
@@ -153,4 +168,34 @@ test("graduate and certificate program sessions are not a first-year's events", 
   const out = await discoverForCollege(db as never, college, { research: research([grad, cert, tour("2026-11-09")]), check: ok, blocked: [], now: NOW, log });
   assert.equal(out.inserted, 1);
   assert.equal(db.rows[0].name, "Campus Tour");
+});
+
+test("offerings the run saw on the college's site replace the college's old ones", async () => {
+  const db = fakeDb([]);
+  db.offerings.push({ college_id: "c1", kind: "campus-tour", title: "Old tour" });
+  const answer: ResearchFn = async () => ({
+    parts: [
+      {
+        text: JSON.stringify({
+          visitPage: null,
+          offerings: [
+            { kind: "campus-tour", title: "Campus Tour", schedule: "Most weekdays", signUpUrl: "https://visit.stanford.edu/tours/" },
+            { kind: "info-session", title: "Graduate Program Info Session", schedule: null, signUpUrl: "https://visit.stanford.edu/tours/" },
+            { kind: "virtual-visit", title: "Virtual Session", schedule: null, signUpUrl: "https://visit.stanford.edu/never-seen" },
+          ],
+          events: [],
+        }),
+        citations: [],
+      },
+    ],
+    sources: [],
+    runId: null,
+    refused: false,
+    queries: [],
+    seenUrls: ["https://visit.stanford.edu/tours/"],
+  });
+  const out = await discoverForCollege(db as never, college, { research: answer, check: ok, blocked: [], now: NOW, log });
+  assert.equal(out.offerings, 1, "the graduate session and the page never seen are dropped");
+  assert.deepEqual(db.offerings.map((o) => o.title), ["Campus Tour"]);
+  assert.equal(db.offerings[0].schedule, "Most weekdays");
 });

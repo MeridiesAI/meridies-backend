@@ -23,6 +23,7 @@ import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
   CALENDAR_TARGETS,
+  EVENT_KIND_LABEL,
   REMINDERS,
   STUDENT_KINDS,
   forStudents,
@@ -36,7 +37,8 @@ import {
   type SavedState,
 } from "../lib/eventsHub.js";
 import { collegesOnLists, listRowsFor } from "../lib/rosterColleges.js";
-import { lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
+import { cleanSchedule, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
+import { similarColleges } from "../lib/similarColleges.js";
 
 type Row = Record<string, unknown>;
 
@@ -79,6 +81,28 @@ async function studentRows(request: FastifyRequest): Promise<Row[]> {
   return ((data ?? []) as Row[]).filter((r) => forStudents(r) && isUpcoming(r));
 }
 
+/** A college_visit_offerings row as a card: dates on the college's own site. */
+function toOffering(r: Row, college: CollegeRef | null) {
+  const kind = String(r.kind);
+  return {
+    id: String(r.id),
+    collegeId: String(r.college_id),
+    college,
+    kind,
+    kindLabel: (EVENT_KIND_LABEL as Record<string, string>)[kind] ?? kind,
+    title: String(r.title),
+    schedule: cleanSchedule(r.schedule as string | null),
+    url: String(r.url),
+    checkedAt: String(r.checked_at),
+    cta: kind === "campus-tour" || kind === "open-house" ? "Plan a visit" : "Register",
+  };
+}
+
+function offeringMatches(o: ReturnType<typeof toOffering>, q: string): boolean {
+  if (!q) return true;
+  return [o.title, o.kindLabel, o.schedule ?? "", o.college?.name ?? "", o.college?.shortName ?? ""].join(" ").toLowerCase().includes(q);
+}
+
 function matches(e: HubEvent, q: string): boolean {
   if (!q) return true;
   return [e.name, e.host, e.kindLabel, e.place, e.description ?? "", e.college?.name ?? "", e.college?.shortName ?? ""]
@@ -107,36 +131,77 @@ export default async function myEventRoutes(app: FastifyInstance) {
     const events = (await hydrate(request, rows)).filter(
       (e) => (!q.kind || q.kind === "all" || e.kind === q.kind) && matches(e, needle)
     );
-    // Each listed college's visit page, found on its own site by the discovery
-    // job: somewhere to sign up even when its tour dates aren't listed.
+    // The colleges the student lists, and up to six like them.
+    const similarIds = await similarColleges(request.db, [...mine]);
+    const allIds = [...mine, ...similarIds.map((x) => x.id)];
+
     let visitPages: { college: CollegeRef; url: string; checkedAt: string | null }[] = [];
     let lookingUp: CollegeRef[] = [];
-    if (mine.size) {
-      const { data, error } = await request.db
-        .from("colleges")
-        .select("id, slug, name, aka, website, visit_url, visit_url_checked_at")
-        .in("id", [...mine]);
-      if (error) throw fromPostgrest(error);
-      const listed = (data ?? []) as Row[];
-      visitPages = listed
-        .filter((r) => r.visit_url)
+    let offerings: ReturnType<typeof toOffering>[] = [];
+    let similar: {
+      college: CollegeRef;
+      similarTo: CollegeRef | null;
+      visitUrl: string | null;
+      events: HubEvent[];
+      offerings: ReturnType<typeof toOffering>[];
+    }[] = [];
+    if (allIds.length) {
+      const [colleges, offered] = await Promise.all([
+        request.db.from("colleges").select("id, slug, name, aka, website, visit_url, visit_url_checked_at").in("id", allIds),
+        request.db.from("college_visit_offerings").select("*").in("college_id", allIds).order("kind"),
+      ]);
+      if (colleges.error) throw fromPostgrest(colleges.error);
+      if (offered.error) throw fromPostgrest(offered.error);
+      const byId = new Map(((colleges.data ?? []) as Row[]).map((r) => [String(r.id), r]));
+      const refOf = (id: string) => (byId.get(id) ? toCollegeRef(byId.get(id)!) : null);
+      const allOfferings = ((offered.data ?? []) as Row[])
+        .map((r) => toOffering(r, refOf(String(r.college_id))))
+        .filter((o) => (!q.kind || q.kind === "all" || o.kind === q.kind) && offeringMatches(o, needle));
+
+      // Each listed college's visit page: somewhere to sign up even when its
+      // dates aren't listed.
+      visitPages = [...mine]
+        .map((id) => byId.get(id))
+        .filter((r): r is Row => Boolean(r?.visit_url))
         .map((r) => ({ college: toCollegeRef(r), url: String(r.visit_url), checkedAt: (r.visit_url_checked_at as string | null) ?? null }))
         .sort((a, b) => a.college.shortName.localeCompare(b.college.shortName));
+      offerings = allOfferings.filter((o) => mine.has(o.collegeId));
 
-      // A college the student just listed (or nobody has looked up this week):
-      // look it up now, in the background, and say so.
-      const stale = listed.filter((r) => needsLookup(r.visit_url_checked_at as string | null)).slice(0, 3);
-      const started = lookUpSoon(
-        stale.map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null })),
-        request.log
-      );
-      const ids = new Set(started.map((c) => c.id));
-      lookingUp = listed.filter((r) => ids.has(String(r.id))).map(toCollegeRef);
+      similar = similarIds
+        .map(({ id, similarTo }) => {
+          const r = byId.get(id);
+          if (!r) return null;
+          return {
+            college: toCollegeRef(r),
+            similarTo: refOf(similarTo),
+            visitUrl: (r.visit_url as string | null) ?? null,
+            events: events.filter((e) => e.college?.id === id),
+            offerings: allOfferings.filter((o) => o.collegeId === id),
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      // Look up, in the background, what nobody has looked up this week: the
+      // student's own colleges first (up to four a load), then two similar ones.
+      const stale = (ids: string[], n: number) =>
+        ids
+          .map((id) => byId.get(id))
+          .filter((r): r is Row => Boolean(r) && needsLookup(r!.visit_url_checked_at as string | null))
+          .slice(0, n)
+          .map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null }));
+      const started = lookUpSoon([...stale([...mine], 4), ...stale(similarIds.map((x) => x.id), 2)], request.log);
+      lookingUp = started.map((c) => refOf(c.id)).filter((x): x is CollegeRef => x !== null);
     }
+
+    const similarSet = new Set(similarIds.map((x) => x.id));
     return {
       forYourColleges: events.filter((e) => e.college && mine.has(e.college.id)),
-      more: events.filter((e) => !e.college || !mine.has(e.college.id)),
+      /** What the student's colleges offer whose dates aren't listed: a card each, "dates on the college's site". */
+      offerings,
       visitPages,
+      /** Colleges like the student's, each with its events, offerings and visit page. */
+      similar,
+      more: events.filter((e) => !e.college || (!mine.has(e.college.id) && !similarSet.has(e.college.id))),
       /** Colleges being looked up right now; their events land in a minute or so. */
       lookingUp,
       /** How many colleges the student has listed, so the page can say "add colleges" when it's none. */

@@ -83,8 +83,15 @@ const NOT_UNDERGRADUATE =
 const HORIZON_DAYS = 183;
 /** Per college per run. */
 const MAX_PER_COLLEGE = 12;
-/** The weekly job's budget: research calls per month, across every college. */
-const SYSTEM_MONTHLY_CALLS = 400;
+/** The system budget: research calls per month, across every college (weekly job and background lookups). */
+const SYSTEM_MONTHLY_CALLS = 2000;
+
+/**
+ * Finding a college's events on its own site doesn't need the research
+ * model: Sonnet at a fraction of the cost, so every college students list
+ * (and the ones like them) can be covered.
+ */
+export const DISCOVERY_MODEL = "claude-sonnet-5-5";
 /** The quota subject for runs nobody started (consume_quota keys on a uuid). */
 const SYSTEM_SUBJECT = "00000000-0000-0000-0000-00000000e7e1";
 
@@ -133,10 +140,11 @@ export const DISCOVERY_SYSTEM = [
   "Wanted: information sessions, campus tours, virtual visits or virtual information sessions, open houses, admissions webinars and workshops, and college fairs the admissions office hosts.",
   "Not wanted: anything for graduate, professional, MBA, PhD, certificate or executive programs; transfer, admitted or enrolled students only; athletics, concerts, lectures, alumni or donor events; anything without a date.",
   "A tour or session offered on many dates: list each date you can see as its own event, at most 12 in all, soonest first.",
-  "Never invent a date, time or link. If the dates load only after choosing on a calendar and you can't see them, list no events, but still give the visit page.",
+  "Never invent a date, time or link. If the dates load only after choosing on a calendar and you can't see them, list no events, but still give the visit page and the offerings.",
+  "Offerings: the kinds of visits the office offers whatever the date (a campus tour, an information session, a virtual information session, an open house), as its pages describe them, with the page to sign up on. Only what a page you retrieved says is offered; at most 6.",
   "Answer with one JSON object and nothing after it:",
-  '{"visitPage": the URL where a prospective student signs up for a tour or information session, or null, "events": [{"title": string, "kind": "info-session"|"campus-tour"|"virtual-visit"|"open-house"|"webinar"|"workshop"|"college-fair", "startDate": "YYYY-MM-DD", "startTime": "HH:MM" or null (24-hour, local to the event), "endTime": "HH:MM" or null, "timeZone": IANA name such as "America/New_York", "place": "Online" or "City, ST", "signUpUrl": the page to register or sign up, "description": one plain sentence under 200 characters}]}',
-  'If you find nothing, answer {"visitPage": null, "events": []}.',
+  '{"visitPage": the URL where a prospective student signs up for a tour or information session, or null, "offerings": [{"kind": "campus-tour"|"info-session"|"virtual-visit"|"open-house"|"webinar"|"workshop", "title": string, "schedule": how often or when, in the words of the page, or null (never a note about your search or what you could or could not see), "signUpUrl": the page to sign up on}], "events": [{"title": string, "kind": "info-session"|"campus-tour"|"virtual-visit"|"open-house"|"webinar"|"workshop"|"college-fair", "startDate": "YYYY-MM-DD", "startTime": "HH:MM" or null (24-hour, local to the event), "endTime": "HH:MM" or null, "timeZone": IANA name such as "America/New_York", "place": "Online" or "City, ST", "signUpUrl": the page to register or sign up, "description": one plain sentence under 200 characters}]}',
+  'If you find nothing, answer {"visitPage": null, "offerings": [], "events": []}.',
 ].join("\n");
 
 export function discoveryQuestion(college: DiscoveryCollege, today: string): string {
@@ -173,7 +181,7 @@ const candidateSchema = z.object({
 export type EventCandidate = z.infer<typeof candidateSchema>;
 
 /** The answer's visit page and events. Malformed or absent: nothing. */
-export function parseAnswer(text: string): { visitPage: string | null; events: unknown[] } {
+export function parseAnswer(text: string): { visitPage: string | null; offerings: unknown[]; events: unknown[] } {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const body = fenced ? fenced[1] : text;
   const start = body.indexOf("{");
@@ -185,6 +193,7 @@ export function parseAnswer(text: string): { visitPage: string | null; events: u
         const o = parsed as { visitPage?: unknown; events?: unknown };
         return {
           visitPage: typeof o.visitPage === "string" && o.visitPage.trim() ? o.visitPage.trim() : null,
+          offerings: Array.isArray((o as { offerings?: unknown }).offerings) ? ((o as { offerings: unknown[] }).offerings) : [],
           events: Array.isArray(o.events) ? o.events : [],
         };
       }
@@ -192,7 +201,7 @@ export function parseAnswer(text: string): { visitPage: string | null; events: u
       // fall through to a bare array
     }
   }
-  return { visitPage: null, events: parseCandidates(text) };
+  return { visitPage: null, offerings: [], events: parseCandidates(text) };
 }
 
 /** A bare JSON array in the answer: the last [...] in the text. Malformed or absent: nothing. */
@@ -245,6 +254,49 @@ export function validCandidates(raw: unknown[], host: string, now = new Date()):
   return out;
 }
 
+const OFFERING_KINDS = ["campus-tour", "info-session", "virtual-visit", "open-house", "webinar", "workshop"] as const;
+
+const offeringSchema = z.object({
+  kind: z.enum(OFFERING_KINDS),
+  title: z.string().trim().min(3).max(200),
+  schedule: z.string().trim().max(200).nullable().optional(),
+  signUpUrl: z.string().trim().url().max(2000),
+});
+
+export type OfferingCandidate = z.infer<typeof offeringSchema>;
+
+/**
+ * A schedule written about the search rather than the visit ("the dates load
+ * on a calendar I couldn't see"): a student would read it as the college's
+ * words, so it is dropped and the card says only where the dates are.
+ */
+const FIRST_PERSON = /\b(I|I'm|I've|I'd)\b/;
+const ABOUT_THE_SEARCH = /\b(me|my)\b|\b(retrieved|couldn'?t (see|find|read|load)|could not (see|find|read|load)|the (\w+ )?(page|listing|site|calendar) (says|said|shows|showed|gives|lists|doesn'?t|does not))\b/i;
+
+export function cleanSchedule(schedule: string | null | undefined): string | null {
+  const s = schedule?.trim().replace(/\s+/g, " ") ?? "";
+  return s && !FIRST_PERSON.test(s) && !ABOUT_THE_SEARCH.test(s) ? s : null;
+}
+
+/** Offerings that validate, are on the college's site and are for first-year applicants; one per kind and title, at most 6. */
+export function validOfferings(raw: unknown[], host: string): OfferingCandidate[] {
+  const out: OfferingCandidate[] = [];
+  const keys = new Set<string>();
+  for (const item of raw) {
+    const p = offeringSchema.safeParse(item);
+    if (!p.success) continue;
+    const o = p.data;
+    if (!onCollegeSite(o.signUpUrl, host)) continue;
+    if (NOT_UNDERGRADUATE.test(o.title) || NOT_UNDERGRADUATE.test(o.schedule ?? "")) continue;
+    const key = `${o.kind}|${o.title.trim().toLowerCase()}`;
+    if (keys.has(key)) continue;
+    keys.add(key);
+    out.push({ ...o, schedule: cleanSchedule(o.schedule) });
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
 /** The text of the answer, every part in order. */
 export function answerText(result: Pick<ResearchResult, "parts">): string {
   return result.parts.map((p) => p.text).join("\n");
@@ -263,6 +315,8 @@ export type CollegeOutcome = {
   collegeId: string;
   /** The visit page kept on the college, when one checked out. */
   visitUrl: string | null;
+  /** Offerings kept on the college (dates not listed). */
+  offerings: number;
   found: number;
   kept: number;
   inserted: number;
@@ -280,7 +334,7 @@ export async function discoverForCollege(
   college: DiscoveryCollege,
   deps: { research: ResearchFn; check?: typeof checkLink; blocked: string[]; now?: Date; log: Log }
 ): Promise<CollegeOutcome> {
-  const outcome: CollegeOutcome = { collegeId: college.id, visitUrl: null, found: 0, kept: 0, inserted: 0, updated: 0, skipped: 0, error: null };
+  const outcome: CollegeOutcome = { collegeId: college.id, visitUrl: null, offerings: 0, found: 0, kept: 0, inserted: 0, updated: 0, skipped: 0, error: null };
   const host = collegeHost(college.website);
   if (!host) return { ...outcome, error: "no website on file" };
   if (isBlocked(`https://${host}/`, deps.blocked)) return { ...outcome, error: "site is on the research blocklist" };
@@ -322,6 +376,34 @@ export async function discoverForCollege(
         if (e) throw new Error(`colleges update: ${e.message}`);
         outcome.visitUrl = page.sources[0].url;
       }
+    }
+
+    // Offerings: checked like everything else, then they replace the college's
+    // previous ones (what its site offers now).
+    const offerings = await keepCandidates(
+      validOfferings(answer.offerings, host).map((o) => ({ ...o, summary: "", sources: [{ url: o.signUpUrl, title: null }] })),
+      { seenUrls: result.seenUrls },
+      deps.blocked,
+      deps.check ?? checkLink
+    );
+    {
+      const { error: delError } = await svc.from("college_visit_offerings").delete().eq("college_id", college.id);
+      if (delError) throw new Error(`offerings delete: ${delError.message}`);
+      if (offerings.length) {
+        const { error: insError } = await svc.from("college_visit_offerings").insert(
+          offerings.map((o) => ({
+            college_id: college.id,
+            kind: o.kind,
+            title: o.title.replace(/\s+/g, " ").slice(0, 200),
+            schedule: o.schedule ?? null,
+            url: o.signUpUrl,
+            source_url: o.sources[0]?.url ?? o.signUpUrl,
+            checked_at: o.checkedAt,
+          }))
+        );
+        if (insError) throw new Error(`offerings insert: ${insError.message}`);
+      }
+      outcome.offerings = offerings.length;
     }
 
     const valid = validCandidates(raw, host, now);
@@ -398,7 +480,7 @@ export const LOOKUP_FRESH_DAYS = 7;
 /** Per instance: a college asked about recently isn't asked again, whatever happened. */
 const RETRY_AFTER_MS = 6 * 3600 * 1000;
 /** At most this many lookups at a time per instance. */
-const MAX_IN_FLIGHT = 2;
+const MAX_IN_FLIGHT = 3;
 
 const attempted = new Map<string, number>();
 let inFlight = 0;
@@ -496,7 +578,10 @@ export function systemResearch(log: Log): ResearchFn {
   return async ({ domains, question }) => {
     const allowed = await consumeQuota(SYSTEM_SUBJECT, "ai_calls", "month", SYSTEM_MONTHLY_CALLS);
     if (!allowed) throw new Error("the monthly discovery budget is spent");
-    return runSystemResearch({ module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4 }, log);
+    return runSystemResearch(
+      { module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4, model: DISCOVERY_MODEL },
+      log
+    );
   };
 }
 
