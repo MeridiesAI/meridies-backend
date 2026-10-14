@@ -163,6 +163,10 @@ app needs no new Vercel variables.
   plus the "Recently added from Drive" list; the Microsoft branch is
   unchanged.
 - `lib/api.ts`: `getGooglePickerConfig`.
+- Drag and drop from the computer is unchanged and stays beside the Drive
+  button wherever files come in: the two are one feature to the counselor
+  ("add files"), one from the computer and one from Drive. Both end in the
+  same place, a document in the student's folder.
 - If the app later adds a Content-Security-Policy, it must allow
   `accounts.google.com`, `apis.google.com` and `docs.google.com` (frames).
   There is none today.
