@@ -143,7 +143,7 @@ export const DISCOVERY_SYSTEM = [
   "Never invent a date, time or link. If the dates load only after choosing on a calendar and you can't see them, list no events, but still give the visit page and the offerings.",
   "Offerings: the kinds of visits the office offers whatever the date (a campus tour, an information session, a virtual information session, an open house), as its pages describe them, with the page to sign up on. Only what a page you retrieved says is offered; at most 6.",
   "Answer with one JSON object and nothing after it:",
-  '{"visitPage": the URL where a prospective student signs up for a tour or information session, or null, "offerings": [{"kind": "campus-tour"|"info-session"|"virtual-visit"|"open-house"|"webinar"|"workshop", "title": string, "schedule": how often or when, as the page says it, or null, "signUpUrl": the page to sign up on}], "events": [{"title": string, "kind": "info-session"|"campus-tour"|"virtual-visit"|"open-house"|"webinar"|"workshop"|"college-fair", "startDate": "YYYY-MM-DD", "startTime": "HH:MM" or null (24-hour, local to the event), "endTime": "HH:MM" or null, "timeZone": IANA name such as "America/New_York", "place": "Online" or "City, ST", "signUpUrl": the page to register or sign up, "description": one plain sentence under 200 characters}]}',
+  '{"visitPage": the URL where a prospective student signs up for a tour or information session, or null, "offerings": [{"kind": "campus-tour"|"info-session"|"virtual-visit"|"open-house"|"webinar"|"workshop", "title": string, "schedule": how often or when, in the words of the page, or null (never a note about your search or what you could or could not see), "signUpUrl": the page to sign up on}], "events": [{"title": string, "kind": "info-session"|"campus-tour"|"virtual-visit"|"open-house"|"webinar"|"workshop"|"college-fair", "startDate": "YYYY-MM-DD", "startTime": "HH:MM" or null (24-hour, local to the event), "endTime": "HH:MM" or null, "timeZone": IANA name such as "America/New_York", "place": "Online" or "City, ST", "signUpUrl": the page to register or sign up, "description": one plain sentence under 200 characters}]}',
   'If you find nothing, answer {"visitPage": null, "offerings": [], "events": []}.',
 ].join("\n");
 
@@ -265,6 +265,19 @@ const offeringSchema = z.object({
 
 export type OfferingCandidate = z.infer<typeof offeringSchema>;
 
+/**
+ * A schedule written about the search rather than the visit ("the dates load
+ * on a calendar I couldn't see"): a student would read it as the college's
+ * words, so it is dropped and the card says only where the dates are.
+ */
+const FIRST_PERSON = /\b(I|I'm|I've|I'd)\b/;
+const ABOUT_THE_SEARCH = /\b(me|my)\b|\b(retrieved|couldn'?t (see|find|read|load)|could not (see|find|read|load)|the (\w+ )?(page|listing|site|calendar) (says|said|shows|showed|doesn'?t|does not))\b/i;
+
+export function cleanSchedule(schedule: string | null | undefined): string | null {
+  const s = schedule?.trim().replace(/\s+/g, " ") ?? "";
+  return s && !FIRST_PERSON.test(s) && !ABOUT_THE_SEARCH.test(s) ? s : null;
+}
+
 /** Offerings that validate, are on the college's site and are for first-year applicants; one per kind and title, at most 6. */
 export function validOfferings(raw: unknown[], host: string): OfferingCandidate[] {
   const out: OfferingCandidate[] = [];
@@ -278,7 +291,7 @@ export function validOfferings(raw: unknown[], host: string): OfferingCandidate[
     const key = `${o.kind}|${o.title.trim().toLowerCase()}`;
     if (keys.has(key)) continue;
     keys.add(key);
-    out.push(o);
+    out.push({ ...o, schedule: cleanSchedule(o.schedule) });
     if (out.length >= 6) break;
   }
   return out;

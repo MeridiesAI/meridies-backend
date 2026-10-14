@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  cleanSchedule,
   collegeHost,
   discoveryDomains,
   needsLookup,
@@ -178,4 +179,15 @@ test("similar colleges: the closest by admit rate and SAT, the same type preferr
   const ivyish = ["a", "b", "c", "d", "e"].map((id) => ({ id, admitRate: 0.07, satMid: 1510, control: "private" }));
   const turns = rankSimilar([cornell, rutgers], [...ivyish, pennState, nyu], 4);
   assert.ok(turns.some((t) => t.similarTo === "rutgers"), JSON.stringify(turns));
+});
+
+test("cleanSchedule keeps the college's words and drops notes about the search", () => {
+  assert.equal(cleanSchedule("Most weekdays at 10am and 2pm"), "Most weekdays at 10am and 2pm");
+  assert.equal(cleanSchedule("Tuesday-Friday at 10:15 a.m."), "Tuesday-Friday at 10:15 a.m.");
+  assert.equal(cleanSchedule("The dates load on a calendar that I couldn't see."), null);
+  assert.equal(cleanSchedule("The listing I retrieved showed only past dates."), null);
+  assert.equal(cleanSchedule("The visit page doesn't give a schedule; registration is by day."), null);
+  assert.equal(cleanSchedule("Weekdays, i.e. Monday to Friday"), "Weekdays, i.e. Monday to Friday");
+  assert.equal(cleanSchedule("  "), null);
+  assert.equal(cleanSchedule(null), null);
 });

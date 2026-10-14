@@ -37,7 +37,7 @@ import {
   type SavedState,
 } from "../lib/eventsHub.js";
 import { collegesOnLists, listRowsFor } from "../lib/rosterColleges.js";
-import { lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
+import { cleanSchedule, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
 import { similarColleges } from "../lib/similarColleges.js";
 
 type Row = Record<string, unknown>;
@@ -91,7 +91,7 @@ function toOffering(r: Row, college: CollegeRef | null) {
     kind,
     kindLabel: (EVENT_KIND_LABEL as Record<string, string>)[kind] ?? kind,
     title: String(r.title),
-    schedule: (r.schedule as string | null) ?? null,
+    schedule: cleanSchedule(r.schedule as string | null),
     url: String(r.url),
     checkedAt: String(r.checked_at),
     cta: kind === "campus-tour" || kind === "open-house" ? "Plan a visit" : "Register",
