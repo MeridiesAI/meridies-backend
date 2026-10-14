@@ -35,3 +35,6 @@ create policy college_visit_offerings_select on public.college_visit_offerings
 revoke all on public.college_visit_offerings from anon, authenticated;
 grant select on public.college_visit_offerings to authenticated;
 grant all on public.college_visit_offerings to service_role;
+
+-- A pending or revoked counselor reads nothing here, like every public table.
+select private.attach_approval_gate('public.college_visit_offerings');
