@@ -48,8 +48,10 @@ const mine = await call(s.token, "GET", "/me/events");
 check("student reads the Events tab", mine.status === 200, `status ${mine.status} ${JSON.stringify(mine.body).slice(0, 200)}`);
 const names = (list) => (list ?? []).map((e) => e.name);
 check("their own college comes first", names(mine.body.forYourColleges).includes(`Stanford Campus Tour ${tag}`), JSON.stringify(names(mine.body.forYourColleges)));
-check("…and the rest after", names(mine.body.more).includes(`MIT Virtual Info Session ${tag}`), JSON.stringify(names(mine.body.more)));
-const all = [...names(mine.body.forYourColleges), ...names(mine.body.more)];
+const similarNames = (mine.body.similar ?? []).flatMap((g) => names(g.events));
+check("…and the rest after, under More or a similar college", [...names(mine.body.more), ...similarNames].includes(`MIT Virtual Info Session ${tag}`), JSON.stringify(names(mine.body.more)));
+check("similar colleges never repeat the student's own", !(mine.body.similar ?? []).some((g) => g.college.id === stanford));
+const all = [...names(mine.body.forYourColleges), ...names(mine.body.more), ...similarNames];
 check("never a counselor-only listing", !all.includes(`Counselor Conference ${tag}`));
 check("never a practice's own listing", !all.includes(`Practice Night ${tag}`));
 check("never a past event", !all.includes(`Past Tour ${tag}`));
@@ -61,7 +63,18 @@ const withVisit = await call(s.token, "GET", "/me/events");
 check("each listed college's visit page is offered", withVisit.body.visitPages?.some((v) => v.college.id === stanford && v.url === "https://visit.stanford.edu/"), JSON.stringify(withVisit.body.visitPages));
 check("…only for colleges on their list", !withVisit.body.visitPages?.some((v) => v.college.id === mit));
 const filtered = await call(s.token, "GET", "/me/events?kind=virtual-visit");
-check("the kind chip filters", [...names(filtered.body.forYourColleges), ...names(filtered.body.more)].every((n) => n.startsWith("MIT")));
+check("the kind chip filters", [...names(filtered.body.forYourColleges), ...names(filtered.body.more), ...(filtered.body.similar ?? []).flatMap((g) => names(g.events))].every((n) => n.startsWith("MIT")));
+
+// Offerings: public college information students read and never write.
+await sql(`insert into college_visit_offerings (college_id, kind, title, schedule, url) values ('${stanford}', 'campus-tour', 'Campus Tour ${tag}', 'Most weekdays', 'https://visit.stanford.edu/')`);
+const withOfferings = await call(s.token, "GET", "/me/events");
+check("a listed college's offerings show as cards", withOfferings.body.offerings?.some((o) => o.title === `Campus Tour ${tag}` && o.cta === "Plan a visit"), JSON.stringify(withOfferings.body.offerings));
+const writeOffering = await fetch(`${SB}/rest/v1/college_visit_offerings`, {
+  method: "POST",
+  headers: { apikey: ANON, Authorization: `Bearer ${s.token}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ college_id: stanford, kind: "campus-tour", title: "Fake", url: "https://example.com/" }),
+});
+check("a student can't write an offering", !writeOffering.ok, `status ${writeOffering.status}`);
 
 const direct = await fetch(`${SB}/rest/v1/hub_events?select=name&name=eq.${encodeURIComponent(`Counselor Conference ${tag}`)}`, {
   headers: { apikey: ANON, Authorization: `Bearer ${s.token}` },
