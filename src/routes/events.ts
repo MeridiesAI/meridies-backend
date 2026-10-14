@@ -30,7 +30,7 @@ import { z } from "zod";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { hasAnthropic } from "../env.js";
 import { runWebResearch } from "../lib/anthropic.js";
-import { DISCOVERY_SYSTEM, blockedDomains, discoverForCollege, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
+import { DISCOVERY_MODEL, DISCOVERY_SYSTEM, blockedDomains, discoverForCollege, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
 import { collegesOnLists, listRowsFor, rankColleges } from "../lib/rosterColleges.js";
 import { serviceClient } from "../lib/supabase.js";
 import { requireRole } from "../lib/guards.js";
@@ -324,7 +324,7 @@ export default async function eventRoutes(app: FastifyInstance) {
       { id: String(college.id), name: String(college.name), website: String(college.website) },
       {
         research: ({ domains, question }) =>
-          runWebResearch({ request, module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4 }),
+          runWebResearch({ request, module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4, model: DISCOVERY_MODEL }),
         blocked: await blockedDomains(svc),
         log: request.log,
       }
