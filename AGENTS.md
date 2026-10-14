@@ -546,7 +546,8 @@ sign-up links:
   (`lib/rosterColleges.ts`, the same rule as `/colleges/recommended` and
   `/events/recommended`), top `EVENTS_DISCOVERY_COLLEGES` (default 30).
 - **How:** `runSystemResearch` (cited research with no user; the ai_runs row
-  has no actor) restricted to the college's own site from
+  has no actor) on `DISCOVERY_MODEL` (`claude-sonnet-5-5`; other research
+  stays on `RESEARCH_MODEL`), restricted to the college's own site from
   `colleges.website`, plus `ADMISSIONS_HOSTS` for a college whose admissions
   office has its own domain (MIT: mitadmissions.org) and `EVENT_PLATFORMS`.
   Undergraduate admissions only: graduate, professional and certificate
@@ -558,26 +559,39 @@ sign-up links:
   (`keepCandidates`). The college's visit page, checked the same way, lands
   on `colleges.visit_url`: many colleges load tour dates with script, so the
   student's "Plan a visit" still has somewhere to go.
+- **Offerings** (`20261022000001`, `college_visit_offerings`): what the
+  admissions office offers when its dates aren't readable (a campus tour
+  "most weekdays, 10am and 2pm", an info session, a virtual visit), each with
+  its sign-up page, kept by the same checks (`validOfferings`, then
+  `keepCandidates`). A successful run replaces the college's offerings; a
+  failed one touches nothing. Any signed-in user reads them; only
+  service_role writes.
 - **Where it lands:** Meridies-wide `hub_events`, `source = 'discovered'`,
   `audience = 'everyone'`, host = the college's name, matched on the CSV
   loader's key (now also a unique index on Meridies-wide rows). Never
   overwrites a CSV or hand-entered row; deletes nothing.
 - **When:** weekly `POST /internal/events/discover` (CRON_SECRET, 202, lease
   `events-discovery`, `ingest_runs` + `job_heartbeats`), capped by a system
-  budget (`consume_quota` on a fixed subject, 400 calls a month). A
+  budget (`consume_quota` on a fixed subject, 2,000 calls a month). A
   counselor's **Refresh events** (`POST /events/discover { collegeId }`) runs
   one college on their own AI quota. No student fact ever goes into a prompt.
 - **Looked up when listed:** opening the student's Events tab (`/me/events`)
   or the Events Hub's college filter (`/events/colleges`) starts a
-  background lookup (`lookUpSoon`, system budget, two at a time per
-  instance) for listed colleges not looked up in the past week
+  background lookup (`lookUpSoon`, system budget, three at a time per
+  instance) for listed colleges (four a load) and similar ones (two) not looked up in the past week
   (`colleges.visit_url_checked_at` doubles as "last looked up"), and the
   response names them (`lookingUp`) so the page can say so and check back.
 
 **Students see events** at `/me/events` (`routes/myEvents.ts`): upcoming
 Meridies-wide listings whose audience is student or everyone, the colleges on
-their own list first, plus each listed college's visit page; saves go to their
-own calendar (`/me/events/calendar`). RLS (`hub_events_select_student`) says
+their own list first, plus each listed college's visit page and offerings;
+then **similar colleges** (`lib/similarColleges.ts`): up to six not on the
+list, from `college_stats` (admit rate within ten points of the listed range,
+1,500+ undergraduates, a website), scored by admit rate, SAT midpoint and
+public/private against the closest listed college ("Similar to Cornell"),
+the listed colleges taking turns so one doesn't take all six. Each carries
+its visit page, events and offerings; their events leave `more`. Saves go to
+their own calendar (`/me/events/calendar`). RLS (`hub_events_select_student`) says
 the same, so a counselor-only or practice listing never reaches a student.
 
 ### Catalog data: yearly refresh
