@@ -339,7 +339,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These thirteen files are merged ahead of production's database on purpose: the code was written to
+These fourteen files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -371,8 +371,9 @@ set's own section below says what it does and how to check it.
 | 11 | `20261023070001_college_photos.sql` | Campus photos |
 | 12 | `20261023080001_college_stats_scorecard_more.sql` | College Scorecard figures |
 | 13 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
+| 14 | `20261024000011_meeting_calendar_owner_guard.sql` | Meeting owner and calendar pointer guard (security) |
 
-(Thirteen files in six sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
+(Fourteen files in seven sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
@@ -381,7 +382,7 @@ satisfies both. No function, policy or trigger is defined in two of these files;
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all thirteen:
+After all fourteen:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -586,3 +587,29 @@ select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tg
 
 Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
 domain (`LAUNCH_CHECKLIST.md`).
+
+## Meetings: the owner and the calendar pointer: `20261024000011`
+
+A security fix. A meeting's `calendar_provider` / `calendar_event_id` name an
+event on the calendar of `meetings.counselor_id`, and the API acts on it with
+that counselor's stored tokens; before this file any approved counselor could
+write a meeting naming another counselor as its owner, and read-only
+collaborators could write meetings. It depends only on files already in
+production, so it can be applied on its own, ahead of the rest of this list.
+Either order with the code is safe (the code already calls a provider only for
+the caller's own meeting). It adds a trigger and replaces policies; it deletes
+nothing.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261024000011_meeting_calendar_owner_guard.sql` | Trigger `meetings_owner_guard` (a user session books only as itself, never changes `counselor_id`, and changes the calendar pointer only on its own meeting; `transfer_caseload` and the service role pass), `meetings_write` replaced by insert/update/delete policies on `private.counselor_can_edit_student`, and `meeting_attendees_write` narrowed to students the caller can edit |
+
+Check:
+
+```sql
+select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tgname = 'meetings_owner_guard';  -- 1 row
+select policyname from pg_policies where schemaname = 'public' and tablename = 'meetings' order by 1;
+-- approval_gate, meetings_delete, meetings_insert, meetings_select, meetings_select_attendee, meetings_update
+```
+
+and `node --test test/integration/meeting-calendar-owner.test.mjs` against a staging copy.
