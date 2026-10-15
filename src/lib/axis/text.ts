@@ -89,7 +89,10 @@ const QUESTION_LEAD =
  * deadline?").
  */
 export function splitClauses(text: string): string[] {
-  const lead = new RegExp(`,?\\s+(?:and|also|plus|then)\\s+(?=(?:${QUESTION_LEAD})\\b)`, "i");
+  // The lookbehind lets a match start only where a whitespace run (or the
+  // comma before it) starts, which is where the leftmost match always starts
+  // anyway; without it every space of a long run rescanned the rest of the run.
+  const lead = new RegExp(`(?:,|(?<![\\s,]))\\s+(?:and|also|plus|then)\\s+(?=(?:${QUESTION_LEAD})\\b)`, "i");
   return text
     .split(/(?<=[?!])\s+|(?<=[a-z)\]"”]\.)\s+(?=[A-Z])|\n+|;\s+/)
     .flatMap((p) => p.split(lead))

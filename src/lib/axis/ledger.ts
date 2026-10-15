@@ -25,8 +25,38 @@ export type LedgerSource = {
 
 export type Citation = Omit<LedgerSource, "text"> & { excerpt: string };
 
+/**
+ * `text.replace(/\s+\n/g, "\n")` in one pass: a whitespace run that holds a
+ * newline after its first character keeps only that newline and what follows
+ * the last one. The expression rescanned a long run of spaces with no newline
+ * from every one of them.
+ */
+export function collapseBeforeNewlines(text: string): string {
+  let out = "";
+  let last = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (!/\s/.test(text[i]!)) {
+      i++;
+      continue;
+    }
+    let j = i;
+    let lastNewline = -1;
+    while (j < text.length && /\s/.test(text[j]!)) {
+      if (text[j] === "\n") lastNewline = j;
+      j++;
+    }
+    if (lastNewline > i) {
+      out += text.slice(last, i) + "\n";
+      last = lastNewline + 1;
+    }
+    i = j;
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
+
 export function clip(text: string, max: number): string {
-  const t = text.replace(/\s+\n/g, "\n").trim();
+  const t = collapseBeforeNewlines(text).trim();
   if (t.length <= max) return t;
   const cut = t.slice(0, max);
   const stop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("\n"));

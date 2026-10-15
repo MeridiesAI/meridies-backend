@@ -8,7 +8,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { scanTokens } from "../../src/lib/axis/entities.js";
-import { SentenceStream } from "../../src/lib/axis/text.js";
+import { collapseBeforeNewlines } from "../../src/lib/axis/ledger.js";
+import { SentenceStream, splitClauses } from "../../src/lib/axis/text.js";
 import { stripHtml } from "../../src/lib/ingest/collegePhotos.js";
 import { redactText } from "../../src/lib/requestLog.js";
 import { BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
@@ -145,6 +146,38 @@ test("SentenceStream streams a 20,000-character reply of any shape in well under
       st.flush();
     });
     assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
+  }
+});
+
+// ---- AxIS: clauses and passages ---------------------------------------------------
+
+const QUESTION_LEAD =
+  "what|when|who|whom|which|how|why|where|did|does|do|is|are|was|were|can|could|should|would|will|has|have|tell|show|give|list|remind|add|draft|email|find|check|pull|summari[sz]e|compare";
+
+function oldSplitClauses(text: string): string[] {
+  const lead = new RegExp(`,?\\s+(?:and|also|plus|then)\\s+(?=(?:${QUESTION_LEAD})\\b)`, "i");
+  return text
+    .split(/(?<=[?!])\s+|(?<=[a-z)\]"”]\.)\s+(?=[A-Z])|\n+|;\s+/)
+    .flatMap((p) => p.split(lead))
+    .map((p) => p.trim())
+    .filter((p) => p.replace(/[^\p{L}\p{N}]/gu, "").length > 2);
+}
+
+test("splitClauses and collapseBeforeNewlines answer as before, in linear time", () => {
+  const rand = seeded(34);
+  const pieces = ["what", "is", "her", "GPA", " ", "  ", ",", ", ", "and", "also", "then", "did", "?", ".", "\n", "\t", ";", "x", "Mom"];
+  for (let i = 0; i < 10000; i++) {
+    const s = randomText(rand, pieces, 1 + Math.floor(rand() * 20));
+    assert.deepEqual(splitClauses(s), oldSplitClauses(s), JSON.stringify(s));
+    assert.equal(collapseBeforeNewlines(s), s.replace(/\s+\n/g, "\n"), JSON.stringify(s));
+  }
+  for (const unit of [" ", "\t", " and", ", ", " \n", "a "]) {
+    const text = `what ${fill(unit, 8000)} x`;
+    const ms = elapsed(() => splitClauses(text));
+    assert.ok(ms < BUDGET_MS, `splitClauses ${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
+    const big = fill(unit, 1_000_000);
+    const ms2 = elapsed(() => collapseBeforeNewlines(big));
+    assert.ok(ms2 < BUDGET_MS, `collapseBeforeNewlines ${JSON.stringify(unit)} took ${ms2.toFixed(1)} ms`);
   }
 });
 
