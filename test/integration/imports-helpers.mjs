@@ -96,3 +96,26 @@ export async function waitStatus(token, id, leaving) {
 }
 
 export const enc = (s) => new TextEncoder().encode(s);
+
+/** Start, upload one CSV, take the preset plan (optionally edited) and stage. Returns { id, plan, stage }. */
+export async function stagedImport(owner, csvText, { stager = owner, edit } = {}) {
+  const id = (await call(owner.token, "POST", "/imports", { permissionConfirmed: true })).body.id;
+  const reg = await addImportFile(owner, id, "roster.csv", enc(csvText));
+  if (reg.body?.status !== "profiled") throw new Error("register failed " + JSON.stringify(reg.body));
+  let plan = (await call(owner.token, "POST", `/imports/${id}/plan`)).body.plan;
+  if (edit) {
+    plan = edit(plan) ?? plan;
+    const put = await call(owner.token, "PUT", `/imports/${id}/plan`, { plan });
+    if (put.status !== 200) throw new Error("plan failed " + JSON.stringify(put.body));
+  }
+  const stage = await call(stager.token, "POST", `/imports/${id}/stage`);
+  return { id, plan, stage };
+}
+
+/** psql as import_worker (IMPORT_DATABASE_URL), the way the API's job connection runs. */
+export async function workerSql(query) {
+  const url = process.env.IMPORT_DATABASE_URL;
+  if (!url) throw new Error("IMPORT_DATABASE_URL is required for this suite");
+  const { execFileSync } = await import("node:child_process");
+  return execFileSync(process.env.PSQL ?? "psql", [url, "-tAc", query], { stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+}
