@@ -29,6 +29,7 @@ import { redactText, serializeErr } from "../requestLog.js";
 import { serviceClient } from "../supabase.js";
 import { fromImportRpc } from "./errors.js";
 import { loadImportRow } from "./files.js";
+import { HELD_ELSEWHERE, heldAtAddresses, heldForSomeoneElse, type HeldAtAddress } from "./heldAddresses.js";
 
 type Row = Record<string, unknown>;
 
@@ -177,10 +178,29 @@ export async function sendImportInvitations(request: FastifyRequest, importId: s
   const out = claim as { held: boolean; items: Array<{ itemId: string; email: string; name: string | null; gradYear: number | null }>; remaining: number };
   if (out.held) return { sent: 0, failed: 0, held: true, remaining: out.remaining, reason: HELD_MESSAGE };
 
+  // Never invite an address whose earlier invitation carries another
+  // student's held data (heldAddresses.ts): insertInvitation would revoke
+  // that invitation and acceptance would put both students' data on one
+  // account. A read that fails holds the whole batch back.
+  let held: HeldAtAddress[] | null = null;
+  try {
+    held = await heldAtAddresses(request, request.auth.userId, out.items.map((it) => it.email));
+  } catch (err) {
+    request.log.warn({ err: serializeErr(err), importId }, "import invitations: could not read held addresses");
+  }
+
   let sent = 0;
   let failed = 0;
+  let heldElsewhere = 0;
   for (const it of out.items) {
     let ok = false;
+    if (!held || heldForSomeoneElse(it.email, it.name, held, it.itemId)) {
+      if (held) heldElsewhere += 1;
+      const fin = await request.db.rpc("import_finish_invite", { p_item: it.itemId, p_ok: false });
+      if (fin.error) request.log.warn({ code: fin.error.code, importId, itemId: it.itemId }, "import invitation: could not record the outcome");
+      failed += 1;
+      continue;
+    }
     try {
       const input = { email: it.email, fullName: it.name, gradYear: it.gradYear, source: "roster" as const };
       const { row, token } = await insertInvitation(request, input);
@@ -200,6 +220,7 @@ export async function sendImportInvitations(request: FastifyRequest, importId: s
     if (ok) sent += 1;
     else failed += 1;
   }
-  request.log.info({ importId, sent, failed, remaining: out.remaining }, "import invitations sent");
-  return { sent, failed, held: false, remaining: out.remaining, reason: null };
+  request.log.info({ importId, sent, failed, heldElsewhere, remaining: out.remaining }, "import invitations sent");
+  const reason = heldElsewhere > 0 ? `${heldElsewhere === 1 ? "1 invitation wasn't" : `${heldElsewhere} invitations weren't`} sent: ${HELD_ELSEWHERE.toLowerCase()}` : null;
+  return { sent, failed, held: false, remaining: out.remaining, reason };
 }
