@@ -1,7 +1,7 @@
 // The questionnaire against held import data (20261023010003) and the
 // one-time backfill (20261023010004).
 import { call, check, rest, sql, user } from "./harness.mjs";
-import { academics, addChange, addItem, makeImport } from "./imports-helpers.mjs";
+import { academics, addChange, addItem, makeImport, studentOf } from "./imports-helpers.mjs";
 
 const c = await user("intake-held-c");
 const tag = Date.now();
@@ -53,4 +53,42 @@ const tag = Date.now();
   await call(s.token, "PATCH", "/auth/me", { profile: { intakeAnswers: { gpaType: "unweighted", gpaExact: "3.9", testStatus: "both", actComposite: "32" } } });
   const b = await academics(s.id);
   check("a re-saved questionnaire leaves the imported values alone", b.gpa_unweighted === 3.5 && b.act_composite === 30, JSON.stringify(b));
+}
+
+// ---- Backfill ------------------------------------------------------------------
+{
+  const answers = JSON.stringify({ gpaType: "weighted", gpaScale: "5", gpaExact: "4.4", firstGen: "yes",
+    activities: [{ category: "Robotics", organization: "Robotics Club", position: "Captain" }] }).replace(/'/g, "''");
+  const s = await studentOf(c, "intake-backfill-s");
+  const archived = await studentOf(c, "intake-backfill-archived");
+  // Answers saved before the trigger existed: written with triggers off for
+  // this one session only (session_replication_role), so no other suite is affected.
+  for (const id of [s.id, archived.id]) {
+    await sql(`set session_replication_role = replica; update public.profiles set profile = profile || jsonb_build_object('intakeAnswers', '${answers}'::jsonb) where id = '${id}'`);
+  }
+  await sql(`update public.profiles set archived_at = now() where id = '${archived.id}'`);
+  check("the seeded answers filled nothing yet", (await academics(s.id)) === null);
+
+  const first = JSON.parse(await sql(`select private.backfill_intake_answers('${s.id}')`));
+  check("the backfill fills the student who answered", first.students === 1 && first.changed >= 4 && first.failed === 0, JSON.stringify(first));
+  const a = await academics(s.id);
+  check("…with the GPA on its scale", a.gpa_weighted === 4.4 && a.gpa_scale === "5.0", JSON.stringify(a));
+  check("…the activity row", (await sql(`select source from public.activities where student_id = '${s.id}'`)) === "intake");
+  check("…and records the run as a backfill", (await sql(`select count(*) from public.intake_fills where student_id = '${s.id}' and run = 'backfill'`)) === String(first.changed));
+  const ev = JSON.parse(await sql(`select metadata from public.progress_events where student_id = '${s.id}' and entity_type = 'intake'`));
+  check("one activity row says it was the backfill", ev.questionnaire.run === "backfill");
+
+  const second = JSON.parse(await sql(`select private.backfill_intake_answers('${s.id}')`));
+  check("running it again changes nothing", second.students === 1 && second.changed === 0 && second.failed === 0, JSON.stringify(second));
+  check("each run writes an audit row", (await sql(`select count(*) from public.audit_log where action = 'intake.backfill' and student_id = '${s.id}'`)) === "2");
+
+  const skippedArchived = JSON.parse(await sql(`select private.backfill_intake_answers('${archived.id}')`));
+  check("an archived student is skipped", skippedArchived.students === 0 && (await academics(archived.id)) === null, JSON.stringify(skippedArchived));
+
+  const all = JSON.parse(await sql(`select private.backfill_intake_answers()`));
+  check("a run over everyone completes without failures", all.failed === 0 && all.students >= 1, JSON.stringify(all));
+  check("…and still leaves the archived student alone", (await academics(archived.id)) === null);
+
+  const direct = await rest(s.token, "POST", "/rest/v1/rpc/backfill_intake_answers", {});
+  check("a client can't run the backfill", direct.status >= 400, `status ${direct.status}`);
 }
