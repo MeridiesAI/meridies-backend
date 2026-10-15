@@ -66,6 +66,7 @@ src/
 │   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id or meeting_id is missing
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
+│   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
@@ -191,8 +192,9 @@ match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 `20261022000001`: the questionnaire sync (`20261023010001`-`04`), import
 pipeline step 2 (`20261023020001`-`03`), caseload transfer
 (`20261023030001`-`03`), campus photos (`20261023070001`), the extended
-College Scorecard columns (`20261023080001`) and emailed meeting invites
-(`20261023090001`). They go in later, in filename order
+College Scorecard columns (`20261023080001`), emailed meeting invites
+(`20261023090001`) and the meeting owner guard (`20261024000011`, a security
+fix that depends only on applied files and can go in ahead of the rest). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -359,10 +361,26 @@ forget it.
   admin or the row is their own. The staff blast is owner/admin only.
 - **`meeting_attendees`.** `meetings.student_id` stays the primary attendee so
   every per-student read keeps working; a trigger writes the primary here too.
-  Only the meeting's counselor adds or removes attendees, and only their own
-  students; an invited student may read the meeting (`meetings_select_attendee`)
+  Only the meeting's counselor adds or removes attendees, and only students
+  they can edit; an invited student may read the meeting (`meetings_select_attendee`)
   but not move it. The helpers are SECURITY DEFINER to avoid policy recursion
   between the two tables.
+- **A meeting's calendar event is its owner's** (`20261024000011`,
+  `lib/meetingCalendar.ts`). `calendar_provider` / `calendar_event_id` name an
+  event on the calendar of `meetings.counselor_id`, and the API moves or
+  deletes it with stored OAuth tokens, so a forged owner would hand one
+  counselor another's calendar. In code: a provider is called only when the
+  caller owns the meeting, always with `request.auth.userId` (never the stored
+  `counselor_id` read on its own); a write collaborator's change to someone
+  else's meeting is saved in Meridies only, the sync skipped with a logged
+  reason and the pointer kept for its owner, and `createConference` on it is
+  403. In the database: `meetings_owner_guard` (keyed off `current_user`, like
+  `admission_outcomes_lock_guard`, so `transfer_caseload` and the service role
+  pass) makes a user session book only as itself, never change
+  `counselor_id`, and set, change or clear the pointer only on its own
+  meeting; insert, update and delete need `private.counselor_can_edit_student`
+  (read-only collaborators read meetings, never write them). A new route that
+  calls a provider about a stored row checks ownership the same way.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the
@@ -1965,7 +1983,7 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   child process, profile and masking, sensitive values, the plan and presets,
   the AI mapping with its spend, rows and matching, values, rollout),
   meeting invites (`ics`, `meeting-invites`, `email-attachments`,
-  `delivery-insert`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  `delivery-insert`), the meeting calendar owner rule (`meeting-calendar`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
@@ -1974,7 +1992,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `research-repeats` (the same suggestion across runs),
   `intake-sync` and `intake-held-backfill` (the questionnaire, every field
   and rule, against held imports, and the backfill),
-  `meeting-invites` (emailed calendar invites), `college-photos`,
+  `meeting-invites` (emailed calendar invites), `meeting-calendar-owner`
+  (forged owners and calendar pointers, read-only collaborators), `college-photos`,
   `college-official` (the federal figures on extras and Compare, on the rows
   the fixture load writes, and a failing Scorecard heartbeat), the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
