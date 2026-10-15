@@ -473,8 +473,8 @@ const codeOf = (v: unknown): number | null => {
 
 /**
  * Every key below `medianEarnings10yr` comes from migration 20261023080001 or
- * from a coded column served raw before; each is null (or all-null) when its
- * column is absent, so this serves the same shape before the migration.
+ * from a coded column stored before but not served; each is null (or all-null)
+ * when its column is absent, so this serves the same shape before the migration.
  */
 export const toOfficialStats = (r: Row, now = Date.now()) => ({
   admitRate: numOrNull(r.admit_rate),
