@@ -54,6 +54,36 @@ test("headers that look like people's names are masked; real headers aren't", ()
   assert.equal(maskHeader("SAT Math"), "SAT Math");
 });
 
+test("a file with no header row: the first student's row reaches the model only as shapes", () => {
+  // findHeaderRow takes the first row with two cells, so this row is the "headers".
+  const first = ["jane doe", "2008-05-14", "(555) 123-4567", "12 Oak Lane", "jane.doe", "Okafor"];
+  const sheet: ParsedSheet = {
+    name: "S", headerRow: 1, date1904: false, headers: first, rowNumbers: [2, 3],
+    rows: [["john roe", "2007-11-02", "(555) 987-6543", "4 Elm Street", "john.roe", "Smith"], ["ann lee", "2008-01-30", "(555) 222-3333", "9 Pine Road", "ann.lee", "Park"]],
+  };
+  const view = JSON.stringify(modelView(profileSheet(sheet), 1));
+  for (const v of first) assert.ok(!view.toLowerCase().includes(v.toLowerCase()), `${v} reached the model view`);
+  assert.deepEqual(modelView(profileSheet(sheet), 1).columns.map((c) => c.header), [
+    "<text, 2 words, lowercase>", "<date>", "<phone>", "<text, 3 words, capitalized, with digits>", "<text, 1 word, lowercase>", "<text, 1 word, capitalized>",
+  ]);
+  // One value-shaped cell is masked on its own, even when the rest read as labels.
+  assert.equal(maskHeader("555-123-4567"), "<phone>");
+  assert.equal(maskHeader("12/3/2008"), "<date>");
+  assert.equal(maskHeader("jane", ["<text, 1 word, lowercase>"]), "<text, 1 word, lowercase>");
+});
+
+test("real headers still reach the model as written", () => {
+  const sheet: ParsedSheet = {
+    name: "S", headerRow: 1, date1904: false, rowNumbers: [2],
+    headers: ["Student Name", "Email", "Grad Year", "SAT Math", "AP Biology 2024", "Unweighted GPA", "Hometown", "Mascot"],
+    rows: [["Jane Doe", "jane@x.org", "2027", "700", "5", "3.9", "Boston", "Tigers"]],
+  };
+  const headers = modelView(profileSheet(sheet), 1).columns.map((c) => c.header);
+  assert.deepEqual(headers.slice(0, 7), ["Student Name", "Email", "Grad Year", "SAT Math", "AP Biology 2024", "Unweighted GPA", "Hometown"]);
+  // A header that isn't a label and has the shape of its column is masked; the rest of the row stays readable.
+  assert.equal(headers[7], "<text, 1 word, capitalized>");
+});
+
 // --- sensitive values (§7.4) ---------------------------------------------------
 
 test("never-stored categories are recognised by header", () => {

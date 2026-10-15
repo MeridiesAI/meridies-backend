@@ -101,7 +101,7 @@ export function toolSchema(targets: string[]): Record<string, unknown> {
 
 export const SYSTEM = [
   "You map the columns of a spreadsheet a college counselor exported from another tool to the fields of a counseling app.",
-  "For each column you see its header (masked as <name> when it may be a person's name), statistics and the shapes of a few values. You never see the values.",
+  "For each column you see its header (masked as <name> when it may be a person's name, or as a value's shape when the file seems to have no header row), statistics and the shapes of a few values. You never see the values.",
   "Pick one target per column from the list you are given. Use ignore whenever you are not sure; a wrong mapping is worse than none.",
   "key:* targets identify the student (email, name, graduation year, high school). field:* targets fill one value per student. row:* targets are parts of a test score, course or activity when the file has one row per test, course or activity. score_column is a column whose header names one test (for example an AP or IB exam) and whose values are its scores.",
   "Never change a value: a GPA stays on its own scale. Only say how to read it: date order (MDY or DMY; a first part over 12 means DMY; whole numbers between 18000 and 60000 are Excel serial dates), comma decimals, or a Last, First name order.",
@@ -148,7 +148,9 @@ export function toColumns(answer: Answer, unmapped: Unmapped[], fields: FieldDef
       target = { kind: "row", table: table as "courses", group: "ai", part };
     } else {
       const exam = scoreExam(col.header);
-      if (!exam || col.maskedHeader === "<name>") continue;
+      // Only a header the model saw as written names an exam; a masked one is
+      // a person's name or a student's data (a file with no header row).
+      if (!exam || col.maskedHeader !== col.header.trim().slice(0, 80)) continue;
       target = { kind: "score_column", exam, testKind: testKindOf(exam) };
     }
     const parse: PlanColumn["parse"] = {};

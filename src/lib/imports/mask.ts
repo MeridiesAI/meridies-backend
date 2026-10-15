@@ -5,6 +5,13 @@
  * (yes/no, letter grades, course levels, terms, test names) passes through,
  * because they say what a column is without saying anything about anyone.
  * A header that looks like a person's name is masked as `<name>` (§5.2).
+ *
+ * A header is sent as written only when it reads as a label. A file with no
+ * header row makes its first student's row the "headers" (findHeaderRow
+ * takes the first row with two cells), so a header shaped like a value (an
+ * email, a date, a phone or ID number) or like the column under it is masked
+ * the way a cell is, and when several of a sheet's headers look like data
+ * the whole row is treated as data (profile.ts).
  */
 
 import { parseName } from "./names.js";
@@ -81,7 +88,44 @@ const HEADER_WORDS = new Set([
   "counselor", "advisor", "biology", "chemistry", "physics", "history", "calculus", "statistics",
   "spanish", "french", "art", "music", "psychology", "economics", "government", "literature",
   "computer", "world", "us", "european", "environmental", "language", "lang", "lit", "comp", "bc", "ab",
+  "extracurricular", "leadership", "participation", "participated", "academic", "field", "study", "current",
+  "expected", "primary", "secondary", "alternate", "personal", "login", "mailing", "street", "testing",
+  "evidence", "based", "nm", "fname", "lname", "erw", "wks", "wk", "yr", "hrs", "uw", "w", "m", "levels",
+  "category", "title", "final", "college", "for", "or", "a", "an", "dates", "unit", "units", "hometown", "town",
 ]);
+
+const VALUE_SHAPED = (h: string) =>
+  isEmailShape(h) || ISO_DATE.test(h) || SLASH_DATE.test(h) || MONTH_DATE.test(h) || RATIO.test(h) || NUMBER.test(h) ||
+  (PHONE.test(h) && h.replace(/\D/g, "").length >= 7) || /\d{3}-\d{2}-\d{4}/.test(h) || /\d{7,}/.test(h);
+
+/**
+ * Words of a column label ("SAT Math", "Grad Year 2027", "AP 5"): every word
+ * a header word or a generic one, numbers of at most four digits, and at
+ * least one word that isn't a number.
+ */
+export function headerIsLabel(header: string): boolean {
+  const ws = header.toLowerCase().split(/[^\p{L}\p{N}+#'’-]+/u).filter(Boolean);
+  if (ws.length === 0) return false;
+  let word = false;
+  for (const w of ws) {
+    if (/^\d{1,4}(st|nd|rd|th)?$/.test(w)) continue;
+    if (!HEADER_WORDS.has(w) && !SAFE_WORDS.has(w)) return false;
+    word = true;
+  }
+  return word;
+}
+
+/**
+ * Does this header read as a data cell rather than a label? A value's shape
+ * (email, date, number, phone, an ID's digits), or the shape of the values
+ * under it ("jane doe" over a column of names), unless it reads as a label.
+ */
+export function headerLooksLikeData(header: string, sampleShapes: readonly string[] = []): boolean {
+  const h = header.trim();
+  if (h === "" || headerIsLabel(h)) return false;
+  if (VALUE_SHAPED(h) || headerLooksLikeName(h)) return true;
+  return sampleShapes.includes(maskValue(h));
+}
 
 /**
  * Does this header look like a person's name ("Jane Doe", "Doe, Jane")?
@@ -98,12 +142,18 @@ export function headerLooksLikeName(header: string): boolean {
   return first.length >= 2 && surnames.length >= 1;
 }
 
-/** What the model sees of a header. */
-export function maskHeader(header: string): string {
+/**
+ * What the model sees of a header: the text when it reads as a label (or
+ * looks like nothing under it), `<name>` for a person's name, and a cell's
+ * shape for anything that looks like data. `sampleShapes` are the masked
+ * shapes of the column's values (profile.ts).
+ */
+export function maskHeader(header: string, sampleShapes: readonly string[] = []): string {
   const h = header.trim();
   if (h === "") return "<blank>";
+  if (headerIsLabel(h)) return h.slice(0, 80);
   if (headerLooksLikeName(h)) return "<name>";
-  if (isEmailShape(h)) return "<email>";
-  if (/\d{3}-\d{2}-\d{4}/.test(h) || /^\d{7,}$/.test(h)) return "<number>";
+  if (/\d{3}-\d{2}-\d{4}/.test(h) || /\d{7,}/.test(h)) return "<number>";
+  if (headerLooksLikeData(h, sampleShapes)) return maskValue(h);
   return h.slice(0, 80);
 }
