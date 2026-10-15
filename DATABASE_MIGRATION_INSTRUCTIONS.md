@@ -442,3 +442,30 @@ select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tg
 
 Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
 domain (`LAUNCH_CHECKLIST.md`).
+
+---
+
+# Campus photos (one more migration)
+
+Apply after every earlier file. It adds a table and the project's first
+**public** bucket, and deletes nothing. Either order is safe: until it is
+applied, every college response carries `photo: null` (the app falls back to
+its 43 static photos), and `POST /internal/ingest/college-photos` answers 503
+naming this file.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023070001_college_photos.sql` | `college_photos` (one freely licensed Commons photo per college with its credit, license, deed and file page; any signed-in user reads, only service_role writes; the approval gate) and the public **`college-photos`** Storage bucket (3 MB, JPEG only, no `storage.objects` policy: only the loader writes). Adds `college-photos` to the `ingest_runs` and `job_heartbeats` labels by reading the current CHECKs back, and a `job_heartbeats` row (31 days) |
+
+Check:
+
+```sql
+select to_regclass('public.college_photos');                                          -- non-null
+select id, public from storage.buckets where id = 'college-photos';                    -- 1 row, public = true
+select count(*) from job_heartbeats where job = 'college-photos';                      -- 1
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
+```
+
+Then load the photos once by hand (`npx tsx --env-file=.env scripts/ingest/college-photos.ts`,
+after a `--dry-run` to look the list over), or `/internal/status` reads the new job overdue
+until the first monthly run.

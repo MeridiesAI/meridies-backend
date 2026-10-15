@@ -100,6 +100,12 @@ check("student deletes their account", sdel.status === 204 && (await sql(`select
 // Status
 const st = await fetch(API + "/internal/status", { headers: { Authorization: `Bearer ${CRON_SECRET}` } });
 const sj = await st.json();
-check("status lists every job", sj.jobs?.length === 6 && sj.jobs.some((j) => j.job === "events-discovery"), JSON.stringify(sj));
+// Other migrations add jobs too, so name the ones that must be there rather than count them.
+const jobNames = new Set((sj.jobs ?? []).map((j) => j.job));
+check(
+  "status lists every job",
+  ["accountability-sweep", "message-dispatch", "scorecard-ingest", "resources-link-check", "import-sweep", "events-discovery", "college-photos"].every((j) => jobNames.has(j)),
+  JSON.stringify(sj)
+);
 const noauth = await fetch(API + "/internal/status");
 check("status needs the cron secret", noauth.status === 401);

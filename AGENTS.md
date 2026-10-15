@@ -67,7 +67,8 @@ src/
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
-│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
+│   ├── collegePhotos.ts   # a college's campus photo as every college surface serves it; null without the migration
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
@@ -131,7 +132,7 @@ src/
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
-│   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
+│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -664,6 +665,63 @@ its visit page, events and offerings; their events leave `more`. Saves go to
 their own calendar (`/me/events/calendar`). RLS (`hub_events_select_student`) says
 the same, so a counselor-only or practice listing never reaches a student.
 
+### Campus photos
+
+Every college surface (search and AI search cards, recommended, slug,
+compare, `GET /colleges/:id` as a top-level `photo`, a student's college list
+on every row path as `collegePhoto`, Events Hub college refs, alumni) carries
+`photo: { url, thumbUrl, width, height, alt, credit, license, licenseUrl,
+sourceUrl, title } | null` (`lib/collegePhotos.ts`). `GET
+/colleges/photo-credits` lists every photo's full attribution for a credits
+page. The list builder and the top-bar search carry none (the app draws none
+there).
+
+- **Source** (`lib/ingest/collegePhotos.ts`, `20261023070001`): Wikimedia
+  Commons, found through Wikidata: the item whose IPEDS id (P1771) is the
+  college's unitid, and its main image (P18). A unitid on two items, or an
+  item claiming two unitids, is skipped (it could be another campus). The
+  team's `scripts/ingest/data/college-photo-picks.csv` wins over Wikidata,
+  seeded with the 43 photos hand-reviewed for the demo; `none` there
+  suppresses a college and removes its photo. **No search fallback**: a
+  college with no usable free image has no row, and the app shows its plain
+  ground.
+- **What a file must be**: a JPEG on Commons (normalised titles and moved
+  files followed), at least 1000 px wide and 1.2:1 landscape unless picked,
+  CC0, public domain, CC BY or CC BY-SA (never NC or ND; the CHECK refuses
+  them too), not NonFree, no restriction template, and for CC BY and BY-SA a
+  credit. A credit over 500 characters is refused, never clipped.
+- **Copied, not hotlinked**: two standard widths (500 for cards, 1280 for the
+  profile) into the public `college-photos` bucket under
+  `<unitid>/<sha1>-<width>.jpg`, so viewers never call Wikimedia and a file
+  changed on Commons gets new objects. The bucket is the only public one, it
+  has no `storage.objects` policy (only the loader writes), and the row keeps
+  paths, not URLs.
+- **The run**: monthly `POST /internal/ingest/college-photos` (CRON_SECRET,
+  202, 409 while running, 503 naming the migration before it is applied;
+  lease `college-photos`, 3 hours; `ingest_runs` + `job_heartbeats`), or
+  `npx tsx --env-file=.env scripts/ingest/college-photos.ts [--limit N]
+  [--only <unitids>] [--dry-run]`. It re-checks every stored file and
+  downloads only changed ones (same sha1: text refreshed, nothing
+  downloaded); a deleted or relicensed file loses its row and objects. A
+  Wikidata or picks failure ends the run before anything changes, and
+  deletions the picks didn't ask for are **held** when they would remove more
+  than a tenth of the stored photos (and more than five), so a truncated
+  answer can't wipe the catalog's photos. `--dry-run` writes nothing (no
+  ingest_runs row, no heartbeat) and prints a CSV to review. Wikimedia
+  etiquette: a User-Agent with the team inbox, serial API calls half a second
+  apart, `maxlag=5`, Retry-After honoured, two downloads at a time; the three
+  hosts are pinned and redirects refused.
+- **Deploy order**: either. Every read degrades to `photo: null` while the
+  table is missing (remembered five minutes, like `lib/deliveryInsert.ts`);
+  not in `REQUIRED_SCHEMA`. After applying it, run the script once by hand,
+  or `/internal/status` reads the job overdue.
+- **Tests**: `college-photos*.test.ts` (rules, client, run, serving) and
+  `test/integration/college-photos.test.mjs` (RLS, the bucket, a fixture load
+  through the real store, every surface). Nothing reaches Wikimedia: the
+  fixtures in `test/fixtures/college-photos/` are hand-written in the
+  documented shapes (see its README), and the cron route is only tested for
+  401 and 409.
+
 ### Catalog data: yearly refresh
 
 | When | Source | Who | How |
@@ -671,6 +729,7 @@ the same, so a counselor-only or practice listing never reaches a student.
 | Monthly (cron) | College Scorecard | automatic | `POST /internal/ingest/scorecard` |
 | Weekly (cron) | Library links | automatic | `POST /internal/resources/link-check` |
 | Weekly (cron) | Colleges' upcoming events and visit pages | automatic | `POST /internal/events/discover` |
+| Monthly (cron) | Campus photos (Wikimedia Commons via Wikidata) | automatic; the team edits the picks CSV | `POST /internal/ingest/college-photos` |
 | When NCES publishes (usually late summer) | IPEDS Admissions (`ADM<year>.zip`) | engineer | `scripts/ingest/ipeds-admissions.ts --year <year>` |
 | August | Common App requirements grid (new cycle) | counselor team compiles, engineer loads | `curated-csv.ts --dataset requirements` |
 | August–October | UC application, Cal State Apply (dates, requirements) | counselor team | `requirements`, and update the library rows' `opens_on`/`closes_on`/`cycle` in a migration |

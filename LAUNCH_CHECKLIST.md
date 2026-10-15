@@ -73,6 +73,14 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   minutes, same header. It has no in-process alternative. Without it, scheduled messages and those
   held for quiet hours never send.
 
+- [ ] **College photos** (new; monthly): after applying `20261023070001_college_photos.sql`, run
+  `npx tsx --env-file=.env scripts/ingest/college-photos.ts --dry-run`, look the CSV over (bad
+  picks go in `scripts/ingest/data/college-photo-picks.csv` as a better title or `none`), then run
+  it without `--dry-run` once by hand: `/internal/status` reads the job overdue until its first clean
+  run. Then a cron service, monthly (for example `17 4 3 * *`): `POST /internal/ingest/college-photos`,
+  same header. It answers 202 and records itself in `ingest_runs`; a first full load is about
+  6,000 downloads from Wikimedia and can take an hour.
+
 ### Vercel variables (meridies-app)
 
 - [x] `NEXT_PUBLIC_API_URL=https://meridies-backend-production.up.railway.app` (set with a trailing slash;

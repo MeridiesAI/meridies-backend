@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
 import { readDocumentText } from "../lib/documentText.js";
+import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
@@ -108,9 +109,15 @@ async function loadListRow(request: FastifyRequest, id: string): Promise<Row> {
   return data as Row;
 }
 
+/**
+ * Every path that answers with list rows (the board, add, update, accept a
+ * recommendation) loads photos the same way, so a row the app swaps in
+ * after an edit keeps its photo. The photo read never throws.
+ */
 async function serializeOne(request: FastifyRequest, row: Row) {
-  const counts = await supplementCounts(request, row.college_id ? [String(row.college_id)] : []);
-  return toListCollege(row, counts);
+  const ids = row.college_id ? [String(row.college_id)] : [];
+  const [counts, photos] = await Promise.all([supplementCounts(request, ids), loadCollegePhotos(request.db, ids, request.log)]);
+  return toListCollege(row, counts, photos);
 }
 
 /** The student's name and email, for a Doc's title and who it is shared with. */
@@ -360,10 +367,11 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const q = studentQuery.parse(request.query);
       const studentId = await resolveStudentId(request, q.studentId, "view");
       const rows = await listRows(request, studentId);
-      const counts = await supplementCounts(
-        request,
-        rows.map((r) => r.college_id).filter((v): v is string => typeof v === "string")
-      );
+      const collegeIds = rows.map((r) => r.college_id).filter((v): v is string => typeof v === "string");
+      const [counts, photos] = await Promise.all([
+        supplementCounts(request, collegeIds),
+        loadCollegePhotos(request.db, collegeIds, request.log),
+      ]);
 
       const recs = await request.db
         .from("student_college_recommendations")
@@ -388,7 +396,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         );
 
       return {
-        rows: rows.map((r) => toListCollege(r, counts)),
+        rows: rows.map((r) => toListCollege(r, counts, photos)),
         recommendations: (recs.data ?? [])
           .filter((r) => !onList(r as Row))
           .map((r) =>

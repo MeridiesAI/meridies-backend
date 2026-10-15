@@ -9,6 +9,8 @@
  *                                          lists, with who put them there
  *   GET    /colleges/slug/:slug           a card by slug (the logo/photo key)
  *   GET    /colleges/compare?ids=a,b,...  Let's Compare: any number of schools
+ *   GET    /colleges/photo-credits        every campus photo's attribution, for a
+ *                                          credits page
  *   GET    /colleges/:id/extras           profile facts, the curated admitted
  *                                          shape, CDS, rounds, programs, webinar
  *                                          advice
@@ -30,6 +32,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { enforceNoProse, runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { findOrCreateChild, practiceFolder } from "../lib/practiceFolders.js";
@@ -300,7 +303,9 @@ export async function runSearch(request: FastifyRequest, q: SearchQuery) {
   const byId = new Map(((cards.data ?? []) as unknown as Row[]).map((r) => [String(r.id), r]));
   const profiled = new Set(((withFacts.data ?? []) as Row[]).map((r) => String(r.college_id)));
   const statsById = new Map(((stats.data ?? []) as Row[]).map((r) => [String(r.college_id), r]));
-  const extras = await cardExtras(request, ids);
+  // The photo read never throws (a missing table is no photos), so it stays
+  // out of cardExtras' error-checked reads.
+  const [extras, photos] = await Promise.all([cardExtras(request, ids), loadCollegePhotos(request.db, ids, request.log)]);
 
   const results = hits
     .filter((h) => byId.has(String(h.college_id)))
@@ -311,6 +316,7 @@ export async function runSearch(request: FastifyRequest, q: SearchQuery) {
       return {
         ...card,
         ...extras.get(id)!,
+        photo: toCollegePhoto(photos.get(id), card.name),
         profiled: profiled.has(id),
         // How it matched: 0 exact, 1 name prefix, 2 word prefix, 3 close spelling, 4 text, 5 major, 6 browse.
         matchTier: Number(h.match_tier),
@@ -455,13 +461,14 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     const { data: cards, error: e2 } = await request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).in("id", ids);
     if (e2) throw fromPostgrest(e2);
     const profiledIds = new Set(((profiled.data ?? []) as Row[]).map((p) => String(p.college_id)));
-    const extras = await cardExtras(request, ids);
+    const [extras, photos] = await Promise.all([cardExtras(request, ids), loadCollegePhotos(request.db, ids, request.log)]);
     return ((cards ?? []) as unknown as Row[])
       .map((r) => {
         const card = toCollegeCard(r);
         return {
           ...card,
           ...extras.get(card.id)!,
+          photo: toCollegePhoto(photos.get(card.id), card.name),
           profiled: profiledIds.has(card.id),
           students: byCollege.get(card.id) ?? [],
         };
@@ -474,7 +481,46 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     const { data, error } = await request.db.from("colleges").select(COLLEGE_CARD_COLUMNS).eq("slug", slug).maybeSingle();
     if (error) throw fromPostgrest(error);
     if (!data) throw notFound("That college isn't in the catalog");
-    return toCollegeCard(data as unknown as Row);
+    const card = toCollegeCard(data as unknown as Row);
+    const photos = await loadCollegePhotos(request.db, [card.id], request.log);
+    return { ...card, photo: toCollegePhoto(photos.get(card.id), card.name) };
+  });
+
+  // ---- Photo credits -----------------------------------------------------------------
+
+  /**
+   * Every campus photo with its full attribution (title, author, license and
+   * its deed, the Commons page): what CC BY and BY-SA ask for, in one place, for
+   * the cards that only have room for a hover credit. Paged; the total is the
+   * X-Total-Count header. An empty list until the photos migration is applied.
+   */
+  app.get("/photo-credits", { preHandler: [app.authenticate, limit("colleges:photo-credits", 60, 60)] }, async (request, reply) => {
+    const q = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(500).optional(),
+        offset: z.coerce.number().int().min(0).max(100_000).optional(),
+      })
+      .strict()
+      .parse(request.query);
+    const from = q.offset ?? 0;
+    const size = q.limit ?? 200;
+    const { data, error, count } = await request.db
+      .from("college_photos")
+      .select(`${PHOTO_COLUMNS}, college:colleges(name, slug)`, { count: "exact" })
+      .order("college_id")
+      .range(from, from + size - 1);
+    if (error) {
+      if (isMissingPhotoSchema(error.code)) {
+        reply.header("X-Total-Count", "0");
+        return [];
+      }
+      throw fromPostgrest(error);
+    }
+    reply.header("X-Total-Count", String(count ?? 0));
+    return ((data ?? []) as unknown as (CollegePhotoRow & { college: Row | null })[]).map((r) => {
+      const name = String(r.college?.name ?? "");
+      return { collegeId: String(r.college_id), name, slug: r.college?.slug ? String(r.college.slug) : null, photo: toCollegePhoto(r, name)! };
+    });
   });
 
   // ---- Compare -------------------------------------------------------------------
@@ -485,7 +531,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     if (list.length > 12) throw badRequest("Compare up to 12 schools at a time");
     if (list.some((id) => !z.string().uuid().safeParse(id).success)) throw badRequest("ids takes college ids");
 
-    const [colleges, facts, aid, ratings, bands, admitted, lists] = await Promise.all([
+    const [colleges, facts, aid, ratings, bands, admitted, lists, photos] = await Promise.all([
       request.db.from("colleges").select("*").in("id", list),
       request.db.from("college_profile_facts").select("*").in("college_id", list),
       request.db.from("college_aid_profiles").select("*").in("college_id", list),
@@ -493,6 +539,8 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       request.db.from("college_aid_band_ratings").select("*").in("college_id", list).order("sort_order"),
       request.db.from("college_admitted_profiles").select("*").in("college_id", list),
       request.db.from("college_list_profiles").select("college_id, campus_setting").in("college_id", list),
+      // Never throws, so it stays out of the error check below.
+      loadCollegePhotos(request.db, list, request.log),
     ]);
     for (const r of [colleges, facts, aid, ratings, bands, admitted, lists]) if (r.error) throw fromPostgrest(r.error);
 
@@ -517,8 +565,9 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       .filter((id) => rows.has(id))
       .map((id) => {
         const c = rows.get(id)!;
+        const card = toCollegeCard(c);
         return {
-          college: { ...toCollegeCard(c), applicationFeeCents: c.application_fee_cents ?? null },
+          college: { ...card, applicationFeeCents: c.application_fee_cents ?? null, photo: toCollegePhoto(photos.get(id), card.name) },
           facts: f.get(id)?.[0] ? toProfileFacts(f.get(id)![0]) : null,
           campusSetting: (f.get(id)?.[0]?.campus_setting as string | undefined) ?? (ls.get(id)?.[0]?.campus_setting as string | undefined) ?? null,
           aidProfile: a.get(id)?.[0] ?? null,

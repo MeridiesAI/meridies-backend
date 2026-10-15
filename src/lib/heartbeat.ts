@@ -12,7 +12,8 @@ export type Job =
   | "scorecard-ingest"
   | "resources-link-check"
   | "import-sweep"
-  | "events-discovery";
+  | "events-discovery"
+  | "college-photos";
 
 export async function beat(job: Job, ok: boolean, error?: string, log?: { warn: (o: object, m?: string) => void }) {
   const svc = serviceClient();
