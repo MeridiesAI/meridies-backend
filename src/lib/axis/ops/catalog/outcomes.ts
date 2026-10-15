@@ -482,7 +482,12 @@ export const recommendations: OpGroup = {
       reply: (body) =>
         listReply(
           asArray(body),
-          (r) => `id ${str(r.id)}: [${str(r.feature)}, ${str(r.status)}] ${untrusted(r.title, "research")}${r.why ? ` · why: ${untrusted(r.why, "research")}` : ""}`,
+          (r) => {
+            // A repeat of another row (lib/research/repeats.ts): the newest copy stands for it, or it was accepted before.
+            const rep = asRecord(r.repeatOf);
+            const repeat = rep.id ? ` · ${rep.status === "accepted" ? "already accepted as" : "repeat of"} ${str(rep.id)}` : "";
+            return `id ${str(r.id)}: [${str(r.feature)}, ${str(r.status)}${repeat}] ${untrusted(r.title, "research")}${r.why ? ` · why: ${untrusted(r.why, "research")}` : ""}`;
+          },
           "No recommendations for this student."
         ),
     }),
