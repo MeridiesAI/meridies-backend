@@ -24,6 +24,16 @@ const envSchema = z.object({
   // import sweep. Off unless "true": counselors can't act on held data until
   // the "Ready to apply" page ships.
   IMPORT_HOLD_EXPIRY_ENABLED: blankIsUnset(z.enum(["true", "false"]).optional()),
+  // Who sees the step-2 Import page (upload, mapping, review). "pilot" (the
+  // default) opens it only to the practices in IMPORTS_PILOT; "all" to every
+  // approved counselor; "off" to nobody. "Ready to apply" is never gated.
+  IMPORTS_ROLLOUT: blankIsUnset(z.enum(["off", "pilot", "all"]).default("pilot")),
+  // Comma-separated practice ids: a firm's id, or a solo counselor's own
+  // profile id. Changing it needs a redeploy.
+  IMPORTS_PILOT: blankIsUnset(z.string().max(4000).optional()),
+  // Kill switch for the AI column mapping. "off" leaves header presets,
+  // saved templates and the counselor's own mapping.
+  IMPORTS_AI: blankIsUnset(z.enum(["on", "off"]).default("on")),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
   // Test double for research (no model, no web). Works only with NODE_ENV
