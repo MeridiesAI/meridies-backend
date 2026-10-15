@@ -14,7 +14,8 @@
     "lint": "tsc --noEmit",
     "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
     "test:integration": "node --test test/integration/*.test.mjs",
-    "test:imports-load": "node test/integration/imports-load.mjs"
+    "test:imports-load": "node test/integration/imports-load.mjs",
+    "seed:e2e": "node scripts/seed/e2e-stack.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
