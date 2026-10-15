@@ -382,10 +382,9 @@ export default async function importRoutes(app: FastifyInstance) {
         const typed = want ? normalizeName(body.confirmName ?? "") : (body.confirmName ?? "").trim().toLocaleLowerCase();
         const expected = want || entry.studentName.trim().toLocaleLowerCase();
         if (typed === "" || typed !== expected) {
-          return reply.code(409).send({
-            code: "name-confirmation-required",
-            message: `The account is ${entry.studentName}, but the file says ${entry.importedName}. Type ${entry.studentName} to confirm.`,
-          });
+          const sentence = `The account is ${entry.studentName}, but the file says ${entry.importedName}. Type ${entry.studentName} to confirm.`;
+          // `error` is the shape every client reads; `message` stays for older callers.
+          return reply.code(409).send({ error: sentence, code: "name-confirmation-required", message: sentence });
         }
       }
 

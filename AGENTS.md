@@ -1470,7 +1470,9 @@ step 1's and is never gated.
   isolated, so it never fails the sweep's heartbeat. The 30-day expiry of
   accepted, waiting data and its warnings stay behind the flag.
 - **Ready to apply** carries each student's current `gpaScale`, and
-  dismissing an entry (every change `reject`) needs no typed name.
+  dismissing an entry (every change `reject`) needs no typed name. The
+  name check's 409 (`name-confirmation-required`) carries its sentence as
+  `error`, the shape every client reads (and as `message`).
 - **Not built** (v1.0): AI cell cleanup; pausing invitations on bounce or
   complaint rates (§6.5) and the §12 metrics (counts are in `stats` and
   `job_result`); PDFs (v1.1); direct Google Sheets; shared starter templates;
