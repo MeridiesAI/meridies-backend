@@ -339,7 +339,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These fourteen files are merged ahead of production's database on purpose: the code was written to
+These nineteen files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -372,8 +372,13 @@ set's own section below says what it does and how to check it.
 | 12 | `20261023080001_college_stats_scorecard_more.sql` | College Scorecard figures |
 | 13 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
 | 14 | `20261024000011_meeting_calendar_owner_guard.sql` | Meeting owner and calendar pointer guard (security) |
+| 15 | `20261024000021_firm_membership_writes.sql` | RLS and ownership |
+| 16 | `20261024000022_student_files_ownership.sql` | RLS and ownership |
+| 17 | `20261024000023_invitation_accept_state.sql` | RLS and ownership |
+| 18 | `20261024000024_student_message_recipients.sql` | RLS and ownership |
+| 19 | `20261024000025_profile_archive_counselor_only.sql` | RLS and ownership |
 
-(Fourteen files in seven sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
+(Nineteen files in eight sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
@@ -382,7 +387,7 @@ satisfies both. No function, policy or trigger is defined in two of these files;
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all fourteen:
+After all nineteen:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -391,6 +396,31 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 and `node --test test/integration/approval-db.test.mjs` against a staging copy finds the approval gate
 on every new table.
+
+---
+
+## RLS and ownership: `20261024000021`-`25`
+
+Closes table-level paths a signed-in user could take straight through PostgREST (AGENTS.md:
+"Only `accept_invitation()` marks an invitation accepted", the composer, "Firm teams", "Documents
+and AI context", "A student can't archive or restore themselves"). Each file is independent of the
+others and of the sets above, and safe for the build that is serving: the API never made any of the
+writes these files refuse. Nothing is deleted; rows planted before them stay, and each file's header
+has a read-only audit query. They change grants, policies, triggers and one function body
+(`private.deliverables_sync_intake_request`, now also requiring the task's student to be the one who
+accepted the invitation).
+
+Check:
+
+```sql
+select count(*) from information_schema.role_table_grants
+ where table_schema = 'public' and table_name = 'firm_members' and grantee = 'authenticated'
+   and privilege_type in ('INSERT','UPDATE','DELETE');                                 -- 0
+select count(*) from pg_trigger where tgname in ('invitations_guard_client', 'deliverables_guard_intake_link',
+  'student_messages_guard_client', 'profiles_guard_self_archive');                     -- 4
+```
+
+and `node --test test/integration/ownership-rls.test.mjs` against a staging copy.
 
 ---
 

@@ -193,8 +193,9 @@ match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 pipeline step 2 (`20261023020001`-`03`), caseload transfer
 (`20261023030001`-`03`), campus photos (`20261023070001`), the extended
 College Scorecard columns (`20261023080001`), emailed meeting invites
-(`20261023090001`) and the meeting owner guard (`20261024000011`, a security
-fix that depends only on applied files and can go in ahead of the rest). They go in later, in filename order
+(`20261023090001`), the meeting owner guard (`20261024000011`, a security
+fix that depends only on applied files and can go in ahead of the rest) and
+the RLS and ownership fixes (`20261024000021`-`25`, below). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -240,6 +241,20 @@ Two things the database enforces that the API must not be trusted to:
   grant was dropped and re-issued per column. Role changes go through
   `confirm_user_role()`, which succeeds exactly once. Same for `counselor_id`,
   which only `accept_invitation()` writes.
+- **Only `accept_invitation()` marks an invitation accepted**
+  (`20261024000023`). The client UPDATE grant on `invitations` covers what
+  the app edits (status, the New student card's fields, intake requests,
+  `dismissed_at`, `confirmed_at`, `submitted_at`), and
+  `private.invitations_guard_client` lets a client move status only
+  pending -> revoked, set `confirmed_at` only once accepted and
+  `submitted_at` only back to null, and insert only a pending row. The API
+  doesn't trust an accepted state either: `PATCH /invites/:id` acts on an
+  acceptance (receive, send back, confirm) only when the accepted profile is
+  a student on the caller's roster (`acceptedStudentOnRoster`), so it holds
+  on a database without the migration. A task's
+  `intake_invitation_id` / `intake_request_id` are written only by
+  `sync_intake_tasks`, and the sync back touches only an invitation the
+  task's own student accepted.
 - **Invitation tokens can't be enumerated.** Counselors invite students by email
   (`routes/invites.ts` → Resend via `lib/email.ts`); the emailed link carries an
   unguessable token. There is no SELECT policy that exposes a pending invite to
@@ -327,6 +342,15 @@ forget it.
   not archived, parents still switched on, each guardian still on file with
   alerts on and the same address, an alert still clear of the throttle.
   Anything unreadable holds the send; a refusal cancels it with the reason.
+  A row is not proof the route wrote it, so dispatch keeps only recipients
+  the composer would have resolved itself (`allowedRecipients`): the student
+  by id at their contact email (else login email) or phone on file, or a
+  guardian of this student still receiving messages at the same address;
+  it sends to the addresses on file, never the row's. In the database
+  (`20261024000024`) a client insert must name exactly such recipients and
+  start `queued` or `scheduled`; a client update moves status only
+  scheduled -> cancelled or queued -> sent | failed | cancelled, and
+  `scheduled_for` is the dispatch cron's alone.
   A composer alert counts toward the parent-alert throttle, so the sweep can't
   send a second alert right behind a hand-written one.
 - **`student_private_notes` is counselor-only both ways**, the same reasoning
@@ -528,6 +552,11 @@ the database (`20261010*`):
   `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (counselor).
   Tracker verdicts are counselor and service-role writes only; a student
   could write one through PostgREST before this migration.
+- **A student can't archive or restore themselves.** Archiving takes a
+  student out of the escalation sweep, scheduled parent messages and
+  reminders, so `archived` on `PATCH /students/:id` is a counselor's, about
+  someone else (`canArchive`), and `private.profiles_guard_self_archive`
+  refuses a client write of one's own `archived_at` (`20261024000025`).
 - **Preferences are the student's, alerts are not.** `student_preferences`
   (banner, theme, the student's own text/email reminder channels) is
   student-written and counselor-readable; `student_alert_prefs` stays
@@ -1289,6 +1318,15 @@ layer below). Students don't see waived recommendation letters, IEP/504 or
 counselor-only documents they didn't upload (`documents_student_restricted_select`),
 nor the task-document links of those files (`deliverable_documents_student_restricted_select`),
 nor their names in the activity log (the upload's `progress_events` row omits the filename).
+A document or link names no student or one the caller can edit
+(`private.can_edit_student`), and a new one lands unfiled, in one of the
+caller's folders, or in the student folder of a student they can edit; a
+client creates only plain folders under a parent of their own, and can't
+point a folder at a student they can't edit (restrictive policies,
+`20261024000022`; the routes check the same in code). Owning the row was
+enough before, so any approved counselor could plant a "transcript" with
+their own parsed text on another practice's student, where its counselor's
+Files and the AI context layer read it.
 Only a counselor sets `aiAccess` and `ferpaWaived`, on create and on patch: the
 route answers 403 to anyone else, and the `documents_guard_student_restricted`
 trigger refuses a student's write of either, also through PostgREST. The same
@@ -1915,6 +1953,14 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `?releaseStudents=true`). Routes: `/firms`, `/firms/mine/{members,invites}`,
   `/firms/mine/caseload-policy`, `/firms/join`. Invitation tokens are stored
   as sha256 only; the app page for the link is `/join-firm/<token>`.
+  `firm_members` is read-only to clients (no insert, update or delete grant,
+  no write policy), and a client updates only a firm's branding columns
+  (`name`, `website`, `logo_url`, `logo_updated_at`, `banner_url`, the
+  accent): `owner_id`, `seats` and `plan` change only inside those functions,
+  and a client inserts no firm row (`create_firm` makes it;
+  `20261024000021`). A firm_members row is what makes someone a member to
+  `firm_consultant_students`, `can_assign_work` and the staff blast, so it
+  must never be writable by an admin directly.
 - **Guardians.** A student may add a guardian, but one they add starts with
   `alerts_enabled = false`, and only the counselor side changes or removes a
   guardian (`private.can_manage_guardians`). Otherwise a student could redirect
@@ -1983,7 +2029,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   child process, profile and masking, sensitive values, the plan and presets,
   the AI mapping with its spend, rows and matching, values, rollout),
   meeting invites (`ics`, `meeting-invites`, `email-attachments`,
-  `delivery-insert`), the meeting calendar owner rule (`meeting-calendar`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  `delivery-insert`), the meeting calendar owner rule (`meeting-calendar`),
+  the ownership checks in code (`ownership-guards`:
+  who archives, which acceptance is trusted, which frozen recipients a
+  scheduled message may still reach), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
@@ -1994,6 +2043,9 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   and rule, against held imports, and the backfill),
   `meeting-invites` (emailed calendar invites), `meeting-calendar-owner`
   (forged owners and calendar pointers, read-only collaborators), `college-photos`,
+  `ownership-rls` (each table-level path a signed-in user could take
+  straight through PostgREST, tried as the attacker, beside the path that
+  still works),
   `college-official` (the federal figures on extras and Compare, on the rows
   the fixture load writes, and a failing Scorecard heartbeat), the
   approval gate (`approval-db`, `approval-api`, `approval-review`,

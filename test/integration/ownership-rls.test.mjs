@@ -186,7 +186,9 @@ const attackerStudent = await studentOf(attacker, "own-attacker-student");
 
   // A link that got in anyway (before the guard) can't tick the other invitation.
   const task = await one(`with d as (insert into public.deliverables (student_id, kind, title, status, source, created_by, intake_invitation_id, intake_request_id)
-    values ('${attackerStudent.id}', 'document', 'Transcript', 'in-progress', 'counselor', '${attacker.id}', '${vInv}', 't1') returning id) select id from d`);
+    values ('${attackerStudent.id}', 'document', 'Transcript', 'in-progress', 'counselor', '${attacker.id}', '${vInv}', 't1')
+    on conflict (intake_invitation_id, intake_request_id) where intake_invitation_id is not null do update set status = 'in-progress'
+    returning id) select id from d`);
   await rest(attacker.token, "PATCH", `/rest/v1/deliverables?id=eq.${task}`, { status: "complete", progress_pct: 100 });
   check("...and completing such a task doesn't tick the victim's request", (await one(`select coalesce((intake_requests->0->>'provided'), 'false') from public.invitations where id = '${vInv}'`)) === "false");
   const relink = await rest(attacker.token, "PATCH", `/rest/v1/deliverables?id=eq.${task}`, { intake_request_id: "t2" });
