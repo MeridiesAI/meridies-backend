@@ -78,7 +78,7 @@ async function counselorOf(request: FastifyRequest) {
 async function overview(request: FastifyRequest, info?: StudentInfo) {
   const me = request.auth.userId;
   const [card, counselor, preferences] = await Promise.all([
-    info ? Promise.resolve(info) : loadStudentInfo(request.db, me),
+    info ? Promise.resolve(info) : loadStudentInfo(request.db, me, request.log),
     counselorOf(request),
     loadPreferences(request.db, me),
   ]);

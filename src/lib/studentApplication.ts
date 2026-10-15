@@ -237,7 +237,19 @@ export const TIMINGS = ["school", "break", "year"] as const;
 export const RECOGNITION = ["school", "state-regional", "national", "international"] as const;
 export const UC_LEVELS = ["school", "city-community", "state", "regional", "national", "international"] as const;
 
-export function toSheetActivity(r: Row) {
+/** Where a sheet row came from: typed on the sheet, the questionnaire, an import, or Profile Update. */
+export type SheetSource = "manual" | "intake" | "import" | "ai";
+const SOURCES: readonly string[] = ["manual", "intake", "import", "ai"];
+const sourceOf = (v: unknown): SheetSource => (SOURCES.includes(str(v)) ? (str(v) as SheetSource) : "manual");
+
+/**
+ * `fromQuestionnaire` is set only where the caller read intake_fills
+ * (GET /application/sheets): true while the row still holds exactly what the
+ * questionnaire wrote. `source` says where the row started, edited or not.
+ */
+type SheetOpts = { fromQuestionnaire?: boolean };
+
+export function toSheetActivity(r: Row, opts: SheetOpts = {}) {
   const timing = arr(r.timing)[0]?.toLowerCase() ?? null;
   return {
     id: str(r.id),
@@ -254,10 +266,12 @@ export function toSheetActivity(r: Row) {
     ucOrgDescription: str(r.uc_org_description),
     ucDescription: str(r.uc_description),
     sortOrder: nnum(r.sort_order) ?? 0,
+    source: sourceOf(r.source),
+    ...(opts.fromQuestionnaire === undefined ? {} : { fromQuestionnaire: opts.fromQuestionnaire }),
   };
 }
 
-export function toSheetHonor(r: Row) {
+export function toSheetHonor(r: Row, opts: SheetOpts = {}) {
   return {
     id: str(r.id),
     title: str(r.name),
@@ -268,6 +282,8 @@ export function toSheetHonor(r: Row) {
     ucEligibility: str(r.uc_criteria),
     ucAchievement: str(r.uc_earned),
     sortOrder: nnum(r.sort_order) ?? 0,
+    source: sourceOf(r.source),
+    ...(opts.fromQuestionnaire === undefined ? {} : { fromQuestionnaire: opts.fromQuestionnaire }),
   };
 }
 

@@ -14,11 +14,12 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { FastifyRequest } from "fastify";
+import type { FastifyBaseLogger, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { rankPercentile, type RankRead } from "./classRank.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "./errors.js";
 import { fourPointGpa } from "./gpa.js";
+import { loadIntakeFills, questionnaireFields, type QuestionnaireField } from "./intakeFills.js";
 import { toRankBand } from "./serialize.js";
 
 type Row = Record<string, unknown>;
@@ -78,10 +79,20 @@ export type StudentInfo = {
   intendedMajors: string[];
   /** Schools on the college list (read-only beside Academics). */
   applications: number;
+  /**
+   * The values above that came from the student's onboarding questionnaire
+   * and still hold what it wrote (`lib/intakeFills.ts`). Empty without the
+   * migration.
+   */
+  fromQuestionnaire: QuestionnaireField[];
 };
 
-export async function loadStudentInfo(db: SupabaseClient, studentId: string): Promise<StudentInfo | null> {
-  const [profile, details, academics, guardians, colleges] = await Promise.all([
+export async function loadStudentInfo(
+  db: SupabaseClient,
+  studentId: string,
+  log?: FastifyBaseLogger
+): Promise<StudentInfo | null> {
+  const [profile, details, academics, guardians, colleges, fills] = await Promise.all([
     db
       .from("profiles")
       .select("id, full_name, email, phone, high_school, high_school_id, grad_year")
@@ -97,6 +108,7 @@ export async function loadStudentInfo(db: SupabaseClient, studentId: string): Pr
       .order("created_at", { ascending: true })
       .limit(1),
     db.from("student_colleges").select("id", { count: "exact", head: true }).eq("student_id", studentId),
+    loadIntakeFills(db, studentId, log),
   ]);
 
   if (profile.error) throw fromPostgrest(profile.error);
@@ -151,6 +163,7 @@ export async function loadStudentInfo(db: SupabaseClient, studentId: string): Pr
     rigor: s(a.rigor_context),
     intendedMajors: Array.isArray(d.intended_majors) ? (d.intended_majors as unknown[]).map(String) : [],
     applications: colleges.count ?? 0,
+    fromQuestionnaire: questionnaireFields(fills),
   };
 }
 
@@ -351,7 +364,7 @@ export async function applyInfoPatch(
     }
   }
 
-  const info = await loadStudentInfo(db, student);
+  const info = await loadStudentInfo(db, student, request.log);
   if (!info) throw notFound("That student isn't on your roster");
   return info;
 }

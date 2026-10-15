@@ -13,6 +13,9 @@ import { limit } from "../lib/limits.js";
 import { toMeridiesUser } from "../lib/serialize.js";
 import { serviceClient } from "../lib/supabase.js";
 
+/** The same bound as an intake configuration (routes/intake.ts). */
+const MAX_PROFILE_CHARS = 200_000;
+
 const updateMeSchema = z
   .object({
     fullName: z.string().trim().min(1).max(200),
@@ -26,8 +29,12 @@ const updateMeSchema = z
     highSchool: z.string().trim().max(200),
     gradYear: z.string().trim().max(10),
     // Free-form intake answers. Merged, not replaced, so a partial save can
-    // never wipe answers the client didn't happen to send.
-    profile: z.record(z.unknown()),
+    // never wipe answers the client didn't happen to send. Bounded: a save of
+    // profile.intakeAnswers runs the questionnaire sync in the database
+    // (20261023010002), so nobody parks a megabyte here.
+    profile: z
+      .record(z.unknown())
+      .refine((p) => JSON.stringify(p).length <= MAX_PROFILE_CHARS, "Profile is too large"),
   })
   .partial()
   .strict();

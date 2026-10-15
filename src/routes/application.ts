@@ -20,6 +20,7 @@ import { registerCollection } from "../lib/collection.js";
 import { readDocumentText } from "../lib/documentText.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
+import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
 import { getRemoteFile, exportGoogleDocText } from "../lib/suiteApi.js";
 import {
@@ -1061,15 +1062,22 @@ export default async function applicationRoutes(app: FastifyInstance) {
     async (request) => {
       const q = studentQuery.parse(request.query);
       const studentId = await resolveStudentId(request, q.studentId, "view");
-      const [activities, honors] = await Promise.all([
+      const [activities, honors, fills] = await Promise.all([
         request.db.from("activities").select("*").eq("student_id", studentId).order("sort_order").order("created_at").limit(100),
         request.db.from("awards").select("*").eq("student_id", studentId).order("sort_order").order("created_at").limit(100),
+        loadIntakeFills(request.db, studentId, request.log),
       ]);
       if (activities.error) throw fromPostgrest(activities.error);
       if (honors.error) throw fromPostgrest(honors.error);
+      const fromQActivities = questionnaireRowIds(fills, "activities");
+      const fromQHonors = questionnaireRowIds(fills, "awards");
       return {
-        activities: (activities.data ?? []).map((r) => toSheetActivity(r as Row)),
-        honors: (honors.data ?? []).map((r) => toSheetHonor(r as Row)),
+        activities: (activities.data ?? []).map((r) =>
+          toSheetActivity(r as Row, { fromQuestionnaire: fromQActivities.has(String((r as Row).id)) })
+        ),
+        honors: (honors.data ?? []).map((r) =>
+          toSheetHonor(r as Row, { fromQuestionnaire: fromQHonors.has(String((r as Row).id)) })
+        ),
       };
     }
   );

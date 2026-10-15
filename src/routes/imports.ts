@@ -34,6 +34,8 @@ type HeldChange = {
   op: "set_field" | "insert_row";
   newValue: unknown;
   currentValue: unknown;
+  /** "intake" when the current value is still what the student's questionnaire wrote (20261023010003). */
+  currentSource?: "intake" | null;
   defaultDecision: "accept" | "keep_old";
 };
 
