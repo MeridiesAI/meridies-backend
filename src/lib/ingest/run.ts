@@ -46,8 +46,9 @@ export async function startScorecardIngest(
   const done = runScorecardIngest(svc, scorecardFetcher(env.SCORECARD_API_KEY), log, { trigger, ...opts })
     .then(async (outcome) => {
       log.info({ ...outcome, errors: outcome.errors.length }, "scorecard ingest: finished");
-      // A degraded run (extended fields refused, or their columns missing) is
-      // not clean: it would repeat every month, so /internal/status shows it.
+      // A degraded run (extended fields refused) is not clean: it would repeat
+      // every month, so /internal/status shows it. Columns that wait on an
+      // unapplied migration (`pending`) are expected, not degraded.
       const clean = outcome.status !== "failed" && outcome.degraded.length === 0;
       await beat("scorecard-ingest", clean, outcome.degraded[0] ?? outcome.errors[0], log as never);
       return outcome;

@@ -645,10 +645,17 @@ export type IngestOutcome = {
   errors: string[];
   /**
    * Why the run loaded less than it should every time, not a passing fault:
-   * Scorecard refused extended fields, or college_stats lacks their columns.
-   * Also the first entries of `errors`. A run with any is not a clean heartbeat.
+   * Scorecard refused extended fields. Also the first entries of `errors`. A
+   * run with any is not a clean heartbeat.
    */
   degraded: string[];
+  /**
+   * What waits on a migration that isn't applied yet (college_stats without
+   * 20261023080001's columns). Expected while the migration is held back, so it
+   * is neither an error nor degraded: the run loads every older figure exactly
+   * as before and stays clean, and /internal/status does not alert on it.
+   */
+  pending: string[];
 };
 
 export async function runScorecardIngest(
@@ -701,9 +708,10 @@ export async function runScorecardIngest(
     degraded.push(`Scorecard refused extended fields (${refused.join(", ")}); loaded without them`);
     log.error({ refused: refused.map((g) => [g, ...EXTENDED_FIELD_GROUPS[g as keyof typeof EXTENDED_FIELD_GROUPS]]) }, "scorecard ingest: extended fields refused");
   }
+  const pending: string[] = [];
   if (extendedColumnsMissing) {
-    degraded.push("college_stats lacks the extended columns; apply migration 20261023080001");
-    log.error({}, "scorecard ingest: college_stats extended columns missing; apply 20261023080001");
+    pending.push("college_stats lacks the extended columns until migration 20261023080001 is applied; loaded without them");
+    log.warn({}, "scorecard ingest: college_stats extended columns missing; loaded without them until 20261023080001 is applied");
   }
   errors.unshift(...degraded);
   const status: IngestOutcome["status"] = errors.length === 0 ? "succeeded" : upserted > 0 ? "partial" : "failed";
@@ -720,5 +728,5 @@ export async function runScorecardIngest(
       })
       .eq("id", runId);
   }
-  return { runId, status, upserted, skipped, pages, errors, degraded };
+  return { runId, status, upserted, skipped, pages, errors, degraded, pending };
 }

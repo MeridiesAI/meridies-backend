@@ -537,9 +537,9 @@ Apply after every earlier file, the same way. It adds columns to `college_stats`
 and deletes nothing; no new table, so no new policies (the table keeps its
 select policy, its approval gate and service-role-only writes). Either order is
 safe: before it, the profile serves the new figures as null, and the Scorecard
-load writes every older figure, records the run as degraded and leaves the
-`scorecard-ingest` heartbeat not clean, so `GET /internal/status` reports the
-job as failing until this is applied and the load has run again.
+load writes every older figure exactly as before (the run ends `succeeded`,
+the missing columns logged as a warning, the heartbeat clean), so nothing
+alerts while the file is held back.
 
 | # | File | What it does |
 |---|---|---|

@@ -334,20 +334,24 @@ test("run: a clean load is clean", async () => {
   const out = await runScorecardIngest(svc.client, onePage, quiet);
   assert.equal(out.status, "succeeded");
   assert.deepEqual(out.degraded, []);
+  assert.deepEqual(out.pending, []);
   assert.equal(out.upserted, 2);
 });
 
-test("run: missing columns load the rest and say so", async () => {
+test("run: missing columns (migration not applied) load the rest and stay clean", async () => {
   resetStatsColumnCache();
   const svc = catalog({ statsColumns: false });
   const out = await runScorecardIngest(svc.client, onePage, quiet);
   assert.equal(out.upserted, 2);
-  assert.equal(out.status, "partial");
-  assert.equal(out.degraded.length, 1);
-  assert.match(out.degraded[0]!, /20261023080001/);
-  assert.equal(out.errors[0], out.degraded[0]);
+  // Production runs without 20261023080001 until it is applied: the load must
+  // look exactly as it did before the lane, with no alert on /internal/status.
+  assert.equal(out.status, "succeeded");
+  assert.deepEqual(out.degraded, []);
+  assert.deepEqual(out.errors, []);
+  assert.equal(out.pending.length, 1);
+  assert.match(out.pending[0]!, /20261023080001/);
   const runUpdate = svc.calls.find((c) => c.table === "ingest_runs" && c.ops[0]?.[0] === "update")!;
-  assert.equal((runUpdate.ops[0]![1][0] as Raw).status, "partial");
+  assert.equal((runUpdate.ops[0]![1][0] as Raw).status, "succeeded");
   resetStatsColumnCache();
 });
 

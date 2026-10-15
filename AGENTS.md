@@ -627,14 +627,18 @@ data dictionary or the field list of Scorecard's own site), and `npm test`
 fails on a requested field with no entry. The API answers 400 to a request
 naming any unknown field, so on the first 400 the fetcher asks for the base
 fields alone (a 400 there is a real failure), then base plus each group, and
-loads without the groups it refuses. Without the migration, the college_stats
-upsert is retried without the new columns (`upsertStats`, the
-`deliveryInsert.ts` pattern, five-minute memory). Either is a **degraded** run:
+loads without the groups it refuses. A refused group is a **degraded** run:
 it ends `partial` with the reason first in `errors`, logs at error level, and
 its heartbeat is not clean, so `/internal/status` lists `scorecard-ingest` as
 failing every month until it is fixed, instead of counting a load that never
-fills the new columns as clean. The migration is not in `REQUIRED_SCHEMA`. After
-applying it, run the load once.
+fills the new columns as clean. Without the migration, the college_stats
+upsert is retried without the new columns (`upsertStats`, the
+`deliveryInsert.ts` pattern, five-minute memory). That is expected while the
+migration is held back, so it is not degraded: the run loads every older
+figure as before, ends `succeeded` with the reason in `pending` (logged as a
+warning), and its heartbeat stays clean, so production's monitoring doesn't
+change until the migration is applied. The migration is not in
+`REQUIRED_SCHEMA`. After applying it, run the load once.
 
 Rules: a row Meridies curated (`catalog_source = 'meridies'`) keeps its name,
 slug, aliases, colours, deadlines and test policy; official data fills facts
