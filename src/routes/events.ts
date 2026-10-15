@@ -27,6 +27,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { hasAnthropic } from "../env.js";
 import { runWebResearch } from "../lib/anthropic.js";
@@ -89,9 +90,12 @@ const LISTING_COLUMNS = "*";
 async function collegesById(request: FastifyRequest, ids: string[]): Promise<Map<string, CollegeRef>> {
   const unique = [...new Set(ids.filter(Boolean))];
   if (!unique.length) return new Map();
-  const { data, error } = await request.db.from("colleges").select("id, slug, name, aka").in("id", unique);
+  const [{ data, error }, photos] = await Promise.all([
+    request.db.from("colleges").select("id, slug, name, aka").in("id", unique),
+    loadCollegePhotos(request.db, unique, request.log),
+  ]);
   if (error) throw fromPostgrest(error);
-  return new Map(((data ?? []) as Row[]).map((r) => [String(r.id), toCollegeRef(r)]));
+  return new Map(((data ?? []) as Row[]).map((r) => [String(r.id), toCollegeRef(r, photos)]));
 }
 
 async function savesFor(request: FastifyRequest, eventIds: string[]): Promise<Map<string, SavedState>> {

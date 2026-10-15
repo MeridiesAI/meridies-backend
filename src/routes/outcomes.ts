@@ -11,6 +11,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { assertCanEditStudent, assertCanViewStudent, requireRole } from "../lib/guards.js";
 import { fourPointGpa } from "../lib/gpa.js";
@@ -283,7 +284,7 @@ const ALUMNI_SELECT =
   "student:profiles!alumni_records_student_id_fkey(full_name, avatar_url, grad_year, high_school, email), " +
   "college:colleges(id, name, slug, initials, brand_color, city, state)";
 
-function toAlum(r: Row) {
+function toAlum(r: Row, photos: Map<string, CollegePhotoRow> = new Map()) {
   const s = (r.student ?? {}) as Row;
   const c = r.college as Row | null;
   return {
@@ -304,12 +305,18 @@ function toAlum(r: Row) {
           brandColor: c?.brand_color ? String(c.brand_color) : null,
           city: c?.city ? String(c.city) : null,
           state: c?.state ? String(c.state) : null,
+          photo: c ? toCollegePhoto(photos.get(String(c.id)), String(c.name ?? r.institution_name)) : null,
         }
       : null,
     program: r.program ? String(r.program) : null,
     outcomeId: r.outcome_id ? String(r.outcome_id) : null,
     createdAt: String(r.created_at),
   };
+}
+
+/** The enrolled colleges' photos. Never throws: no photos is a card without one. */
+function alumPhotos(request: FastifyRequest, rows: Row[]) {
+  return loadCollegePhotos(request.db, rows.map((r) => (r.college_id as string | null) ?? null), request.log);
 }
 
 const alumPatch = z
@@ -334,7 +341,9 @@ export async function alumniRoutes(app: FastifyInstance) {
         .order("created_at", { ascending: false })
         .limit(1000);
       if (error) throw fromPostgrest(error);
-      return ((data ?? []) as unknown as Row[]).map(toAlum);
+      const rows = (data ?? []) as unknown as Row[];
+      const photos = await alumPhotos(request, rows);
+      return rows.map((r) => toAlum(r, photos));
     }
   );
 
@@ -356,7 +365,7 @@ export async function alumniRoutes(app: FastifyInstance) {
       if (o.error) throw fromPostgrest(o.error);
       outcomes = ((o.data ?? []) as unknown as Row[]).map(toOutcome);
     }
-    return { ...toAlum(data as unknown as Row), outcomes };
+    return { ...toAlum(data as unknown as Row, await alumPhotos(request, [data as unknown as Row])), outcomes };
   });
 
   /** Correct where an alum went (inline edit on the alumni page). */
@@ -380,7 +389,7 @@ export async function alumniRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That student isn't an alum yet");
-      return toAlum(data as unknown as Row);
+      return toAlum(data as unknown as Row, await alumPhotos(request, [data as unknown as Row]));
     }
   );
 }

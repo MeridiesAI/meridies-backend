@@ -3,7 +3,7 @@
 // college-photos bucket, a pending counselor reads nothing, and the database
 // refuses a non-free license on its own. Real accounts on a local Supabase
 // (see harness.mjs). No test here reaches Wikidata or Commons.
-import { user, check, sql, rest, SB, ANON, API, CRON_SECRET } from "./harness.mjs";
+import { user, call, check, sql, rest, SB, ANON, API, CRON_SECRET } from "./harness.mjs";
 
 const c = await user("counselor-photos");
 const s = await user("student-photos", "student");
@@ -93,3 +93,76 @@ if (held === "t") {
 } else {
   check("the test could take the photo lease", false, "skipped the 409 check rather than start a real run");
 }
+
+// ---- The loader on recorded answers, then every surface that shows a college ---------
+// The fixture run is the real store against this database and bucket, with
+// Wikidata and Commons replaced by test/fixtures/college-photos.
+const { execFileSync } = await import("node:child_process");
+const repo = new URL("../..", import.meta.url);
+let loaded = false;
+try {
+  execFileSync("npx", ["tsx", "scripts/ingest/college-photos.ts", "--fixture-dir", "test/fixtures/college-photos", "--picks", "test/fixtures/college-photos/picks.csv", "--only", "166683,243744,130794"], { cwd: repo, env: process.env, stdio: "pipe" });
+  loaded = true;
+} catch (err) {
+  console.log(String(err.stdout ?? ""), String(err.stderr ?? ""));
+}
+check("the fixture load runs", loaded);
+check("MIT has its Wikidata photo, Stanford the team's pick, Yale none",
+  (await sql(`select string_agg(c.slug || ':' || p.source, ',' order by c.slug) from college_photos p join colleges c on c.id = p.college_id where c.unitid in (166683, 243744, 130794)`)) === "mit:wikidata,stanford:pick");
+
+const stanford = await sql(`select id from colleges where unitid = 243744 limit 1`);
+const detail = await call(c.token, "GET", `/colleges/${mit}`);
+const photo = detail.body.photo;
+check("GET /colleges/:id carries the photo, both sizes", detail.status === 200 && /-1280\.jpg$/.test(photo?.url ?? "") && /-500\.jpg$/.test(photo?.thumbUrl ?? ""), JSON.stringify(photo));
+check("with the attribution", photo?.credit === "José & Co." && photo?.license === "CC BY-SA 4.0" && photo?.licenseUrl === "https://creativecommons.org/licenses/by-sa/4.0" && /^https:\/\/commons\.wikimedia\.org\//.test(photo?.sourceUrl ?? "") && photo?.title === "File:Great dome of MIT, Feb 2021.jpg");
+const img = await fetch(photo?.thumbUrl ?? "http://127.0.0.1:1/");
+check("the thumbnail is public: no token needed", img.status === 200 && (img.headers.get("content-type") ?? "").startsWith("image/jpeg"), `status ${img.status}`);
+const noPhoto = await call(c.token, "GET", `/colleges/${yale}`);
+check("a college without a photo says null", noPhoto.status === 200 && noPhoto.body.photo === null);
+
+const search = await call(c.token, "GET", `/colleges/search?q=${encodeURIComponent("Massachusetts Institute of Technology")}`);
+const hit = Array.isArray(search.body) ? search.body.find((r) => r.id === mit) : null;
+check("search cards carry the photo", /-500\.jpg$/.test(hit?.photo?.thumbUrl ?? ""), JSON.stringify(search.body).slice(0, 300));
+const slug = await call(s.token, "GET", `/colleges/slug/mit`);
+check("a card by slug carries it, for a student too", slug.status === 200 && slug.body.photo?.credit === "José & Co.");
+const cmp = await call(c.token, "GET", `/colleges/compare?ids=${mit},${yale}`);
+check("compare columns carry it, or null", cmp.status === 200 && cmp.body[0]?.college?.photo?.title === "File:Great dome of MIT, Feb 2021.jpg" && cmp.body[1]?.college?.photo === null);
+const credits = await call(c.token, "GET", `/colleges/photo-credits?limit=500`);
+check("the credits list names every photo with its full attribution", credits.status === 200 && credits.body.some((r) => r.collegeId === mit && r.photo.sourceUrl && r.photo.license), `status ${credits.status}`);
+const pendingCredits = await call(pending.token, "GET", `/colleges/photo-credits`);
+check("a pending counselor is refused", pendingCredits.status === 403, `status ${pendingCredits.status}`);
+
+// The student's college list: the board, and the rows add and update answer with.
+const token = `photos-${Date.now()}`;
+await sql(`insert into invitations (counselor_id, email, token, source) values ('${c.id}', '${s.email}', '${token}', 'single')`);
+const accepted = await fetch(`${SB}/rest/v1/rpc/accept_invitation`, {
+  method: "POST",
+  headers: { apikey: ANON, Authorization: `Bearer ${s.token}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ p_token: token }),
+});
+check("the student joins the roster", accepted.ok, `status ${accepted.status}`);
+const added = await call(c.token, "POST", `/application/college-list`, { studentId: s.id, collegeId: mit });
+check("adding a school answers with its photo", added.status === 201 && /-500\.jpg$/.test(added.body.collegePhoto?.thumbUrl ?? ""), JSON.stringify(added.body).slice(0, 300));
+const patched = await call(c.token, "PATCH", `/application/college-list/${added.body.id}`, { notes: "photo check" });
+check("an update keeps the photo", patched.status === 200 && patched.body.collegePhoto?.credit === "José & Co.");
+await call(c.token, "POST", `/application/college-list`, { studentId: s.id, collegeId: yale });
+const board = await call(s.token, "GET", `/application/college-list?studentId=${s.id}`);
+const rowFor = (id) => board.body.rows?.find((r) => r.collegeId === id);
+check("the board carries each school's photo, or null", board.status === 200 && rowFor(mit)?.collegePhoto?.title === "File:Great dome of MIT, Feb 2021.jpg" && rowFor(yale)?.collegePhoto === null, JSON.stringify(board.body).slice(0, 300));
+
+// Events: an MIT listing on the student's Events tab and the counselor's hub.
+const d = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
+await sql(`insert into hub_events (name, kind, host, start_date, start_time, end_time, time_zone, place, url, college_id, audience, source)
+  values ('MIT Info Session ${token}', 'virtual-visit', 'MIT', '${d(9)}', '19:00', '20:00', 'America/New_York', 'Online', 'https://mitadmissions.org/visit/', '${mit}', 'everyone', 'csv')`);
+const mine = await call(s.token, "GET", `/me/events`);
+const ev = (mine.body.forYourColleges ?? []).find((e) => e.name === `MIT Info Session ${token}`);
+check("the student's Events tab carries the college's photo", /-500\.jpg$/.test(ev?.college?.photo?.thumbUrl ?? ""), JSON.stringify(mine.body).slice(0, 300));
+const hub = await call(c.token, "GET", `/events`);
+const hubItems = JSON.stringify(hub.body);
+check("the Events Hub carries it too", hub.status === 200 && hubItems.includes(`MIT Info Session ${token}`) && hubItems.includes("-500.jpg"), `status ${hub.status}`);
+
+// Alumni: where an alum enrolled.
+await sql(`insert into alumni_records (student_id, counselor_id, cycle, college_id, institution_name) values ('${s.id}', '${c.id}', '2025-2026', '${mit}', 'Massachusetts Institute of Technology') on conflict (student_id) do nothing`);
+const alumni = await call(c.token, "GET", `/alumni`);
+const alum = Array.isArray(alumni.body) ? alumni.body.find((a) => a.studentId === s.id) : null;
+check("an alum's college carries its photo", alum?.institution?.photo?.credit === "José & Co.", JSON.stringify(alum));

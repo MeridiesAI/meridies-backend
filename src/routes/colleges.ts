@@ -14,6 +14,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { rankPercentile } from "../lib/classRank.js";
+import { loadCollegePhotos, toCollegePhoto } from "../lib/collegePhotos.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { escapeIlike } from "../lib/collegesV10.js";
 import { limit } from "../lib/limits.js";
@@ -113,6 +114,8 @@ export default async function collegeRoutes(app: FastifyInstance) {
 
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
+    // After the 404, so an unknown id costs no photo read. Never throws.
+    const photos = await loadCollegePhotos(request.db, [id], request.log);
 
     const cdsRows = (cds.data ?? []) as Row[];
     const latestCdsYear = cdsRows.length
@@ -122,6 +125,8 @@ export default async function collegeRoutes(app: FastifyInstance) {
 
     return {
       college: college.data,
+      /** The campus photo with its credit and license (lib/collegePhotos.ts); outside `college`, which is the raw row. */
+      photo: toCollegePhoto(photos.get(id), String((college.data as Row).name ?? "")),
       intel: intel.data ? toCollegeIntel(intel.data as Row) : null,
       admissionStats: stats.data ?? [],
       aidProfile: aid.data ?? null,

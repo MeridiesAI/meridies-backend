@@ -4,6 +4,7 @@
  * in meridies-app/lib/api.ts under "v10 sync: student-application".
  */
 
+import { toCollegePhoto, type CollegePhotoRow } from "./collegePhotos.js";
 import { currentCycle } from "./supplementDocs.js";
 
 type Row = Record<string, unknown>;
@@ -76,7 +77,11 @@ export function catalogDeadline(deadlines: unknown, round: string | null, cycle 
   return `${year}-${String(month + 1).padStart(2, "0")}-${String(Number(m[2])).padStart(2, "0")}`;
 }
 
-export function toListCollege(r: Row, supplementCounts: Map<string, number> = new Map()) {
+export function toListCollege(
+  r: Row,
+  supplementCounts: Map<string, number> = new Map(),
+  photos: Map<string, CollegePhotoRow> = new Map()
+) {
   const c = (r.college ?? null) as Row | null;
   const status = str(r.status) || "not-started";
   const collegeId = nstr(r.college_id);
@@ -85,6 +90,8 @@ export function toListCollege(r: Row, supplementCounts: Map<string, number> = ne
     id: str(r.id),
     collegeId,
     collegeSlug: c ? nstr(c.slug) : null,
+    /** The catalog college's campus photo (lib/collegePhotos.ts), or null. */
+    collegePhoto: collegeId ? toCollegePhoto(photos.get(collegeId), str(c?.name) || str(r.name)) : null,
     name: str(r.name),
     initials: str(r.initials) || initialsOf(str(r.name)),
     color: str(r.brand_color) || "#176b45",

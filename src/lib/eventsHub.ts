@@ -13,6 +13,8 @@
  * counselor-only rows (conferences, a practice's own listings) never reach them.
  */
 
+import { toCollegePhoto, type CollegePhoto, type CollegePhotoRow } from "./collegePhotos.js";
+
 type Row = Record<string, unknown>;
 
 const str = (v: unknown): string => (v == null ? "" : String(v));
@@ -61,11 +63,18 @@ export const PHOTO_KEYS = ["webinar", "webinar-desk", "conference", "college-fai
 export const CALENDAR_TARGETS = ["meridies", "google", "outlook", "apple"] as const;
 export const REMINDERS = ["none", "15m", "1h", "1d", "1w"] as const;
 
-export type CollegeRef = { id: string; slug: string; name: string; shortName: string };
+export type CollegeRef = { id: string; slug: string; name: string; shortName: string; photo: CollegePhoto | null };
 
-export const toCollegeRef = (r: Row): CollegeRef => {
+/** A college as an event card names it; `photos` from loadCollegePhotos, when the caller read them. */
+export const toCollegeRef = (r: Row, photos?: Map<string, CollegePhotoRow>): CollegeRef => {
   const aka = arr(r.aka);
-  return { id: str(r.id), slug: str(r.slug), name: str(r.name), shortName: aka[0] ?? str(r.name) };
+  return {
+    id: str(r.id),
+    slug: str(r.slug),
+    name: str(r.name),
+    shortName: aka[0] ?? str(r.name),
+    photo: toCollegePhoto(photos?.get(str(r.id)), str(r.name)),
+  };
 };
 
 /** "16:00:00" -> "16:00". */
