@@ -78,6 +78,7 @@ src/
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
+│   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
 │   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
@@ -355,6 +356,49 @@ the database (`20261010*`):
   `activities` or `awards` (`source = 'ai'`) plus a `profile_updates` log row
   the counselor reads at `GET /students/:id/profile-updates`. It never writes
   essay prose.
+- **The questionnaire fills the record** (`20261023010001`-`04`). The
+  onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
+  /auth/me`, the profile bounded at 200,000 characters), and a trigger on
+  that column (`private.sync_intake_answers`) copies every answer that has a
+  real field into it, through the import pipeline's own functions
+  (`import_value_ok`, `import_current_value`, the compare-and-set
+  `import_set_field`, `import_insert_row` with `source = 'intake'`): high
+  school (linked to the catalog on a unique name match), hometown, class
+  year, the GPA with its scale (never converted; 'Something else' fills
+  nothing) and its range as text ("3.7–3.99 unweighted", "4.5+ weighted (5.0
+  scale)"; none on a 100-point scale), class rank, test status, SAT sections
+  and total (the sum when only sections are given), ACT, AP/IB scores (an IB
+  exam's option reads on the IB scale), advanced courses (not the grade
+  level: `courses.grade` is the mark), activities (the type mapped onto
+  `ACTIVITY_TYPES`, anything else "Other Club/Activity"; text cut to the
+  sheet's limits), honors (keyed on name and year), first-gen and intended
+  majors. Rules: **fill only what is empty**; a re-saved questionnaire may
+  change a value (or take back a row, or a field whose answer is gone) only
+  while it is still exactly what the questionnaire wrote, compared by hash
+  in `intake_fills` the way import provenance compares; anything the
+  counselor, an import or the student edited elsewhere is never touched
+  again, and a cleared value or deleted row stays gone. Grouped fields move
+  together or not at all (GPA, scale and the other GPA column; the three
+  SAT figures; class rank and its value), and a student's GPA is never
+  written under a counselor's scale that doesn't match. Citizenship, aid
+  need, aid types, FAFSA status, country, English test and the background
+  note are copied nowhere: they stay in `profiles.profile.intakeAnswers`,
+  which no AI feature reads (`student_personal_details.citizenship` is on
+  the AI allowlist, so the questionnaire never fills it). Each group runs in
+  its own subtransaction and the save never fails because of the sync; a
+  `progress_events` row (`intake` / `edited`) names the fields changed and
+  why others were skipped, never a value. Held import data still wins: the
+  Ready to apply queue defaults a field the questionnaire filled (unchanged)
+  to accept and says `currentSource: "intake"`. The counselor sees what came
+  from the questionnaire: `fromQuestionnaire` on `GET /student-page/:id/info`
+  and `/me/overview` (info card keys still as the questionnaire left them)
+  and `source` plus `fromQuestionnaire` on each `GET /application/sheets`
+  row, read through `intake_filled_fields(p_student)` (`can_view_student`),
+  degrading to no marks without the migration. `20261023010004` backfilled
+  everyone who had answered; `select private.backfill_intake_answers();` (or
+  `('<student id>')`) re-runs it safely and skips archived students. Data
+  the student reports clears the matching setup steps (`lib/studentSetup.ts`)
+  like any other data, before the counselor has checked it.
 - **Files is "My documents".** A student lists, uploads into and pastes links
   into their own student folder only (`assertFileableFolder`, restrictive RLS).
 - **What the counselor asks for is the student's To-Do** (`20261012000001`).
@@ -1354,6 +1398,17 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - `request_held_apply` records each field's current value as `old_value`;
   `apply_held_item` compare-and-sets against it, so a value that changed
   while waiting is kept (`skipped_stale`).
+- **The questionnaire writes through the same functions** (see "The
+  questionnaire fills the record"). Since `20261023010001`, `import_fields`
+  also lists `profiles.high_school` / `hometown` / `grad_year`,
+  `student_academics.gpa_band` and award rows (25 entries), activity rows may
+  carry `timing`, `continuing` and `uc_description`, inserted activities and
+  awards go to the end of the sheet, and `import_insert_row` has a 4-argument
+  form taking the source (`'import'` or `'intake'`); the 3-argument form is
+  unchanged for the import's callers. `import_row_snapshot` keeps its
+  activity shape, because undo compares against snapshots stored at commit.
+  A value the questionnaire filled and nobody changed since defaults to
+  accept in the held queue (`private.intake_owns_current`).
 
 ## Safe coding standards
 
@@ -1429,12 +1484,15 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   `research-boot-guard`: the brief and identity filter, the citation keeper,
   the answer parser, the match validation and the boot check), the
   counselor approval gate (`access`, `access-review`, `service-callsites`),
+  the questionnaire sync's read side and activity-type list (`intake-sync`),
   and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and
-  hidden tasks), `research-api` (the routes, with the test double) and the
+  hidden tasks), `research-api` (the routes, with the test double),
+  `intake-sync` and `intake-held-backfill` (the questionnaire, every field
+  and rule, against held imports, and the backfill) and the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`). The harness's `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
