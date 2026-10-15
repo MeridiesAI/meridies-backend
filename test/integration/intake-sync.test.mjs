@@ -96,6 +96,25 @@ const eventCount = async (id) => Number(await sql(`select count(*) from public.p
   check("'4.5+' on a 6.0 scale reads well", (await acad(s.id)).gpa_band === "4.5+ weighted (6.0 scale)");
 }
 {
+  // Every range the questionnaire offers (meridies-app lib/aggregator.ts) reads as a phrase.
+  const want = {
+    "unweighted|4.0|4.0": "4.0 unweighted", "unweighted|3.7-3.99|4.0": "3.7–3.99 unweighted",
+    "unweighted|3.3-3.69|4.0": "3.3–3.69 unweighted", "unweighted|3.0-3.29|4.0": "3.0–3.29 unweighted",
+    "unweighted|2.5-2.99|4.0": "2.5–2.99 unweighted", "unweighted|below-2.5|4.0": "Below 2.5 unweighted",
+    "weighted|4.5+|5.0": "4.5+ weighted (5.0 scale)", "weighted|4.2-4.49|5.0": "4.2–4.49 weighted (5.0 scale)",
+    "weighted|4.0-4.19|6.0": "4.0–4.19 weighted (6.0 scale)", "weighted|3.7-3.99|5.0": "3.7–3.99 weighted (5.0 scale)",
+    "weighted|3.3-3.69|5.0": "3.3–3.69 weighted (5.0 scale)", "weighted|below-3.3|5.0": "Below 3.3 weighted (5.0 scale)",
+    "weighted|4.5+|100": null, "weighted|4.5+|": null, "unweighted|3.9|4.0": null,
+  };
+  let all = true;
+  for (const [k, v] of Object.entries(want)) {
+    const [t, b, sc] = k.split("|");
+    const got = await sql(`select coalesce(private.intake_gpa_band('${t}', '${b}', ${sc ? `'${sc}'` : "null"}), 'null')`);
+    if (got !== (v ?? "null")) { all = false; console.log(`  ${k} -> ${got}`); }
+  }
+  check("every GPA range option reads well, and none is written on a scale it can't be on", all);
+}
+{
   const s = await freshStudent();
   await save(s, { gpaType: "unweighted", gpaExact: "4.5" });
   check("an unweighted GPA above 4 is out of range and fills nothing", (await acad(s.id)).gpa_unweighted == null);

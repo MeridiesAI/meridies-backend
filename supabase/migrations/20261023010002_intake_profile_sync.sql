@@ -882,7 +882,7 @@ begin
       select min(ord) as first_ord, (array_agg(t order by ord))[1] as m
       from (select nullif(rtrim(left(btrim(regexp_replace(x #>> '{}', '\s+', ' ', 'g')), 200)), '') as t, ord
               from jsonb_array_elements(a -> 'intendedMajors') with ordinality as y(x, ord)
-             where jsonb_typeof(x) = 'string') z
+             where jsonb_typeof(x) = 'string' and ord <= 50) z
       where t is not null
       group by lower(t)
       order by min(ord)
