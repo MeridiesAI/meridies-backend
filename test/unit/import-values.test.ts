@@ -23,6 +23,19 @@ test("valueOk mirrors private.import_value_ok", () => {
     ["enum:gender", 5, false], ["row:test_score", { exam: "SAT" }, false],
     ["row:test_score", { exam: "SAT", kind: 5 }, false], ["row:course", { name: "x", type: 5 }, false],
     ["anything", "x", false], ["gpa", null, false],
+    // The questionnaire's targets (20261023010001), as imports-values.test.mjs checks them in SQL.
+    ["grad_year", "2027", true], ["grad_year", "27", false], ["grad_year", 2027, false], ["grad_year", " 2027", false],
+    ["row:award", { name: "National Merit Semifinalist", level: "National", year: "2025", recognition_levels: ["national"], uc_level: "national", grade_levels: ["11"] }, true],
+    ["row:award", { name: "X", recognition_levels: ["galactic"] }, false],
+    ["row:award", { name: "X", prize_money: "100" }, false],
+    ["row:award", { year: "2025" }, false],
+    ["row:award", { name: "X", grade_levels: ["13"] }, false],
+    ["row:award", { name: "X", uc_level: "planetary" }, false],
+    ["row:activity", { name: "Robotics", timing: ["school"], continuing: true, uc_description: "Built a robot." }, true],
+    ["row:activity", { name: "Robotics", timing: ["summer"] }, false],
+    ["row:activity", { name: "Robotics", timing: ["school", "break", "year", "school"] }, false],
+    ["row:activity", { name: "Robotics", continuing: "yes" }, false],
+    ["text:40", "3.7–3.99 unweighted", true],
   ];
   for (const [type, v, want] of cases) assert.equal(valueOk(type, v as never), want, `${type} ${JSON.stringify(v)}`);
 });
@@ -88,4 +101,12 @@ test("a test's kind comes from its name", () => {
   assert.equal(testKindOf("PSAT/NMSQT"), "other");
   assert.equal(testKindOf("ACT Composite"), "act");
   assert.equal(testKindOf("Duolingo"), "other");
+});
+
+test("a class year cleans from a number or a phrase, and nothing else", () => {
+  assert.deepEqual(cleanCell("grad_year", "2027"), { ok: true, value: "2027" });
+  assert.deepEqual(cleanCell("grad_year", "2027.0"), { ok: true, value: "2027" });
+  assert.deepEqual(cleanCell("grad_year", "Class of 2028"), { ok: true, value: "2028" });
+  assert.deepEqual(cleanCell("grad_year", "27"), { ok: false });
+  assert.deepEqual(cleanCell("grad_year", "1999"), { ok: false });
 });

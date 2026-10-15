@@ -56,7 +56,18 @@ export function findField(fields: FieldDef[], table: string, field: string): Fie
   return fields.find((f) => f.table === table && f.field === field);
 }
 
+/**
+ * import_fields rows the onboarding questionnaire writes through the same
+ * compare-and-set (20261023010001) that no spreadsheet column maps to: the
+ * GPA band is the questionnaire's own range answer (an import maps the GPA
+ * itself), and the profiles fields are the import's matching keys. The
+ * awards '*' row is outside ROW_TABLES for the same reason.
+ */
+export const QUESTIONNAIRE_ONLY: ReadonlySet<string> = new Set(["student_academics.gpa_band"]);
+
 /** Single-row fields a column may map to. */
 export function singleFields(fields: FieldDef[]): FieldDef[] {
-  return fields.filter((f) => (SINGLE_TABLES as readonly string[]).includes(f.table) && f.field !== "*");
+  return fields.filter(
+    (f) => (SINGLE_TABLES as readonly string[]).includes(f.table) && f.field !== "*" && !QUESTIONNAIRE_ONLY.has(`${f.table}.${f.field}`)
+  );
 }

@@ -106,3 +106,11 @@ test("a template applies sheet by sheet to a file with the same headers", () => 
   assert.deepEqual(again![0].columns.map((c) => c.target), plan.sheets[0].columns.map((c) => c.target));
   assert.ok(again![0].columns.every((c) => c.source === "template"));
 });
+
+test("the questionnaire's own targets aren't offered to a spreadsheet column", async () => {
+  const { singleFields } = await import("../../src/lib/imports/fields.js");
+  const names = singleFields(FIELDS).map((f) => `${f.table}.${f.field}`);
+  assert.ok(names.includes("student_academics.gpa_weighted"));
+  assert.ok(!names.includes("student_academics.gpa_band"));
+  assert.ok(!names.some((n) => n.startsWith("profiles.") || n.startsWith("awards.")));
+});

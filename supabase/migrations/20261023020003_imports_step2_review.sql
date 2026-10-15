@@ -137,13 +137,18 @@ begin
            old_value = case when op = 'set_field' and it.match_status in ('matched_email','confirmed')
                             then private.import_current_value(target_table, field, it.student_id) end
      where id = ch.id;
+    -- 'intake': the value is still exactly what the student's questionnaire
+    -- wrote (20261023010003), the same reading private.import_assess makes.
     update public.import_changes c
-       set old_source = case when c.op = 'insert_row' then null
-                             when private.import_absent(c.old_value) then 'empty' else 'student' end,
-           risk = private.import_risk(f.sensitivity,
-                    case when private.import_absent(c.old_value) then 'empty' else 'student' end,
-                    f.value_type, c.old_value, c.new_value, it.match_confidence)
+       set old_source = case when c.op = 'insert_row' then null else src.v end,
+           risk = private.import_risk(f.sensitivity, src.v, f.value_type, c.old_value, c.new_value, it.match_confidence)
       from public.import_fields f
+      cross join lateral (
+        select case when private.import_absent(c.old_value) then 'empty'
+                    when c.op = 'set_field'
+                         and private.intake_owns_current(it.student_id, c.target_table, c.field, c.old_value) then 'intake'
+                    else 'student' end as v
+      ) src
      where c.id = ch.id and f.target_table = c.target_table and f.field = c.field;
   end loop;
 

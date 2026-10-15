@@ -129,7 +129,9 @@ $$;
 
 -- Is this row already on the student's record (§4.3)? 'present' (the same
 -- keys import_insert_row refuses), 'similar' (shown as a possible duplicate,
--- never dropped or added silently), or null.
+-- never dropped or added silently), or null. The 'present' keys must stay
+-- equal to private.import_insert_row's (20261023010001, the questionnaire's
+-- lane): a change to one is a change to both.
 create or replace function private.import_row_presence(p_target text, p_student uuid, p_row jsonb)
 returns text
 language plpgsql
@@ -188,6 +190,26 @@ begin
       select 1 from public.activities a
       where a.student_id = p_student
         and regexp_replace(lower(coalesce(a.name, '')), '[^a-z0-9]+', '', 'g')
+          = regexp_replace(lower(coalesce(p_row ->> 'name', '')), '[^a-z0-9]+', '', 'g')
+    ) then
+      return 'similar';
+    end if;
+    return null;
+  elsif p_target = 'awards' then
+    -- The questionnaire's honors target (20261023010001): import_insert_row
+    -- refuses the same name and year.
+    if exists (
+      select 1 from public.awards w
+      where w.student_id = p_student
+        and lower(btrim(coalesce(w.name, ''))) = lower(btrim(coalesce(p_row ->> 'name', '')))
+        and nullif(btrim(w.year), '') is not distinct from nullif(btrim(p_row ->> 'year'), '')
+    ) then
+      return 'present';
+    end if;
+    if exists (
+      select 1 from public.awards w
+      where w.student_id = p_student
+        and regexp_replace(lower(coalesce(w.name, '')), '[^a-z0-9]+', '', 'g')
           = regexp_replace(lower(coalesce(p_row ->> 'name', '')), '[^a-z0-9]+', '', 'g')
     ) then
       return 'similar';
@@ -299,7 +321,12 @@ begin
     select ch.id, ch.op, ch.flags, ch.old_value, ch.new_value, it.match_status, it.match_confidence,
            f.sensitivity, f.value_type,
            case when ch.op = 'set_field' and not private.import_absent(ch.old_value)
-                then public.import_field_provenance(it.student_id, ch.target_table, ch.field) end as prov
+                then public.import_field_provenance(it.student_id, ch.target_table, ch.field) end as prov,
+           -- The value is still exactly what the student's onboarding
+           -- questionnaire wrote (20261023010003): the counselor's import
+           -- beats it by default, as in the Ready to apply queue.
+           ch.op = 'set_field' and not private.import_absent(ch.old_value)
+             and private.intake_owns_current(it.student_id, ch.target_table, ch.field, ch.old_value) as intake_owned
     from public.import_changes ch
     join public.import_items it on it.id = ch.item_id
     join public.import_fields f on f.target_table = ch.target_table and f.field = ch.field
@@ -310,6 +337,7 @@ begin
     select a.*,
            case when a.op = 'insert_row' or private.import_absent(a.old_value) then 'empty'
                 when coalesce((a.prov ->> 'matchesCurrent')::boolean, false) then 'import'
+                when a.intake_owned then 'intake'
                 -- Nothing says who typed it; the safest reading (plan decision).
                 else 'student' end as src,
            coalesce((a.prov ->> 'matchesCurrent')::boolean, false)
@@ -324,6 +352,7 @@ begin
            when b.op = 'insert_row' or b.src = 'empty' then
              case when b.match_status = 'matched_email' and b.match_confidence = 'high' then 'auto' else 'accept' end
            when b.same_source then 'accept'
+           when b.src = 'intake' then 'accept'
            else 'keep_old' end,
          risk = private.import_risk(b.sensitivity, b.src, b.value_type, b.old_value, b.new_value, b.match_confidence)
     from b

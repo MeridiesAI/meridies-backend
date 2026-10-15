@@ -62,7 +62,7 @@ export function xlsx(o: XlsxOptions): Uint8Array {
 
 export const csv = (text: string) => new TextEncoder().encode(text);
 
-/** import_fields as 20261014000001 seeds it. */
+/** import_fields as 20261014000001 seeds it, plus the questionnaire's rows (20261023010001). */
 export const FIELDS = [
   ["student_academics", "gpa_unweighted", "gpa", 3], ["student_academics", "gpa_weighted", "gpa", 3],
   ["student_academics", "gpa_scale", "text:20", 3], ["student_academics", "class_rank", "text:40", 3],
@@ -74,4 +74,6 @@ export const FIELDS = [
   ["student_personal_details", "citizenship", "enum:citizenship", 2], ["student_personal_details", "first_gen", "bool", 2],
   ["student_personal_details", "intended_majors", "text[]", 1],
   ["test_scores", "*", "row:test_score", 3], ["courses", "*", "row:course", 1], ["activities", "*", "row:activity", 1],
+  ["student_academics", "gpa_band", "text:40", 3], ["profiles", "high_school", "text:200", 1],
+  ["profiles", "hometown", "text:200", 1], ["profiles", "grad_year", "grad_year", 1], ["awards", "*", "row:award", 1],
 ].map(([table, field, valueType, sensitivity]) => ({ table: String(table), field: String(field), valueType: String(valueType), sensitivity: Number(sensitivity) }));

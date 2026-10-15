@@ -24,7 +24,9 @@ export type ReviewUpdate = {
   fixes?: Record<string, Json>;
 };
 
-const ROW_TYPE: Record<string, string> = { test_scores: "row:test_score", courses: "row:course", activities: "row:activity" };
+const ROW_TYPE: Record<string, string> = {
+  test_scores: "row:test_score", courses: "row:course", activities: "row:activity", awards: "row:award",
+};
 
 export async function reviewGroups(request: FastifyRequest, importId: string): Promise<unknown> {
   const { data, error } = await request.db.rpc("import_review_groups", { p_import: importId });

@@ -38,8 +38,24 @@ export const COURSE_STATUS = ["planned", "in-progress", "completed"] as const;
 const ROW_KEYS: Record<string, readonly string[]> = {
   "row:test_score": ["exam", "kind", "score", "taken_on"],
   "row:course": ["name", "type", "grade", "status", "school_year"],
-  "row:activity": ["name", "position", "organization", "category", "hours_per_week", "weeks_per_year", "description", "grade_levels"],
+  "row:activity": [
+    "name", "position", "organization", "category", "hours_per_week", "weeks_per_year", "description", "grade_levels",
+    // The questionnaire's sheet columns (20261023010001).
+    "timing", "continuing", "uc_description",
+  ],
+  // An Awards & Honors row (20261023010001). Written by the questionnaire; no
+  // import plan maps to it yet, but a stored value must still read as valid.
+  "row:award": ["name", "level", "year", "grade_levels", "recognition_levels", "uc_level", "uc_criteria", "uc_earned"],
 };
+
+export const ACTIVITY_TIMING = ["school", "break", "year"] as const;
+export const AWARD_GRADES = ["9", "10", "11", "12", "PG"] as const;
+export const AWARD_RECOGNITION = ["school", "state-regional", "national", "international"] as const;
+export const AWARD_UC_LEVELS = ["school", "city-community", "state", "regional", "national", "international"] as const;
+
+const strIn = (list: readonly string[]) => (x: Json) => list.includes(str(x) ?? "\u0000");
+const arrayOf = (max: number | null, ok: (e: Json) => boolean) => (x: Json) =>
+  Array.isArray(x) && (max === null || x.length <= max) && x.every((e) => str(e) !== null && ok(e));
 
 /** private.import_value_ok, in TypeScript. Never throws; undecidable is false. */
 export function valueOk(type: string, v: Json | undefined): boolean {
@@ -62,6 +78,9 @@ export function valueOk(type: string, v: Json | undefined): boolean {
     }
     case "bool":
       return typeof v === "boolean";
+    case "grad_year":
+      // profiles.grad_year is text; a class year reads like 2027.
+      return /^20\d\d$/.test(str(v) ?? "");
     case "text[]":
       return Array.isArray(v) && v.length <= 10 && v.every((e) => textOk(e, 200));
     case "enum:gender":
@@ -89,6 +108,16 @@ export function valueOk(type: string, v: Json | undefined): boolean {
         && opt("status", (x) => (COURSE_STATUS as readonly string[]).includes(str(x) ?? ""))
         && opt("school_year", (x) => textOk(x, 40));
     }
+    if (type === "row:award") {
+      return textOk(o.name, 300)
+        && opt("level", (x) => textOk(x, 100))
+        && opt("year", (x) => textOk(x, 20))
+        && opt("grade_levels", arrayOf(null, strIn(AWARD_GRADES)))
+        && opt("recognition_levels", arrayOf(null, strIn(AWARD_RECOGNITION)))
+        && opt("uc_level", strIn(AWARD_UC_LEVELS))
+        && opt("uc_criteria", (x) => textOk(x, 2000))
+        && opt("uc_earned", (x) => textOk(x, 2000));
+    }
     return textOk(o.name, 300)
       && opt("position", (x) => textOk(x, 200))
       && opt("organization", (x) => textOk(x, 200))
@@ -96,7 +125,10 @@ export function valueOk(type: string, v: Json | undefined): boolean {
       && opt("hours_per_week", (x) => { const h = num(x); return h !== null && h >= 0 && h <= 168; })
       && opt("weeks_per_year", (x) => { const w = num(x); return w !== null && Number.isInteger(w) && w >= 0 && w <= 52; })
       && opt("description", (x) => textOk(x, 2000))
-      && opt("grade_levels", (x) => valueOk("text[]", x));
+      && opt("grade_levels", (x) => valueOk("text[]", x))
+      && opt("timing", arrayOf(3, strIn(ACTIVITY_TIMING)))
+      && opt("continuing", (x) => typeof x === "boolean")
+      && opt("uc_description", (x) => textOk(x, 2000));
   }
   return false;
 }
@@ -281,6 +313,12 @@ export function cleanCell(type: string, raw: string, opts: CleanOptions = {}): C
     case "enum:test_status":
       value = cleanEnum("test_status", s);
       break;
+    case "grad_year": {
+      // "2027", "2027.0" (a spreadsheet number), "Class of 2027".
+      const m = /^(?:class\s+of\s+)?(20\d\d)(?:\.0+)?$/i.exec(s);
+      value = m ? m[1] : null;
+      break;
+    }
     default:
       if (type.startsWith("text:")) value = s.replace(/\s+/g, " ");
   }

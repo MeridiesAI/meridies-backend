@@ -11,7 +11,7 @@
 
 import { z } from "zod";
 import { MAX_COLUMNS } from "./caps.js";
-import { findField, KEY_KINDS, ROW_PARTS, ROW_REQUIRED, ROW_TABLES, SINGLE_TABLES, type FieldDef, type RowTable } from "./fields.js";
+import { findField, KEY_KINDS, QUESTIONNAIRE_ONLY, ROW_PARTS, ROW_REQUIRED, ROW_TABLES, SINGLE_TABLES, type FieldDef, type RowTable } from "./fields.js";
 import type { FileProfile } from "./profile.js";
 import { TEST_KINDS } from "./values.js";
 
@@ -137,7 +137,7 @@ export function validatePlan(input: ParsePlan, files: ProfiledFile[], fields: Fi
       const t = c.target;
       if (t.kind === "field") {
         const f = findField(fields, t.table, t.field);
-        if (!f || f.field === "*") {
+        if (!f || f.field === "*" || QUESTIONNAIRE_ONLY.has(`${f.table}.${f.field}`)) {
           problems.push(`${t.table}.${t.field} isn't something an import can fill`);
           continue;
         }
