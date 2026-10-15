@@ -17,7 +17,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { readDocumentText } from "../lib/documentText.js";
+import { canReadDocumentText, readDocumentText } from "../lib/documentText.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
@@ -831,11 +831,15 @@ export default async function applicationRoutes(app: FastifyInstance) {
         const file = await getRemoteFile(request.auth.userId, "google", String(doc.external_file_id), null, request.log).catch(() => null);
         text = file ? await exportGoogleDocText(request.auth.userId, file, request.log).catch(() => null) : null;
       }
-      if (text === null && doc.storage_path) {
+      const filename = String(doc.filename ?? "");
+      const mimeType = (doc.mime_type as string | null) ?? null;
+      // A format it can't read or a file over the cap stays unreadable without
+      // a download; readDocumentText checks the size again on the bytes.
+      if (text === null && doc.storage_path && canReadDocumentText(filename, mimeType, doc.size_bytes)) {
         const dl = await request.db.storage.from(String(doc.bucket ?? "student-documents")).download(String(doc.storage_path));
         if (!dl.error && dl.data) {
           const bytes = Buffer.from(await dl.data.arrayBuffer());
-          text = readDocumentText(bytes, String(doc.filename ?? ""), (doc.mime_type as string | null) ?? null);
+          text = readDocumentText(bytes, filename, mimeType);
         }
       }
 

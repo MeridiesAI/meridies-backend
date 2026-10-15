@@ -10,20 +10,29 @@
  */
 
 import { inflateRawSync } from "node:zlib";
+import { trimLineEnds } from "./linearText.js";
 
 const TEXT_EXTENSIONS = new Set(["txt", "md", "markdown"]);
 /** Largest XML part inflated: a 300-page manuscript is a few MB. */
 const MAX_XML_BYTES = 20 * 1024 * 1024;
+/**
+ * Largest file read for its text, as submission review caps it. An essay is a
+ * few KB; anything past this is read as unreadable rather than parsed on the
+ * event loop every request shares.
+ */
+export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 
 function extensionOf(name: string): string {
   return name.split(".").pop()?.toLowerCase() ?? "";
 }
 
+/**
+ * Linear in the text: the line-end trim is a per-line scan, not
+ * `/[ \t]+\n/g`, which rescans a long run of spaces with no newline from
+ * every position (100k spaces took 11 s).
+ */
 export function normalizeText(text: string): string {
-  return text
-    .replace(/ /g, " ")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
+  return trimLineEnds(text.replace(/ /g, " ").replace(/\r\n?/g, "\n"))
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -39,16 +48,33 @@ export function isReadableName(filename: string, mimeType: string | null): boole
   return TEXT_EXTENSIONS.has(ext) || ext === "docx" || mimeType === "text/plain";
 }
 
-export function readDocumentText(bytes: Buffer, filename: string, mimeType: string | null): string | null {
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+function textKind(filename: string, mimeType: string | null): "text" | "docx" | null {
   const ext = extensionOf(filename);
+  if (TEXT_EXTENSIONS.has(ext) || mimeType === "text/plain" || mimeType === "text/markdown") return "text";
+  if (ext === "docx" || mimeType === DOCX_MIME) return "docx";
+  return null;
+}
+
+/**
+ * Whether `readDocumentText` could read this file at all, asked before
+ * downloading it: a format it can't open, or a file over
+ * MAX_DOCUMENT_BYTES, reads as null without fetching a byte.
+ */
+export function canReadDocumentText(filename: string, mimeType: string | null, sizeBytes: unknown): boolean {
+  if (typeof sizeBytes === "number" && sizeBytes > MAX_DOCUMENT_BYTES) return false;
+  return textKind(filename, mimeType) !== null;
+}
+
+export function readDocumentText(bytes: Buffer, filename: string, mimeType: string | null): string | null {
+  if (bytes.length > MAX_DOCUMENT_BYTES) return null;
+  const kind = textKind(filename, mimeType);
   try {
-    if (TEXT_EXTENSIONS.has(ext) || mimeType === "text/plain" || mimeType === "text/markdown") {
+    if (kind === "text") {
       return normalizeText(bytes.toString("utf8"));
     }
-    if (
-      ext === "docx" ||
-      mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ) {
+    if (kind === "docx") {
       const xml = unzipEntry(bytes, "word/document.xml");
       return xml === null ? null : normalizeText(docxText(xml));
     }
@@ -61,14 +87,63 @@ export function readDocumentText(bytes: Buffer, filename: string, mimeType: stri
 /** Paragraphs from WordprocessingML: one per `<w:p>`, runs joined, tabs and breaks kept. */
 function docxText(xml: string): string {
   return xml
-    .split(/<\/w:p>/)
-    .map((p) =>
-      [...p.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\/>|<w:br\/>/g)]
-        .map((m) => (m[0] === "<w:tab/>" ? "\t" : m[0] === "<w:br/>" ? "\n" : decodeEntities(m[1] ?? "")))
-        .join("")
-    )
+    .split("</w:p>")
+    .map(paragraphText)
     .filter((p) => p.trim().length > 0)
     .join("\n\n");
+}
+
+/**
+ * One paragraph's runs, as `/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>|<w:tab\/>|<w:br\/>/g`
+ * reads them, in one pass: `[^>]*` with no ">" after it rescanned the rest of
+ * the part from every "<w:t " (200 KB took 7 s, and the inflate cap allows 20 MB).
+ */
+function paragraphText(p: string): string {
+  let out = "";
+  // Lookups shared by every "<w:t " before the same ">": each is done once,
+  // and a ">" that isn't there at all is looked for once, not per "<w:t ".
+  let gt = -1;
+  let noGt = false;
+  let ltFrom = -1;
+  let lt = -1;
+  let i = p.indexOf("<");
+  while (i >= 0) {
+    if (p.startsWith("<w:tab/>", i)) {
+      out += "\t";
+      i = p.indexOf("<", i + 8);
+      continue;
+    }
+    if (p.startsWith("<w:br/>", i)) {
+      out += "\n";
+      i = p.indexOf("<", i + 7);
+      continue;
+    }
+    if (p.startsWith("<w:t", i)) {
+      const after = i + 4;
+      let open = -1;
+      if (p[after] === ">") open = after;
+      else if (after < p.length && /\s/.test(p[after]!)) {
+        if (!noGt && gt < after) {
+          gt = p.indexOf(">", after);
+          noGt = gt < 0;
+        }
+        open = noGt ? -1 : gt;
+      }
+      if (open >= 0) {
+        if (ltFrom !== open) {
+          ltFrom = open;
+          lt = p.indexOf("<", open + 1);
+        }
+        if (lt >= 0 && p.startsWith("</w:t>", lt)) {
+          out += decodeEntities(p.slice(open + 1, lt));
+          i = p.indexOf("<", lt + 6);
+          continue;
+        }
+      }
+    }
+    i = p.indexOf("<", i + 1);
+  }
+  return out;
 }
 
 function decodeEntities(s: string): string {
