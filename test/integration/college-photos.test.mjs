@@ -3,7 +3,7 @@
 // college-photos bucket, a pending counselor reads nothing, and the database
 // refuses a non-free license on its own. Real accounts on a local Supabase
 // (see harness.mjs). No test here reaches Wikidata or Commons.
-import { user, check, sql, rest, SB, ANON } from "./harness.mjs";
+import { user, check, sql, rest, SB, ANON, API, CRON_SECRET } from "./harness.mjs";
 
 const c = await user("counselor-photos");
 const s = await user("student-photos", "student");
@@ -78,3 +78,18 @@ for (const [label, who] of [["counselor", c], ["student", s]]) {
   check(`a ${label} can't upload to the photos bucket`, up.status === 403 || String(up.body?.statusCode) === "403", `${up.status} ${JSON.stringify(up.body)}`);
 }
 check("labels: ingest_runs and job_heartbeats accept college-photos", (await sql(`select count(*) from job_heartbeats where job = 'college-photos'`)) === "1");
+
+// ---- The monthly cron route --------------------------------------------------------
+// Never started for real here: CI has no business calling Wikidata or Commons.
+// Without the secret it's 401; with the lease already held it's 409 and nothing runs.
+const noSecret = await fetch(`${API}/internal/ingest/college-photos`, { method: "POST" });
+check("the photo cron needs the secret", noSecret.status === 401 || noSecret.status === 503, `status ${noSecret.status}`);
+const holder = `test-${Date.now()}`;
+const held = await sql(`select public.acquire_job_lease('college-photos', '${holder}', 120)`);
+if (held === "t") {
+  const busy = await fetch(`${API}/internal/ingest/college-photos`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+  check("while a load holds the lease, the cron answers 409", busy.status === 409, `status ${busy.status}`);
+  await sql(`select public.release_job_lease('college-photos', '${holder}')`);
+} else {
+  check("the test could take the photo lease", false, "skipped the 409 check rather than start a real run");
+}

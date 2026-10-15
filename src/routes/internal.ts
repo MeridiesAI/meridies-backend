@@ -14,6 +14,8 @@
  *     "$API_URL/internal/imports/sweep"
  * and weekly, the Events Hub's discovery of colleges' upcoming events:
  *     "$API_URL/internal/events/discover"
+ * and monthly, the catalog's campus photos from Wikimedia Commons:
+ *     "$API_URL/internal/ingest/college-photos"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
@@ -25,7 +27,7 @@ import { runImportSweep } from "../lib/imports/jobs.js";
 import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
 import { serviceClient } from "../lib/supabase.js";
-import { startScorecardIngest } from "../lib/ingest/run.js";
+import { startCollegePhotoIngest, startScorecardIngest } from "../lib/ingest/run.js";
 import { runScheduledSweep } from "../lib/sweepSchedule.js";
 
 /**
@@ -92,6 +94,30 @@ export default async function internalRoutes(app: FastifyInstance) {
             : r.reason === "no-service-role"
               ? "The ingest needs the service role key"
               : "The ingest could not take its lease";
+        return reply.code(503).send({ started: false, reason });
+      }
+      return reply.code(202).send({ started: true });
+    }
+  );
+
+  /**
+   * Monthly: campus photos from Wikimedia Commons (lib/ingest/collegePhotos.ts).
+   * Re-checks every stored file's license and existence and downloads only what
+   * changed. 202; the run records itself in ingest_runs and job_heartbeats.
+   */
+  app.post(
+    "/ingest/college-photos",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startCollegePhotoIngest(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "A photo load is already running" });
+        const reason =
+          r.reason === "no-schema"
+            ? "Apply 20261023070001_college_photos.sql to load photos"
+            : r.reason === "no-service-role"
+              ? "The photo load needs the service role key"
+              : "The photo load could not take its lease";
         return reply.code(503).send({ started: false, reason });
       }
       return reply.code(202).send({ started: true });
