@@ -19,13 +19,21 @@
  *   POST   /firms/join                     accept an invitation (the token from the email)
  *   PATCH  /firms/mine/members/:profileId  change a seat (owner/admin)
  *   DELETE /firms/mine/members/:profileId  remove someone, or yourself to leave
+ *          ?releaseStudents=true           (owner/admin) let them take their students
+ *   GET    /firms/mine/caseload-policy     what Remove offers when someone leaves
+ *   PATCH  /firms/mine/caseload-policy     change it (owner/admin)
+ *
+ * Removing someone who still has students is refused (409
+ * caseload_not_transferred) until Management's caseload transfer has moved
+ * them, or an owner/admin releases them (migration 20261023030003).
  */
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { createHash } from "node:crypto";
 import { env } from "../env.js";
-import { crmError } from "../lib/crm.js";
+import { policyBody, removeMember, toPolicy, transferUnavailable } from "../lib/caseloadTransfer.js";
+import { crmError, loadWorkspace } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
 import { forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { newInviteToken } from "../lib/invites.js";
@@ -260,8 +268,52 @@ export default async function firmRoutes(app: FastifyInstance) {
 
   app.delete("/mine/members/:profileId", { preHandler: [...counselor, limit("firms:members", 60, 60)] }, async (request, reply) => {
     const { profileId } = z.object({ profileId: uuid }).parse(request.params);
-    const { error } = await request.db.rpc("remove_firm_member", { p_profile: profileId });
-    if (error) throw crmError(error);
+    const { releaseStudents } = z
+      .object({ releaseStudents: z.enum(["true", "false"]).optional() })
+      .strict()
+      .parse(request.query ?? {});
+    await removeMember((fn, args) => request.db.rpc(fn, args), profileId, releaseStudents === "true");
     return reply.code(204).send();
+  });
+
+  /** The firm's caseload transfer setting. A solo counselor has none. */
+  app.get("/mine/caseload-policy", { preHandler: [...counselor, limit("firms:policy", 120, 60)] }, async (request) => {
+    const ws = await loadWorkspace(request);
+    if (!ws.firmId) return toPolicy(null, null, false);
+    const { data, error } = await request.db
+      .from("practice_settings")
+      .select("id, caseload_transfer_mode, caseload_default_receiver")
+      .eq("firm_id", ws.firmId)
+      .maybeSingle();
+    if (error) throw transferUnavailable(error) ?? fromPostgrest(error);
+    return toPolicy((data as Record<string, unknown> | null) ?? null, ws.firmId, ws.isAdmin);
+  });
+
+  app.patch("/mine/caseload-policy", { preHandler: [...counselor, limit("firms:policy", 60, 60)] }, async (request) => {
+    const b = policyBody.parse(request.body);
+    const ws = await loadWorkspace(request);
+    if (!ws.firmId) throw notFound("Caseload transfer is a firm setting. Start a firm first.");
+    if (!ws.isAdmin) throw forbidden("Only a firm owner or admin can change this");
+
+    const values: Record<string, unknown> = { updated_by: request.auth.userId };
+    if (b.mode !== undefined) values.caseload_transfer_mode = b.mode;
+    if (b.defaultReceiverId !== undefined) values.caseload_default_receiver = b.defaultReceiverId;
+
+    const existing = await request.db.from("practice_settings").select("id").eq("firm_id", ws.firmId).maybeSingle();
+    if (existing.error) throw transferUnavailable(existing.error) ?? fromPostgrest(existing.error);
+    const { data, error } = existing.data
+      ? await request.db
+          .from("practice_settings")
+          .update(values)
+          .eq("id", String((existing.data as Record<string, unknown>).id))
+          .select("id, caseload_transfer_mode, caseload_default_receiver")
+          .single()
+      : await request.db
+          .from("practice_settings")
+          .insert({ ...values, firm_id: ws.firmId, counselor_id: null })
+          .select("id, caseload_transfer_mode, caseload_default_receiver")
+          .single();
+    if (error) throw transferUnavailable(error) ?? crmError(error);
+    return toPolicy(data as Record<string, unknown>, ws.firmId, true);
   });
 }

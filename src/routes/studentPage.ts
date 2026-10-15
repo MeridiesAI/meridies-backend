@@ -23,6 +23,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { loadTransferredFrom } from "../lib/caseloadTransfer.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { assertCanEditStudent, assertCanViewStudent, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -65,9 +66,17 @@ export default async function studentPageRoutes(app: FastifyInstance) {
   app.get("/:id/info", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const student = await resolveStudentId(request, id, "view");
-    const info = await loadStudentInfo(request.db, student);
+    const [info, transferredFrom] = await Promise.all([
+      loadStudentInfo(request.db, student),
+      // The counselor's card says where the student came from after a caseload
+      // transfer (an InfoTip beside the counselor's name). Null before the
+      // migration, and never asked for on a student's own card.
+      request.profile.role === "counselor"
+        ? loadTransferredFrom(request.db, student, request.log)
+        : Promise.resolve(null),
+    ]);
     if (!info) throw notFound("That student isn't on your roster");
-    return info;
+    return { ...info, transferredFrom };
   });
 
   app.patch(
