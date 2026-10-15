@@ -325,8 +325,8 @@ Every refusal is raised with a counselor-readable message and a CRM error code
 transaction, and "Transfer and remove" is inside it. Emails are after the
 commit and best effort. Before the migrations are applied, the transfer,
 preview, history and policy routes answer `503 { code:
-"caseload_transfer_unavailable" }` (PGRST202, PGRST204, PGRST205, 42P01, 42703
-and 42883 all count as "not applied"), the student page's `transferredFrom`
+"caseload_transfer_unavailable" }` (PGRST200, PGRST202, PGRST204, PGRST205,
+42P01, 42703 and 42883 all count as "not applied"), the student page's `transferredFrom`
 reads null, and `DELETE /firms/mine/members/:id` falls back to the 1-argument
 function (remembered for five minutes per process), so removal behaves exactly
 as today.

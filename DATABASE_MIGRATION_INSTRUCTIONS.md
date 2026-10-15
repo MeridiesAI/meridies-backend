@@ -221,3 +221,38 @@ select to_regclass('public.ai_attachments');                                    
 select id, public from storage.buckets where id = 'axis-attachments';                  -- 1 row, public = false
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
 ```
+
+---
+
+# Caseload transfer (three more migrations)
+
+Spec: `docs/superpowers/specs/2026-10-15-caseload-transfer-design.md`. Apply in
+this order, after every earlier file. Nothing is deleted. Either order with the
+code is safe: before the files, the transfer, preview, history and policy
+routes answer `503 { code: "caseload_transfer_unavailable" }`, the student
+page's `transferredFrom` reads null, and removing a firm member falls back to
+the 1-argument `remove_firm_member` (today's behaviour). None of it is in
+`REQUIRED_SCHEMA`.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023030001_caseload_transfer.sql` | `caseload_transfers` and `caseload_transfer_students` (RLS, the approval gate, no client writes); `practice_settings.caseload_transfer_mode` (`one_person` / `per_student`, default `per_student`) and `caseload_default_receiver`, with a trigger keeping the receiver an approved member of the firm; the closed-cycle lock guard on `admission_outcomes` lets a SECURITY DEFINER caller change only a locked row's owner |
+| 2 | `20261023030002_caseload_transfer_functions.sql` | `caseload_transfer_preview(p_from)` and `transfer_caseload(...)` (SECURITY DEFINER, firm owner/admin only), and two private helpers |
+| 3 | `20261023030003_remove_firm_member_caseload.sql` | Drops the 1-argument `remove_firm_member` and creates `remove_firm_member(p_profile, p_release_students default false)`, which refuses a member who still has students (archived included) until they are transferred or an owner/admin releases them; `firm_consultants()` gains `archived_count` (drop and recreate, same grants) |
+
+**Behaviour change from file 3 alone:** once it is applied, removing a firm
+member who still has students is refused (409 `caseload_not_transferred`),
+including through AxIS's `firm.remove_member`, until Management's transfer has
+moved them or an owner/admin removes them with "Let them take their students"
+(`?releaseStudents=true`).
+
+Check:
+
+```sql
+select to_regclass('public.caseload_transfers'), to_regclass('public.caseload_transfer_students');  -- both non-null
+select count(*) from public.caseload_transfers;                                                       -- 0 on a fresh apply
+select oid::regprocedure from pg_proc where proname = 'remove_firm_member';                           -- one row: remove_firm_member(uuid,boolean)
+select column_name from information_schema.columns
+ where table_name = 'practice_settings' and column_name like 'caseload_%';                            -- 2 rows
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;                  -- expect 0
+```

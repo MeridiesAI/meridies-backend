@@ -70,6 +70,7 @@ src/
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
+│   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
@@ -113,7 +114,7 @@ src/
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
-│   ├── management.ts      # /management   consultants, consultant tasks, staff blast
+│   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
@@ -1373,14 +1374,60 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
 
+## Caseload transfer
+
+Spec: `docs/superpowers/specs/2026-10-15-caseload-transfer-design.md`.
+Migrations `20261023030001`-`3` (runbook in `DATABASE_MIGRATION_INSTRUCTIONS.md`),
+code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
+`routes/firms.ts`.
+
+- **Who.** A firm owner or admin (approved), moving a member's students to
+  other approved members of the same firm. The from side may be pending or
+  revoked; every receiver passes the approval gate
+  (`private.caseload_can_receive`). Only the owner transfers the owner's
+  students. A solo counselor is refused ("Start a firm..."). Not in the AxIS
+  catalog.
+- **Routes.** `GET /management/consultants/:id/transfer-preview`,
+  `POST /management/consultants/:id/transfer` (`{ mode: "one_person", toId }`
+  or `{ mode: "per_student", assignments: [{ studentId, toId }] }`, at most
+  500; `notifyStudents` default true, `removeAfter`, `includePracticeItems`,
+  `practiceToId`), `GET /management/transfers`,
+  `GET`/`PATCH /firms/mine/caseload-policy`. Before the migrations they answer
+  503 `caseload_transfer_unavailable`.
+- **One transaction** (`transfer_caseload`, SECURITY DEFINER): every row about
+  a moved student that the old counselor owns and that would cascade with
+  their account moves (meetings, notes, reports, messages, research runs,
+  outcomes, the student folder with its subtree, documents and links,
+  supplement Doc rows, accepted invitations); open work moves; scheduled sends
+  and queued parent alerts are cancelled; a group meeting moves only when
+  every attendee goes to the same receiver; held import data moves into a
+  carrier import owned by the student's receiver (no import function
+  changes). Practice items (pending invitations, imports, templates, the firm
+  pipeline rows they made) move only with the whole caseload and when the
+  consultant is leaving. "Transfer and remove" removes the member inside the
+  same transaction. A transfer is recorded in `caseload_transfers` /
+  `caseload_transfer_students` and `audit_log`.
+- **No addresses from SQL.** The functions return ids and names; the API
+  reads the addresses of exactly the returned ids on the service client after
+  the commit, to mail the receiver, the old counselor and each active,
+  non-alumni student (templates `caseload-transfer-*`). Guardians are not
+  emailed.
+- **Hand-kept table list.** `caseload-transfer.test.mjs` fails when a new
+  cascading counselor-owned column appears on a student table that the
+  transfer doesn't handle and that isn't on its "stays" list. Decide it there.
+- **Temporary delegation** is specified in the spec (§13) and not built.
+
 ## Teams, guardians, delivery status, data rights, monitoring
 
 - **Firm teams.** `profiles.firm_id` can't be updated by clients, so firms
   change through SECURITY DEFINER functions: `create_firm`,
   `accept_firm_invitation` (the invite's email must match the account; seats
   are enforced), `set_firm_member_role` (the owner's seat never changes),
-  `remove_firm_member` (the owner can't leave). Routes: `/firms`,
-  `/firms/mine/{members,invites}`, `/firms/join`. Invitation tokens are stored
+  `remove_firm_member` (the owner can't leave; a member who still has
+  students, archived included, is refused with 409 `caseload_not_transferred`
+  until their caseload is transferred or an owner/admin releases them with
+  `?releaseStudents=true`). Routes: `/firms`, `/firms/mine/{members,invites}`,
+  `/firms/mine/caseload-policy`, `/firms/join`. Invitation tokens are stored
   as sha256 only; the app page for the link is `/join-firm/<token>`.
 - **Guardians.** A student may add a guardian, but one they add starts with
   `alerts_enabled = false`, and only the counselor side changes or removes a
@@ -1411,7 +1458,9 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
-  user; a counselor with an active roster or an owned firm is refused.
+  user; a counselor with an active roster or an owned firm is refused, and a
+  firm member with any student, archived included, is told to ask an owner or
+  admin to transfer them.
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
   `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
   when one hasn't run cleanly within twice its interval. Point an uptime monitor
@@ -1436,7 +1485,10 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   including `context-layer`, `context-documents`, `research-tables` (RLS and
   hidden tasks), `research-api` (the routes, with the test double) and the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
-  `approval-jobs`). The harness's `user()` approves the counselors it makes;
+  `approval-jobs`), and `caseload-transfer` (every persona, every table
+  that follows a student, removal, the firm setting; `npm run
+  test:caseload-load` checks 500 students in one call). The harness's
+  `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
 - `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
   tests; then a throwaway Supabase with every migration, an RLS-on-every-table
