@@ -22,6 +22,11 @@ export const INTENT_FEATURES: Record<Intent, readonly Feature[]> = {
     [/\b(add|put|insert|change|set|update|replace|swap|rewrite)\b(?: \w+){0,4} (paragraph|sentence|line|intro|introduction|conclusion|hook|opening|ending|wording)\b(?: \w+){0,6} (essay|essays|personal statement|statement|supplement|supplemental|why us)\b/, 8],
     [/\b(add|put|insert|change|set|update|replace|swap)\b(?: \w+){0,4} (essay|essays|personal statement|statement|supplement|supplemental|why us)(?: \w+){0,2} (paragraph|sentence|first line|last line|intro|introduction|conclusion|hook|opening|ending|wording)\b/, 8],
     [/\b(essay|personal statement|statement|supplement)\b(?: \w+){0,3} (to say|to read|so it (says|reads|opens|starts|ends))\b/, 8],
+    // Asking for prose by its size or its prompt, without the word "essay": "give me 650 first-person
+    // words for her Common App prompt", "answer the UC PIQ about leadership for him".
+    [/\b(give|write|need|want|produce|generate|draft|create|make|come up with)\b(?: (?!(?:email|emails|message|messages|note|notes|text|texts|reminder|summary|update|reply)\b)\w+){0,4} (\d{2,4}|a few hundred|few hundred|several hundred) (first person |personal |narrative )?words\b/, 8],
+    [/\b(write|draft|compose|answer|respond to|generate|produce|fill in)\b(?: (?!(?:email|emails|message|messages|note|notes|text|texts|reminder|task|tasks)\b)\w+){0,6} (prompt|prompts|piq|piqs|personal insight questions?|why (this|our) (college|school|major))\b/, 8],
+    [/\b(in (the )?first person|in (her|his|their) (own )?voice|as if (she|he|they) (wrote|were writing|was writing)|from (her|his|their) (perspective|point of view))\b/, 6],
   ],
   action: [
     [/\b(remind me(?! (what|when|who|which|how|where|why|whether|if|of)\b)|set a reminder|add (a |an )?(task|to do|todo|reminder|item)|create (a |an )?(task|to do|todo|reminder)|on my (list|queue|work queue)|to my (list|queue|work queue))\b/, 7],

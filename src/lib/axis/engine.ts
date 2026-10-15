@@ -26,6 +26,7 @@ import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { enforceNoProse, NO_PROSE_SYSTEM } from "../anthropic.js";
+import { ProseGate } from "../proseGuard.js";
 import { buildRosterContext, signerLine } from "../chat.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../context/pack.js";
 import type { ContextUsage } from "../context/types.js";
@@ -411,14 +412,19 @@ export async function runAxisTurn(opts: {
     ];
 
     const grounder = new LiveGrounder(index, ledger, (c) => emit("grounding", c));
+    // The essay guardrail in code for the free-text path: past the first-person cap nothing more
+    // of the answer reaches the counselor (lib/proseGuard.ts), whatever the router decided.
+    const gate = new ProseGate();
+    const show = (d: string) => {
+      if (!d) return;
+      emit("delta", { text: d });
+      if (!opaqueFiles) grounder.push(d);
+    };
     emit("status", { phase: "answering" });
     const res = await runLoop({
       api, base: requestBase(system, tools, turnEffort), messages, effort: turnEffort, maxCalls: turnProfile.maxCalls,
       deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, beforeCall,
-      onText: (d) => {
-        emit("delta", { text: d });
-        if (!opaqueFiles) grounder.push(d);
-      },
+      onText: (d) => show(gate.push(d)),
       onToolStart: (c) => {
         const label = toolLabel(c.name, c.input);
         step(label);
@@ -429,21 +435,26 @@ export async function runAxisTurn(opts: {
       onToolEnd: (c, out) => emit("tool", { id: c.id, name: c.name, status: out.isError ? "failed" : "done" }),
     });
     add(res.usage);
+    show(gate.finish());
+    if (gate.blocked) request.log.warn({ axis: { essayGuard: "withheld" } }, "axis answer cut by the essay guard");
     const checks = grounder.finish();
 
-    const { citations, invalid } = resolveCitations(res.text, ledger);
-    const text = dropInvalidCitations(res.text, invalid);
+    // A cut answer is saved as the counselor saw it, never the model's full text.
+    const answer = gate.blocked ? gate.text : res.text;
+    const { citations, invalid } = resolveCitations(answer, ledger);
+    const text = dropInvalidCitations(answer, invalid);
     if (citations.length) emit("citations", { citations });
     await closeRun(run, res.stop === "refusal" ? "blocked" : "succeeded", total, {
       stop: res.stop, refusal: res.refusalCategory, calls: res.calls, tools: res.tools, passages: ledger.size, cited: citations.length,
       invalidCitations: invalid.length, sentencesChecked: checks.length, unverified: checks.filter((c) => c.status === "unverified").length,
       ms: Date.now() - startedAt, writes: toolCtx.turn.writes, autoWrites: toolCtx.turn.autoWrites, tainted: toolCtx.turn.tainted,
+      essayGuard: gate.blocked,
     });
     await chargeOutput(request, total.output);
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: { ...state, outside: toolCtx.turn.sawOutside },
-      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
+      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
     };
   } catch (err) {
