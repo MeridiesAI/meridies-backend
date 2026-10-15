@@ -50,6 +50,15 @@ type DeliveryColumns = {
   recipient_id?: string | null;
   /** The invitation an invite email belongs to, so its counselor can read the status. */
   invitation_id?: string | null;
+  /** The meeting a calendar invite belongs to (lib/meetingInvites.ts). */
+  meeting_id?: string | null;
+};
+
+export type EmailAttachment = {
+  filename: string;
+  /** Base64. */
+  content: string;
+  contentType: string;
 };
 
 type SendEmailArgs = DeliveryColumns & {
@@ -64,6 +73,21 @@ type SendEmailArgs = DeliveryColumns & {
    * was sent: an email whose text carries a one-time link records this instead.
    */
   recordText?: string;
+  /**
+   * Resend's Idempotency-Key: a retry with the same key within 24 hours is
+   * answered from the first send instead of mailing again.
+   */
+  idempotencyKey?: string;
+  /** Files sent with the email (a calendar invite's .ics). Never recorded in message_deliveries. */
+  attachments?: EmailAttachment[];
+  /** Where a reply goes when it isn't the From address (a valid address, server-chosen). */
+  replyTo?: string;
+  /**
+   * On a 429 from Resend, wait out Retry-After (1 to 10 seconds) and try
+   * once more before recording the send as failed. For sends whose loss
+   * leaves something wrong, like a calendar update that never arrives.
+   */
+  retryOn429?: boolean;
   logger?: Logger;
 };
 
@@ -91,7 +115,7 @@ async function recordDelivery(
 /** Mailpit's send API (local development only, see `DEV_MAIL_URL`). */
 async function sendToDevMail(
   base: string,
-  m: { to: string; subject: string; html: string; text: string }
+  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string }
 ): Promise<{ providerId: string | null; sent: boolean; errorText: string | null }> {
   const from = /^(.*?)\s*<([^>]+)>$/.exec(env.INVITE_FROM_EMAIL);
   try {
@@ -104,6 +128,10 @@ async function sendToDevMail(
         Subject: m.subject,
         HTML: m.html,
         Text: m.text,
+        ...(m.replyTo ? { ReplyTo: [{ Email: m.replyTo }] } : {}),
+        ...(m.attachments?.length
+          ? { Attachments: m.attachments.map((a) => ({ Content: a.content, Filename: a.filename, ContentType: a.contentType })) }
+          : {}),
       }),
     });
     const payload = (await res.json().catch(() => ({}))) as { ID?: string };
@@ -114,30 +142,66 @@ async function sendToDevMail(
   }
 }
 
+/** Seconds to wait before retrying a 429: the provider's Retry-After, kept between 1 and 10. */
+export function retryAfterMs(header: string | null): number {
+  const n = header == null ? Number.NaN : Number(header);
+  const seconds = Number.isFinite(n) ? Math.min(10, Math.max(1, n)) : 1;
+  return Math.round(seconds * 1000);
+}
+
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /** The one place an email actually leaves this process. */
 export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
   const { to, subject, html, text, template, logger } = args;
+  const attachments = args.attachments?.length ? args.attachments : undefined;
 
   let providerId: string | null = null;
   let sent = false;
   let errorText: string | null = null;
 
   if (devMailUrl) {
-    ({ providerId, sent, errorText } = await sendToDevMail(devMailUrl, { to, subject, html, text }));
+    ({ providerId, sent, errorText } = await sendToDevMail(devMailUrl, {
+      to,
+      subject,
+      html,
+      text,
+      attachments,
+      replyTo: args.replyTo,
+    }));
     if (!sent) logger?.error({ template, err: errorText }, "dev mail send failed");
   } else if (!hasResend) {
     errorText = "RESEND_API_KEY unset";
     logger?.warn({ template }, "RESEND_API_KEY unset — email skipped (logged only).");
   } else {
     try {
-      const res = await fetch(RESEND_ENDPOINT, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.RESEND_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ from: env.INVITE_FROM_EMAIL, to: [to], subject, html, text }),
+      const body = JSON.stringify({
+        from: env.INVITE_FROM_EMAIL,
+        to: [to],
+        subject,
+        html,
+        text,
+        ...(args.replyTo ? { reply_to: args.replyTo } : {}),
+        ...(attachments
+          ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content, content_type: a.contentType })) }
+          : {}),
       });
+      const post = () =>
+        fetch(RESEND_ENDPOINT, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.RESEND_API_KEY}`,
+            "Content-Type": "application/json",
+            ...(args.idempotencyKey ? { "Idempotency-Key": args.idempotencyKey.slice(0, 256) } : {}),
+          },
+          body,
+        });
+      let res = await post();
+      if (res.status === 429 && args.retryOn429) {
+        await res.body?.cancel().catch(() => undefined);
+        await pause(retryAfterMs(res.headers.get("retry-after")));
+        res = await post();
+      }
       const payload = (await res.json().catch(() => ({}))) as { id?: string; message?: string };
       if (res.ok && payload.id) {
         providerId = payload.id;
@@ -160,6 +224,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       parent_alert_id: args.parent_alert_id ?? null,
       family_report_id: args.family_report_id ?? null,
       ...(args.invitation_id ? { invitation_id: args.invitation_id } : {}),
+      ...(args.meeting_id ? { meeting_id: args.meeting_id } : {}),
       recipient_kind: args.recipient_kind ?? "student",
       recipient_id: args.recipient_id ?? null,
       to_email: to,
@@ -442,6 +507,8 @@ type SendInviteArgs = {
   note?: string | null;
   /** v10 sync (overview): a referred family is invited, not a student. */
   audience?: "student" | "family";
+  /** Passed to Resend (see SendEmailArgs.idempotencyKey). */
+  idempotencyKey?: string;
 };
 
 export async function sendInviteEmail(
@@ -474,6 +541,7 @@ export async function sendInviteEmail(
     student_id: studentId,
     invitation_id: invitationId,
     recipient_kind: "student",
+    idempotencyKey: args.idempotencyKey,
     logger,
   });
 

@@ -14,7 +14,10 @@
     "lint": "tsc --noEmit",
     "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
     "test:integration": "node --test test/integration/*.test.mjs",
-    "test:imports-load": "node test/integration/imports-load.mjs"
+    "test:imports-load": "node test/integration/imports-load.mjs",
+    "test:caseload-load": "node test/integration/caseload-transfer-load.mjs",
+    "test:perf": "node test/integration/perf-roster.mjs",
+    "seed:e2e": "node scripts/seed/e2e-stack.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
@@ -23,11 +26,14 @@
     "@fastify/swagger": "^9.9.2",
     "@fastify/swagger-ui": "^5.2.6",
     "@supabase/supabase-js": "^2.112.1",
+    "csv-parse": "7.0.3",
     "dotenv": "^16.4.5",
     "fastify": "^5.1.0",
     "fastify-plugin": "^5.0.1",
+    "fflate": "0.8.3",
     "jose": "^5.9.6",
     "pg": "^8.23.1",
+    "read-excel-file": "9.3.12",
     "zod": "^3.24.1"
   },
   "devDependencies": {

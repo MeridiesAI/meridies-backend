@@ -10,7 +10,16 @@
  * Outlook calendar with a real Meet / Teams link (lib/suiteApi.ts), and the
  * meeting remembers the event so moving or cancelling it here does the same
  * there. The calendar call runs first: a meeting is never saved claiming a
- * link that the provider refused to create. No invitation is sent by this API.
+ * link that the provider refused to create. That provider event carries no
+ * attendees and sends nobody anything.
+ *
+ * Invitations are Meridies' own: with `sendInvites` on, each invited student
+ * (and their guardians, when the meeting invites them) is emailed an
+ * iCalendar invite that any calendar can add, connected or not, and moves,
+ * cancellations and deletions follow (lib/meetingInvites.ts). The emails go
+ * out after the response; the response says who they are going to
+ * (`invites`). `notifyAttendees: false` on a PATCH keeps one change to
+ * Meridies; switching `sendInvites` itself always tells invitees.
  *
  * The counselor owns the calendar: a student sees their own meetings and cannot
  * move them.
@@ -21,6 +30,18 @@ import { z } from "zod";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import {
+  INVITES_UNAVAILABLE,
+  inviteColumns,
+  inviteEndError,
+  invitesReady,
+  latestInvitePerAddress,
+  loadAttendeeIds,
+  meetingState,
+  prepareInviteRound,
+  startInviteDelivery,
+  type InviteRoundSummary,
+} from "../lib/meetingInvites.js";
 import type { SuiteProvider } from "../lib/oauth.js";
 import { toMeeting } from "../lib/serialize.js";
 import {
@@ -61,6 +82,8 @@ const meetingBody = z
      * `studentId` is always one of them whether listed or not.
      */
     attendeeIds: z.array(z.string().uuid()).max(30).optional(),
+    /** Email each invitee an iCalendar invite, and every change after it. Needs an end time. */
+    sendInvites: z.boolean().optional(),
   })
   .strict();
 
@@ -76,6 +99,8 @@ const meetingPatch = meetingBody
   .extend({
     status: z.enum(["scheduled", "held", "cancelled", "no-show"]),
     meetingNoteId: z.string().uuid().nullable(),
+    /** Email this change to invitees when invites are on (default true). */
+    notifyAttendees: z.boolean(),
   })
   .partial()
   .strict();
@@ -140,6 +165,9 @@ export default async function meetingRoutes(app: FastifyInstance) {
       const student = await resolveStudentId(request, body.studentId, "edit");
       const mode = body.mode ?? "google-meet";
       const invitees = await checkAttendees(request, student, body.attendeeIds);
+      const ready = await invitesReady(request.db);
+      const endError = inviteEndError(ready, body.sendInvites === true, body.endsAt);
+      if (endError) throw badRequest(endError);
 
       let calendar: { provider: SuiteProvider; eventId: string; joinUrl: string } | null = null;
       if (body.createConference) {
@@ -171,6 +199,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
           guardians_invited: body.guardiansInvited ?? false,
           deadline_id: body.deadlineId ?? null,
           created_by: request.auth.userId,
+          ...inviteColumns(ready, body.sendInvites),
         })
         .select("*")
         .single();
@@ -193,7 +222,20 @@ export default async function meetingRoutes(app: FastifyInstance) {
           );
         if (aErr) throw fromPostgrest(aErr);
       }
-      return reply.code(201).send((await withAttendees(request, [saved]))[0]);
+      let invites: InviteRoundSummary = { status: "none" };
+      if (body.sendInvites && !ready) invites = INVITES_UNAVAILABLE;
+      else if (body.sendInvites) {
+        const prepared = await prepareInviteRound(request, {
+          before: null,
+          after: meetingState(saved),
+          attendeesBefore: [],
+          attendeesAfter: [student, ...invitees],
+          notify: true,
+        });
+        invites = prepared.summary;
+        startInviteDelivery(prepared.round, request.log);
+      }
+      return reply.code(201).send({ ...(await withAttendees(request, [saved]))[0], invites });
     }
   );
 
@@ -207,11 +249,24 @@ export default async function meetingRoutes(app: FastifyInstance) {
       const patch = meetingPatch.parse(request.body);
 
       const existing = await loadMeeting(request, id);
-      await resolveStudentId(request, String(existing.student_id), "edit");
+      const primary = String(existing.student_id);
+      await resolveStudentId(request, primary, "edit");
       const invitees =
         patch.attendeeIds === undefined
           ? null
-          : await checkAttendees(request, String(existing.student_id), patch.attendeeIds);
+          : await checkAttendees(request, primary, patch.attendeeIds);
+
+      const ready = await invitesReady(request.db);
+      const before = meetingState(existing);
+      const endError = inviteEndError(
+        ready,
+        patch.sendInvites ?? before.sendInvites,
+        patch.endsAt !== undefined ? patch.endsAt : before.endsAt
+      );
+      if (endError) throw badRequest(endError);
+      // Who held the invite before this change, read before anything moves.
+      const tracking = ready && (before.sendInvites || patch.sendInvites === true);
+      const attendeesBefore = tracking ? await attendeeIds(request, before) : [];
 
       const calendarValues: Record<string, unknown> = {};
       await syncCalendar(request, existing, patch, calendarValues);
@@ -231,23 +286,56 @@ export default async function meetingRoutes(app: FastifyInstance) {
       if (patch.meetingNoteId !== undefined) values.meeting_note_id = patch.meetingNoteId;
       // A calendar-backed meeting's link belongs to the calendar, not the form.
       if (existing.calendar_event_id && !("calendar_event_id" in calendarValues)) delete values.join_url;
-      Object.assign(values, calendarValues);
+      Object.assign(values, calendarValues, inviteColumns(ready, patch.sendInvites));
 
-      // Only the invitees changed: nothing to write on the meeting row itself.
-      if (Object.keys(values).length === 0) {
-        if (invitees) await replaceAttendees(request, id, String(existing.student_id), invitees);
-        return (await withAttendees(request, [existing]))[0];
+      // Only the invitees changed (or nothing did): nothing to write on the meeting row itself.
+      let saved = existing;
+      if (Object.keys(values).length > 0) {
+        const { data, error } = await request.db
+          .from("meetings")
+          .update(values)
+          .eq("id", id)
+          .select("*")
+          .single();
+        if (error) throw fromPostgrest(error);
+        saved = data as Row;
       }
 
-      const { data, error } = await request.db
-        .from("meetings")
-        .update(values)
-        .eq("id", id)
-        .select("*")
-        .single();
-      if (error) throw fromPostgrest(error);
-      if (invitees) await replaceAttendees(request, id, String(existing.student_id), invitees);
-      return (await withAttendees(request, [data as Row]))[0];
+      // The row change is committed, so invitees hear about it even if the
+      // attendee write then fails: the round runs on what actually persisted.
+      let attendeeError: unknown = null;
+      if (invitees) {
+        try {
+          await replaceAttendees(request, id, primary, invitees);
+        } catch (err) {
+          attendeeError = err;
+        }
+      }
+
+      let invites: InviteRoundSummary = { status: "none" };
+      if (patch.sendInvites && !ready) invites = INVITES_UNAVAILABLE;
+      if (tracking) {
+        const attendeesAfter = !invitees
+          ? attendeesBefore
+          : attendeeError
+            ? await attendeeIds(request, before).catch(() => null)
+            : [primary, ...invitees];
+        if (attendeesAfter) {
+          const prepared = await prepareInviteRound(request, {
+            before,
+            after: meetingState(saved),
+            attendeesBefore,
+            attendeesAfter,
+            notify: patch.notifyAttendees ?? true,
+          });
+          invites = prepared.summary;
+          startInviteDelivery(prepared.round, request.log);
+        } else {
+          invites = { status: "skipped", reason: "Couldn't read who is invited" };
+        }
+      }
+      if (attendeeError) throw attendeeError;
+      return { ...(await withAttendees(request, [saved]))[0], invites };
     }
   );
 
@@ -265,12 +353,59 @@ export default async function meetingRoutes(app: FastifyInstance) {
       const existing = await loadMeeting(request, id);
       await resolveStudentId(request, String(existing.student_id), "edit");
 
+      // Who to tell is read while the meeting and its attendees still exist.
+      const before = meetingState(existing);
+      let prepared: Awaited<ReturnType<typeof prepareInviteRound>> | null = null;
+      if (before.sendInvites && (await invitesReady(request.db))) {
+        const attendees = await attendeeIds(request, before).catch(() => null);
+        prepared = attendees
+          ? await prepareInviteRound(request, { before, after: null, attendeesBefore: attendees, attendeesAfter: [], notify: true })
+          : { summary: { status: "skipped", reason: "Couldn't read who is invited" }, round: null };
+      }
+
       await dropCalendarEvent(request, existing);
       const { error } = await request.db.from("meetings").delete().eq("id", id);
       if (error) throw fromPostgrest(error);
-      return { deleted: true };
+      startInviteDelivery(prepared?.round ?? null, request.log);
+      return { deleted: true, invites: prepared?.summary ?? ({ status: "none" } satisfies InviteRoundSummary) };
     }
   );
+
+  /**
+   * Who was emailed this meeting's calendar invite and how each send stands:
+   * the newest attempt per address, from message_deliveries (RLS returns the
+   * rows of students on the caller's caseload). Before 20261023090001 there
+   * is no meeting link to read, so the list is empty.
+   */
+  app.get(
+    "/:id/invites",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("meetings:invites", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const existing = await loadMeeting(request, id);
+      await resolveStudentId(request, String(existing.student_id), "view");
+      const { data, error } = await request.db
+        .from("message_deliveries")
+        .select("id, student_id, recipient_kind, to_email, template, status, channel, error, sent_at, delivered_at, created_at")
+        .eq("meeting_id", id)
+        .order("created_at", { ascending: false })
+        .limit(300);
+      if (error) {
+        if (error.code === "42703" || error.code === "PGRST204") return [];
+        throw fromPostgrest(error);
+      }
+      return latestInvitePerAddress((data ?? []) as Row[]);
+    }
+  );
+}
+
+/** The students invited to a meeting, primary first. A read error throws (who to tell is never guessed). */
+async function attendeeIds(request: FastifyRequest, meeting: ReturnType<typeof meetingState>): Promise<string[]> {
+  try {
+    return await loadAttendeeIds(request.db, meeting);
+  } catch (err) {
+    throw fromPostgrest(err as { message: string; code?: string });
+  }
 }
 
 /** Meetings a student is invited to without being the primary attendee. */

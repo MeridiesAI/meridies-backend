@@ -12,7 +12,15 @@ const REVIEWED = [
   // lib/eventsDiscovery.ts: the weekly job acts for no counselor; it writes only Meridies-wide hub_events
   // rows from colleges' public pages. routes/events.ts: "Refresh events" runs inside an approved
   // counselor's own request (requireRole) and writes only those same public rows.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/imports/files.ts, mapping.ts, stage.ts: the import worker inside an approved counselor's own
+  // request (authenticate + requireRole ran), p_actor = that counselor; every function re-checks
+  // private.can_manage_import (which asks the approval gate). lib/imports/retention.ts: the sweep acts
+  // for no counselor; it removes only raw files in the private imports bucket and staged values whose
+  // time is up, as the database decides.
+  // lib/caseloadTransfer.ts: after an approved firm admin's transfer commits (inside their request), reads the
+  // addresses of exactly the profiles transfer_caseload returned, to mail them. Outbound delivery only.
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  "lib/imports/files.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",

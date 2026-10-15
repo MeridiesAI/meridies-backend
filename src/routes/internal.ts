@@ -14,18 +14,20 @@
  *     "$API_URL/internal/imports/sweep"
  * and weekly, the Events Hub's discovery of colleges' upcoming events:
  *     "$API_URL/internal/events/discover"
+ * and monthly, the catalog's campus photos from Wikimedia Commons:
+ *     "$API_URL/internal/ingest/college-photos"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
-import { isStale } from "../lib/heartbeat.js";
+import { summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
 import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
 import { serviceClient } from "../lib/supabase.js";
-import { startScorecardIngest } from "../lib/ingest/run.js";
+import { startCollegePhotoIngest, startScorecardIngest } from "../lib/ingest/run.js";
 import { runScheduledSweep } from "../lib/sweepSchedule.js";
 
 /**
@@ -98,6 +100,30 @@ export default async function internalRoutes(app: FastifyInstance) {
     }
   );
 
+  /**
+   * Monthly: campus photos from Wikimedia Commons (lib/ingest/collegePhotos.ts).
+   * Re-checks every stored file's license and existence and downloads only what
+   * changed. 202; the run records itself in ingest_runs and job_heartbeats.
+   */
+  app.post(
+    "/ingest/college-photos",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 4, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const r = await startCollegePhotoIngest(request.log, "cron");
+      if (!r.started) {
+        if (r.reason === "locked") return reply.code(409).send({ started: false, reason: "A photo load is already running" });
+        const reason =
+          r.reason === "no-schema"
+            ? "Apply 20261023070001_college_photos.sql to load photos"
+            : r.reason === "no-service-role"
+              ? "The photo load needs the service role key"
+              : "The photo load could not take its lease";
+        return reply.code(503).send({ started: false, reason });
+      }
+      return reply.code(202).send({ started: true });
+    }
+  );
+
   /** Weekly: flag library links that stopped answering. 202; recorded in ingest_runs. */
   app.post(
     "/resources/link-check",
@@ -162,22 +188,17 @@ export default async function internalRoutes(app: FastifyInstance) {
 
   /**
    * For a monitor (an uptime check with a keyword match on "all-ok"): every
-   * scheduled job's last clean run, and whether it's overdue. 503 when any is,
-   * so a plain status-code monitor alerts too.
+   * scheduled job's last clean run, whether it's overdue, and whether its last
+   * run failed. 503 when any is overdue, or when a job that runs daily or less
+   * often is failing (lib/heartbeat.ts failingAlerts), so a plain status-code
+   * monitor alerts too.
    */
   app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (_request, reply) => {
     const svc = serviceClient();
     if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });
     const { data, error } = await svc.from("job_heartbeats").select("job, last_ok_at, last_error_at, expected_every");
     if (error) return reply.code(503).send({ status: "degraded", reason: "heartbeats unreadable" });
-    const jobs = ((data ?? []) as { job: string; last_ok_at: string | null; last_error_at: string | null; expected_every: string }[]).map((j) => ({
-      job: j.job,
-      lastOkAt: j.last_ok_at,
-      lastErrorAt: j.last_error_at,
-      // Not yet run at all reads as overdue only once something should have run.
-      overdue: isStale(j.last_ok_at, j.expected_every),
-    }));
-    const overdue = jobs.filter((j) => j.overdue).map((j) => j.job);
-    return reply.code(overdue.length ? 503 : 200).send({ status: overdue.length ? "overdue" : "all-ok", overdue, jobs });
+    const summary = summarizeHeartbeats((data ?? []) as HeartbeatRow[]);
+    return reply.code(summary.status === "all-ok" ? 200 : 503).send(summary);
   });
 }

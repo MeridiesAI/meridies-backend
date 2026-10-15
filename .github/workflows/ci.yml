@@ -15,29 +15,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # The import parser's child process, from dist/ (the unit tests run the source).
+      - run: node scripts/smoke/parse-worker.mjs
       - run: npm test
+
+  workflows:
+    name: Lint GitHub workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      # actionlint 1.7.7, checked against the release's published sha256; the
+      # runner's own shellcheck lints the run: scripts.
+      - name: actionlint
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
 
   integration:
     name: Migrations + RLS persona suite (local Supabase)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
-      - uses: supabase/setup-cli@v1
+      # The CLI that applies to production (migrations.yml); bump both together.
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
         with:
-          version: latest
+          version: 2.121.0
       - run: npm ci
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
 
@@ -53,6 +74,36 @@ jobs:
             | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|DB_URL)=' \
             | sed -e 's/^API_URL=/SUPABASE_URL=/' -e 's/^ANON_KEY=/SUPABASE_ANON_KEY=/' -e 's/^SERVICE_ROLE_KEY=/SUPABASE_SERVICE_ROLE_KEY=/' \
             | tr -d '"' >> "$GITHUB_ENV"
+
+      # The Apply migrations workflow reads the CLI's JSON (scripts/migrations/plan.mjs).
+      # Run that reader on what this CLI really prints: nothing pending, one file
+      # pending, a file older than the newest applied, and the database check.
+      - name: Migration plan reader against the pinned CLI
+        run: |
+          cd "$RUNNER_TEMP/sb"
+          reader="$GITHUB_WORKSPACE/scripts/migrations/plan.mjs"
+          dry() { rc=0; supabase db push --local --dry-run --skip-vault --agent no --output-format json > "$1" 2>/dev/null || rc=$?; }
+
+          dry "$RUNNER_TEMP/none.json"
+          node "$reader" plan --dry-run "$RUNNER_TEMP/none.json" --exit-code "$rc" --dir supabase/migrations --outputs "$RUNNER_TEMP/o1"
+          grep -qx 'pending=false' "$RUNNER_TEMP/o1"
+
+          printf -- '-- CI parser check\nselect 1;\n' > supabase/migrations/29991231000000_ci_parser_check.sql
+          dry "$RUNNER_TEMP/one.json"
+          node "$reader" plan --dry-run "$RUNNER_TEMP/one.json" --exit-code "$rc" --dir supabase/migrations --outputs "$RUNNER_TEMP/o2"
+          grep -qx 'newest=29991231000000' "$RUNNER_TEMP/o2"
+          rm supabase/migrations/29991231000000_ci_parser_check.sql
+
+          printf 'select 1;\n' > supabase/migrations/20000101000000_ci_out_of_order.sql
+          dry "$RUNNER_TEMP/old.json"
+          if node "$reader" plan --dry-run "$RUNNER_TEMP/old.json" --exit-code "$rc" --dir supabase/migrations > "$RUNNER_TEMP/old.out"; then
+            echo "the reader accepted an out-of-order file"; exit 1
+          fi
+          grep -q 'older than the newest one on production' "$RUNNER_TEMP/old.out"
+          rm supabase/migrations/20000101000000_ci_out_of_order.sql
+
+          supabase db query --local --agent no --output-format json -f "$GITHUB_WORKSPACE/scripts/migrations/problems.sql" > "$RUNNER_TEMP/problems.json"
+          node "$reader" gate --after "$RUNNER_TEMP/problems.json"
 
       - name: Every public table has RLS
         run: test "$(psql "$DB_URL" -tAc "select count(*) from pg_tables where schemaname='public' and rowsecurity=false")" = "0"
@@ -78,9 +129,12 @@ jobs:
           TWILIO_AUTH_TOKEN: local-twilio-test-token-123
           # Research test double (no model or web calls); refuses to boot in production.
           RESEARCH_FAKE: fixture
+          # The Import page for every test counselor, with presets only (no model calls).
+          IMPORTS_ROLLOUT: all
+          IMPORTS_AI: "off"
         run: |
           npx tsx src/index.ts > api.log 2>&1 &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done
           cat api.log; exit 1
 
       - name: Persona suite
@@ -88,6 +142,28 @@ jobs:
           API_URL: http://127.0.0.1:4100
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
         run: npm run test:integration
+
+      # The app's signed-in suite seeds its stack with this; keep it running. The
+      # accounts it prints stay out of the log.
+      - name: E2E stack seed runs
+        env:
+          API_URL: http://127.0.0.1:4100
+        run: npm run seed:e2e -- --students 5 --roster 3 > /dev/null
+
+      # B14. Report only: runners are too noisy to gate a merge on 500 ms. It
+      # still fails when the seed or a timed call breaks. PERF_ENFORCE=1 by hand.
+      - name: 60-student speed test (report only)
+        env:
+          API_URL: http://127.0.0.1:4100
+        run: npm run test:perf
+
+      - name: Keep the speed test's numbers
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-roster
+          path: perf-roster.json
+          if-no-files-found: ignore
 
       - if: failure()
         run: cat api.log || true

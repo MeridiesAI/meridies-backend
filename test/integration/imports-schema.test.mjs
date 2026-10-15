@@ -10,9 +10,9 @@ const rls = await sql(`select count(*) from pg_tables where schemaname = 'public
 check("RLS is on for every import table", rls === "0", rls);
 
 const fields = await sql(`select count(*) from public.import_fields`);
-check("import_fields is seeded (17 fields + 3 row targets)", fields === "20", fields);
+check("import_fields is seeded (21 fields + 4 row targets)", fields === "25", fields);
 const star = await sql(`select string_agg(target_table, ',' order by target_table) from public.import_fields where field = '*'`);
-check("each multi-row target has a '*' row", star === "activities,courses,test_scores", star);
+check("each multi-row target has a '*' row", star === "activities,awards,courses,test_scores", star);
 
 const c = await user("imp-schema");
 const s = await studentOf(c);
@@ -80,7 +80,7 @@ const bump = await rest(counselorA.token, "PATCH", `/rest/v1/roster_imports?id=e
 check("the browser can't move an import to committed", bump.status >= 400, `status ${bump.status}`);
 
 const fieldsSeen = await rest(counselorA.token, "GET", "/rest/v1/import_fields?select=field");
-check("counselors can read the field list", Array.isArray(fieldsSeen.body) && fieldsSeen.body.length === 20);
+check("counselors can read the field list", Array.isArray(fieldsSeen.body) && fieldsSeen.body.length === 25);
 
 // Leaving the firm: the uploader loses access, the owner keeps it.
 await sql(`delete from public.firm_members where profile_id = '${counselorA.id}'`);

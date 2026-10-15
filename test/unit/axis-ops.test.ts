@@ -493,3 +493,40 @@ test("change requests are understood as actions, questions are not", () => {
   }
   assert.equal(understand("Finish her personal statement", ctx).intent, "essay", "the essay guard outranks a change request");
 });
+
+// ---- Meetings and emailed calendar invites -------------------------------------------------
+
+test("meeting ops never email invitees unless asked, and asking makes it a card", () => {
+  const create = getOp("meetings.create")!;
+  const update = getOp("meetings.update")!;
+  const base = { student_id: SAMPLE_UUID, title: "Check-in", starts_at: "2026-11-03T16:00:00-05:00", ends_at: "2026-11-03T17:00:00-05:00" };
+  assert.equal(riskOf(create, base), "auto");
+  assert.equal(riskOf(create, { ...base, send_invites: true }), "confirm");
+  assert.equal((create.request(create.input.parse({ ...base, send_invites: true }) as never).body as Record<string, unknown>).sendInvites, true);
+
+  const move = { meeting_id: SAMPLE_UUID, starts_at: "2026-11-04T16:00:00Z", ends_at: "2026-11-04T17:00:00Z" };
+  assert.equal(riskOf(update, move), "auto");
+  const body = update.request(update.input.parse(move) as never).body as Record<string, unknown>;
+  assert.equal(body.notifyAttendees, false, "an auto change tells the route not to email anyone");
+  assert.equal(riskOf(update, { ...move, notify_attendees: true }), "confirm");
+  assert.equal((update.request(update.input.parse({ ...move, notify_attendees: true }) as never).body as Record<string, unknown>).notifyAttendees, true);
+  assert.equal(riskOf(update, { meeting_id: SAMPLE_UUID, send_invites: false }), "confirm", "switching off sends cancellations");
+  assert.equal(riskOf(update, { meeting_id: SAMPLE_UUID, send_invites: true }), "confirm");
+});
+
+test("undoing a notified change notifies again, and send_invites is restored from the snapshot", () => {
+  const update = getOp("meetings.update")!;
+  const before = { id: SAMPLE_UUID, studentId: SAMPLE_UUID, title: "Old", startsAt: "2026-11-03T16:00:00Z", endsAt: "2026-11-03T17:00:00Z", sendInvites: true };
+  const moved = update.undo!({ meeting_id: SAMPLE_UUID, starts_at: "2026-11-04T16:00:00Z", ends_at: "2026-11-04T17:00:00Z", notify_attendees: true } as never, {}, before);
+  assert.deepEqual(moved, {
+    op: "meetings.update",
+    input: { meeting_id: SAMPLE_UUID, notify_attendees: true, starts_at: "2026-11-03T16:00:00.000Z", ends_at: "2026-11-03T17:00:00.000Z" },
+  });
+  const off = update.undo!({ meeting_id: SAMPLE_UUID, send_invites: false } as never, {}, before);
+  assert.deepEqual(off, { op: "meetings.update", input: { meeting_id: SAMPLE_UUID, send_invites: true } });
+  // Nothing to put back but the flag itself: no undo.
+  assert.equal(update.undo!({ meeting_id: SAMPLE_UUID, notify_attendees: true } as never, {}, before), null);
+  // A snapshot from before the migration has no sendInvites: no undo rather than a guess.
+  const { sendInvites: _gone, ...old } = before;
+  assert.equal(update.undo!({ meeting_id: SAMPLE_UUID, send_invites: true } as never, {}, old), null);
+});

@@ -4,6 +4,7 @@
  * in meridies-app/lib/api.ts under "v10 sync: student-application".
  */
 
+import { toCollegePhoto, type CollegePhotoRow } from "./collegePhotos.js";
 import { currentCycle } from "./supplementDocs.js";
 
 type Row = Record<string, unknown>;
@@ -76,7 +77,11 @@ export function catalogDeadline(deadlines: unknown, round: string | null, cycle 
   return `${year}-${String(month + 1).padStart(2, "0")}-${String(Number(m[2])).padStart(2, "0")}`;
 }
 
-export function toListCollege(r: Row, supplementCounts: Map<string, number> = new Map()) {
+export function toListCollege(
+  r: Row,
+  supplementCounts: Map<string, number> = new Map(),
+  photos: Map<string, CollegePhotoRow> = new Map()
+) {
   const c = (r.college ?? null) as Row | null;
   const status = str(r.status) || "not-started";
   const collegeId = nstr(r.college_id);
@@ -85,6 +90,8 @@ export function toListCollege(r: Row, supplementCounts: Map<string, number> = ne
     id: str(r.id),
     collegeId,
     collegeSlug: c ? nstr(c.slug) : null,
+    /** The catalog college's campus photo (lib/collegePhotos.ts), or null. */
+    collegePhoto: collegeId ? toCollegePhoto(photos.get(collegeId), str(c?.name) || str(r.name)) : null,
     name: str(r.name),
     initials: str(r.initials) || initialsOf(str(r.name)),
     color: str(r.brand_color) || "#176b45",
@@ -237,7 +244,19 @@ export const TIMINGS = ["school", "break", "year"] as const;
 export const RECOGNITION = ["school", "state-regional", "national", "international"] as const;
 export const UC_LEVELS = ["school", "city-community", "state", "regional", "national", "international"] as const;
 
-export function toSheetActivity(r: Row) {
+/** Where a sheet row came from: typed on the sheet, the questionnaire, an import, or Profile Update. */
+export type SheetSource = "manual" | "intake" | "import" | "ai";
+const SOURCES: readonly string[] = ["manual", "intake", "import", "ai"];
+const sourceOf = (v: unknown): SheetSource => (SOURCES.includes(str(v)) ? (str(v) as SheetSource) : "manual");
+
+/**
+ * `fromQuestionnaire` is set only where the caller read intake_fills
+ * (GET /application/sheets): true while the row still holds exactly what the
+ * questionnaire wrote. `source` says where the row started, edited or not.
+ */
+type SheetOpts = { fromQuestionnaire?: boolean };
+
+export function toSheetActivity(r: Row, opts: SheetOpts = {}) {
   const timing = arr(r.timing)[0]?.toLowerCase() ?? null;
   return {
     id: str(r.id),
@@ -254,10 +273,12 @@ export function toSheetActivity(r: Row) {
     ucOrgDescription: str(r.uc_org_description),
     ucDescription: str(r.uc_description),
     sortOrder: nnum(r.sort_order) ?? 0,
+    source: sourceOf(r.source),
+    ...(opts.fromQuestionnaire === undefined ? {} : { fromQuestionnaire: opts.fromQuestionnaire }),
   };
 }
 
-export function toSheetHonor(r: Row) {
+export function toSheetHonor(r: Row, opts: SheetOpts = {}) {
   return {
     id: str(r.id),
     title: str(r.name),
@@ -268,6 +289,8 @@ export function toSheetHonor(r: Row) {
     ucEligibility: str(r.uc_criteria),
     ucAchievement: str(r.uc_earned),
     sortOrder: nnum(r.sort_order) ?? 0,
+    source: sourceOf(r.source),
+    ...(opts.fromQuestionnaire === undefined ? {} : { fromQuestionnaire: opts.fromQuestionnaire }),
   };
 }
 

@@ -1,0 +1,516 @@
+{
+  "_about": [
+    "Every College Scorecard API field lib/ingest/scorecard.ts asks for, and where its name was checked.",
+    "source 'dictionary': the developer-friendly name, variable and description from the College Scorecard data dictionary, as packaged in rscorecard 0.21.0 (R/sysdata.rda, github.com/btskinner/rscorecard).",
+    "source 'site': not in that edition of the dictionary; the name is the one College Scorecard's own site requests (github.com/RTICWDT/college-scorecard, composables/useConstants.js, dev branch, November 2025), under the constant named.",
+    "latest.completion.consumer_rate: the field Scorecard's site sorts and filters schools by graduation rate with (COMPLETION_RATE). The rate the site displays is Outcome Measures (an award within 8 years of entering, all entering students) where reported, else the first-time full-time rate within 150% of normal time; the dictionary edition above predates consumer_rate, so that it is exactly this blend is inferred, not confirmed. It is never a 6-year rate: serve it as Scorecard's graduation rate, and use grad_rate_150 for a timed first-time full-time rate.",
+    "Checked 2026-10-15. test/unit/ingest.test.ts fails when a requested field has no entry here: look the new field up and add it."
+  ],
+  "fields": {
+    "id": {
+      "variable": "UNITID",
+      "source": "dictionary",
+      "description": "Unit ID for institution"
+    },
+    "ope8_id": {
+      "variable": "OPEID",
+      "source": "dictionary",
+      "description": "8-digit OPE ID for institution"
+    },
+    "school.name": {
+      "variable": "INSTNM",
+      "source": "dictionary",
+      "description": "Institution name"
+    },
+    "school.alias": {
+      "variable": "ALIAS",
+      "source": "dictionary",
+      "description": "Institution name aliases"
+    },
+    "school.city": {
+      "variable": "CITY",
+      "source": "dictionary",
+      "description": "City"
+    },
+    "school.state": {
+      "variable": "STABBR",
+      "source": "dictionary",
+      "description": "State postcode"
+    },
+    "school.zip": {
+      "variable": "ZIP",
+      "source": "dictionary",
+      "description": "ZIP code"
+    },
+    "school.school_url": {
+      "variable": "INSTURL",
+      "source": "dictionary",
+      "description": "URL for institution's homepage"
+    },
+    "school.ownership": {
+      "variable": "CONTROL",
+      "source": "dictionary",
+      "description": "Control of institution"
+    },
+    "school.locale": {
+      "variable": "LOCALE",
+      "source": "dictionary",
+      "description": "Locale of institution"
+    },
+    "school.carnegie_size_setting": {
+      "variable": "CCSIZSET",
+      "source": "dictionary",
+      "description": "Carnegie Classification -- size and setting"
+    },
+    "school.religious_affiliation": {
+      "variable": "RELAFFIL",
+      "source": "dictionary",
+      "description": "Religous affiliation of the institution"
+    },
+    "school.women_only": {
+      "variable": "WOMENONLY",
+      "source": "dictionary",
+      "description": "Flag for women-only college"
+    },
+    "school.men_only": {
+      "variable": "MENONLY",
+      "source": "dictionary",
+      "description": "Flag for men-only college"
+    },
+    "school.online_only": {
+      "variable": "DISTANCEONLY",
+      "source": "dictionary",
+      "description": "Flag for distance-education-only education"
+    },
+    "school.open_admissions_policy": {
+      "variable": "OPENADMP",
+      "source": "dictionary",
+      "description": "Open admissions policy indicator"
+    },
+    "school.price_calculator_url": {
+      "variable": "NPCURL",
+      "source": "dictionary",
+      "description": "URL for institution's net price calculator"
+    },
+    "school.degrees_awarded.predominant": {
+      "variable": "PREDDEG",
+      "source": "dictionary",
+      "description": "Predominant undergraduate degree awarded"
+    },
+    "school.minority_serving.historically_black": {
+      "variable": "HBCU",
+      "source": "dictionary",
+      "description": "Flag for Historically Black College and University"
+    },
+    "school.minority_serving.hispanic": {
+      "variable": "HSI",
+      "source": "dictionary",
+      "description": "Flag for Hispanic-serving institution"
+    },
+    "school.minority_serving.tribal": {
+      "variable": "TRIBAL",
+      "source": "dictionary",
+      "description": "Flag for tribal college and university"
+    },
+    "location.lat": {
+      "variable": "LATITUDE",
+      "source": "dictionary",
+      "description": "Latitude"
+    },
+    "location.lon": {
+      "variable": "LONGITUDE",
+      "source": "dictionary",
+      "description": "Longitude"
+    },
+    "latest.admissions.admission_rate.overall": {
+      "variable": "ADM_RATE",
+      "source": "dictionary",
+      "description": "Admission rate"
+    },
+    "latest.admissions.test_requirements": {
+      "variable": "ADMCON7",
+      "source": "dictionary",
+      "description": "Test score requirements for admission"
+    },
+    "latest.admissions.sat_scores.25th_percentile.critical_reading": {
+      "variable": "SATVR25",
+      "source": "dictionary",
+      "description": "25th percentile of SAT scores at the institution (critical reading)"
+    },
+    "latest.admissions.sat_scores.75th_percentile.critical_reading": {
+      "variable": "SATVR75",
+      "source": "dictionary",
+      "description": "75th percentile of SAT scores at the institution (critical reading)"
+    },
+    "latest.admissions.sat_scores.25th_percentile.math": {
+      "variable": "SATMT25",
+      "source": "dictionary",
+      "description": "25th percentile of SAT scores at the institution (math)"
+    },
+    "latest.admissions.sat_scores.75th_percentile.math": {
+      "variable": "SATMT75",
+      "source": "dictionary",
+      "description": "75th percentile of SAT scores at the institution (math)"
+    },
+    "latest.admissions.act_scores.25th_percentile.cumulative": {
+      "variable": "ACTCM25",
+      "source": "dictionary",
+      "description": "25th percentile of the ACT cumulative score"
+    },
+    "latest.admissions.act_scores.75th_percentile.cumulative": {
+      "variable": "ACTCM75",
+      "source": "dictionary",
+      "description": "75th percentile of the ACT cumulative score"
+    },
+    "latest.student.size": {
+      "variable": "UGDS",
+      "source": "dictionary",
+      "description": "Enrollment of undergraduate certificate/degree-seeking students"
+    },
+    "latest.cost.attendance.academic_year": {
+      "variable": "COSTT4_A",
+      "source": "dictionary",
+      "description": "Average cost of attendance (academic year institutions)"
+    },
+    "latest.cost.tuition.in_state": {
+      "variable": "TUITIONFEE_IN",
+      "source": "dictionary",
+      "description": "In-state tuition and fees"
+    },
+    "latest.cost.tuition.out_of_state": {
+      "variable": "TUITIONFEE_OUT",
+      "source": "dictionary",
+      "description": "Out-of-state tuition and fees"
+    },
+    "latest.cost.avg_net_price.overall": {
+      "variable": null,
+      "source": "site",
+      "siteConstant": "NET_PRICE"
+    },
+    "latest.cost.net_price.public.by_income_level.0-30000": {
+      "variable": "NPT41_PUB",
+      "source": "dictionary",
+      "description": "Average net price for $0-$30,000 family income (public institutions)"
+    },
+    "latest.cost.net_price.private.by_income_level.0-30000": {
+      "variable": "NPT41_PRIV",
+      "source": "dictionary",
+      "description": "Average net price for $0-$30,000 family income (private for-profit and nonprofit institutions)"
+    },
+    "latest.cost.net_price.public.by_income_level.30001-48000": {
+      "variable": "NPT42_PUB",
+      "source": "dictionary",
+      "description": "Average net price for $30,001-$48,000 family income (public institutions)"
+    },
+    "latest.cost.net_price.private.by_income_level.30001-48000": {
+      "variable": "NPT42_PRIV",
+      "source": "dictionary",
+      "description": "Average net price for $30,001-$48,000 family income (private for-profit and nonprofit institutions)"
+    },
+    "latest.cost.net_price.public.by_income_level.48001-75000": {
+      "variable": "NPT43_PUB",
+      "source": "dictionary",
+      "description": "Average net price for $48,001-$75,000 family income (public institutions)"
+    },
+    "latest.cost.net_price.private.by_income_level.48001-75000": {
+      "variable": "NPT43_PRIV",
+      "source": "dictionary",
+      "description": "Average net price for $48,001-$75,000 family income (private for-profit and nonprofit institutions)"
+    },
+    "latest.cost.net_price.public.by_income_level.75001-110000": {
+      "variable": "NPT44_PUB",
+      "source": "dictionary",
+      "description": "Average net price for $75,001-$110,000 family income (public institutions)"
+    },
+    "latest.cost.net_price.private.by_income_level.75001-110000": {
+      "variable": "NPT44_PRIV",
+      "source": "dictionary",
+      "description": "Average net price for $75,001-$110,000 family income (private for-profit and nonprofit institutions)"
+    },
+    "latest.cost.net_price.public.by_income_level.110001-plus": {
+      "variable": "NPT45_PUB",
+      "source": "dictionary",
+      "description": "Average net price for $110,000+ family income (public institutions)"
+    },
+    "latest.cost.net_price.private.by_income_level.110001-plus": {
+      "variable": "NPT45_PRIV",
+      "source": "dictionary",
+      "description": "Average net price for $110,000+ family income (private for-profit and nonprofit institutions)"
+    },
+    "latest.aid.pell_grant_rate": {
+      "variable": "PCTPELL",
+      "source": "dictionary",
+      "description": "Percentage of undergraduates who receive a Pell Grant"
+    },
+    "latest.aid.federal_loan_rate": {
+      "variable": "PCTFLOAN",
+      "source": "dictionary",
+      "description": "Percent of all undergraduate students receiving a federal student loan"
+    },
+    "latest.aid.median_debt.completers.overall": {
+      "variable": "GRAD_DEBT_MDN",
+      "source": "dictionary",
+      "description": "The median debt for students who have completed"
+    },
+    "latest.completion.consumer_rate": {
+      "variable": null,
+      "source": "site",
+      "siteConstant": "COMPLETION_RATE"
+    },
+    "latest.earnings.10_yrs_after_entry.median": {
+      "variable": "MD_EARN_WNE_P10",
+      "source": "dictionary",
+      "description": "Median earnings of students working and not enrolled 10 years after entry"
+    },
+    "latest.programs.cip_4_digit.code": {
+      "variable": "CIPCODE",
+      "source": "dictionary",
+      "description": "Classification of Instructional Programs (CIP) code for the field of study"
+    },
+    "latest.programs.cip_4_digit.title": {
+      "variable": "CIPDESC",
+      "source": "dictionary",
+      "description": "Text description of the field of study CIP Code"
+    },
+    "latest.programs.cip_4_digit.credential.level": {
+      "variable": "CREDLEV",
+      "source": "dictionary",
+      "description": "Level of credential"
+    },
+    "latest.programs.cip_4_digit.counts.ipeds_awards2": {
+      "variable": "IPEDSCOUNT2",
+      "source": "dictionary",
+      "description": "Number of awards to all students in year 2 of the pooled debt cohort"
+    },
+    "latest.programs.cip_4_digit.earnings.4_yr.overall_median_earnings": {
+      "variable": null,
+      "source": "site",
+      "siteConstant": "FIELD_OF_STUDY_EARNINGS"
+    },
+    "latest.programs.cip_4_digit.debt.staff_grad_plus.all.eval_inst.median": {
+      "variable": "DEBT_ALL_STGP_EVAL_MDN",
+      "source": "dictionary",
+      "description": "Median Stafford and Grad PLUS loan debt disbursed at this institution"
+    },
+    "latest.completion.completion_rate_4yr_100nt": {
+      "variable": "C100_4",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (100% of expected time to completion)"
+    },
+    "latest.completion.completion_rate_4yr_150nt": {
+      "variable": "C150_4",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion)"
+    },
+    "latest.completion.completion_rate_less_than_4yr_100nt": {
+      "variable": "C100_L4",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (100% of expected time to completion)"
+    },
+    "latest.completion.completion_rate_less_than_4yr_150nt": {
+      "variable": "C150_L4",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion)"
+    },
+    "latest.completion.completion_rate_4yr_150_white": {
+      "variable": "C150_4_WHITE",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for white students"
+    },
+    "latest.completion.completion_rate_4yr_150_black": {
+      "variable": "C150_4_BLACK",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for black students"
+    },
+    "latest.completion.completion_rate_4yr_150_hispanic": {
+      "variable": "C150_4_HISP",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for Hispanic students"
+    },
+    "latest.completion.completion_rate_4yr_150_asian": {
+      "variable": "C150_4_ASIAN",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for Asian students"
+    },
+    "latest.completion.completion_rate_4yr_150_aian": {
+      "variable": "C150_4_AIAN",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for American Indian/Alaska Native students"
+    },
+    "latest.completion.completion_rate_4yr_150_nhpi": {
+      "variable": "C150_4_NHPI",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for Native Hawaiian/Pacific Islander students"
+    },
+    "latest.completion.completion_rate_4yr_150_2ormore": {
+      "variable": "C150_4_2MOR",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for students of two-or-more-races"
+    },
+    "latest.completion.completion_rate_4yr_150_nonresident.alien": {
+      "variable": "C150_4_NRA",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for non-resident alien students"
+    },
+    "latest.completion.completion_rate_4yr_150_race.unknown": {
+      "variable": "C150_4_UNKN",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at four-year institutions (150% of expected time to completion) for students whose race is unknown"
+    },
+    "latest.completion.completion_rate_l4yr_150_white": {
+      "variable": "C150_L4_WHITE",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for white students"
+    },
+    "latest.completion.completion_rate_l4yr_150_black": {
+      "variable": "C150_L4_BLACK",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for black students"
+    },
+    "latest.completion.completion_rate_l4yr_150_hispanic": {
+      "variable": "C150_L4_HISP",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for Hispanic students"
+    },
+    "latest.completion.completion_rate_l4yr_150_asian": {
+      "variable": "C150_L4_ASIAN",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for Asian students"
+    },
+    "latest.completion.completion_rate_l4yr_150_aian": {
+      "variable": "C150_L4_AIAN",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for American Indian/Alaska Native students"
+    },
+    "latest.completion.completion_rate_l4yr_150_nhpi": {
+      "variable": "C150_L4_NHPI",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for Native Hawaiian/Pacific Islander students"
+    },
+    "latest.completion.completion_rate_l4yr_150_2ormore": {
+      "variable": "C150_L4_2MOR",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for students of two-or-more-races"
+    },
+    "latest.completion.completion_rate_l4yr_150_nonresident.alien": {
+      "variable": "C150_L4_NRA",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for non-resident alien students"
+    },
+    "latest.completion.completion_rate_l4yr_150_race.unknown": {
+      "variable": "C150_L4_UNKN",
+      "source": "dictionary",
+      "description": "Completion rate for first-time, full-time students at less-than-four-year institutions (150% of expected time to completion) for students whose race is unknown"
+    },
+    "latest.student.retention_rate_suppressed.four_year.full_time_pooled": {
+      "variable": "RET_FT4_POOLED_SUPP",
+      "source": "dictionary",
+      "description": "First-time, full-time student retention rate at four-year institutions"
+    },
+    "latest.student.retention_rate_suppressed.lt_four_year.full_time_pooled": {
+      "variable": "RET_FTL4_POOLED_SUPP",
+      "source": "dictionary",
+      "description": "First-time, full-time student retention rate at less-than-four-year institutions"
+    },
+    "latest.student.part_time_share": {
+      "variable": "PPTUG_EF",
+      "source": "dictionary",
+      "description": "Share of undergraduate, degree-/certificate-seeking students who are part-time"
+    },
+    "latest.student.grad_students": {
+      "variable": "GRADS",
+      "source": "dictionary",
+      "description": "Number of graduate students"
+    },
+    "latest.student.demographics.student_faculty_ratio": {
+      "variable": null,
+      "source": "site",
+      "siteConstant": "STUDENT_RATIO"
+    },
+    "latest.student.demographics.women": {
+      "variable": "UGDS_WOMEN",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are women"
+    },
+    "latest.student.demographics.men": {
+      "variable": "UGDS_MEN",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are men"
+    },
+    "latest.student.demographics.race_ethnicity.white": {
+      "variable": "UGDS_WHITE",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are white"
+    },
+    "latest.student.demographics.race_ethnicity.black": {
+      "variable": "UGDS_BLACK",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are black"
+    },
+    "latest.student.demographics.race_ethnicity.hispanic": {
+      "variable": "UGDS_HISP",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are Hispanic"
+    },
+    "latest.student.demographics.race_ethnicity.asian": {
+      "variable": "UGDS_ASIAN",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are Asian"
+    },
+    "latest.student.demographics.race_ethnicity.aian": {
+      "variable": "UGDS_AIAN",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are American Indian/Alaska Native"
+    },
+    "latest.student.demographics.race_ethnicity.nhpi": {
+      "variable": "UGDS_NHPI",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are Native Hawaiian/Pacific Islander"
+    },
+    "latest.student.demographics.race_ethnicity.two_or_more": {
+      "variable": "UGDS_2MOR",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are two or more races"
+    },
+    "latest.student.demographics.race_ethnicity.non_resident_alien": {
+      "variable": "UGDS_NRA",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students who are non-resident aliens"
+    },
+    "latest.student.demographics.race_ethnicity.unknown": {
+      "variable": "UGDS_UNKN",
+      "source": "dictionary",
+      "description": "Total share of enrollment of undergraduate degree-seeking students whose race is unknown"
+    },
+    "latest.cost.roomboard.oncampus": {
+      "variable": "ROOMBOARD_ON",
+      "source": "dictionary",
+      "description": "Cost of attendance: on-campus room and board"
+    },
+    "latest.cost.booksupply": {
+      "variable": "BOOKSUPPLY",
+      "source": "dictionary",
+      "description": "Cost of attendance: estimated books and supplies"
+    },
+    "latest.earnings.6_yrs_after_entry.median": {
+      "variable": "MD_EARN_WNE_P6",
+      "source": "dictionary",
+      "description": "Median earnings of students working and not enrolled 6 years after entry"
+    },
+    "latest.aid.median_debt.completers.monthly_payments": {
+      "variable": "GRAD_DEBT_MDN10YR",
+      "source": "dictionary",
+      "description": "Median loan debt of completers in monthly payments (10-year amortization plan)"
+    },
+    "latest.aid.median_debt.noncompleters": {
+      "variable": "WDRAW_DEBT_MDN",
+      "source": "dictionary",
+      "description": "The median debt for students who have not completed"
+    },
+    "school.carnegie_basic": {
+      "variable": "CCBASIC",
+      "source": "dictionary",
+      "description": "Carnegie Classification -- basic"
+    }
+  }
+}

@@ -116,13 +116,23 @@ export default async function accountRoutes(app: FastifyInstance) {
     if (!svc) throw unavailable("Account deletion needs the service role key");
 
     if (request.profile.role === "counselor") {
-      const { count, error } = await svc
-        .from("profiles")
-        .select("id", { count: "exact", head: true })
-        .eq("counselor_id", me)
-        .is("archived_at", null);
+      // In a firm, archived students count too: their meetings, notes and
+      // documents would go with this account, and the firm can transfer them
+      // (Management, caseload transfer). A solo counselor may still archive
+      // and delete; that gap is known (caseload transfer spec §12).
+      const inFirm = Boolean(request.profile.firm_id);
+      let roster = svc.from("profiles").select("id", { count: "exact", head: true }).eq("counselor_id", me);
+      if (!inFirm) roster = roster.is("archived_at", null);
+      const { count, error } = await roster;
       if (error) throw fromPostgrest(error);
-      if ((count ?? 0) > 0) throw conflict(`You still have ${count} student${count === 1 ? "" : "s"} on your roster. Archive them or hand them to a colleague first.`);
+      if ((count ?? 0) > 0) {
+        const students = `${count} student${count === 1 ? "" : "s"}`;
+        throw conflict(
+          inFirm
+            ? `You still have ${students} on your caseload. Ask a firm owner or admin to transfer them (Management › Transfer caseload).`
+            : `You still have ${students} on your roster. Archive them or hand them to a colleague first.`
+        );
+      }
       const { data: firm } = await svc.from("firms").select("id").eq("owner_id", me).maybeSingle();
       if (firm) throw conflict("You own a firm. Hand ownership to someone else before deleting your account.");
     }

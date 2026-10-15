@@ -440,6 +440,8 @@ export const firm: OpGroup = {
           : null;
       },
     }),
+    // Caseload transfer (Management) is deliberately not an op, and this one
+    // never sends releaseStudents: AxIS can't move or release a caseload.
     op({
       name: "firm.remove_member",
       kind: "write",

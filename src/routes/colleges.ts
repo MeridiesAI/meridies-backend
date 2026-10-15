@@ -14,6 +14,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { rankPercentile } from "../lib/classRank.js";
+import { loadCollegePhotos, toCollegePhoto } from "../lib/collegePhotos.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { escapeIlike } from "../lib/collegesV10.js";
 import { limit } from "../lib/limits.js";
@@ -72,7 +73,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
   app.get("/colleges/:id", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
 
-    const [college, intel, stats, aid, rating, bandRatings, cds, requirements, flags] =
+    const [college, intel, stats, aid, rating, bandRatings, cds, requirements, flags, photos] =
       await Promise.all([
         request.db.from("colleges").select("*").eq("id", id).maybeSingle(),
         request.db.from("college_intel_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -109,6 +110,8 @@ export default async function collegeRoutes(app: FastifyInstance) {
           .is("college_major_id", null)
           .order("severity")
           .limit(50),
+        // Never throws: a missing table or a failed read is no photo.
+        loadCollegePhotos(request.db, [id], request.log),
       ]);
 
     if (college.error) throw fromPostgrest(college.error);
@@ -122,6 +125,8 @@ export default async function collegeRoutes(app: FastifyInstance) {
 
     return {
       college: college.data,
+      /** The campus photo with its credit and license (lib/collegePhotos.ts); outside `college`, which is the raw row. */
+      photo: toCollegePhoto(photos.get(id), String((college.data as Row).name ?? "")),
       intel: intel.data ? toCollegeIntel(intel.data as Row) : null,
       admissionStats: stats.data ?? [],
       aidProfile: aid.data ?? null,

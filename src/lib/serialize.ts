@@ -44,6 +44,8 @@ export type MeridiesUser = {
   counselorId: string | null;
   counselorName: string | null;
   avatarUrl: string | null;
+  /** IANA time zone the user saved (PATCH /auth/me), or null when none is on file. */
+  timezone: string | null;
   /** Counselors: "pending" until Meridies approves the account. null for students. */
   accessStatus: AccessStatus | null;
   profile: Record<string, unknown>;
@@ -72,6 +74,7 @@ export function toMeridiesUser(
     counselorId: p.counselor_id,
     counselorName: opts.counselorName ?? null,
     avatarUrl: p.avatar_url,
+    timezone: p.timezone?.trim() ? p.timezone : null,
     accessStatus: accessStatusOf(p),
     profile: {
       ...blob,
@@ -724,6 +727,8 @@ export const toMeeting = (r: Row) => ({
   deadlineId: nstr(r.deadline_id),
   /** Set when the API booked it on a connected Google / Outlook calendar. */
   calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | null,
+  /** Emailed calendar invites on (lib/meetingInvites.ts). False before 20261023090001. */
+  sendInvites: r.send_invites === true,
   createdAt: nstr(r.created_at),
 });
 

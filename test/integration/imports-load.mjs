@@ -3,6 +3,8 @@
 // the API and the import_worker connection, within the 300 s timeout.
 // NOTE: this script leaves its students and data behind; run `supabase db reset` afterwards.
 // Not part of `npm run test:integration` (slow). Run: npm run test:imports-load
+// Step 2 (at the end): the same students staged from one 5,000-row CSV through
+// the API (upload, register, presets, stage) and saved; needs IMPORTS_ROLLOUT=all.
 import { call, check, sql, user } from "./harness.mjs";
 
 const ROWS = Number(process.env.IMPORT_LOAD_ROWS ?? 5000);
@@ -82,3 +84,48 @@ check("undo finishes within 300 s", undo.body.status === "undone" && undo.ms < 3
 check("undo reverted every change", undo.body.jobResult?.reverted === ROWS * 18, `${undo.body.jobResult?.reverted}`);
 check("imported test_scores gone", (await count(`select count(*) from public.test_scores where student_id in ${mine} and source = 'import'`)) === 0);
 check("imported academics values gone", (await count(`select count(*) from public.student_academics where student_id in ${mine} and sat_superscore is not null`)) === 0);
+
+// ---- step 2: 5,000 rows staged through the API ---------------------------------------------
+// Upload, register, map with presets and stage the same students from one CSV,
+// then save it: staging must finish well inside the request (it is set-based)
+// and the commit inside the job timeout. Needs IMPORTS_ROLLOUT=all on the API.
+const { addImportFile, enc } = await import("./imports-helpers.mjs");
+const people = (await sql(`select string_agg(p.full_name || '|' || u.email, E'\\n' order by u.email) from public.profiles p join auth.users u on u.id = p.id where p.counselor_id = '${c.id}'`)).split("\n");
+const header = "Email,Name,Weighted GPA,Unweighted GPA,SAT,SAT Math,SAT EBRW,ACT,Birthday,Gender,Citizenship,Class Rank,Test Status,Address,Intended Majors,First Gen,Contact Email,AP Biology";
+const body = people.map((line, i) => {
+  const [name, email] = line.split("|");
+  return `${email},${name},4.2,3.9,1500,760,740,34,2008-02-0${(i % 9) + 1},female,us-citizen,${i + 1}/5000,taken,${i} Elm St,Biology; Chemistry,no,parent${i}@test.local,${(i % 5) + 1}`;
+});
+const csvBytes = enc([header, ...body].join("\n"));
+const started = await call(c.token, "POST", "/imports", { permissionConfirmed: true });
+if (started.status !== 201) {
+  check("step 2 is on for this API (IMPORTS_ROLLOUT=all)", false, JSON.stringify(started.body));
+  process.exit(1);
+}
+const imp2 = started.body.id;
+const reg = await addImportFile(c, imp2, "load.csv", csvBytes);
+check("the 5,000-row file registers", reg.body?.status === "profiled" && reg.body.rowCount === ROWS, JSON.stringify(reg.body).slice(0, 200));
+const planned = await call(c.token, "POST", `/imports/${imp2}/plan`);
+const plan = planned.body.plan;
+plan.constants = { gpaScale: "5.0" };
+await call(c.token, "PUT", `/imports/${imp2}/plan`, { plan });
+const t0 = Date.now();
+const staged = await call(c.token, "POST", `/imports/${imp2}/stage`);
+const stageMs = Date.now() - t0;
+console.log(`stage: ${stageMs} ms`, staged.body.stats);
+check("5,000 rows stage, all matched", staged.status === 200 && staged.body.stats.matched === ROWS, JSON.stringify(staged.body).slice(0, 300));
+check("staging 5,000 rows takes under 120 s", stageMs < 120_000, `${stageMs} ms`);
+const stagedChanges = Number(await sql(`select count(*) from public.import_changes where import_id = '${imp2}' and state = 'staged'`));
+console.log(`${stagedChanges} changes staged through the API`);
+const t1 = Date.now();
+const commit2 = await call(c.token, "POST", `/imports/${imp2}/commit`, { invitations: 0 });
+check("the staged import commits", commit2.status === 202, JSON.stringify(commit2.body));
+let saved2;
+for (;;) {
+  saved2 = (await call(c.token, "GET", `/imports/${imp2}`)).body;
+  if (saved2.status !== "committing" || Date.now() - t1 > DEADLINE_MS + 10_000) break;
+  await new Promise((res) => setTimeout(res, 1000));
+}
+console.log(`commit (step 2): ${Date.now() - t1} ms`, saved2.jobResult);
+check("the step-2 commit finishes within 300 s", saved2.status === "committed" && Date.now() - t1 < 300_000, saved2.status);
+check("every accepted change was applied", saved2.jobResult?.applied > 0 && saved2.jobResult?.stale === 0, JSON.stringify(saved2.jobResult));

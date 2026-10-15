@@ -482,7 +482,11 @@ uid)`; commit, undo and applying held data go through
 
 Changing who else may see imports later is a change to these two functions
 only. What happens to a departing counselor's students and imports is decided
-by the firm (caseload transfer spec, §14).
+by the firm: see `2026-10-15-caseload-transfer-design.md`. Held data of a
+moved student goes, in a carrier import, to that student's new counselor;
+the departing counselor's imports and templates go to one practice receiver,
+and only when their whole caseload moves and they are leaving (§6.5, §6.6
+there). These two functions are unchanged by it.
 
 ### 6.5 Invitations as an abuse channel
 Invitation emails use fixed templates; the student and counselor names are
@@ -513,12 +517,19 @@ MM/DD from DD/MM, without values. Headers that look like personal names are
 masked too (§5.2).
 
 ### 7.3 Parsing hardening
-- Parse in a `worker_threads` worker with `resourceLimits` (heap cap) and a
-  wall-clock timeout; kill on breach.
+- Parse in a separate process with its own heap cap and a wall-clock
+  timeout; kill on breach. (Amended in v1.0: a forked child process, not a
+  `worker_threads` worker, because a process-wide `--max-old-space-size`, as
+  hosts set through NODE_OPTIONS, silently overrides a worker's
+  `resourceLimits`.)
 - Enforce an uncompressed-size cap on XLSX (zip bomb) and disable external
   entities / entity expansion in XML parsing.
-- Library: `exceljs` (or SheetJS's own CDN build), **not** npm `xlsx`, which is
-  stuck at 0.18.5 with known prototype-pollution and ReDoS issues.
+- Library: `read-excel-file` (its `universal` build: fflate for the zip,
+  saxen for XML, which expands no entities) and `csv-parse`, **not** npm
+  `xlsx`, which is stuck at 0.18.5 with known prototype-pollution and ReDoS
+  issues. (Amended in v1.0: `exceljs` has been unmaintained since 2023. The
+  parser reads only the XML parts the zip guard checked, stored uncompressed,
+  so it never re-reads the original archive.)
 - File type from magic bytes, not the declared MIME type.
 
 ### 7.4 Sensitive values
@@ -588,7 +599,7 @@ recovery).
 | Backend crash mid-job | Transaction rolls back; job lease expires and the job reruns | Progress resumes |
 | Accepting account's name differs | Item held with mismatch flag | Warning; type the name to apply |
 | Held data near expiry / expired | Email + in-app warning at 7 days; wipe; audit | "4 students' held data expires in 7 days" |
-| Uploader left the firm | Firm admins keep full access; the firm's offboarding choice decides who takes over (caseload transfer spec, §14) | Import listed under its students' new counselor |
+| Uploader left the firm | Firm admins keep full access. A caseload transfer moves each student's held data into a carrier import owned by that student's new counselor, and, when the uploader leaves with their whole caseload transferred, their imports and templates to one practice receiver (caseload transfer spec §6.5, §6.6) | Held data in the new counselor's Ready to apply; the import under the practice receiver |
 
 ## 9. Testing
 
@@ -682,10 +693,11 @@ timelines. School customers are out of scope until this is done.
 - Direct Google Sheets import (`lib/suiteApi.ts`, `accessTokenFor`).
 - Shared starter templates (column names only, no data) for common tools, so a
   counselor's first import from a known tool needs no AI or mapping work.
-- Caseload transfer when a counselor leaves (separate spec): firm setting for
-  "transfer everything to one person" vs "an admin assigns each student",
-  optional temporary delegation; imports, held data and templates follow the
-  students.
+- Caseload transfer when a counselor leaves: built, see
+  `2026-10-15-caseload-transfer-design.md`. Held data follows each student (a
+  carrier import owned by their new counselor); imports and templates go to
+  one practice receiver, not to the students' counselors, because an import
+  holds many students. Temporary delegation is specified there and deferred.
 - Tighten `import_fields.value_type` as the field list settles.
 - `field_sources` provenance column if hash-based provenance proves too coarse.
 - PDF region highlighting in review.
@@ -799,3 +811,45 @@ through `import_fields.value_type` (§4.2).
   permission checkbox; first-customer tools first in real-file tests;
   sensitive-data categories; lawyer checks state laws for the family launch;
   starter templates as a follow-up.
+
+## Appendix E. v1.0 as built (step 2, the CSV/XLSX path)
+
+What shipped differs from the design above in these places; AGENTS.md
+("Import pipeline (step 2)") is the operational reference.
+
+- **Parsing** runs in a forked child process (see §7.3, amended), with a
+  256 MB heap, a 20 s kill and an environment holding only PATH.
+- **Rollout** (§11) is an environment flag: `IMPORTS_ROLLOUT=off|pilot|all`
+  and `IMPORTS_PILOT` (firm or solo counselor ids). Changing the pilot list
+  needs a redeploy. `IMPORTS_AI=off` is the AI kill switch.
+- **Statuses.** A new-pipeline import uses `draft` while files are added (the
+  bucket's insert policy needs it), `mapping` once a plan is stored,
+  `staging`, `review`, then step 1's. `profiling` is unused: profiling happens
+  while registering each file. A new-pipeline row is told apart by
+  `permission_confirmed_at`, and the client guard refuses any client change
+  to one.
+- **The column mapping** sits under the practice's "reading uploaded
+  documents" switch. The model never sees a sheet's name (tabs and files can
+  be named after a student), and a score column's test name comes from the
+  file's header, not the model.
+- **Invitations** are claimed per item (`invite_state = 'sending'`), tied to
+  their invitation before the email is sent, and carry the Resend idempotency
+  key `import-invite/<item_id>/<invitation_id>` (the invitation id is part of
+  the key because a retry after a failure sends a new invitation). Only the
+  uploader sends them. One invitation per address per import: siblings on a
+  parent's email are skipped, and the counselor may invite one of them.
+- **Staff approval** (§5.1) is by hand: a first import over 50 invitations is
+  saved, its invitations wait until `invites_approved_at` is set, and one
+  email goes to `ACCESS_REVIEW_EMAIL`.
+- **Retention** (§5.10) runs on every sweep, outside
+  `IMPORT_HOLD_EXPIRY_ENABLED` (which still holds back the 30-day expiry of
+  accepted data and its warnings until the app's Ready to apply page ships).
+  Invitations never sent expire 14 days after the save.
+- **old_source** for a stored value no import wrote is recorded as `student`
+  (nothing says who typed it; the safest reading), so it defaults to
+  `keep_old` and sorts first.
+- **Deferred:** AI cell cleanup (§5.5; the `import-cleanup` label exists),
+  pausing on bounce or complaint rates (§6.5), the §12 metrics dashboard,
+  PDFs (v1.1), direct Google Sheets, shared starter templates, `high_school`
+  and `grad_year` as import targets, and template management beyond list and
+  delete. Header presets stay conservative until the §13 real files arrive.

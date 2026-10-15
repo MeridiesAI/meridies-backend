@@ -59,6 +59,20 @@ export async function createInvitation(
   request: FastifyRequest,
   input: CreateInvitationInput
 ): Promise<{ row: Row; emailSent: boolean }> {
+  const { row, token } = await insertInvitation(request, input);
+  const sent = await emailInvitation(request, row, token, input);
+  return { row, emailSent: sent };
+}
+
+/**
+ * The first half of createInvitation: supersede and insert, no email. For a
+ * caller that must record the invitation somewhere before it is sent (an
+ * import ties its held data to the invitation first, lib/imports/invitations.ts).
+ */
+export async function insertInvitation(
+  request: FastifyRequest,
+  input: CreateInvitationInput
+): Promise<{ row: Row; token: string }> {
   const email = input.email.trim().toLowerCase();
 
   const { error: supersedeError } = await request.db
@@ -89,18 +103,28 @@ export async function createInvitation(
     .select(INVITATION_COLUMNS)
     .single();
   if (error) throw fromPostgrest(error);
+  return { row: data as unknown as Row, token };
+}
 
+/** The second half: the invitation email for a row insertInvitation made. */
+export async function emailInvitation(
+  request: FastifyRequest,
+  row: Row,
+  token: string,
+  input: CreateInvitationInput,
+  idempotencyKey?: string
+): Promise<boolean> {
   const { sent } = await sendInviteEmail({
-    to: email,
+    to: String(row.email),
     counselorName: request.profile.full_name ?? null,
     acceptUrl: appJoinUrl(token),
-    invitationId: String((data as unknown as Row).id),
+    invitationId: String(row.id),
     note: input.note ?? null,
     audience: input.audience ?? "student",
+    idempotencyKey,
     logger: request.log,
   });
-
-  return { row: data as unknown as Row, emailSent: sent };
+  return sent;
 }
 
 export type AddressStatus = "accepted" | "pending" | "joined";

@@ -2,15 +2,20 @@
  * Meetings (routes/meetings.ts) and the Calendar (routes/calendar.ts).
  *
  * A meeting is a session with a student; the student sees it on their
- * calendar, and no email or text goes out when one is booked, moved or
- * cancelled: the API sends no invitation, and the Google / Outlook event it
- * can create has no attendees and is written with `sendUpdates=none`
- * (lib/suiteApi.ts). Booking or moving one therefore runs at once.
+ * calendar. The Google / Outlook event the API can create has no attendees
+ * and is written with `sendUpdates=none` (lib/suiteApi.ts), so it emails
+ * nobody. What does email families is `send_invites` (lib/meetingInvites.ts):
+ * an iCalendar invite to each invitee, and to their parents when invited.
+ * So booking with it asks, and so does switching it either way (off sends
+ * cancellations). On a change, the route emails invitees only when told to:
+ * every update sends `notifyAttendees: notify_attendees === true`, so an
+ * auto change never emails anyone, and `notify_attendees` makes it ask.
+ * A plain booking or move without those runs at once.
  * `create_conference` puts an event with a real Meet / Teams link on the
  * counselor's connected Google or Outlook calendar, so that asks, and so do
- * cancelling and changing the mode (either removes that event), deleting, and
- * inviting other students (each one then sees the meeting, its title and
- * agenda).
+ * cancelling and changing the mode (either removes that event), deleting
+ * (which also cancels any emailed invite), and inviting other students (each
+ * one then sees the meeting, its title and agenda).
  *
  * The Calendar's event types and practice events ("Planning milestone") are
  * the counselor's own. A practice event shared with a student shows on that
@@ -115,6 +120,8 @@ const meetingFields = {
   deadline_id: uuid.nullable(),
   create_conference: z.boolean(),
   attendee_ids: z.array(uuid).max(30),
+  send_invites: z.boolean(),
+  notify_attendees: z.boolean(),
 };
 
 const MEETING_LABELS = {
@@ -128,6 +135,8 @@ const MEETING_LABELS = {
   status: "Status",
   meeting_note_id: "Linked meeting note",
   create_conference: "Create the Meet / Teams event",
+  send_invites: "Email calendar invites",
+  notify_attendees: "Email the change to invitees",
 };
 
 type MeetingInput = Partial<Record<keyof typeof meetingFields | "status" | "meeting_note_id", unknown>>;
@@ -145,6 +154,7 @@ const meetingBody = (i: MeetingInput) =>
     deadlineId: i.deadline_id,
     createConference: i.create_conference,
     attendeeIds: i.attendee_ids,
+    sendInvites: i.send_invites,
     status: i.status,
     meetingNoteId: i.meeting_note_id,
   });
@@ -175,6 +185,7 @@ type Meeting = {
   deadlineId?: string | null;
   calendarProvider?: string | null;
   attendeeIds?: string[];
+  sendInvites?: boolean;
 };
 
 async function findMeeting(h: Get, id: string): Promise<Meeting | null> {
@@ -201,6 +212,8 @@ const meetingUpdateInput = z
     attendee_ids: meetingFields.attendee_ids.optional(),
     status: z.enum(STATUSES).optional(),
     meeting_note_id: uuid.nullable().optional(),
+    send_invites: meetingFields.send_invites.optional(),
+    notify_attendees: meetingFields.notify_attendees.optional(),
   })
   .strict();
 
@@ -236,7 +249,7 @@ export const meetings: OpGroup = {
           asArray(body),
           (m) => {
             const others = Array.isArray(m.attendeeIds) ? m.attendeeIds.length : 1;
-            return `id ${str(m.id)}: ${utcOrNull(m.startsAt) ?? "no time"} [${str(m.status)}, ${str(m.mode)}${m.calendarProvider ? ", on the connected calendar" : ""}] ${untrusted(m.title)} · student ${str(m.studentId)}${others > 1 ? ` (+${others - 1} more invited)` : ""}`;
+            return `id ${str(m.id)}: ${utcOrNull(m.startsAt) ?? "no time"} [${str(m.status)}, ${str(m.mode)}${m.calendarProvider ? ", on the connected calendar" : ""}${m.sendInvites === true ? ", invites on" : ""}] ${untrusted(m.title)} · student ${str(m.studentId)}${others > 1 ? ` (+${others - 1} more invited)` : ""}`;
           },
           "No meetings."
         ),
@@ -244,10 +257,11 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.create",
       kind: "write",
-      // Asks when it writes to the connected calendar, or when other students (other families) will see it.
-      risk: (i) => (i.create_conference || (i.attendee_ids ?? []).some((id) => id !== i.student_id) ? "confirm" : "auto"),
-      title: "Book a meeting with a student (no invitation is sent; create_conference adds a Meet/Teams calendar event).",
-      doc: "{ student_id, title ≤300, starts_at ISO datetime with offset, ends_at?, mode?: google-meet|teams|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? (other students) ≤30, create_conference? (needs ends_at) }",
+      // Asks when it emails invites, writes to the connected calendar, or other students (other families) will see it.
+      risk: (i) =>
+        i.send_invites || i.create_conference || (i.attendee_ids ?? []).some((id) => id !== i.student_id) ? "confirm" : "auto",
+      title: "Book a meeting with a student (send_invites emails each invitee a calendar invite; create_conference adds a Meet/Teams event).",
+      doc: "{ student_id, title ≤300, starts_at ISO datetime with offset, ends_at?, mode?: google-meet|teams|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? (other students) ≤30, create_conference?, send_invites? (both need ends_at) }",
       input: z
         .object({
           student_id: uuid,
@@ -262,6 +276,7 @@ export const meetings: OpGroup = {
           deadline_id: meetingFields.deadline_id.optional(),
           create_conference: meetingFields.create_conference.optional(),
           attendee_ids: meetingFields.attendee_ids.optional(),
+          send_invites: meetingFields.send_invites.optional(),
         })
         .strict(),
       takesStudent: true,
@@ -274,7 +289,7 @@ export const meetings: OpGroup = {
         const { title: _title, starts_at: _starts, student_id: _student, ...rest } = i;
         return meetingDetails(rest, h);
       },
-      warning: "Every student invited sees the meeting, its title and agenda on their calendar; with a Meet or Teams link, the event also goes on your connected Google or Outlook calendar.",
+      warning: "Every student invited sees the meeting, its title and agenda on their calendar; with calendar invites on, each of them (and their parents, if invited) is emailed it; with a Meet or Teams link, the event also goes on your connected Google or Outlook calendar.",
       undo: (_i, body) => {
         const id = idOf(body);
         return id ? { op: "meetings.delete", input: { meeting_id: id } } : null;
@@ -283,12 +298,26 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.update",
       kind: "write",
-      // Cancelling or a mode change can remove the connected-calendar event; attendee changes show the meeting to other families.
-      risk: (i) => (i.status === "cancelled" || i.create_conference || i.mode !== undefined || i.attendee_ids !== undefined ? "confirm" : "auto"),
+      // Cancelling or a mode change can remove the connected-calendar event; attendee changes show the meeting to other families;
+      // notify_attendees and send_invites email families.
+      risk: (i) =>
+        i.status === "cancelled" ||
+        i.create_conference ||
+        i.mode !== undefined ||
+        i.attendee_ids !== undefined ||
+        i.notify_attendees === true ||
+        i.send_invites !== undefined
+          ? "confirm"
+          : "auto",
       title: "Change a meeting: move it, retitle, agenda, mode, who's invited, mark it held/no-show, or cancel it.",
-      doc: "{ meeting_id, title?, starts_at?+ends_at? (move both; ISO with offset), mode?, location?|null, join_url?|null, agenda?|null, guardians_invited?, deadline_id?|null, attendee_ids? (all), status?: scheduled|held|cancelled|no-show, meeting_note_id?|null, create_conference? }",
+      doc: "{ meeting_id, title?, starts_at?+ends_at? (both, ISO+offset), mode?, location?|null, join_url?|null, agenda?|null, guardians_invited?, deadline_id?|null, attendee_ids? (all), status?: scheduled|held|cancelled|no-show, meeting_note_id?|null, create_conference?, send_invites?, notify_attendees? (true if invites on) }",
       input: meetingUpdateInput,
-      request: (i) => ({ method: "PATCH", url: `/meetings/${seg(i.meeting_id)}`, body: meetingBody(i) }),
+      // Invitees are emailed a change only when the model asked (and the card was confirmed).
+      request: (i) => ({
+        method: "PATCH",
+        url: `/meetings/${seg(i.meeting_id)}`,
+        body: { ...meetingBody(i), notifyAttendees: i.notify_attendees === true },
+      }),
       describe: async (i, h) => {
         const m = await findMeeting(h, i.meeting_id);
         const who = m?.studentId ? ` with ${h.studentName(m.studentId)}` : "";
@@ -299,7 +328,7 @@ export const meetings: OpGroup = {
         return `Update ${meetingLabel(m)}${who}`;
       },
       details: (i, h) => meetingDetails(i, h),
-      warning: "On a meeting booked on your Google or Outlook calendar, cancelling or changing the mode removes that event. Students added to the meeting see it, its title and agenda.",
+      warning: "On a meeting booked on your Google or Outlook calendar, cancelling or changing the mode removes that event. Students added to the meeting see it, its title and agenda. Emailed invites go to every invitee.",
       snapshot: (i, h) => findMeeting(h, i.meeting_id),
       undo: (i, _body, before) => {
         const b = asRecord(before) as Row & Meeting;
@@ -310,7 +339,8 @@ export const meetings: OpGroup = {
           "meetings.update",
           meetingUpdateInput,
           i,
-          { meeting_id: i.meeting_id },
+          // Undoing a change the invitees were emailed emails them the reversal too.
+          { meeting_id: i.meeting_id, ...(i.notify_attendees === true ? { notify_attendees: true } : {}) },
           {
             title: (r) => r.title,
             mode: (r) => r.mode,
@@ -324,6 +354,7 @@ export const meetings: OpGroup = {
             attendee_ids: (r) => (Array.isArray(r.attendeeIds) ? r.attendeeIds : undefined),
             status: (r) => r.status,
             meeting_note_id: (r) => r.meetingNoteId ?? null,
+            send_invites: (r) => (typeof r.sendInvites === "boolean" ? r.sendInvites : undefined),
           },
           b
         );
@@ -341,7 +372,7 @@ export const meetings: OpGroup = {
         const m = await findMeeting(h, i.meeting_id);
         return `Delete ${meetingLabel(m)}${m?.studentId ? ` with ${h.studentName(m.studentId)}` : ""}`;
       },
-      warning: "The meeting is deleted, not cancelled, along with any event on your connected calendar.",
+      warning: "The meeting is deleted, not cancelled, along with any event on your connected calendar. Invitees with an emailed invite get a cancellation.",
     }),
   ],
 };

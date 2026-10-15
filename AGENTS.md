@@ -46,6 +46,7 @@ src/
 │   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
 │   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
+│   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
 │   ├── oauth.ts           # Google/Microsoft OAuth (code + PKCE), token refresh/revoke
@@ -62,14 +63,19 @@ src/
 │   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── inviteDelivery.ts  # an invitation's (or a composer attempt's) delivery status, as the webhooks left it
-│   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id is missing
+│   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id or meeting_id is missing
+│   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
+│   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
-│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
+│   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
+│   ├── collegePhotos.ts   # a college's campus photo as every college surface serves it; null without the migration
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
+│   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
@@ -78,8 +84,11 @@ src/
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
+│   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
-│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
+│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule;
+│   │                      #   step 2: parse (capped child process), profile + masking, plan + presets + AI mapping,
+│   │                      #   rows + matching, staging, review, invitations, retention, rollout flag
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
@@ -113,7 +122,7 @@ src/
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
-│   ├── management.ts      # /management   consultants, consultant tasks, staff blast
+│   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
@@ -125,7 +134,7 @@ src/
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
-│   └── internal.ts        # CRON_SECRET machine routes (scheduled sweep)
+│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -141,18 +150,68 @@ src/
 Authorize in code *and* let RLS enforce it. A route that skips its check leaks
 the shape of the answer (404 vs 403 vs empty list) even when RLS blocks the row.
 
+**Don't lean on RLS to find a counselor's rows.** A list over all of a
+counselor's students with no student filter makes Postgres read every
+practice's rows and run the RLS helpers on each one, so the page slows down as
+other practices grow (the speed test below caught the calendar feed and
+`GET /tasks` doing this). Name the students: `caseloadStudentIds(request)`
+(`lib/guards.ts`) returns exactly what `private.can_view_student` allows (the
+roster, archived included, the students shared with them, and the caller), or
+null past 250 ids, when the query runs unscoped as before. RLS still applies on top.
+
 ### Schema
 
 `supabase/migrations/*.sql`, applied to the Supabase project. Every migration
 ships its own RLS policies so no table is ever created unprotected.
 
-**The v10 sync added 24 migrations (`20261005*`) that are not applied
-automatically.** `DATABASE_MIGRATION_INSTRUCTIONS.md` at the repo root is the
-runbook: backup first (`20261005030002` deletes FAFSA data on purpose), the
-order, what each file changes in place, the checks, and the two settings
-outside the database (Google's `drive.file` scope, the dispatch cron). Routes
-that read the new columns fail until it has run, including existing screens
-(meetings, AxIS chats, Files, invitations, Financial aid).
+**How migrations reach production.** `.github/workflows/migrations.yml`
+("Apply migrations"): on a merge to `main` that touches `supabase/migrations/**`,
+or a manual run, the plan job (no approval) dry-runs `supabase db push` and
+writes the pending files, their header lines and any destructive statements
+(`scripts/migrations/plan.mjs`) to the run summary. The apply job waits for the
+`production-db` environment; a push applies only when
+`vars.MIGRATIONS_REVIEWERS_CONFIGURED` says reviewers exist, otherwise an
+approver in `vars.MIGRATION_APPROVERS` runs it by hand with apply on and confirm
+set to the newest version. It re-checks the list (refusing if it changed),
+pushes, and fails on any table it left without RLS or the approval gate
+(`scripts/migrations/problems.sql`). Without `SUPABASE_ACCESS_TOKEN` /
+`SUPABASE_DB_PASSWORD` it skips green with a notice. The code and its migration
+land minutes apart in no guaranteed order (with Railway's "Wait for CI" the
+migration's own commit deploys after it, a later merge that touches no
+migration does not wait), so every migration still states its deploy order: what
+happens if the code runs first, and whether it belongs in `REQUIRED_SCHEMA`.
+The other direction too: a migration applies while the previous build still
+serves, so it must be safe for that build; drops and renames go in a later PR,
+after the code that reads the old shape has shipped. Never `--include-all` on
+production: a file older than production's newest version gets a new
+timestamp. The CLI version is pinned in both workflows (a unit test checks they
+match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
+
+**Merged but not yet applied to production.** Everything after
+`20261022000001`: the questionnaire sync (`20261023010001`-`04`), import
+pipeline step 2 (`20261023020001`-`03`), caseload transfer
+(`20261023030001`-`03`), campus photos (`20261023070001`), the extended
+College Scorecard columns (`20261023080001`) and emailed meeting invites
+(`20261023090001`). They go in later, in filename order
+(`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
+`REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
+route works as before (origin/main's persona suites pass against a database
+that has none of them), and each new feature says it isn't switched on yet
+rather than failing: `503 imports_unavailable` (and `GET /imports` reads
+`available: false`), `503 caseload_transfer_unavailable` (removing a firm
+member falls back to the old function), `invites: { status: "unavailable" }`
+on meetings, `photo: null` on colleges, the extended Scorecard figures null
+on extras and Compare (the monthly load writes the older ones and stays
+clean), `fromQuestionnaire: []` and
+`transferredFrom: null` on the info card, and a questionnaire save that copies
+nothing. Keep it that way until they are applied: a feature that needs one of
+these files degrades, it never 500s.
+
+**The v10 sync added 24 migrations (`20261005*`)**, applied by hand on
+2026-10-06 before the workflow existed. `DATABASE_MIGRATION_INSTRUCTIONS.md`
+keeps that runbook as history (backup first: `20261005030002` deletes FAFSA data
+on purpose; the order; what each file changes in place; the two settings
+outside the database, Google's `drive.file` scope and the dispatch cron).
 `node --env-file=.env scripts/verify-v10.mjs` checks, read-only, that every
 table the 24 files create exists. `LAUNCH_CHECKLIST.md` is everything else
 left before going live (Railway, crons, Supabase Auth, Resend, OAuth, smoke test).
@@ -163,8 +222,8 @@ use it rather than hand-writing four policies and getting one wrong.
 `scripts/seed/generate-catalog.ts` from the meridies-demo fixtures (edit the
 script, then `MERIDIES_DEMO_DIR=../meridies-demo npx tsx
 scripts/seed/generate-catalog.ts > supabase/migrations/20260923000001_seed_catalog.sql`).
-Apply it like any migration (`supabase db push`, or paste it into the SQL
-editor as the project owner). It is idempotent (ON CONFLICT / WHERE NOT EXISTS)
+Apply it like any migration (the Apply migrations workflow; by hand,
+`supabase db push`). It is idempotent (ON CONFLICT / WHERE NOT EXISTS)
 and never updates a row that already exists, so re-running it will not overwrite
 hand corrections. It fills only what a fixture states: no scattergram points (the
 demo's are PRNG output), no admission stats (no cohort year), and
@@ -316,7 +375,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -355,6 +414,51 @@ the database (`20261010*`):
   `activities` or `awards` (`source = 'ai'`) plus a `profile_updates` log row
   the counselor reads at `GET /students/:id/profile-updates`. It never writes
   essay prose.
+- **The questionnaire fills the record** (`20261023010001`-`04`). The
+  onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
+  /auth/me`, the profile bounded at 200,000 characters), and a trigger on
+  that column (`private.sync_intake_answers`) copies every answer that has a
+  real field into it, through the import pipeline's own functions
+  (`import_value_ok`, `import_current_value`, the compare-and-set
+  `import_set_field`, `import_insert_row` with `source = 'intake'`): high
+  school (linked to the catalog on a unique name match), hometown, class
+  year, the GPA with its scale (never converted; 'Something else' fills
+  nothing) and its range as text ("3.7–3.99 unweighted", "4.5+ weighted (5.0
+  scale)"; none on a 100-point scale), class rank, test status, SAT sections
+  and total (the sum when only sections are given), ACT, AP/IB scores (an IB
+  exam's option reads on the IB scale), advanced courses (not the grade
+  level: `courses.grade` is the mark), activities (the type mapped onto
+  `ACTIVITY_TYPES`, anything else "Other Club/Activity"; text cut to the
+  sheet's limits), honors (keyed on name and year), first-gen and intended
+  majors. Rules: **fill only what is empty**; a re-saved questionnaire may
+  change a value (or take back a row, or a field whose answer is gone) only
+  while it is still exactly what the questionnaire wrote, compared by hash
+  in `intake_fills` the way import provenance compares; anything the
+  counselor, an import or the student edited elsewhere is never touched
+  again, and a cleared value or deleted row stays gone. Grouped fields move
+  together or not at all (GPA, scale and the other GPA column; the three
+  SAT figures; class rank and its value), and a student's GPA is never
+  written under a counselor's scale that doesn't match. Citizenship, aid
+  need, aid types, FAFSA status, country, English test and the background
+  note are copied nowhere: they stay in `profiles.profile.intakeAnswers`,
+  which no AI feature reads (`student_personal_details.citizenship` is on
+  the AI allowlist, so the questionnaire never fills it). Each group runs in
+  its own subtransaction and the save never fails because of the sync; a
+  `progress_events` row (`intake` / `edited`) names the fields changed and
+  why others were skipped, never a value. Held import data still wins: the
+  Ready to apply queue defaults a field the questionnaire filled (unchanged)
+  to accept and says `currentSource: "intake"`. The counselor sees what came
+  from the questionnaire: `fromQuestionnaire` on `GET /student-page/:id/info`
+  and `/me/overview` (info card keys still as the questionnaire left them)
+  and `source` plus `fromQuestionnaire` on each `GET /application/sheets`
+  row, read through `intake_filled_fields(p_student)` (`can_view_student`),
+  degrading to no marks without the migration. `20261023010004` backfills
+  everyone who has answered when it is applied (not yet in production);
+  `select private.backfill_intake_answers();` (or `('<student id>')`) re-runs
+  it safely and skips archived students. Before `20261023010002` a save
+  stores the answers as it always did and copies nothing. Data
+  the student reports clears the matching setup steps (`lib/studentSetup.ts`)
+  like any other data, before the counselor has checked it.
 - **Files is "My documents".** A student lists, uploads into and pastes links
   into their own student folder only (`assertFileableFolder`, restrictive RLS).
 - **What the counselor asks for is the student's To-Do** (`20261012000001`).
@@ -485,6 +589,60 @@ bachelor's or graduate degrees, from the U.S. Department of Education:
   `npx tsx scripts/ingest/ipeds-admissions.ts --year <YYYY>` fills
   `college_admission_factors` (what a school weighs; test policy).
 
+**What the profile serves.** `GET /colleges/:id/extras` returns `official`:
+`stats` (`toOfficialStats`), `admissionFactors` (IPEDS), `majors` (bachelor's
+fields of study) and `associateMajors` (associate's, so a two-year school's
+list isn't empty), each most awarded first; `GET /colleges/compare` carries
+each school's `official` stats too (null with no Scorecard row). Everything in
+it is federal and `sourced`, with its own `stale` flag, and never mixes with the
+curated facts beside it. The coded fields are served raw and labelled
+(`labels`): `setting` is `settingFromLocale` (the curated campus-setting words,
+so a catalog school and a profiled one read alike), `testPolicy` is the IPEDS
+consideration code through `testPolicyFrom` (the catalog's
+required/recommended/optional/blind), and the Carnegie and predominant-degree
+texts are the dictionary's value labels (`lib/scorecardCodes.ts`). Religious
+affiliation is `religious: boolean`, not a denomination. Things that are easy
+to mislabel, and how the DTO keeps them apart:
+
+- **Completion.** `gradRate150` / `gradRateOnTime` are IPEDS first-time
+  full-time rates from one cohort, named by `completionBasis`: `four-year`
+  (within 6 / 4 years) or `less-than-four-year` (150% / 100% of normal time, 3
+  years for an associate's). `labels.gradRate150` / `labels.gradRateOnTime`
+  say which; never call an L4 rate "6-year". `completionByRace` is the same
+  cohort by group (a null is suppressed or not reported). `gradRate` is
+  Scorecard's own `consumer_rate`, the rate its site sorts by (Outcome
+  Measures, an award within 8 years for all entering students, where reported;
+  else the 150% rate): show it as Scorecard's graduation rate, never as a
+  number of years.
+- **Who a figure describes.** Earnings (`medianEarnings6yr`, `10yr`) are of
+  federally aided students, working and not enrolled, counted from entry.
+  Debt (`medianDebt`, `medianDebtMonthly` as a 10-year payment,
+  `medianDebtNoncompleters`) is federal loans only. `avgNetPrice` is what
+  students who received federal aid paid on average (in-state at a public
+  school), an average and not a quote. `demographics` are shares
+  of degree-seeking undergraduates; `retentionRate` is first-time full-time,
+  back for a second fall. All shares are 0-1, all money whole dollars.
+
+**More fields, safely** (`20261023080001`). The ingest asks for
+`BASE_FIELDS` plus `EXTENDED_FIELD_GROUPS`; every name is on
+`test/fixtures/scorecard-field-reference.json` with where it was checked (the
+data dictionary or the field list of Scorecard's own site), and `npm test`
+fails on a requested field with no entry. The API answers 400 to a request
+naming any unknown field, so on the first 400 the fetcher asks for the base
+fields alone (a 400 there is a real failure), then base plus each group, and
+loads without the groups it refuses. A refused group is a **degraded** run:
+it ends `partial` with the reason first in `errors`, logs at error level, and
+its heartbeat is not clean, so `/internal/status` lists `scorecard-ingest` as
+failing every month until it is fixed, instead of counting a load that never
+fills the new columns as clean. Without the migration, the college_stats
+upsert is retried without the new columns (`upsertStats`, the
+`deliveryInsert.ts` pattern, five-minute memory). That is expected while the
+migration is held back, so it is not degraded: the run loads every older
+figure as before, ends `succeeded` with the reason in `pending` (logged as a
+warning), and its heartbeat stays clean, so production's monitoring doesn't
+change until the migration is applied. The migration is not in
+`REQUIRED_SCHEMA`. After applying it, run the load once.
+
 Rules: a row Meridies curated (`catalog_source = 'meridies'`) keeps its name,
 slug, aliases, colours, deadlines and test policy; official data fills facts
 only and never touches ratings or profile copy. Official figures carry
@@ -594,6 +752,63 @@ its visit page, events and offerings; their events leave `more`. Saves go to
 their own calendar (`/me/events/calendar`). RLS (`hub_events_select_student`) says
 the same, so a counselor-only or practice listing never reaches a student.
 
+### Campus photos
+
+Every college surface (search and AI search cards, recommended, slug,
+compare, `GET /colleges/:id` as a top-level `photo`, a student's college list
+on every row path as `collegePhoto`, Events Hub college refs, alumni) carries
+`photo: { url, thumbUrl, width, height, alt, credit, license, licenseUrl,
+sourceUrl, title } | null` (`lib/collegePhotos.ts`). `GET
+/colleges/photo-credits` lists every photo's full attribution for a credits
+page. The list builder and the top-bar search carry none (the app draws none
+there).
+
+- **Source** (`lib/ingest/collegePhotos.ts`, `20261023070001`): Wikimedia
+  Commons, found through Wikidata: the item whose IPEDS id (P1771) is the
+  college's unitid, and its main image (P18). A unitid on two items, or an
+  item claiming two unitids, is skipped (it could be another campus). The
+  team's `scripts/ingest/data/college-photo-picks.csv` wins over Wikidata,
+  seeded with the 43 photos hand-reviewed for the demo; `none` there
+  suppresses a college and removes its photo. **No search fallback**: a
+  college with no usable free image has no row, and the app shows its plain
+  ground.
+- **What a file must be**: a JPEG on Commons (normalised titles and moved
+  files followed), at least 1000 px wide and 1.2:1 landscape unless picked,
+  CC0, public domain, CC BY or CC BY-SA (never NC or ND; the CHECK refuses
+  them too), not NonFree, no restriction template, and for CC BY and BY-SA a
+  credit. A credit over 500 characters is refused, never clipped.
+- **Copied, not hotlinked**: two standard widths (500 for cards, 1280 for the
+  profile) into the public `college-photos` bucket under
+  `<unitid>/<sha1>-<width>.jpg`, so viewers never call Wikimedia and a file
+  changed on Commons gets new objects. The bucket is the only public one, it
+  has no `storage.objects` policy (only the loader writes), and the row keeps
+  paths, not URLs.
+- **The run**: monthly `POST /internal/ingest/college-photos` (CRON_SECRET,
+  202, 409 while running, 503 naming the migration before it is applied;
+  lease `college-photos`, 3 hours; `ingest_runs` + `job_heartbeats`), or
+  `npx tsx --env-file=.env scripts/ingest/college-photos.ts [--limit N]
+  [--only <unitids>] [--dry-run]`. It re-checks every stored file and
+  downloads only changed ones (same sha1: text refreshed, nothing
+  downloaded); a deleted or relicensed file loses its row and objects. A
+  Wikidata or picks failure ends the run before anything changes, and
+  deletions the picks didn't ask for are **held** when they would remove more
+  than a tenth of the stored photos (and more than five), so a truncated
+  answer can't wipe the catalog's photos. `--dry-run` writes nothing (no
+  ingest_runs row, no heartbeat) and prints a CSV to review. Wikimedia
+  etiquette: a User-Agent with the team inbox, serial API calls half a second
+  apart, `maxlag=5`, Retry-After honoured, two downloads at a time; the three
+  hosts are pinned and redirects refused.
+- **Deploy order**: either. Every read degrades to `photo: null` while the
+  table is missing (remembered five minutes, like `lib/deliveryInsert.ts`);
+  not in `REQUIRED_SCHEMA`. After applying it, run the script once by hand,
+  or `/internal/status` reads the job overdue.
+- **Tests**: `college-photos*.test.ts` (rules, client, run, serving) and
+  `test/integration/college-photos.test.mjs` (RLS, the bucket, a fixture load
+  through the real store, every surface). Nothing reaches Wikimedia: the
+  fixtures in `test/fixtures/college-photos/` are hand-written in the
+  documented shapes (see its README), and the cron route is only tested for
+  401 and 409.
+
 ### Catalog data: yearly refresh
 
 | When | Source | Who | How |
@@ -601,6 +816,7 @@ the same, so a counselor-only or practice listing never reaches a student.
 | Monthly (cron) | College Scorecard | automatic | `POST /internal/ingest/scorecard` |
 | Weekly (cron) | Library links | automatic | `POST /internal/resources/link-check` |
 | Weekly (cron) | Colleges' upcoming events and visit pages | automatic | `POST /internal/events/discover` |
+| Monthly (cron) | Campus photos (Wikimedia Commons via Wikidata) | automatic; the team edits the picks CSV | `POST /internal/ingest/college-photos` |
 | When NCES publishes (usually late summer) | IPEDS Admissions (`ADM<year>.zip`) | engineer | `scripts/ingest/ipeds-admissions.ts --year <year>` |
 | August | Common App requirements grid (new cycle) | counselor team compiles, engineer loads | `curated-csv.ts --dataset requirements` |
 | August–October | UC application, Cal State Apply (dates, requirements) | counselor team | `requirements`, and update the library rows' `opens_on`/`closes_on`/`cycle` in a migration |
@@ -960,6 +1176,83 @@ reason and the app files the prompts as plain essay records. These calls go to f
 with provider-issued ids, so they are not the `lib/links.ts` SSRF surface.
 Every route answers 503 with the missing setting when a provider is unset.
 
+### Emailed calendar invites (no Google or Microsoft needed)
+
+The Google / Outlook event above has no attendees and emails nobody. A
+meeting's own invites are Meridies' (`lib/meetingInvites.ts`, `lib/ics.ts`,
+`20261023090001`): with `sendInvites: true` on `POST /meetings` (or
+`PATCH`), each invited student is emailed an iCalendar file through Resend
+(`text/calendar; method=…` attachment, Reply-To the counselor) that any
+calendar can add.
+
+- **Who.** Each invited student (primary and `meeting_attendees`) at their
+  contact email, else their login email. Their guardians only when the
+  meeting has `guardians_invited`, the student's `copy_parents` is on
+  (`loadAlertPrefs`, fail closed) and the guardian's own `alerts_enabled`
+  is on, at most four per student. The meeting's owner (`meetings.counselor_id`,
+  never the caller: a write collaborator may edit) is the ORGANIZER and gets a
+  PUBLISH copy when the meeting isn't on their connected calendar. A student
+  who is archived, unreadable, or off the owner's caseload (their counselor
+  or a `student_collaborators` row) receives nothing, and nor do their
+  guardians. Recipients are read on the caller's client before the
+  response; any read that errors drops what it decides (the whole round for
+  the roster or the owner's address, the guardians for their reads).
+  One email per address: an invite outranks a cancellation, and an address
+  still invited (a guardian of two siblings) is never sent a cancellation.
+- **One file per recipient**, whose only ATTENDEE is that recipient, with
+  `RSVP=FALSE` (Meridies has no inbound mail). UID `meeting-<id>@meridiesai.com`
+  for the life of the meeting; SEQUENCE is `meetings.ics_sequence`, written
+  only by a trigger that raises it on every change a calendar shows (and on
+  `send_invites` switching) and ignores any client value. Delete sends the
+  last sequence plus one. Times are UTC; typed text is escaped as TEXT or a
+  quoted parameter so it can't start a property.
+- **What goes out.** Booking, switching invites on, and un-cancelling: REQUEST
+  `meeting-invite`. A move, title, place, link, mode or agenda change: REQUEST
+  `meeting-update` to everyone kept. Students added: an invite; removed: a
+  cancellation; the guardians flag toggled: an invite or a cancellation to
+  the kept students' guardians. Cancelling, deleting, or switching invites
+  off after they went out: CANCEL `meeting-cancel` to everyone who held it.
+  Held, no-show and a meeting already over send nothing. `notifyAttendees:
+  false` on a PATCH (default true) keeps a change to Meridies; switching
+  `sendInvites` either way always sends. An end time is required while
+  invites are on: the route answers 400 and the CHECK
+  `meetings_invites_need_end` refuses a direct write.
+- **Transactional.** Quiet hours don't hold an invite and the student's own
+  reminder channels don't gate it, like a task assignment. A round that sends
+  an invite or update costs one of 60 an hour per meeting owner
+  (`consumeRateLimit`, `meeting-invites:<owner>`); a round of cancellations is
+  never held back, and a throttled mixed round still sends its cancellations.
+- **Delivery.** The response carries `invites` (`{ status: "sending",
+  recipients, skipped, note? } | { status: "none" } | { status: "skipped" |
+  "unavailable", reason }`, `recipients` counting students and guardians,
+  not the counselor's copy); the sends run after it, one at a time 250 ms
+  apart, each retried once on a Resend 429 after Retry-After, each a
+  `message_deliveries` row (templates `meeting-invite`, `meeting-update`,
+  `meeting-cancel`; `student_id` the invited student, `meeting_id` the
+  meeting, null for a deleted meeting's cancellations). A failed send never
+  fails the save; a restart mid-round loses the rest of it (rows exist only
+  for attempts that ran). The round runs on what persisted even if the
+  attendee write fails after the row update. `GET /meetings/:id/invites`
+  (counselor) lists the newest send per address with its delivery status;
+  the student's own invites show in `GET /me/messages`.
+- **AxIS.** `meetings.update` always sends `notifyAttendees: notify_attendees
+  === true`, so an auto change emails nobody; `notify_attendees` and
+  `send_invites` (either way) make it a Confirm card, as does `send_invites`
+  on `meetings.create`. `meetings.delete` (already Confirm) cancels emailed
+  invites. Undo restores `send_invites` and re-notifies a notified change.
+- **Deploy order.** Either order is safe. Before `20261023090001` is applied,
+  `invitesReady` (a zero-row probe; ready kept for the process, missing for
+  30 s) is false: no write names `send_invites`, `sendInvites` is accepted and
+  answered `invites: { status: "unavailable" }`, `sendInvites` reads false,
+  the invites list is empty, and `insertDelivery` drops `meeting_id` the same
+  way it drops `invitation_id`. Not in `REQUIRED_SCHEMA`. Invites reach
+  families only once `INVITE_FROM_EMAIL` is on a verified Resend domain.
+  Known limits: Outlook desktop may show the attachment as a file to open
+  rather than an inline meeting request, Google may show an "Add to calendar"
+  button instead of adding it for an unknown sender, and a student removed and
+  re-added with no other change gets an invite at the same SEQUENCE as their
+  cancellation.
+
 ### Documents and AI context
 
 Files live in the private `student-documents` Storage bucket
@@ -1107,9 +1400,16 @@ column and tables.
     refused for its focus, refused because the same run is already in flight, or
     refused by the up-front AI check does not spend the daily cap.
   - `GET /students/:id/recommendations?feature=college_list|activities`
-    (newest first, 200 at most).
+    (newest first, 200 at most). Each row carries `createdAt` and `repeatOf`
+    (below).
   - `POST /recommendations/:id/accept` and `.../dismiss`. These two and the
-    list share a limit of 120 a minute per user.
+    list share a limit of 120 a minute per user. Accept answers `{ acceptedAs,
+    alsoDismissed }`, dismiss `{ id, status, alsoDismissed }`. Their 409s carry
+    a `code`: `recommendation_decided` (this row was accepted or dismissed
+    already), `already_accepted` (the same suggestion was accepted before,
+    below) and, for a college, `already_on_list` (the school is on the list
+    already, by hand or otherwise; the claim is released and the row stays
+    suggested).
   - Order inside a run: access (the counselor must be able to see the student:
     403 or 404), the brief and its identity filter, the cache, the practice's AI
     switches, the in-flight check, the daily cap, the run row, then the model.
@@ -1270,6 +1570,29 @@ column and tables.
   source URLs and "Verify dates and costs before applying."; what was created is
   stored in `accepted_as`. Dismiss is the same conditional update. Nothing is
   shared across practices.
+- **The same suggestion across runs** (`repeats.ts`). Every run that isn't
+  served from the cache stores fresh rows, so "search again" or a new focus
+  leaves one program or college `suggested` twice, or suggests again one that
+  was accepted. Two rows are the same suggestion when they share a feature and
+  a key: a college's catalog id when it has one, else the title folded
+  (Unicode NFKC, lowercase, accents and punctuation dropped, `&` read as
+  "and"). Every recommendation DTO (the list, a run's answer, a cached answer)
+  carries `repeatOf`, set only on a `suggested` row: `{ id, status:
+  "suggested" }` on every older copy, pointing at the newest, which stands for
+  them all (a list shows the newest only); `{ id, status: "accepted" }` on the
+  newest copy when an accepted row for it still has its college-list row or
+  task (read on the caller's client; an accepted row whose thing was deleted,
+  or with no `accepted_as`, doesn't count). Accepting such a copy is refused
+  with 409 `already_accepted` before anything is claimed, so one program can't
+  become two tasks; dismissing it works. A decision on one copy, accept or
+  dismiss, dismisses the student's other `suggested` copies (service role,
+  ids read on the caller's client for that student, `status = 'suggested'`
+  repeated in the update; best effort, logged on failure) and returns them as
+  `alsoDismissed`. A failed repeat read on a fresh run is logged and the paid
+  answer is returned unmarked; on the list, a cached answer and accept it
+  fails the request (accept fails closed). Known limit: two copies accepted at
+  the same instant can both pass the check. AxIS's `recommendations.list`
+  reply names the repeat.
 - **Hidden tasks.** `deliverables.visible_to_student` (default true). Enforced in
   RLS by restrictive select policies, so a student's read never returns a hidden
   task or what points at it: `deliverables`, `deliverable_stages`,
@@ -1308,7 +1631,9 @@ as it is (the in-flight check ignores one older than 10 minutes). Two identical
 uncached requests made at the same instant can both pass the in-flight check and
 run.
 Research is in none of the practice AI switches (`practiceSettings.ts`), so the
-up-front AI check gates nothing yet. The app has no screens for any of this.
+up-front AI check gates nothing yet. The app's screens: the College list's
+Recommended column (Research colleges), Activities Build (Research
+activities), and sharing a hidden task from the student page's task card.
 
 ### Import pipeline (step 1)
 
@@ -1354,6 +1679,148 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - `request_held_apply` records each field's current value as `old_value`;
   `apply_held_item` compare-and-sets against it, so a value that changed
   while waiting is kept (`skipped_stale`).
+- **The questionnaire writes through the same functions** (see "The
+  questionnaire fills the record"). Since `20261023010001`, `import_fields`
+  also lists `profiles.high_school` / `hometown` / `grad_year`,
+  `student_academics.gpa_band` and award rows (25 entries), activity rows may
+  carry `timing`, `continuing` and `uc_description`, inserted activities and
+  awards go to the end of the sheet, and `import_insert_row` has a 4-argument
+  form taking the source (`'import'` or `'intake'`); the 3-argument form is
+  unchanged for the import's callers. `import_row_snapshot` keeps its
+  activity shape, because undo compares against snapshots stored at commit.
+  A value the questionnaire filled and nobody changed since defaults to
+  accept in the held queue (`private.intake_owns_current`).
+
+### Import pipeline (step 2: the CSV/XLSX path)
+
+Spec as above (§5.1-§5.10, "v1.0 as built" at its end). The Import page's API;
+Ready to apply (`GET /imports/held`, `POST /imports/held/:itemId/apply`) is
+step 1's and is never gated.
+
+- **Rollout.** `IMPORTS_ROLLOUT=off|pilot|all` (default `pilot`) and
+  `IMPORTS_PILOT` (comma-separated firm ids, or a solo counselor's own id;
+  `lib/imports/rollout.ts`). Env-based, so a new pilot practice needs a
+  redeploy. `IMPORTS_AI=off` is the kill switch for the AI column mapping.
+  `GET /imports/availability` and `GET /imports` answer `{ enabled, available,
+  aiAvailable }` and never 503; every other step-2 route answers
+  `403 { code: "imports_not_enabled" }` outside the rollout and
+  `503 { code: "imports_unavailable" }` before the migrations or without
+  `IMPORT_DATABASE_URL` (`lib/imports/availability.ts`). Invitations, discard
+  and template delete ask only for the migrations, so a saved import can
+  still send after its practice leaves the pilot.
+- **Deploy order.** `20261023020001`-`20261023020003`, either order (see
+  `DATABASE_MIGRATION_INSTRUCTIONS.md`). The readiness probe asks for
+  `imports_step2_ready()`, the last object of the last file; a ready answer is
+  kept for the process, a missing one for 30 s. Not in `REQUIRED_SCHEMA`: no
+  request outside `/imports` needs it.
+- **Which rows are which.** A new-pipeline import is one `start_import`
+  created: `permission_confirmed_at` is set (the family-permission box, who
+  ticked it and when). The old roster flow's rows have it null. `/roster/*`
+  never lists or acts on a new-pipeline import, `/imports` never lists an old
+  one, and **the client guard makes a new-pipeline row the API's alone**: no
+  client update or delete at all. A new `roster_imports` column must be added
+  to `private.roster_imports_guard_client()` (it names every protected column).
+- **Flow.** `POST /imports { permissionConfirmed: true }` (draft, 7-day
+  expiry; shares `roster:import`'s 20 an hour) -> `POST /:id/files/upload-url`
+  (signed upload into `imports/<uid>/<import>/<file>-<name>`, minted on the
+  counselor's token; only the uploader, only a draft) -> `POST /:id/files`
+  (download on the same token, size, sha256, magic bytes, parse and profile;
+  a bad file fails by name and the rest go on; up to 20 files and 5,000 rows)
+  -> `POST /:id/plan` (template by header fingerprint, then presets, then the
+  AI fallback; the import moves to `mapping`) -> `PUT /:id/plan` (every edit;
+  a plan with problems is stored with them, staging refuses until there are
+  none; `saveTemplate: { name }` is "Remember this layout") -> `POST /:id/stage`
+  (synchronous, about 30 s for 5,000 rows; a double click gets 409) ->
+  `GET /:id/review?section=summary|groups|changes|suggested|invites|skipped|problems`
+  and `PATCH /:id/review` (one transaction: `fixes`, `items` confirm/skip/invite,
+  `changes`, `patterns`) -> `POST /:id/commit { invitations: N }` (required, and
+  equal to the staged count, whenever the import invites anyone: `409 { code:
+  "confirm-invitations", count }`; checked again under the lock) ->
+  `POST /:id/invitations` -> `POST /:id/undo`. `DELETE /:id` discards a draft or
+  review; `DELETE /templates/:id`.
+- **Parsing** (`lib/imports/sheet.ts`, `parse.ts`). In a forked child process,
+  not a worker thread: a process-wide `--max-old-space-size` (NODE_OPTIONS)
+  silently overrides a worker's `resourceLimits`. The child gets its own heap
+  flag (256 MB), a 20 s kill, an environment holding only PATH, and no stdout.
+  Type from bytes (UTF-8 or windows-1252 CSV; XLSX by its content types; xls,
+  xlsm and the rest refused). XLSX: declared sizes (100 MiB in all, 50 MiB an
+  entry, 2,000 entries), no external links, no DOCTYPE/ENTITY in any XML part;
+  the parser (`read-excel-file/universal`, saxen) then reads only the parts
+  that passed, rezipped uncompressed, so it never re-reads the original
+  archive and never starts fflate's helper threads. Formulas give cached
+  values only. `scripts/smoke/parse-worker.mjs` checks the built child (CI).
+- **What the model sees** (`profile.ts`, `mask.ts`, `aiPlan.ts`, module
+  `import-mapping`, Haiku through `runStructured`): masked headers, column
+  counts and shapes, numeric min/max only for small numbers (at most 2,100),
+  a date column's year range, sheets numbered not named, sensitive columns
+  left out; wrapped as untrusted data. Never a real text cell. Its answer is
+  filtered to the columns it was asked about and targets on the fixed list;
+  a score column's exam comes from the file's header. Two retries, then the
+  counselor maps by hand. Spend per import (`onUsage` on `runStructured`,
+  `spend.ts`) is capped at 200 cents. It is under the practice's "reading
+  uploaded documents" switch (`practiceSettings.ts` `DOCUMENT_MODULES`). AI
+  cell cleanup (`import-cleanup`) is deferred: a cell that won't clean is a
+  manual fix in review.
+- **Sensitive values** (`sensitive.ts`, §7.4): a header naming a never-stored
+  category is forced to ignore whoever mapped it (`validatePlan`); an
+  SSN-shaped value is dropped and counted; a bare 9-digit value is flagged
+  `nine_digit_id`, never blocked.
+- **Matching** (`match.ts`; `import_roster_for_matching`): only the
+  uploader's own caseload (their students and write collaborations),
+  intersected with what the actor may write, so a firm admin staging a
+  member's import never matches the admin's wider reach. Email + name:
+  matched; email with a different name: suggested, confirmed one by one; name
+  + birthday or grad year + school: suggested; else invite or skip. Siblings on
+  a parent's email are never merged, matched or invited on their own;
+  `stage_import` keeps one invitation per address and the review's "invite"
+  refuses a second at the same address.
+- **Staging defaults** (`stage_import`, `private.import_assess`): old values
+  read with `import_current_value`; equal values dropped (3.8 = 3.800); rows
+  already on the record dropped and counted, near matches kept back as
+  `possible_duplicate`; an empty field fills (`auto` on a high-confidence
+  email match, else `accept`); a value an earlier import from the same
+  `source_system` or template wrote, unedited since, is `accept`; anything
+  else `keep_old` (an unknown author counts as the student), except a value
+  the student's onboarding questionnaire wrote and nobody changed since,
+  which is `accept` with old source `intake` (`private.intake_owns_current`,
+  the same rule as Ready to apply; a review fix reads it the same way).
+  Conflicting values in one file are one change flagged `conflict_in_file`
+  with its `alternatives`. `student_academics.gpa_band` and the `profiles`
+  and `awards` rows are on `import_fields` for the questionnaire only: no
+  column maps to them (`QUESTIONNAIRE_ONLY` in `lib/imports/fields.ts`,
+  refused by `validatePlan`), though `values.ts` validates their types and
+  `import_row_presence` knows the award key (name and year).
+- **Invitations** (`invitations.ts`): only the uploader sends (accepting makes
+  the inviter the counselor), so a firm admin gets 403. Items are claimed
+  (`invite_state = 'sending'`, SKIP LOCKED; a claim older than ten minutes
+  can be retaken), never-tried addresses first; the invitation row is inserted
+  and tied to the item before the email goes out (`insertInvitation`, then
+  `import_link_invitation`, then `emailInvitation` with the Resend
+  idempotency key `import-invite/<item>/<invitation>`); 25 per request; the
+  `invites` quota (100 a day, 50 for an account under 14 days). A counselor's
+  first import over 50 invitations is saved but its invitations wait
+  (`invites_held_reason`) until Meridies sets `invites_approved_at` by hand;
+  one email goes to `ACCESS_REVIEW_EMAIL`.
+- **Retention** (`retention.ts`, `import_retention`), every sweep, not behind
+  `IMPORT_HOLD_EXPIRY_ENABLED`: drafts and reviews expire after 7 days with
+  their staged values; never-sent invitations' data expires 14 days after the
+  save, sent ones' when the invitation does; matching dead for ten minutes
+  returns to mapping; masked samples go at commit; raw files once an import is
+  saved, undone or expired; objects nobody registered after 24 hours (through
+  the Storage API on the service client). Skipped before the migrations;
+  isolated, so it never fails the sweep's heartbeat. The 30-day expiry of
+  accepted, waiting data and its warnings stay behind the flag.
+- **Ready to apply** carries each student's current `gpaScale`, and
+  dismissing an entry (every change `reject`) needs no typed name. The
+  name check's 409 (`name-confirmation-required`) carries its sentence as
+  `error`, the shape every client reads (and as `message`).
+- **Not built** (v1.0): AI cell cleanup; pausing invitations on bounce or
+  complaint rates (§6.5) and the §12 metrics (counts are in `stats` and
+  `job_result`); PDFs (v1.1); direct Google Sheets; shared starter templates;
+  `high_school` and `grad_year` as import targets (matching keys and the
+  invitation's grad year only); template management beyond list and delete;
+  a database-held pilot list. Header presets and source-system detection are
+  deliberately conservative until real exports arrive (spec §13).
 
 ## Safe coding standards
 
@@ -1373,14 +1840,62 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
 
+## Caseload transfer
+
+Spec: `docs/superpowers/specs/2026-10-15-caseload-transfer-design.md`.
+Migrations `20261023030001`-`3` (runbook in `DATABASE_MIGRATION_INSTRUCTIONS.md`),
+code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
+`routes/firms.ts`.
+
+- **Who.** A firm owner or admin (approved), moving a member's students to
+  other approved members of the same firm. The from side may be pending or
+  revoked; every receiver passes the approval gate
+  (`private.caseload_can_receive`). Only the owner transfers the owner's
+  students. A solo counselor is refused ("Start a firm..."). Not in the AxIS
+  catalog.
+- **Routes.** `GET /management/consultants/:id/transfer-preview`,
+  `POST /management/consultants/:id/transfer` (`{ mode: "one_person", toId }`
+  or `{ mode: "per_student", assignments: [{ studentId, toId }] }`, at most
+  500; `notifyStudents` default true, `removeAfter`, `includePracticeItems`,
+  `practiceToId`), `GET /management/transfers`,
+  `GET`/`PATCH /firms/mine/caseload-policy`. Before the migrations they answer
+  503 `caseload_transfer_unavailable`.
+- **One transaction** (`transfer_caseload`, SECURITY DEFINER): every row about
+  a moved student that the old counselor owns and that would cascade with
+  their account moves (meetings, notes, reports, messages, research runs,
+  outcomes, the student folder with its subtree, documents and links,
+  supplement Doc rows, accepted invitations); open work moves; scheduled sends
+  and queued parent alerts are cancelled; a group meeting moves only when
+  every attendee goes to the same receiver; held import data moves into a
+  carrier import owned by the student's receiver (no import function
+  changes). Practice items (pending invitations, imports, templates, the firm
+  pipeline rows they made) move only with the whole caseload and when the
+  consultant is leaving, and not while one of their imports is saving or its
+  invitations are being sent (a fresh step-2 `sending` claim finishes only for
+  the uploader): 409, try again in a few minutes. "Transfer and remove" removes the member inside the
+  same transaction. A transfer is recorded in `caseload_transfers` /
+  `caseload_transfer_students` and `audit_log`.
+- **No addresses from SQL.** The functions return ids and names; the API
+  reads the addresses of exactly the returned ids on the service client after
+  the commit, to mail the receiver, the old counselor and each active,
+  non-alumni student (templates `caseload-transfer-*`). Guardians are not
+  emailed.
+- **Hand-kept table list.** `caseload-transfer.test.mjs` fails when a new
+  cascading counselor-owned column appears on a student table that the
+  transfer doesn't handle and that isn't on its "stays" list. Decide it there.
+- **Temporary delegation** is specified in the spec (§13) and not built.
+
 ## Teams, guardians, delivery status, data rights, monitoring
 
 - **Firm teams.** `profiles.firm_id` can't be updated by clients, so firms
   change through SECURITY DEFINER functions: `create_firm`,
   `accept_firm_invitation` (the invite's email must match the account; seats
   are enforced), `set_firm_member_role` (the owner's seat never changes),
-  `remove_firm_member` (the owner can't leave). Routes: `/firms`,
-  `/firms/mine/{members,invites}`, `/firms/join`. Invitation tokens are stored
+  `remove_firm_member` (the owner can't leave; a member who still has
+  students, archived included, is refused with 409 `caseload_not_transferred`
+  until their caseload is transferred or an owner/admin releases them with
+  `?releaseStudents=true`). Routes: `/firms`, `/firms/mine/{members,invites}`,
+  `/firms/mine/caseload-policy`, `/firms/join`. Invitation tokens are stored
   as sha256 only; the app page for the link is `/join-firm/<token>`.
 - **Guardians.** A student may add a guardian, but one they add starts with
   `alerts_enabled = false`, and only the counselor side changes or removes a
@@ -1401,47 +1916,124 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   delivered, and `reason` (bounced/failed only) never names a server setting.
   **Apply `20261018000002` to light up delivery status.** Until then invites
   work and show "Pending": the list reads `delivery: null`, and the delivery
-  row insert (`lib/deliveryInsert.ts`) retries once without `invitation_id`
+  row insert (`lib/deliveryInsert.ts`) retries without `invitation_id`
   when the column is missing (42703 / PGRST204), remembering that for five
   minutes per process so each send doesn't fail first. It is deliberately not
-  in `REQUIRED_SCHEMA`.
+  in `REQUIRED_SCHEMA`. `meeting_id` (`20261023090001`, meeting invites) gets
+  the same treatment, each column cached on its own, and a row whose meeting
+  was deleted mid-send is kept without the link.
 - **Data rights.** `GET /account/export` (self) and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
-  user; a counselor with an active roster or an owned firm is refused.
+  user; a counselor with an active roster or an owned firm is refused, and a
+  firm member with any student, archived included, is told to ask an owner or
+  admin to transfer them.
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
   `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
-  when one hasn't run cleanly within twice its interval. Point an uptime monitor
+  when one hasn't run cleanly within twice its interval. It also lists as
+  `failing` any job whose last run failed or was degraded (last error newer
+  than last clean run); for a job that runs daily or less often (the monthly
+  Scorecard load, weekly event discovery) that alone makes
+  it 503 with `status: "failing"`, because waiting for "overdue" would mean
+  weeks of silence (`summarizeHeartbeats` in `lib/heartbeat.ts`). A frequent
+  job's single failure is listed but left to the overdue rule. The error text
+  stays in the table, never in the response. Point an uptime monitor
   at `/health` (public) and `/internal/status` (with the bearer header).
 
 ## Tests and CI
 
 - `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
   rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
-  mapping (against a recorded real Scorecard response in `test/fixtures`), the
+  mapping (against a recorded real Scorecard response in `test/fixtures`; the
+  extended fields, the field reference, the degrade paths and the status
+  summary in `scorecard-extended` and `college-official`), the
   essay guardrails, the link guard, payments, class rank, proposals, webhook
   signatures, heartbeats, the context layer (allowlist, packing, feature
   profiles, coherence material, consumers), and research (`research-brief`,
   `research-citations`, `research-extract`, `research-run`,
-  `research-boot-guard`: the brief and identity filter, the citation keeper,
-  the answer parser, the match validation and the boot check), the
+  `research-boot-guard`, `research-repeats`: the brief and identity filter, the
+  citation keeper, the answer parser, the match validation, the boot check and
+  the repeat rule), the
   counselor approval gate (`access`, `access-review`, `service-callsites`),
-  and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  the questionnaire sync's read side and activity-type list (`intake-sync`),
+  caseload transfer bodies and answers (`caseload-transfer`), campus photos
+  (`college-photos*`), /health's key check (`anthropic-key-check`), the
+  import pipeline (`import-*`: parsing and the zip guard, the capped
+  child process, profile and masking, sensitive values, the plan and presets,
+  the AI mapping with its spend, rows and matching, values, rollout),
+  meeting invites (`ics`, `meeting-invites`, `email-attachments`,
+  `delivery-insert`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and
-  hidden tasks), `research-api` (the routes, with the test double) and the
+  hidden tasks), `research-api` (the routes, with the test double),
+  `research-repeats` (the same suggestion across runs),
+  `intake-sync` and `intake-held-backfill` (the questionnaire, every field
+  and rule, against held imports, and the backfill),
+  `meeting-invites` (emailed calendar invites), `college-photos`,
+  `college-official` (the federal figures on extras and Compare, on the rows
+  the fixture load writes, and a failing Scorecard heartbeat), the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
-  `approval-jobs`). The harness's `user()` approves the counselors it makes;
+  `approval-jobs`), the import pipeline (`imports-*`; step 2's
+  `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
+  `-retention`, `-guard`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`)
+  and `caseload-transfer` (every persona, every table that follows a student,
+  removal, the firm setting). `npm run test:imports-load` (pre-release) commits
+  and undoes 5,000 rows and stages 5,000 more through the API; `npm run
+  test:caseload-load` checks 500 students in one call. The harness's `user()`
+  approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
-- `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
-  tests; then a throwaway Supabase with every migration, an RLS-on-every-table
-  check, the fixtures, and the persona suites, with the API started under
-  `RESEARCH_FAKE=fixture` so research runs without a model or the web. Other AI
+- `npm run test:perf`: the 60-student speed test (B14,
+  `test/integration/perf-roster.mjs`; not a `*.test.mjs`, so the persona run
+  doesn't pick it up). It seeds one firm owner with 60 fully populated students
+  (academics, polygon, activities, awards, essays, 8 colleges, 4 tasks with
+  dated steps, deadlines, a meeting, a guardian, a work item each), two firm
+  members, 60 pipeline contacts with 20 billed, Management tasks, pending
+  invitations and saved events, plus three other practices of the same size,
+  because a counselor's pages must not slow down as other practices grow. Then
+  p50/p95/max and row counts per endpoint and per page (Overview, Calendar, My
+  Work Queue, Contact Pipeline, Management, and the Payment Tracker), a page
+  timed as the layout's `/students` followed by its own calls together.
+  Requests are paced under the in-process limit and every route's DB limit, so
+  a 429 never passes as a fast answer. Report only, writing
+  `perf-roster.json`; `PERF_ENFORCE=1` exits 1 when a page's p95 reaches
+  `PERF_BUDGET_MS` (500). It leaves its rows behind: `supabase db reset` after a
+  local run. `test/unit/fanout-limits.test.ts` checks every list read on those
+  pages carries a DB-backed `limit()`.
+- `scripts/seed/e2e-stack.mjs` (`npm run seed:e2e -- [--students 60] [--roster 12]`):
+  the seed the app's signed-in Playwright workflow runs against a throwaway
+  local stack. It prints `KEY=value` lines for `$GITHUB_ENV`: `E2E_COUNSELOR_*`
+  (firm owner, populated roster and pipeline, for read sweeps), `E2E_MEMBER_*`
+  (same firm, seat `counselor`, not an admin), `E2E_WRITER_*` and
+  `E2E_WRITER_MEMBER_*` (a second firm for specs that change things),
+  `E2E_BILLING_*` (a solo counselor holding only the Payment Tracker scenario in
+  `scripts/seed/billing-scenario.mjs`, whose hand-worked figures
+  `test/unit/seed-scenario.test.ts` checks against `deriveAccount`),
+  `E2E_STUDENT_*` and `E2E_STUDENT_ID`, `E2E_JOINER_*` with `E2E_JOIN_TOKEN` and
+  `E2E_JOIN_CONTACT_ID` (a pipeline contact's invitation, for the "contact
+  becomes a student" check), `E2E_PERF_*`, and `E2E_STACK=local`. Passwords are
+  random per run. Rows go in through PostgREST as the counselor, firms through
+  `create_firm` and a firm invitation; psql only for bulk auth users,
+  `counselor_id`/role/approval and Meridies-wide Events Hub rows. It and the
+  speed test refuse any `SUPABASE_URL`, `DB_URL` or `API_URL` that isn't
+  localhost, and anything naming the production project, with no override
+  (`scripts/seed/local-only.mjs`): they create approved accounts with the
+  service-role key. `test/integration/e2e-seed.test.mjs` runs each helper and
+  reads the result back through the API.
+- `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
+  (every action pinned to a commit); typecheck, build, unit tests (including
+  `migration-plan`, the plan reader against CLI output captured in
+  `test/fixtures/supabase-cli`, and `migrations-workflow`, the rules
+  `migrations.yml` must keep); then a throwaway Supabase with every migration
+  (CLI 2.121.0, the version that applies to production), the plan reader run
+  against that CLI's real output, an RLS-on-every-table check, the fixtures, and the persona suites, with the API started under
+  `RESEARCH_FAKE=fixture` so research runs without a model or the web. After
+  them it runs the e2e seed (output kept out of the log) and the speed test,
+  report only, and uploads `perf-roster.json`. Other AI
   calls are not exercised in CI (they cost money); their pure parts are
   unit-tested. The live research path is checked by hand with
   `scripts/smoke/research.ts`.
@@ -1467,6 +2059,8 @@ npm run dev               # http://localhost:4000
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
+| `IMPORTS_ROLLOUT` / `IMPORTS_PILOT` | The Import page: `off`, `pilot` (default; only the practices in `IMPORTS_PILOT`, firm or solo counselor ids, comma-separated) or `all`. Ready to apply is never gated |
+| `IMPORTS_AI` | `on` (default) or `off`: the AI column mapping's kill switch |
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
@@ -1480,14 +2074,27 @@ and reachability only, never values, URLs or error text. `database` is a 2s HEAD
 probe on `colleges` (cached 5s); when it fails the route returns **503** with
 `status: "degraded"`, so a Railway healthcheck sees an unreachable database.
 
+`anthropic` is `true` when Anthropic accepted the key (asked with one cheap
+`models.list` call, re-checked every 10 minutes), `false` when no key is set or
+Anthropic refused it (401 or 403, re-checked every minute), and `null` until a
+check has given a firm answer (right after a deploy). A timeout, an outage, a
+rate limit or any other error keeps the last firm answer and asks again a
+minute later (`lib/anthropicKeyCheck.ts`). /health waits at most 2 s for the
+check and otherwise answers from the cache while it finishes. Like
+`serviceRole`, it never changes the status code. The AxIS fail-safe and the
+503 gates read only whether the key is set (`hasAnthropic`), never this check.
+
 `schema` is whether the tables and columns this build cannot run without
 exist (`REQUIRED_SCHEMA` in `lib/schemaCheck.ts`); when one is missing the route
 returns **503** too. `railway.json` points Railway's healthcheck at `/health`,
 so a build that is merged before its migration is applied never goes live: the
 previous deployment keeps serving until the migration is in. **A migration that
 adds something every request needs gets a line in `REQUIRED_SCHEMA` in the same
-pull request.** This is the backstop, not the process: apply the migration
-first.
+pull request.** The Apply migrations workflow applies a merged migration within
+minutes, but not necessarily before the code that needs it goes live (see
+"How migrations reach production"), so this check and code that degrades
+safely without its migration are still what keep a deploy from serving a
+schema it can't use.
 
 ## Related repos
 
@@ -1509,10 +2116,10 @@ npm run typecheck && npm run build
 # open PR — include the migration if the schema changed
 ```
 
-Railway runs `npm run start` (plain `node dist/index.js`). Migrations are **no
-longer applied on deploy** — Prisma owned that, and it's gone. Apply schema
-changes to Supabase deliberately, and commit the SQL under
-`supabase/migrations/` in the same PR.
+Railway runs `npm run start` (plain `node dist/index.js`). Migrations are **not
+applied on deploy**. Commit the SQL under `supabase/migrations/` in the same
+PR; after the merge the Apply migrations workflow plans it and applies it once
+a person approves (see "How migrations reach production").
 
 **Commit in steps on big changes.** A large PR lands as many commits, each a
 coherent step that builds on its own (a migration with its route, one screen,

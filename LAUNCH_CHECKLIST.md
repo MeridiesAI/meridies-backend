@@ -21,7 +21,8 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   (`POST /v1/projects/{ref}/database/query`), one transaction per file, each version recorded in
   `supabase_migrations.schema_migrations`. All 24 applied without errors. The earlier migrations are
   recorded under dashboard timestamps rather than their file names, so `supabase db push` would try
-  to re-run them: don't use it against this project until that is reconciled.
+  to re-run them: don't use it against this project until that is reconciled. (Reconciled 2026-10-12,
+  X12: `supabase db push` is safe now, and it is what the Apply migrations workflow runs.)
 - [x] **Verify** (§4). Done 2026-10-06:
   - `node --env-file=.env scripts/verify-v10.mjs` prints `All checks passed.` (Use this rather than
     the "24 rows in `schema_migrations`" query: the SQL editor doesn't record versions, so that query
@@ -37,6 +38,27 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   reads), then `20261016000002_research.sql` (hidden counselor tasks, `research_runs`, `recommendations`,
   `research_blocked_domains`), each before deploying the code that needs it. Never set `RESEARCH_FAKE` on
   Railway: the server refuses to boot with it unless `NODE_ENV` is `development` or `test`.
+
+- [ ] **Apply migrations workflow** (`.github/workflows/migrations.yml`; setup in
+  `DATABASE_MIGRATION_INSTRUCTIONS.md`, "Setup, once"). Add `SUPABASE_ACCESS_TOKEN` and
+  `SUPABASE_DB_PASSWORD`, create the `production-db-plan` and `production-db` environments restricted to
+  `main`, set `MIGRATION_APPROVERS` (and `MIGRATIONS_REVIEWERS_CONFIGURED=true` only once
+  `production-db` has required reviewers), turn on Railway's "Wait for CI", then do one manual run with
+  apply off and read the plan before anything is applied. Until the secrets exist the workflow skips
+  with a notice and migrations are applied by hand.
+- [ ] **The thirteen migrations after `20261022000001`** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet
+  applied"): the questionnaire sync, import pipeline step 2, caseload transfer, campus photos, the College
+  Scorecard figures and emailed meeting invites. Merged ahead of the database on purpose and not applied yet; apply them in that
+  section's order, after a backup, when the team decides. Until then each feature says it isn't switched
+  on yet (meetings: "Email calendar invites" answers that invites aren't switched on and nothing is
+  emailed; imports and caseload transfer answer 503 with a code; photos and the extended Scorecard
+  figures read null) and nothing else
+  changes. Applying `20261023030003` changes one existing behaviour: removing a firm member who still
+  has students is refused until their caseload is transferred or released.
+- [ ] **College Scorecard figures** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "College Scorecard: more
+  figures"). When the thirteen above go in, `20261023080001_college_stats_scorecard_more.sql` among them, run the Scorecard load once
+  (`POST /internal/ingest/scorecard`); the new profile figures stay empty until it has run. Afterwards
+  `GET /internal/status` should not list `scorecard-ingest` under `failing`.
 
 ### Railway variables
 
@@ -60,6 +82,14 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   every 10 minutes, `CRON_SECRET` as a reference to `${{meridies-backend.CRON_SECRET}}`): `POST /communication/internal/dispatch`, every 5 to 15
   minutes, same header. It has no in-process alternative. Without it, scheduled messages and those
   held for quiet hours never send.
+
+- [ ] **College photos** (new; monthly): after applying `20261023070001_college_photos.sql`, run
+  `npx tsx --env-file=.env scripts/ingest/college-photos.ts --dry-run`, look the CSV over (bad
+  picks go in `scripts/ingest/data/college-photo-picks.csv` as a better title or `none`), then run
+  it without `--dry-run` once by hand: `/internal/status` reads the job overdue until its first clean
+  run. Then a cron service, monthly (for example `17 4 3 * *`): `POST /internal/ingest/college-photos`,
+  same header. It answers 202 and records itself in `ingest_runs`; a first full load is about
+  6,000 downloads from Wikimedia and can take an hour.
 
 ### Vercel variables (meridies-app)
 
@@ -115,6 +145,15 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 - [ ] **Leaked-password protection**: Supabase Auth > Attack Protection. Needs the Supabase Pro plan;
   the project is on Free, which also has no daily backups. The upgrade is pending a team decision.
 
+- [ ] **Import pipeline step 2 (the Import page)**: apply `20261023020001`-`20261023020003`
+  (`DATABASE_MIGRATION_INSTRUCTIONS.md`); confirm `IMPORT_DATABASE_URL` (logs in as `import_worker`
+  through the session pooler) and the `/internal/imports/sweep` cron (every 5 to 15 minutes, which now
+  also runs retention); set `IMPORTS_PILOT` to the pilot practices' ids (`IMPORTS_ROLLOUT` defaults to
+  `pilot`; `all` once spec §13's blockers are cleared: five real anonymized exports tested and
+  Anthropic zero data retention confirmed in writing). Changing the pilot list needs a redeploy.
+  Leave `IMPORT_HOLD_EXPIRY_ENABLED` unset until the app's Ready to apply page is live, then run the
+  grace update in the runbook and set it to `true`.
+
 ---
 
 ## P2: production smoke test
@@ -137,6 +176,11 @@ Run against app.meridiesai.com and Railway once P0 and P1 are done.
 
 **Messaging and background jobs**
 - [ ] A task with email + SMS produces two `sent` rows in `message_deliveries`
+- [ ] A meeting booked with "Email calendar invites" (`20261023090001` applied) reaches a test
+  student as an invite that adds to the calendar, then a move updates it and a cancel removes it, in
+  Gmail, Outlook.com, Outlook desktop and iOS Mail (Outlook desktop may show the attached file rather
+  than an inline meeting request: note what each client does). Each send is a `message_deliveries`
+  row with the meeting's `meeting_id`; needs the verified Resend domain above
 - [ ] A scheduled message sends within one dispatch interval (this proves cron 2 runs)
 - [ ] The sweep raises a stall alert with no dashboard open (this proves cron 1, or the interval,
   runs)
@@ -151,6 +195,9 @@ Run against app.meridiesai.com and Railway once P0 and P1 are done.
 - [ ] `curl https://meridies-backend-production.up.railway.app/health` returns 200 with
   `database: true` and no secrets in the body. (The 503 path when the database is unreachable is in
   `src/routes/health.ts`; don't take production down to test it.)
+- [ ] The same response has `anthropic: true`. `null` is fine only right after a deploy (the first
+  key check hasn't answered yet; ask again in a few seconds). `false` means a key problem: the key is
+  unset, or Anthropic refused it (401/403). A timeout or an Anthropic outage never reads `false`.
 - [ ] Re-run `scripts/verify-v10.mjs` and the security advisors
 
 ---

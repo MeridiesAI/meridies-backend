@@ -1,8 +1,9 @@
 import { user, call, check, API } from "./harness.mjs";
 
 const h = await (await fetch(API + "/health")).json();
-// With a key configured the check must say it works; without one (CI), it must say false, not true.
-check("health reports whether the key works", h.database === true && h.anthropic === Boolean(process.env.ANTHROPIC_API_KEY), JSON.stringify(h));
+// No key (CI): false. With a key: true once Anthropic answered, null while the
+// first check is still running; never false for a timeout or an outage.
+check("health reports whether the key works", h.database === true && (process.env.ANTHROPIC_API_KEY ? h.anthropic !== false : h.anthropic === false), JSON.stringify(h));
 check("health reports that the schema this build needs is there", h.schema === true && h.status === "ok", JSON.stringify(h));
 
 const c = await user("counselor-a");

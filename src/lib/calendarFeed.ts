@@ -23,6 +23,7 @@
 
 import type { FastifyRequest } from "fastify";
 import { fromPostgrest } from "./errors.js";
+import { caseloadStudentIds } from "./guards.js";
 
 type Row = Record<string, unknown>;
 
@@ -247,6 +248,16 @@ export async function buildCalendarFeed(
   else {
     practice = practice.eq("owner_id", me);
     if (scopeStudent) practice = practice.eq("student_id", scopeStudent);
+  }
+
+  // A counselor's whole calendar: name their students, so the two reads that
+  // span students use the index instead of RLS-checking every practice's rows.
+  if (!scopeStudent) {
+    const caseload = await caseloadStudentIds(request);
+    if (caseload) {
+      deadlines = deadlines.in("student_id", caseload);
+      tasks = tasks.in("student_id", caseload);
+    }
   }
 
   const [dl, mt, tk, pe, eventTypes, assignments] = await Promise.all([
