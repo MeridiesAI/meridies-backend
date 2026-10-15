@@ -99,6 +99,13 @@ if (held === "t") {
 // Wikidata and Commons replaced by test/fixtures/college-photos.
 const { execFileSync } = await import("node:child_process");
 const repo = new URL("../..", import.meta.url);
+// The hand-inserted MIT row above goes first: the loader never replaces a
+// stored photo on the run that first sees the new file (the review gate,
+// college-photos-review.test.mjs), so it would keep serving the test row.
+await sql(`delete from college_photos where college_id = '${mit}'`);
+if ((await sql(`select to_regclass('public.college_photo_candidates') is not null`)) === "t") {
+  await sql(`delete from college_photo_candidates where college_id in ('${mit}', '${yale}')`);
+}
 let loaded = false;
 try {
   execFileSync("npx", ["tsx", "scripts/ingest/college-photos.ts", "--fixture-dir", "test/fixtures/college-photos", "--picks", "test/fixtures/college-photos/picks.csv", "--only", "166683,243744,130794"], { cwd: repo, env: process.env, stdio: "pipe" });
