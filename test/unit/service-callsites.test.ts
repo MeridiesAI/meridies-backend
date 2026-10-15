@@ -12,7 +12,9 @@ const REVIEWED = [
   // lib/eventsDiscovery.ts: the weekly job acts for no counselor; it writes only Meridies-wide hub_events
   // rows from colleges' public pages. routes/events.ts: "Refresh events" runs inside an approved
   // counselor's own request (requireRole) and writes only those same public rows.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/caseloadTransfer.ts: after an approved firm admin's transfer commits (inside their request), reads the
+  // addresses of exactly the profiles transfer_caseload returned, to mail them. Outbound delivery only.
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
