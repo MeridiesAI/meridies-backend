@@ -30,7 +30,7 @@ begin
   if (select count(*) from public.roster_imports
        where counselor_id = v_me and permission_confirmed_at is not null
          and status in ('draft','mapping','staging','review')) >= 20 then
-    raise exception 'You have 20 imports in progress. Finish or discard one first.' using errcode = 'P0001';
+    raise exception 'You have 20 imports in progress. Finish or discard one first.' using errcode = '55000';
   end if;
   insert into public.roster_imports (counselor_id, filename, source, status, permission_confirmed_by,
                                      permission_confirmed_at, expires_at)
@@ -575,7 +575,7 @@ begin
                                   'name', (select p.full_name from public.profiles p where p.id = page.student_id)) end,
            'candidates', coalesce((select jsonb_agg(jsonb_build_object(
                                      'id', c ->> 'id',
-                                     'name', (select p.full_name from public.profiles p where p.id::text = c ->> 'id'),
+                                     'name', (select p.full_name from public.profiles p where p.id = (c ->> 'id')::uuid),
                                      'why', c ->> 'why'))
                                    from jsonb_array_elements(page.candidates) c), '[]'::jsonb),
            'maxRisk', page.max_risk,

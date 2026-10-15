@@ -383,7 +383,7 @@ begin
   end if;
 
   if (select count(*) from public.import_files where import_id = p_import and status <> 'excluded') >= 20 then
-    raise exception 'An import holds at most 20 files' using errcode = 'P0001';
+    raise exception 'An import holds at most 20 files' using errcode = '55000';
   end if;
   if v_status = 'profiled' and v_sha is not null and exists (
     select 1 from public.import_files
@@ -493,7 +493,7 @@ begin
   end if;
   if (select count(*) from public.import_templates where counselor_id = p_actor) >= 200
      and not exists (select 1 from public.import_templates where counselor_id = p_actor and fingerprint = p_fingerprint) then
-    raise exception 'You have 200 saved layouts. Delete one first.' using errcode = 'P0001';
+    raise exception 'You have 200 saved layouts. Delete one first.' using errcode = '55000';
   end if;
   insert into public.import_templates (counselor_id, name, source_system, fingerprint, parse_plan, use_count, last_used_at)
   values (p_actor, left(btrim(p_name), 200), p_source_system, p_fingerprint, p_plan, 1, now())

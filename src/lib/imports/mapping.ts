@@ -59,7 +59,9 @@ async function addSpend(request: FastifyRequest, importId: string, cents: number
 
 export async function suggestPlan(request: FastifyRequest, importId: string): Promise<PlanAnswer> {
   const imp = await loadImportRow(request, importId, "id, status, ai_spend_cents");
-  if (!["draft", "mapping", "review"].includes(String(imp.status))) throw conflict("That can't be done at this step of the import");
+  // Not from review: a fresh suggestion would throw away what was staged and
+  // decided. Changing the mapping then is PUT /plan, which the app confirms.
+  if (!["draft", "mapping"].includes(String(imp.status))) throw conflict("Change the mapping instead of starting it again");
   const files = await profiledFiles(request, importId);
   if (files.length === 0) throw conflict("Add a file that can be read first");
   const fields = await loadFields(request);

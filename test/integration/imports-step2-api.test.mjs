@@ -88,6 +88,7 @@ check("to invite: the new student only", stats.toInvite === 1);
 check("skipped: the siblings on a parent's email", stats.skipped === 2);
 check("a cell that won't clean needs a fix", stats.problems === 1);
 check("the import is in review", (await sql(`select status from public.roster_imports where id = '${imp}'`)) === "review");
+check("a fresh suggestion can't wipe a review", (await call(c.token, "POST", `/imports/${imp}/plan`)).status === 409);
 
 const changes = await call(c.token, "GET", `/imports/${imp}/review?section=changes`);
 const janeItem = changes.body.items.find((i) => i.student?.id === jane.id);

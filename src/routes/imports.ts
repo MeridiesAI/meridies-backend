@@ -270,7 +270,7 @@ export default async function importRoutes(app: FastifyInstance) {
     return { stats: await updateReview(request, id, body) };
   });
 
-  app.post("/:id/invitations", { preHandler: [...counselor, limit("imports:invite", 10, 3600)] }, async (request) => {
+  app.post("/:id/invitations", { preHandler: [...counselor, limit("imports:invite", 30, 3600)] }, async (request) => {
     const { id } = idParam.parse(request.params);
     // Not behind the rollout flag: a saved import's invitations must still go out.
     if (!(await step2Migrated(request))) throw unavailableNow();
