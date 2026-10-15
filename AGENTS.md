@@ -1107,9 +1107,16 @@ column and tables.
     refused for its focus, refused because the same run is already in flight, or
     refused by the up-front AI check does not spend the daily cap.
   - `GET /students/:id/recommendations?feature=college_list|activities`
-    (newest first, 200 at most).
+    (newest first, 200 at most). Each row carries `createdAt` and `repeatOf`
+    (below).
   - `POST /recommendations/:id/accept` and `.../dismiss`. These two and the
-    list share a limit of 120 a minute per user.
+    list share a limit of 120 a minute per user. Accept answers `{ acceptedAs,
+    alsoDismissed }`, dismiss `{ id, status, alsoDismissed }`. Their 409s carry
+    a `code`: `recommendation_decided` (this row was accepted or dismissed
+    already), `already_accepted` (the same suggestion was accepted before,
+    below) and, for a college, `already_on_list` (the school is on the list
+    already, by hand or otherwise; the claim is released and the row stays
+    suggested).
   - Order inside a run: access (the counselor must be able to see the student:
     403 or 404), the brief and its identity filter, the cache, the practice's AI
     switches, the in-flight check, the daily cap, the run row, then the model.
@@ -1270,6 +1277,29 @@ column and tables.
   source URLs and "Verify dates and costs before applying."; what was created is
   stored in `accepted_as`. Dismiss is the same conditional update. Nothing is
   shared across practices.
+- **The same suggestion across runs** (`repeats.ts`). Every run that isn't
+  served from the cache stores fresh rows, so "search again" or a new focus
+  leaves one program or college `suggested` twice, or suggests again one that
+  was accepted. Two rows are the same suggestion when they share a feature and
+  a key: a college's catalog id when it has one, else the title folded
+  (Unicode NFKC, lowercase, accents and punctuation dropped, `&` read as
+  "and"). Every recommendation DTO (the list, a run's answer, a cached answer)
+  carries `repeatOf`, set only on a `suggested` row: `{ id, status:
+  "suggested" }` on every older copy, pointing at the newest, which stands for
+  them all (a list shows the newest only); `{ id, status: "accepted" }` on the
+  newest copy when an accepted row for it still has its college-list row or
+  task (read on the caller's client; an accepted row whose thing was deleted,
+  or with no `accepted_as`, doesn't count). Accepting such a copy is refused
+  with 409 `already_accepted` before anything is claimed, so one program can't
+  become two tasks; dismissing it works. A decision on one copy, accept or
+  dismiss, dismisses the student's other `suggested` copies (service role,
+  ids read on the caller's client for that student, `status = 'suggested'`
+  repeated in the update; best effort, logged on failure) and returns them as
+  `alsoDismissed`. A failed repeat read on a fresh run is logged and the paid
+  answer is returned unmarked; on the list, a cached answer and accept it
+  fails the request (accept fails closed). Known limit: two copies accepted at
+  the same instant can both pass the check. AxIS's `recommendations.list`
+  reply names the repeat.
 - **Hidden tasks.** `deliverables.visible_to_student` (default true). Enforced in
   RLS by restrictive select policies, so a student's read never returns a hidden
   task or what points at it: `deliverables`, `deliverable_stages`,
@@ -1308,7 +1338,9 @@ as it is (the in-flight check ignores one older than 10 minutes). Two identical
 uncached requests made at the same instant can both pass the in-flight check and
 run.
 Research is in none of the practice AI switches (`practiceSettings.ts`), so the
-up-front AI check gates nothing yet. The app has no screens for any of this.
+up-front AI check gates nothing yet. The app's screens: the College list's
+Recommended column (Research colleges), Activities Build (Research
+activities), and sharing a hidden task from the student page's task card.
 
 ### Import pipeline (step 1)
 
@@ -1426,15 +1458,17 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   signatures, heartbeats, the context layer (allowlist, packing, feature
   profiles, coherence material, consumers), and research (`research-brief`,
   `research-citations`, `research-extract`, `research-run`,
-  `research-boot-guard`: the brief and identity filter, the citation keeper,
-  the answer parser, the match validation and the boot check), the
+  `research-boot-guard`, `research-repeats`: the brief and identity filter, the
+  citation keeper, the answer parser, the match validation, the boot check and
+  the repeat rule), the
   counselor approval gate (`access`, `access-review`, `service-callsites`),
   and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and
-  hidden tasks), `research-api` (the routes, with the test double) and the
+  hidden tasks), `research-api` (the routes, with the test double),
+  `research-repeats` (the same suggestion across runs) and the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`). The harness's `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
