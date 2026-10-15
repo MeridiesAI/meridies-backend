@@ -15,6 +15,7 @@
     "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
     "test:integration": "node --test test/integration/*.test.mjs",
     "test:imports-load": "node test/integration/imports-load.mjs",
+    "test:perf": "node test/integration/perf-roster.mjs",
     "seed:e2e": "node scripts/seed/e2e-stack.mjs"
   },
   "dependencies": {
