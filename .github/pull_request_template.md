@@ -23,6 +23,9 @@ The problem this solves, and why this approach. Link the issue if there is one.
 ## Migrations / env changes
 
 - [ ] Schema migration included
+- [ ] Deploy order stated: what happens if this code runs before its migration, and whether it is in `REQUIRED_SCHEMA`
+- [ ] The migration is safe while the previous build still serves (drops and renames go in a later PR)
+- [ ] After merge: the Apply migrations run's plan lists only the files expected (the approver checks)
 - [ ] New env var — added to `.env.example` AND set on Railway
 - [ ] None
 

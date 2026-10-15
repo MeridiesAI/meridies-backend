@@ -146,13 +146,34 @@ the shape of the answer (404 vs 403 vs empty list) even when RLS blocks the row.
 `supabase/migrations/*.sql`, applied to the Supabase project. Every migration
 ships its own RLS policies so no table is ever created unprotected.
 
-**The v10 sync added 24 migrations (`20261005*`) that are not applied
-automatically.** `DATABASE_MIGRATION_INSTRUCTIONS.md` at the repo root is the
-runbook: backup first (`20261005030002` deletes FAFSA data on purpose), the
-order, what each file changes in place, the checks, and the two settings
-outside the database (Google's `drive.file` scope, the dispatch cron). Routes
-that read the new columns fail until it has run, including existing screens
-(meetings, AxIS chats, Files, invitations, Financial aid).
+**How migrations reach production.** `.github/workflows/migrations.yml`
+("Apply migrations"): on a merge to `main` that touches `supabase/migrations/**`,
+or a manual run, the plan job (no approval) dry-runs `supabase db push` and
+writes the pending files, their header lines and any destructive statements
+(`scripts/migrations/plan.mjs`) to the run summary. The apply job waits for the
+`production-db` environment; a push applies only when
+`vars.MIGRATIONS_REVIEWERS_CONFIGURED` says reviewers exist, otherwise an
+approver in `vars.MIGRATION_APPROVERS` runs it by hand with apply on and confirm
+set to the newest version. It re-checks the list (refusing if it changed),
+pushes, and fails on any table it left without RLS or the approval gate
+(`scripts/migrations/problems.sql`). Without `SUPABASE_ACCESS_TOKEN` /
+`SUPABASE_DB_PASSWORD` it skips green with a notice. The code and its migration
+land minutes apart in no guaranteed order (with Railway's "Wait for CI" the
+migration's own commit deploys after it, a later merge that touches no
+migration does not wait), so every migration still states its deploy order: what
+happens if the code runs first, and whether it belongs in `REQUIRED_SCHEMA`.
+The other direction too: a migration applies while the previous build still
+serves, so it must be safe for that build; drops and renames go in a later PR,
+after the code that reads the old shape has shipped. Never `--include-all` on
+production: a file older than production's newest version gets a new
+timestamp. The CLI version is pinned in both workflows (a unit test checks they
+match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
+
+**The v10 sync added 24 migrations (`20261005*`)**, applied by hand on
+2026-10-06 before the workflow existed. `DATABASE_MIGRATION_INSTRUCTIONS.md`
+keeps that runbook as history (backup first: `20261005030002` deletes FAFSA data
+on purpose; the order; what each file changes in place; the two settings
+outside the database, Google's `drive.file` scope and the dispatch cron).
 `node --env-file=.env scripts/verify-v10.mjs` checks, read-only, that every
 table the 24 files create exists. `LAUNCH_CHECKLIST.md` is everything else
 left before going live (Railway, crons, Supabase Auth, Resend, OAuth, smoke test).
@@ -163,8 +184,8 @@ use it rather than hand-writing four policies and getting one wrong.
 `scripts/seed/generate-catalog.ts` from the meridies-demo fixtures (edit the
 script, then `MERIDIES_DEMO_DIR=../meridies-demo npx tsx
 scripts/seed/generate-catalog.ts > supabase/migrations/20260923000001_seed_catalog.sql`).
-Apply it like any migration (`supabase db push`, or paste it into the SQL
-editor as the project owner). It is idempotent (ON CONFLICT / WHERE NOT EXISTS)
+Apply it like any migration (the Apply migrations workflow; by hand,
+`supabase db push`). It is idempotent (ON CONFLICT / WHERE NOT EXISTS)
 and never updates a row that already exists, so re-running it will not overwrite
 hand corrections. It fills only what a fixture states: no scattergram points (the
 demo's are PRNG output), no admission stats (no cohort year), and
@@ -1438,9 +1459,13 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`). The harness's `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
-- `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
-  tests; then a throwaway Supabase with every migration, an RLS-on-every-table
-  check, the fixtures, and the persona suites, with the API started under
+- `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
+  (every action pinned to a commit); typecheck, build, unit tests (including
+  `migration-plan`, the plan reader against CLI output captured in
+  `test/fixtures/supabase-cli`, and `migrations-workflow`, the rules
+  `migrations.yml` must keep); then a throwaway Supabase with every migration
+  (CLI 2.121.0, the version that applies to production), the plan reader run
+  against that CLI's real output, an RLS-on-every-table check, the fixtures, and the persona suites, with the API started under
   `RESEARCH_FAKE=fixture` so research runs without a model or the web. Other AI
   calls are not exercised in CI (they cost money); their pure parts are
   unit-tested. The live research path is checked by hand with
@@ -1496,8 +1521,11 @@ returns **503** too. `railway.json` points Railway's healthcheck at `/health`,
 so a build that is merged before its migration is applied never goes live: the
 previous deployment keeps serving until the migration is in. **A migration that
 adds something every request needs gets a line in `REQUIRED_SCHEMA` in the same
-pull request.** This is the backstop, not the process: apply the migration
-first.
+pull request.** The Apply migrations workflow applies a merged migration within
+minutes, but not necessarily before the code that needs it goes live (see
+"How migrations reach production"), so this check and code that degrades
+safely without its migration are still what keep a deploy from serving a
+schema it can't use.
 
 ## Related repos
 
@@ -1519,10 +1547,10 @@ npm run typecheck && npm run build
 # open PR — include the migration if the schema changed
 ```
 
-Railway runs `npm run start` (plain `node dist/index.js`). Migrations are **no
-longer applied on deploy** — Prisma owned that, and it's gone. Apply schema
-changes to Supabase deliberately, and commit the SQL under
-`supabase/migrations/` in the same PR.
+Railway runs `npm run start` (plain `node dist/index.js`). Migrations are **not
+applied on deploy**. Commit the SQL under `supabase/migrations/` in the same
+PR; after the merge the Apply migrations workflow plans it and applies it once
+a person approves (see "How migrations reach production").
 
 **Commit in steps on big changes.** A large PR lands as many commits, each a
 coherent step that builds on its own (a migration with its route, one screen,

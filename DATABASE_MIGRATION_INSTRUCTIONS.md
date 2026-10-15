@@ -1,8 +1,121 @@
-# Database migration instructions: Demo v10 sync
+# Database migrations
 
-These steps bring the Supabase project `kerstlpuvpmstiavxblv` up to the schema the v10 backend and app
-expect. They were not applied automatically: the project is not reachable from the session that wrote
-this change.
+## How a migration reaches production
+
+`.github/workflows/migrations.yml` ("Apply migrations") applies `supabase/migrations/*.sql` to the
+Supabase project `kerstlpuvpmstiavxblv`. The migration history was reconciled on 2026-10-12 (the
+context repo's MASTER_TODO X12), so `supabase db push` is safe against this project and is what the
+workflow runs.
+
+1. **Merge the PR that carries the migration.** A push to `main` that touches `supabase/migrations/**`
+   starts the workflow. So does a manual run (Actions > Apply migrations > Run workflow, on `main`).
+2. **Plan** (no approval). It links the project, runs `supabase db push --dry-run`, and writes to the
+   run summary: each pending file in order, the first line of its header comment, and flags for
+   statements an approver must read (dropped tables or columns, deleted or updated rows, a changed
+   column type, dynamic SQL in a DO block, a new table without RLS or the approval gate). It also runs
+   the RLS and approval-gate check read-only (`scripts/migrations/problems.sql`) and reports what it
+   finds as warnings.
+3. **An approver reads the plan.** The list is everything production hasn't applied, which can be more
+   than this PR's files. For any flagged file, confirm a recent backup exists (Supabase > Database >
+   Backups) and read the file. Then:
+   - **With reviewers** (`MIGRATIONS_REVIEWERS_CONFIGURED` is `true`): approve the `production-db`
+     deployment on the run.
+   - **Without** (manual mode): run the workflow on `main` with **apply** on and **confirm** set to the
+     newest version the plan lists (the summary names it). The person clicking must be in
+     `MIGRATION_APPROVERS`; on a re-run, the check is against whoever clicked Re-run.
+4. **Apply.** It dry-runs again and refuses if the list or any file's content changed since the plan
+   (another apply, a file applied by hand). Then `supabase db push`, then the RLS and approval-gate
+   check again: it fails on any table this apply left without RLS or the gate, and only warns about
+   problems that were already there.
+5. **Check the API.** `/health` reports `schema: true` on the new deployment. If Railway skipped or
+   failed its deploy while the apply waited, redeploy it (below).
+
+Without `SUPABASE_ACCESS_TOKEN` and `SUPABASE_DB_PASSWORD` the plan prints a notice, stays green, and
+nothing touches the database: apply by hand (the sections further down are the by-hand route).
+
+**Never use `--include-all` on production.** When a pending file is older than the newest version
+production has applied, the CLI refuses and the plan fails with "older than the newest one on
+production". Give the file a later timestamp in a new PR. `--include-all` would run it out of order
+under a version history that says otherwise.
+
+### Code and its migration land minutes apart, not in a fixed order
+
+On a merge, Railway's deploy and this workflow start at the same time.
+
+- **With Railway's "Wait for CI" on**, Railway waits for the GitHub checks on the commit it deploys,
+  including this workflow while its apply waits for approval. So the commit that carries the migration
+  deploys after it, and not at all if the apply is rejected or fails. That holds for that commit only.
+  If another PR that touches no migration merges while the apply waits, it starts no migration run,
+  `ci.yml` cancels the earlier commit's CI run, and Railway deploys the newer commit, which already
+  contains the earlier code, before the migration is applied.
+- **Without "Wait for CI"**, or in manual mode, the code can go live first.
+
+So the protection is still what it was: every migration's PR states what happens if its code runs
+before the migration (it degrades safely, or it goes in `REQUIRED_SCHEMA`, and then `/health` answers
+503 and Railway keeps the previous deployment after its 120 s healthcheck; redeploy once the apply is
+done).
+
+The reverse matters too: the previous build keeps serving while the apply waits and the new build
+starts. **A migration must be safe for the code that is already live.** Add first; drop or rename only
+in a later PR, after the code that reads the old shape has shipped (the pattern `20261005030002`'s
+FAFSA column drops would break today).
+
+A rejected migration's code still reaches production with the next deploy of `main`, and only
+`REQUIRED_SCHEMA` holds it back. Revert the PR rather than leave the migration rejected.
+
+### When an apply fails or its check turns red
+
+- **A file fails.** Each file is its own transaction and is recorded as it lands, so the files before
+  it stay applied. Railway (with Wait for CI) skips the commit's deploy and `main` shows a red run.
+  Fix forward with a new migration in a new PR; its merge runs the workflow again. "Re-run failed jobs"
+  reuses the old plan and is refused at the drift check, which is intended: use "Re-run all jobs" or a
+  new manual run.
+- **The check after the apply is red.** The migration is applied, but a table it created has no RLS or
+  no approval gate. Fix it forward with a migration that adds them. Railway skipped the deploy; once
+  production is right, redeploy the Railway service by hand.
+- **Railway waited too long.** An approval can wait for days. If Railway gave up on the commit, redeploy
+  it after the apply. How long Railway waits on a pending check hasn't been measured.
+
+### Setup, once (Elvin or Brandon)
+
+1. **Secrets.** `SUPABASE_ACCESS_TOKEN` (a personal access token of a Supabase org member with access
+   to `kerstlpuvpmstiavxblv`; a dedicated machine account is better, since the token can run any SQL
+   through the Management API) and `SUPABASE_DB_PASSWORD`. Store them as environment secrets on both
+   environments below, so a workflow edited on another branch can't read them. Repository secrets with
+   the same names also work, readable from any branch.
+2. **Environments.** `production-db-plan`: no reviewers, deployment branches `main` only.
+   `production-db`: deployment branches `main` only, required reviewers where the GitHub plan allows
+   them, "Prevent self-review" on. GitHub creates an environment named by a workflow automatically
+   with no protection, which is why a push applies only when the variable below says reviewers exist.
+3. **Variables.** `MIGRATION_APPROVERS` (comma-separated GitHub logins). `MIGRATIONS_REVIEWERS_CONFIGURED`
+   = `true` only once `production-db` really has required reviewers; never before.
+4. **Railway.** Turn on "Wait for CI" for the API service.
+5. **First run: plan only.** Run the workflow by hand with apply off. Read the list (it may hold files
+   from several PRs), check that the summary's "Connection" line shows the pooler host on port 5432,
+   and that the database check reads the Management API's answer. The check may warn about tables made
+   outside migrations (the stray `public.test`, LAUNCH_CHECKLIST); deal with those before the first
+   apply so its warnings mean something.
+
+**GitHub plan.** The repository is private. Required reviewers on a private repository's environment
+need GitHub Enterprise; Team has environments, environment secrets and branch rules but no reviewers.
+On Team, leave `MIGRATIONS_REVIEWERS_CONFIGURED` unset and use manual mode. On Free, environment
+protection isn't available for a private repository: use repository secrets and manual mode, where the
+typed confirm and `MIGRATION_APPROVERS` are the approval. Confirm which applies with the first
+plan-only run.
+
+---
+
+# History: how the earlier sets were applied by hand
+
+The sections below are how each set was applied before the workflow existed. They stay as the by-hand
+route for when the workflow can't run (no secrets, GitHub down): `supabase link` + `supabase db push`
+from a laptop, or each file pasted whole into the SQL editor (which records no version, so the next
+`db push` would try to run it again; prefer the CLI).
+
+## Demo v10 sync
+
+These steps brought the Supabase project `kerstlpuvpmstiavxblv` up to the schema the v10 backend and
+app expect. They were applied by hand on 2026-10-06 (LAUNCH_CHECKLIST.md).
 
 **Run them as soon as the PRs merge.** Railway and Vercel deploy `main` on merge, and until these
 migrations are applied, routes that read the new columns fail. That includes existing screens: meetings
@@ -15,13 +128,13 @@ accounts.
 
 ---
 
-## 1. Take a backup
+### 1. Take a backup
 
 Supabase dashboard > Project `kerstlpuvpmstiavxblv` > Database > Backups. Confirm a recent backup
 exists, or download one. Step 2's file `20261005030002` deletes data on purpose (see "Data that is
 deleted" below), so a backup is the only way back.
 
-## 2. Check where the database is today
+### 2. Check where the database is today
 
 In the SQL editor:
 
@@ -33,7 +146,7 @@ The newest version should be `20260923000005`. If you have been pasting migratio
 editor by hand, this table may be empty or behind; in that case check that
 `public.student_red_flags` (the view from `20260923000005`) exists and continue.
 
-## 3. Apply the 24 new migrations, in this order
+### 3. Apply the 24 new migrations, in this order
 
 Option A, Supabase CLI (records each version, recommended):
 
@@ -75,7 +188,7 @@ one at a time, in this order. Stop at the first error and send it over.
 
 Every new table ships with RLS enabled and its policies in the same file.
 
-### Data that is deleted
+#### Data that is deleted
 
 `20261005030002` applies the v5 privacy rule that the v8 brief kept: the FAFSA shows its status and
 due date only. It:
@@ -85,7 +198,7 @@ due date only. It:
 - maps old FAFSA statuses onto three (`verified` becomes `submitted`, `corrections-needed` becomes
   `in-progress`, `not-applicable` becomes `not-started`).
 
-### Data that is changed in place
+#### Data that is changed in place
 
 - `20261005020001`: `student_colleges.status` `considering` becomes `not-started` and `applying`
   becomes `in-progress`. If a student had the same catalog college on their list twice, the newer row
@@ -95,7 +208,7 @@ due date only. It:
 - `20261005030001`: existing students keep their current polygon axes; only students with no axes get
   the new default five.
 
-## 4. Check it worked
+### 4. Check it worked
 
 ```sql
 select version from supabase_migrations.schema_migrations
@@ -115,7 +228,7 @@ node --env-file=.env scripts/verify-v10.mjs      # ends with "All checks passed.
 Then Supabase dashboard > Advisors > Security: there should be no new "RLS disabled" or
 "policy missing" warnings.
 
-## 5. Settings outside the database
+### 5. Settings outside the database
 
 1. **Google consent screen.** Google Cloud Console > APIs & Services > OAuth consent screen > Scopes:
    add `https://www.googleapis.com/auth/drive.file`. Counselors who already connected Google need to
@@ -133,7 +246,7 @@ Then Supabase dashboard > Advisors > Security: there should be no new "RLS disab
    It needs `CRON_SECRET` and `SUPABASE_SERVICE_ROLE_KEY`, which the sweep already uses.
 3. **No new environment variables** and no new storage buckets.
 
-## 6. If something fails
+### 6. If something fails
 
 A failure leaves the earlier files applied and stops there. Send the file name and the error text.
 Files 4, 15 and 20 rebuild the `ai_runs` module check by reading the current list back and adding
@@ -141,10 +254,10 @@ their label, so running any of them a second time is harmless.
 
 ---
 
-# Student view (SV Demo v2): five more migrations
+## Student view (SV Demo v2): five more migrations
 
-Apply these after the 24 above, in this order, the same way (`supabase db push`, or paste each file
-whole into the SQL editor). None deletes data. They were applied after every earlier file on a local
+Apply these after the 24 above, in this order (today: the Apply migrations workflow; by hand,
+`supabase db push`, or paste each file whole into the SQL editor). None deletes data. They were applied after every earlier file on a local
 Postgres with Supabase's auth/storage stubs and exercised as a counselor, their student and a second
 student.
 
@@ -176,11 +289,12 @@ The app changes with it: `polygon` writes, `DELETE /tasks/:id/documents/:documen
 
 ---
 
-# AI context and research: two more migrations
+## AI context and research: two more migrations
 
-Apply these after every earlier file, in this order, the same way (paste each file whole into the SQL
-editor, or the Management API; not `supabase db push`, see the launch checklist). Both are additive and
-idempotent. Apply each **before deploying the code that needs it**.
+Apply these after every earlier file, in this order. Both are additive and idempotent. Apply each
+**before deploying the code that needs it**. (This section once said to avoid `supabase db push`
+because the project's version history didn't match the files; that was reconciled on 2026-10-12, X12,
+and the Apply migrations workflow is now the route.)
 
 | # | File | What it does |
 |---|---|---|
@@ -202,10 +316,9 @@ select to_regclass('public.research_runs'), to_regclass('public.recommendations'
 
 ---
 
-# AxIS: files in a chat (one more migration)
+## AxIS: files in a chat (one more migration)
 
-Apply after every earlier file (`supabase db push` once the history repair in
-the context repo's MASTER_TODO X12 is done, or paste it into the SQL editor). It
+Apply after every earlier file (the Apply migrations workflow, or `supabase db push`). It
 adds a table and a private bucket and deletes nothing. Either order is safe:
 until it is applied, attaching a file in AxIS says files aren't switched on yet,
 and messages go out without files as before.

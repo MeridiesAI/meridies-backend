@@ -21,7 +21,8 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   (`POST /v1/projects/{ref}/database/query`), one transaction per file, each version recorded in
   `supabase_migrations.schema_migrations`. All 24 applied without errors. The earlier migrations are
   recorded under dashboard timestamps rather than their file names, so `supabase db push` would try
-  to re-run them: don't use it against this project until that is reconciled.
+  to re-run them: don't use it against this project until that is reconciled. (Reconciled 2026-10-12,
+  X12: `supabase db push` is safe now, and it is what the Apply migrations workflow runs.)
 - [x] **Verify** (§4). Done 2026-10-06:
   - `node --env-file=.env scripts/verify-v10.mjs` prints `All checks passed.` (Use this rather than
     the "24 rows in `schema_migrations`" query: the SQL editor doesn't record versions, so that query
@@ -37,6 +38,14 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   reads), then `20261016000002_research.sql` (hidden counselor tasks, `research_runs`, `recommendations`,
   `research_blocked_domains`), each before deploying the code that needs it. Never set `RESEARCH_FAKE` on
   Railway: the server refuses to boot with it unless `NODE_ENV` is `development` or `test`.
+
+- [ ] **Apply migrations workflow** (`.github/workflows/migrations.yml`; setup in
+  `DATABASE_MIGRATION_INSTRUCTIONS.md`, "Setup, once"). Add `SUPABASE_ACCESS_TOKEN` and
+  `SUPABASE_DB_PASSWORD`, create the `production-db-plan` and `production-db` environments restricted to
+  `main`, set `MIGRATION_APPROVERS` (and `MIGRATIONS_REVIEWERS_CONFIGURED=true` only once
+  `production-db` has required reviewers), turn on Railway's "Wait for CI", then do one manual run with
+  apply off and read the plan before anything is applied. Until the secrets exist the workflow skips
+  with a notice and migrations are applied by hand.
 
 ### Railway variables
 
