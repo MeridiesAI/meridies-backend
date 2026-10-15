@@ -141,6 +141,15 @@ src/
 Authorize in code *and* let RLS enforce it. A route that skips its check leaks
 the shape of the answer (404 vs 403 vs empty list) even when RLS blocks the row.
 
+**Don't lean on RLS to find a counselor's rows.** A list over all of a
+counselor's students with no student filter makes Postgres read every
+practice's rows and run the RLS helpers on each one, so the page slows down as
+other practices grow (the speed test below caught the calendar feed and
+`GET /tasks` doing this). Name the students: `caseloadStudentIds(request)`
+(`lib/guards.ts`) returns exactly what `private.can_view_student` allows (the
+roster, archived included, the students shared with them, and the caller), or
+null past 250 ids, when the query runs unscoped as before. RLS still applies on top.
+
 ### Schema
 
 `supabase/migrations/*.sql`, applied to the Supabase project. Every migration
@@ -1438,10 +1447,49 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`). The harness's `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
+- `npm run test:perf`: the 60-student speed test (B14,
+  `test/integration/perf-roster.mjs`; not a `*.test.mjs`, so the persona run
+  doesn't pick it up). It seeds one firm owner with 60 fully populated students
+  (academics, polygon, activities, awards, essays, 8 colleges, 4 tasks with
+  dated steps, deadlines, a meeting, a guardian, a work item each), two firm
+  members, 60 pipeline contacts with 20 billed, Management tasks, pending
+  invitations and saved events, plus three other practices of the same size,
+  because a counselor's pages must not slow down as other practices grow. Then
+  p50/p95/max and row counts per endpoint and per page (Overview, Calendar, My
+  Work Queue, Contact Pipeline, Management, and the Payment Tracker), a page
+  timed as the layout's `/students` followed by its own calls together.
+  Requests are paced under the in-process limit and every route's DB limit, so
+  a 429 never passes as a fast answer. Report only, writing
+  `perf-roster.json`; `PERF_ENFORCE=1` exits 1 when a page's p95 reaches
+  `PERF_BUDGET_MS` (500). It leaves its rows behind: `supabase db reset` after a
+  local run. `test/unit/fanout-limits.test.ts` checks every list read on those
+  pages carries a DB-backed `limit()`.
+- `scripts/seed/e2e-stack.mjs` (`npm run seed:e2e -- [--students 60] [--roster 12]`):
+  the seed the app's signed-in Playwright workflow runs against a throwaway
+  local stack. It prints `KEY=value` lines for `$GITHUB_ENV`: `E2E_COUNSELOR_*`
+  (firm owner, populated roster and pipeline, for read sweeps), `E2E_MEMBER_*`
+  (same firm, seat `counselor`, not an admin), `E2E_WRITER_*` and
+  `E2E_WRITER_MEMBER_*` (a second firm for specs that change things),
+  `E2E_BILLING_*` (a solo counselor holding only the Payment Tracker scenario in
+  `scripts/seed/billing-scenario.mjs`, whose hand-worked figures
+  `test/unit/seed-scenario.test.ts` checks against `deriveAccount`),
+  `E2E_STUDENT_*` and `E2E_STUDENT_ID`, `E2E_JOINER_*` with `E2E_JOIN_TOKEN` and
+  `E2E_JOIN_CONTACT_ID` (a pipeline contact's invitation, for the "contact
+  becomes a student" check), `E2E_PERF_*`, and `E2E_STACK=local`. Passwords are
+  random per run. Rows go in through PostgREST as the counselor, firms through
+  `create_firm` and a firm invitation; psql only for bulk auth users,
+  `counselor_id`/role/approval and Meridies-wide Events Hub rows. It and the
+  speed test refuse any `SUPABASE_URL`, `DB_URL` or `API_URL` that isn't
+  localhost, and anything naming the production project, with no override
+  (`scripts/seed/local-only.mjs`): they create approved accounts with the
+  service-role key. `test/integration/e2e-seed.test.mjs` runs each helper and
+  reads the result back through the API.
 - `.github/workflows/ci.yml` runs both on every PR: typecheck, build, unit
   tests; then a throwaway Supabase with every migration, an RLS-on-every-table
   check, the fixtures, and the persona suites, with the API started under
-  `RESEARCH_FAKE=fixture` so research runs without a model or the web. Other AI
+  `RESEARCH_FAKE=fixture` so research runs without a model or the web. After
+  them it runs the e2e seed (output kept out of the log) and the speed test,
+  report only, and uploads `perf-roster.json`. Other AI
   calls are not exercised in CI (they cost money); their pure parts are
   unit-tested. The live research path is checked by hand with
   `scripts/smoke/research.ts`.
