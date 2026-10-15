@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { scanTokens } from "../../src/lib/axis/entities.js";
+import { SentenceStream } from "../../src/lib/axis/text.js";
 import { stripHtml } from "../../src/lib/ingest/collegePhotos.js";
 import { redactText } from "../../src/lib/requestLog.js";
 import { BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
@@ -42,6 +43,107 @@ test("scanTokens reads an 8,000-character message of any shape in well under 100
   for (const unit of ["a ", "a.", "a\n", "\n", "a" + "\n".repeat(50), "Jane ", "- a ", " "]) {
     const text = `x${fill(unit, 8000)}y`;
     const ms = elapsed(() => scanTokens(text));
+    assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
+  }
+});
+
+// ---- AxIS: streamed sentences --------------------------------------------------
+
+const ABBREVIATIONS = new Set([
+  "e.g", "i.e", "etc", "vs", "dr", "mr", "mrs", "ms", "st", "u.s", "jr", "sr", "no", "approx", "est", "dept", "univ", "inc", "mt", "ft",
+]);
+
+/** SentenceStream as it stood before the fix: it rescanned the buffer on every push. */
+class OldSentenceStream {
+  private buf = "";
+  push(delta: string): string[] {
+    this.buf += delta;
+    return this.drain(false);
+  }
+  flush(): string[] {
+    return this.drain(true);
+  }
+  private drain(final: boolean): string[] {
+    const out: string[] = [];
+    for (;;) {
+      const cut = this.boundary(final);
+      if (cut < 0) break;
+      const s = this.buf.slice(0, cut).trim();
+      this.buf = this.buf.slice(cut);
+      if (s) out.push(s);
+    }
+    if (final) {
+      const rest = this.buf.trim();
+      if (rest) out.push(rest);
+      this.buf = "";
+    }
+    return out;
+  }
+  private boundary(final: boolean): number {
+    const b = this.buf;
+    for (let i = 0; i < b.length; i++) {
+      const ch = b[i]!;
+      if (ch === "\n") return i + 1;
+      if (ch !== "." && ch !== "!" && ch !== "?") continue;
+      let j = i + 1;
+      while (j < b.length && /[.!?)"'”’]/.test(b[j]!)) j++;
+      if (j >= b.length) return final ? b.length : -1;
+      if (!/\s/.test(b[j]!)) continue;
+      if (ch === "." && endsWithAbbreviation(b.slice(0, i))) continue;
+      let k = j;
+      while (k < b.length && (b[k] === " " || b[k] === "\t")) k++;
+      if (k >= b.length) return final ? b.length : -1;
+      if (b[k] === "[") {
+        const rest = b.slice(k);
+        const m = /^(?:\[S\d{1,3}\][ \t]*)+/.exec(rest);
+        if (m) return k + m[0].length;
+        if (!final && /^\[(?:S\d{0,3})?$/.test(rest)) return -1;
+      }
+      return j;
+    }
+    return -1;
+  }
+}
+function endsWithAbbreviation(before: string): boolean {
+  const m = /([A-Za-z][A-Za-z.]*)$/.exec(before);
+  if (!m) return false;
+  const w = m[1]!.toLowerCase();
+  return ABBREVIATIONS.has(w) || /^[a-z]$/i.test(w);
+}
+
+function sentences(stream: { push(d: string): string[]; flush(): string[] }, text: string, cuts: number[]): string[][] {
+  const out: string[][] = [];
+  let at = 0;
+  for (const c of [...cuts, text.length]) {
+    out.push(stream.push(text.slice(at, c)));
+    at = c;
+  }
+  out.push(stream.flush());
+  return out;
+}
+
+test("SentenceStream cuts a stream exactly as before, whatever the chunks", () => {
+  const rand = seeded(33);
+  const pieces = [
+    "a", "Her", " ", "  ", "\t", "\n", ".", "!", "?", ")", "\"", "’", "3.87", "U.S", "e.g", "J", "approx", "[S1]", "[S", "1]", "[", "S12",
+    " [S2]", "x", "St", "..", "Mr", "?!",
+  ];
+  for (let i = 0; i < 4000; i++) {
+    const text = randomText(rand, pieces, 1 + Math.floor(rand() * 24));
+    const cuts: number[] = [];
+    for (let c = 0; c < text.length; c++) if (rand() < 0.3) cuts.push(c);
+    assert.deepEqual(sentences(new SentenceStream(), text, cuts), sentences(new OldSentenceStream(), text, cuts), JSON.stringify([text, cuts]));
+  }
+});
+
+test("SentenceStream streams a 20,000-character reply of any shape in well under 100 ms", () => {
+  for (const unit of ["a ", ".", "a.", ". ", "a. ", "aaaaaaaaaa", " ", "U.S. ", "e.g. ", "[S1] ", "?!", "a.a.a ", "\t"]) {
+    const text = `x${fill(unit, 20000)}`;
+    const ms = elapsed(() => {
+      const st = new SentenceStream();
+      for (let at = 0; at < text.length; at += 4) st.push(text.slice(at, at + 4));
+      st.flush();
+    });
     assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
   }
 });
