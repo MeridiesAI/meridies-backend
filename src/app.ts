@@ -90,9 +90,12 @@ export function buildApp() {
         },
       },
     },
-    // Railway sits behind a proxy; without this every request looks like it
-    // came from the same address and the per-IP limiter is useless.
-    trustProxy: true,
+    // Railway sits behind one proxy, which appends the address it saw to
+    // X-Forwarded-For. Trusting that many hops (TRUST_PROXY_HOPS, default 1)
+    // gives the per-IP limiter and the request log the edge's view; trusting
+    // every hop (`true`) took the leftmost entry, which the client writes, so a
+    // fresh header each request got a fresh rate-limit bucket.
+    trustProxy: env.TRUST_PROXY_HOPS,
     bodyLimit: 1_048_576,
     // A client whose base URL ends in "/" sends "//auth/me". Fastify treats
     // that as a distinct, unrouted path and 404s, which reads like the endpoint

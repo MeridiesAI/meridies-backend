@@ -83,6 +83,11 @@ const envSchema = z.object({
   // told to report status there, and its signature is computed over that URL.
   RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
   PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
+  // How many proxies stand between the internet and this process (Railway's
+  // edge: one). request.ip is the address the outermost of them saw: the
+  // X-Forwarded-For entries a client wrote itself, to the left of what the
+  // edge appended, are never trusted. 0 trusts no header (direct exposure).
+  TRUST_PROXY_HOPS: blankIsUnset(z.coerce.number().int().min(0).max(5).default(1)),
   // Where counselor access requests are sent for review (lib/accessReview.ts).
   ACCESS_REVIEW_EMAIL: blankIsUnset(z.string().email().optional()),
 
