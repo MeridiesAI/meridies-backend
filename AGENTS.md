@@ -200,8 +200,8 @@ fix that depends only on applied files and can go in ahead of the rest),
 the RLS and ownership fixes (`20261024000021`-`25`, below), the
 submission-review and reminder security fixes (`20261024000041`-`43`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
-the API already refuses students on `/chat`) and the per-counselor import
-invitation review (`20261024000061`). They go in later, in filename order
+the API already refuses students on `/chat`), the per-counselor import
+invitation review (`20261024000061`) and the campus photo review queue (`20261024000071`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -861,6 +861,39 @@ there).
   suppresses a college and removes its photo. **No search fallback**: a
   college with no usable free image has no row, and the app shows its plain
   ground.
+- **Nothing goes live the moment a wiki says so** (`reviewDecision`,
+  `20261024000071`). Wikidata and Commons are crowd-edited: anyone can point
+  a college's P18 at another free image, or upload a new version over its
+  file, minutes before a run, and the photo is shown to students and
+  families. So a new or changed photo (its Commons sha1 differs from the
+  stored one) is published only when it has been quiet for `STABLE_DAYS` (7):
+  the Wikidata item (`schema:dateModified`, in the same SPARQL query), the
+  Commons file version (imageinfo `timestamp`) and its description page
+  (latest revision, `prop=revisions`) all last edited at least that long
+  before the run, and the file not reached through a redirect (whose age no
+  API gives); or a run at least that long ago held this exact candidate
+  (source, title, sha1, credit and license) and it is unchanged now. A
+  **replacement** of a photo already shown always needs that earlier
+  sighting, so with the monthly cron it goes live a run later; until then
+  the old photo keeps serving. Unknown or future times are never stable.
+  **A team pick is published at once** (the team looked at it), except a new
+  version uploaded over the picked file, which is a replacement like any
+  other. An unchanged file whose description page was edited within the
+  week keeps the credit already shown (only `checked_at` moves). Held
+  candidates are `college_photo_candidates` rows (service_role only; why,
+  first and last seen), the team's review queue: read it in the SQL editor
+  or in the `--dry-run` CSV (action `held-new` / `held-replace`, the reasons,
+  the title shown today). To publish a held photo now, pick it; to keep it
+  off, pick `none` or a better file. Each run's counts (`added`, `replaced`,
+  `held-new`, `held-replace`, `hold:<reason>`, `confirmed`, `text-held`, ...)
+  are on its `ingest_runs.counts`. Holding is not an error: the run and its
+  heartbeat stay clean. Deletions are not held by this gate (a removal is
+  the safe direction; the mass-deletion guard below still applies). Without
+  the migration nothing is remembered: a new photo still passes on its
+  timestamps, a replacement is held with `no-review-table`, and the run's
+  row is finished without counts. The known limit: an edit that survives a
+  week of Wikidata and Commons patrol and lands across a run is published,
+  as is anything on a picked title before the team picked it.
 - **What a file must be**: a JPEG on Commons (normalised titles and moved
   files followed), at least 1000 px wide and 1.2:1 landscape unless picked,
   CC0, public domain, CC BY or CC BY-SA (never NC or ND; the CHECK refuses
@@ -883,17 +916,27 @@ there).
   deletions the picks didn't ask for are **held** when they would remove more
   than a tenth of the stored photos (and more than five), so a truncated
   answer can't wipe the catalog's photos. `--dry-run` writes nothing (no
-  ingest_runs row, no heartbeat) and prints a CSV to review. Wikimedia
+  ingest_runs row, no heartbeat, no review queue) and prints a CSV to review
+  (`action,unitid,name,title,license,credit,source,current_title,reasons`);
+  every cell a spreadsheet would read as a formula (one starting with `=`,
+  `+`, `-`, `@`, a tab or a carriage return) is prefixed with an apostrophe
+  (`csvCell`), because the credit and title are Commons text anyone can
+  write. `--now <ISO time>` pins the clock, for `--fixture-dir` runs only. Wikimedia
   etiquette: a User-Agent with the team inbox, serial API calls half a second
   apart, `maxlag=5`, Retry-After honoured, two downloads at a time; the three
   hosts are pinned and redirects refused.
 - **Deploy order**: either. Every read degrades to `photo: null` while the
   table is missing (remembered five minutes, like `lib/deliveryInsert.ts`);
   not in `REQUIRED_SCHEMA`. After applying it, run the script once by hand,
-  or `/internal/status` reads the job overdue.
-- **Tests**: `college-photos*.test.ts` (rules, client, run, serving) and
-  `test/integration/college-photos.test.mjs` (RLS, the bucket, a fixture load
-  through the real store, every surface). Nothing reaches Wikimedia: the
+  or `/internal/status` reads the job overdue. `20261024000071` (the review
+  queue and `ingest_runs.counts`) goes in after it, either order with the
+  code; not in `REQUIRED_SCHEMA` either.
+- **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
+  review gate and `csvCell`), `test/integration/college-photos.test.mjs`
+  (RLS, the bucket, a fixture load through the real store, every surface)
+  and `college-photos-review.test.mjs` (a vandal's P18 and a new version
+  over a file held while the old photo keeps serving, published a week on,
+  a pick at once, the dry-run CSV, and the run without the migration). Nothing reaches Wikimedia: the
   fixtures in `test/fixtures/college-photos/` are hand-written in the
   documented shapes (see its README), and the cron route is only tested for
   401 and 409.

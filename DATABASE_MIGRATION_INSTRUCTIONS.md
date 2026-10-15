@@ -339,7 +339,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twenty-four files are merged ahead of production's database on purpose: the code was written to
+These twenty-five files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -382,8 +382,9 @@ set's own section below says what it does and how to check it.
 | 22 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
 | 23 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
 | 24 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitation review (after file 7) |
+| 25 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
 
-(Twenty-four files: the first thirteen are six feature sets, the other eleven are five sets of security
+(Twenty-five files: the first thirteen are six feature sets, the other twelve are six sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 20-22, the security fixes for submission review and student reminders, depend on none of the
@@ -403,7 +404,7 @@ satisfies both. No function, policy or trigger is defined in two of these files;
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all twenty-four:
+After all twenty-five:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -554,7 +555,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 ---
 
-## Campus photos: `20261023070001`
+## Campus photos: `20261023070001`, `20261024000071`
 
 Apply after every earlier file. It adds a table and the project's first
 **public** bucket, and deletes nothing. Either order is safe: until it is
@@ -565,6 +566,7 @@ naming this file.
 | # | File | What it does |
 |---|---|---|
 | 1 | `20261023070001_college_photos.sql` | `college_photos` (one freely licensed Commons photo per college with its credit, license, deed and file page; any signed-in user reads, only service_role writes; the approval gate) and the public **`college-photos`** Storage bucket (3 MB, JPEG only, no `storage.objects` policy: only the loader writes). Adds `college-photos` to the `ingest_runs` and `job_heartbeats` labels by reading the current CHECKs back, and a `job_heartbeats` row (31 days) |
+| 2 | `20261024000071_college_photo_review.sql` | `college_photo_candidates`, the review queue: a new or changed photo the loader held until Wikidata and Commons have been quiet about it for a week, with why and when a run first and last saw it (service_role only, no policies, the approval gate). Adds the nullable `ingest_runs.counts` (each run's counts by outcome). Either order: without it new photos still pass on their timestamps, replacements are held, and the run's row is finished without counts |
 
 Check:
 
@@ -572,6 +574,7 @@ Check:
 select to_regclass('public.college_photos');                                          -- non-null
 select id, public from storage.buckets where id = 'college-photos';                    -- 1 row, public = true
 select count(*) from job_heartbeats where job = 'college-photos';                      -- 1
+select to_regclass('public.college_photo_candidates');                                -- non-null
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
 ```
 
