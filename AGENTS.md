@@ -65,6 +65,7 @@ src/
 │   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id is missing
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
+│   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
@@ -484,6 +485,56 @@ bachelor's or graduate degrees, from the U.S. Department of Education:
 - **IPEDS Admissions** (`lib/ingest/ipeds.ts`), yearly:
   `npx tsx scripts/ingest/ipeds-admissions.ts --year <YYYY>` fills
   `college_admission_factors` (what a school weighs; test policy).
+
+**What the profile serves.** `GET /colleges/:id/extras` returns `official`:
+`stats` (`toOfficialStats`), `admissionFactors` (IPEDS), `majors` (bachelor's
+fields of study) and `associateMajors` (associate's, so a two-year school's
+list isn't empty), each most awarded first; `GET /colleges/compare` carries
+each school's `official` stats too (null with no Scorecard row). Everything in
+it is federal and `sourced`, with its own `stale` flag, and never mixes with the
+curated facts beside it. The coded fields are served raw and labelled
+(`labels`): `setting` is `settingFromLocale` (the curated campus-setting words,
+so a catalog school and a profiled one read alike), `testPolicy` is the IPEDS
+consideration code through `testPolicyFrom` (the catalog's
+required/recommended/optional/blind), and the Carnegie and predominant-degree
+texts are the dictionary's value labels (`lib/scorecardCodes.ts`). Religious
+affiliation is `religious: boolean`, not a denomination. Things that are easy
+to mislabel, and how the DTO keeps them apart:
+
+- **Completion.** `gradRate150` / `gradRateOnTime` are IPEDS first-time
+  full-time rates from one cohort, named by `completionBasis`: `four-year`
+  (within 6 / 4 years) or `less-than-four-year` (150% / 100% of normal time, 3
+  years for an associate's). `labels.gradRate150` / `labels.gradRateOnTime`
+  say which; never call an L4 rate "6-year". `completionByRace` is the same
+  cohort by group (a null is suppressed or not reported). `gradRate` is
+  Scorecard's own `consumer_rate`, the rate its site sorts by (Outcome
+  Measures, an award within 8 years for all entering students, where reported;
+  else the 150% rate): show it as Scorecard's graduation rate, never as a
+  number of years.
+- **Who a figure describes.** Earnings (`medianEarnings6yr`, `10yr`) are of
+  federally aided students, working and not enrolled, counted from entry.
+  Debt (`medianDebt`, `medianDebtMonthly` as a 10-year payment,
+  `medianDebtNoncompleters`) is federal loans only. `avgNetPrice` is what
+  students who received federal aid paid on average (in-state at a public
+  school), an average and not a quote. `demographics` are shares
+  of degree-seeking undergraduates; `retentionRate` is first-time full-time,
+  back for a second fall. All shares are 0-1, all money whole dollars.
+
+**More fields, safely** (`20261023080001`). The ingest asks for
+`BASE_FIELDS` plus `EXTENDED_FIELD_GROUPS`; every name is on
+`test/fixtures/scorecard-field-reference.json` with where it was checked (the
+data dictionary or the field list of Scorecard's own site), and `npm test`
+fails on a requested field with no entry. The API answers 400 to a request
+naming any unknown field, so on the first 400 the fetcher asks for the base
+fields alone (a 400 there is a real failure), then base plus each group, and
+loads without the groups it refuses. Without the migration, the college_stats
+upsert is retried without the new columns (`upsertStats`, the
+`deliveryInsert.ts` pattern, five-minute memory). Either is a **degraded** run:
+it ends `partial` with the reason first in `errors`, logs at error level, and
+its heartbeat is not clean, so `/internal/status` lists `scorecard-ingest` as
+failing every month until it is fixed, instead of counting a load that never
+fills the new columns as clean. The migration is not in `REQUIRED_SCHEMA`. After
+applying it, run the load once.
 
 Rules: a row Meridies curated (`catalog_source = 'meridies'`) keeps its name,
 slug, aliases, colours, deadlines and test policy; official data fills facts
@@ -1414,14 +1465,23 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   user; a counselor with an active roster or an owned firm is refused.
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
   `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
-  when one hasn't run cleanly within twice its interval. Point an uptime monitor
+  when one hasn't run cleanly within twice its interval. It also lists as
+  `failing` any job whose last run failed or was degraded (last error newer
+  than last clean run); for a job that runs daily or less often (the monthly
+  Scorecard load, weekly event discovery) that alone makes
+  it 503 with `status: "failing"`, because waiting for "overdue" would mean
+  weeks of silence (`summarizeHeartbeats` in `lib/heartbeat.ts`). A frequent
+  job's single failure is listed but left to the overdue rule. The error text
+  stays in the table, never in the response. Point an uptime monitor
   at `/health` (public) and `/internal/status` (with the bearer header).
 
 ## Tests and CI
 
 - `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
   rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
-  mapping (against a recorded real Scorecard response in `test/fixtures`), the
+  mapping (against a recorded real Scorecard response in `test/fixtures`; the
+  extended fields, the field reference, the degrade paths and the status
+  summary in `scorecard-extended` and `college-official`), the
   essay guardrails, the link guard, payments, class rank, proposals, webhook
   signatures, heartbeats, the context layer (allowlist, packing, feature
   profiles, coherence material, consumers), and research (`research-brief`,
@@ -1434,7 +1494,9 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and
-  hidden tasks), `research-api` (the routes, with the test double) and the
+  hidden tasks), `research-api` (the routes, with the test double),
+  `college-official` (the federal figures on extras and Compare, on the rows
+  the fixture load writes, and a failing Scorecard heartbeat) and the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`). The harness's `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.

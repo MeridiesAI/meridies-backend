@@ -38,6 +38,11 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   `research_blocked_domains`), each before deploying the code that needs it. Never set `RESEARCH_FAKE` on
   Railway: the server refuses to boot with it unless `NODE_ENV` is `development` or `test`.
 
+- [ ] **College Scorecard figures** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, last section). Apply
+  `20261023080001_college_stats_scorecard_more.sql`, then run the Scorecard load once
+  (`POST /internal/ingest/scorecard`); the new profile figures stay empty until it has run. Afterwards
+  `GET /internal/status` should not list `scorecard-ingest` under `failing`.
+
 ### Railway variables
 
 - [x] `NODE_ENV=production`

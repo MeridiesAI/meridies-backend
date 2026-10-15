@@ -221,3 +221,34 @@ select to_regclass('public.ai_attachments');                                    
 select id, public from storage.buckets where id = 'axis-attachments';                  -- 1 row, public = false
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
 ```
+
+---
+
+# College Scorecard: more figures on college_stats (one more migration)
+
+Apply after every earlier file, the same way. It adds columns to `college_stats`
+and deletes nothing; no new table, so no new policies (the table keeps its
+select policy, its approval gate and service-role-only writes). Either order is
+safe: before it, the profile serves the new figures as null, and the Scorecard
+load writes every older figure, records the run as degraded and leaves the
+`scorecard-ingest` heartbeat not clean, so `GET /internal/status` reports the
+job as failing until this is applied and the load has run again.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023080001_college_stats_scorecard_more.sql` | Adds the completion cohort and rates (`completion_basis`, `grad_rate_on_time`, `grad_rate_150`, `completion_by_race`), `retention_rate`, `part_time_share`, `student_faculty_ratio`, `grad_students`, `demographics`, `room_board_on_campus`, `books_supplies`, `median_earnings_6yr`, `median_debt_monthly`, `median_debt_noncompleters` and `carnegie_basic` |
+
+Then run the Scorecard load once (`POST /internal/ingest/scorecard` with the
+cron secret, or `npx tsx --env-file=.env scripts/ingest/scorecard.ts`), or the
+columns stay empty until the monthly cron.
+
+Check:
+
+```sql
+select count(*) from information_schema.columns
+ where table_schema = 'public' and table_name = 'college_stats'
+   and column_name in ('completion_basis', 'grad_rate_150', 'demographics', 'carnegie_basic');  -- expect 4
+-- after the load:
+select count(*) filter (where completion_basis is not null), count(*) from college_stats;
+select status, errors from ingest_runs where source = 'scorecard' order by started_at desc limit 1;  -- succeeded, []
+```
