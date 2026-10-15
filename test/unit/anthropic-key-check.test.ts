@@ -250,3 +250,12 @@ test("withDeadline: the fallback reads the cache at the deadline, not before", a
   const kc = createKeyCheck({ list: () => new Promise(() => {}) });
   assert.equal(await withDeadline(kc.check(), 5, kc.peek), null);
 });
+
+// test/env.ts sets no ANTHROPIC_API_KEY; a shell that exports one skips this.
+test("anthropicKeyWorks without a key reads false without asking Anthropic", { skip: Boolean(process.env.ANTHROPIC_API_KEY) }, async () => {
+  const { anthropicKeyWorks } = await import("../../src/lib/anthropic.js");
+  const { hasAnthropic } = await import("../../src/env.js");
+  assert.equal(hasAnthropic, false);
+  assert.equal(await anthropicKeyWorks(undefined, { waitMs: 10 }), false);
+  assert.equal(await anthropicKeyWorks(), false);
+});

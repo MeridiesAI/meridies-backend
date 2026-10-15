@@ -14,6 +14,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { env, hasAnthropic } from "../env.js";
+import { createKeyCheck, withDeadline, type KeyCheckLog, type KeyStatus } from "./anthropicKeyCheck.js";
 import type { ContextUsage } from "./context/types.js";
 import { HttpError, unavailable } from "./errors.js";
 import { enforceQuota } from "./limits.js";
@@ -36,39 +37,27 @@ function anthropic(): Anthropic {
   return client;
 }
 
-/** A working key is re-checked this often; a failing one, sooner. */
-const KEY_CHECK_OK_MS = 10 * 60 * 1000;
-const KEY_CHECK_FAIL_MS = 60 * 1000;
-let keyCheck: { at: number; ok: boolean } | null = null;
-let keyCheckInFlight: Promise<boolean> | null = null;
+let keyCheck: ReturnType<typeof createKeyCheck> | null = null;
 
 /**
- * Whether ANTHROPIC_API_KEY is set *and accepted*. A set-but-revoked key used
- * to read as healthy until a counselor opened AxIS; this asks Anthropic (one
- * cheap models.list call, cached) so /health and monitoring see it first.
+ * Whether ANTHROPIC_API_KEY is set *and accepted*, for /health. A set-but-revoked
+ * key used to read as healthy until a counselor opened AxIS; this asks
+ * Anthropic (one cheap models.list call, cached) so monitoring sees it first.
+ *
+ * false: no key, or Anthropic refused it (401/403). true: Anthropic accepted it.
+ * null: no firm answer yet. A timeout, outage or rate limit keeps the last
+ * answer (lib/anthropicKeyCheck.ts). With `waitMs`, it answers within that
+ * time from the cache and lets the check finish in the background.
  */
-export async function anthropicKeyWorks(log?: { warn: (o: object, m: string) => void }): Promise<boolean> {
+export async function anthropicKeyWorks(log?: KeyCheckLog, opts?: { waitMs?: number }): Promise<KeyStatus> {
   if (!hasAnthropic) return false;
-  const now = Date.now();
-  if (keyCheck && now - keyCheck.at < (keyCheck.ok ? KEY_CHECK_OK_MS : KEY_CHECK_FAIL_MS)) return keyCheck.ok;
-  if (!keyCheckInFlight) {
-    keyCheckInFlight = anthropic()
-      .models.list({ limit: 1 }, { timeout: 5000, maxRetries: 0 })
-      .then(() => true)
-      .catch((err: unknown) => {
-        const status = err && typeof err === "object" && "status" in err ? (err as { status?: number }).status : undefined;
-        log?.warn({ status }, "anthropic key check failed");
-        return false;
-      })
-      .then((ok) => {
-        keyCheck = { at: Date.now(), ok };
-        return ok;
-      })
-      .finally(() => {
-        keyCheckInFlight = null;
-      });
-  }
-  return keyCheckInFlight;
+  // Created lazily, behind the key check, so a keyless server never builds a client.
+  keyCheck ??= createKeyCheck({
+    list: () => anthropic().models.list({ limit: 1 }, { timeout: 5000, maxRetries: 0 }),
+  });
+  const kc = keyCheck;
+  const answer = kc.check(log);
+  return opts?.waitMs === undefined ? answer : withDeadline(answer, opts.waitMs, kc.peek);
 }
 
 export type AiModule =
