@@ -482,7 +482,11 @@ uid)`; commit, undo and applying held data go through
 
 Changing who else may see imports later is a change to these two functions
 only. What happens to a departing counselor's students and imports is decided
-by the firm (caseload transfer spec, §14).
+by the firm: see `2026-10-15-caseload-transfer-design.md`. Held data of a
+moved student goes, in a carrier import, to that student's new counselor;
+the departing counselor's imports and templates go to one practice receiver,
+and only when their whole caseload moves and they are leaving (§6.5, §6.6
+there). These two functions are unchanged by it.
 
 ### 6.5 Invitations as an abuse channel
 Invitation emails use fixed templates; the student and counselor names are
@@ -588,7 +592,7 @@ recovery).
 | Backend crash mid-job | Transaction rolls back; job lease expires and the job reruns | Progress resumes |
 | Accepting account's name differs | Item held with mismatch flag | Warning; type the name to apply |
 | Held data near expiry / expired | Email + in-app warning at 7 days; wipe; audit | "4 students' held data expires in 7 days" |
-| Uploader left the firm | Firm admins keep full access; the firm's offboarding choice decides who takes over (caseload transfer spec, §14) | Import listed under its students' new counselor |
+| Uploader left the firm | Firm admins keep full access. A caseload transfer moves each student's held data into a carrier import owned by that student's new counselor, and, when the uploader leaves with their whole caseload transferred, their imports and templates to one practice receiver (caseload transfer spec §6.5, §6.6) | Held data in the new counselor's Ready to apply; the import under the practice receiver |
 
 ## 9. Testing
 
@@ -682,10 +686,11 @@ timelines. School customers are out of scope until this is done.
 - Direct Google Sheets import (`lib/suiteApi.ts`, `accessTokenFor`).
 - Shared starter templates (column names only, no data) for common tools, so a
   counselor's first import from a known tool needs no AI or mapping work.
-- Caseload transfer when a counselor leaves (separate spec): firm setting for
-  "transfer everything to one person" vs "an admin assigns each student",
-  optional temporary delegation; imports, held data and templates follow the
-  students.
+- Caseload transfer when a counselor leaves: built, see
+  `2026-10-15-caseload-transfer-design.md`. Held data follows each student (a
+  carrier import owned by their new counselor); imports and templates go to
+  one practice receiver, not to the students' counselors, because an import
+  holds many students. Temporary delegation is specified there and deferred.
 - Tighten `import_fields.value_type` as the field list settles.
 - `field_sources` provenance column if hash-based provenance proves too coarse.
 - PDF region highlighting in review.
