@@ -225,6 +225,7 @@ test("renderSummary lists each file, escapes table cells and asks for a backup w
   const quiet = renderSummary({ files: files.slice(0, 1), details: [{ description: "", flags: [], gate: [] }], sha: "abc", mode: "push" });
   assert.doesNotMatch(quiet, /backup/);
   assert.match(quiet, /production-db/);
+  assert.match(quiet, /\*\*confirm\*\* = `20261021000001`/);
   assert.match(renderSummary({ files: [], details: [], sha: "abc", mode: "push" }), /up to date/);
 });
 

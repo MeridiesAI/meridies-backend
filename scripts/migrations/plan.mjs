@@ -269,11 +269,12 @@ export function renderSummary({ files, details, sha, mode }) {
       "",
     );
   }
+  const newest = FILE_RE.exec(files[files.length - 1])?.[1] ?? "";
+  const byHand = `run this workflow on \`main\` with **apply** on and **confirm** = \`${newest}\``;
   if (mode === "workflow_dispatch") {
-    const newest = FILE_RE.exec(files[files.length - 1])?.[1] ?? "";
-    lines.push(`To apply exactly this list, run the workflow on \`main\` with **apply** on and **confirm** = \`${newest}\`.`, "");
+    lines.push(`To apply exactly this list, ${byHand}.`, "");
   } else {
-    lines.push("Applying waits for an approver on the `production-db` environment, or for a manual run (DATABASE_MIGRATION_INSTRUCTIONS.md).", "");
+    lines.push(`Where the \`production-db\` environment has reviewers, the apply waits for one of them. Otherwise nothing is applied until an approver does it by hand: ${byHand}.`, "");
   }
   return lines.join("\n");
 }

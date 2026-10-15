@@ -1,0 +1,250 @@
+# Applies supabase/migrations/*.sql to production (project kerstlpuvpmstiavxblv).
+# Runbook: DATABASE_MIGRATION_INSTRUCTIONS.md, "How a migration reaches production".
+#
+#   plan   no approval. Links the project, dry-runs `supabase db push`, and writes
+#          the pending files, what each says it does and any destructive statements
+#          to the run summary. Also checks RLS and the approval gate, read-only.
+#   apply  behind the production-db environment. Dry-runs again and refuses if the
+#          list changed since the plan, pushes, then checks RLS and the approval
+#          gate again and fails on anything this apply broke.
+#
+# Without SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD the plan says so in a
+# notice, stays green, and nothing touches the database.
+#
+# A push to main applies only when vars.MIGRATIONS_REVIEWERS_CONFIGURED is 'true'
+# (production-db has required reviewers). Otherwise a merge only plans, and an
+# approver applies with a manual run: apply on, confirm = the newest version the
+# plan lists, and the person clicking listed in vars.MIGRATION_APPROVERS.
+#
+# Rules: the CLI version is pinned here and in ci.yml together (a unit test checks
+# they match); every CLI call passes --agent no so its output doesn't depend on who
+# runs it; secrets sit only on the steps that call the CLI; never pass --debug (it
+# prints connection strings); never pass --skip-pooler (runners have no IPv6 and the
+# direct host is IPv6-only). If a --db-url is ever needed instead of link, it must be
+# the session pooler (port 5432, user postgres.<ref>), never the transaction pooler.
+name: Apply migrations
+
+on:
+  push:
+    branches: [main]
+    paths: ["supabase/migrations/**"]
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply after the plan (off: plan only)"
+        type: boolean
+        default: false
+      confirm:
+        description: "With apply: the newest version the plan lists, e.g. 20261022000001"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One run at a time, never cancelled: a second run's plan waits for the first
+# run's apply, including while it waits for approval, so a plan is never stale
+# against an apply in flight. GitHub keeps one pending run per group; a third
+# replaces the second, which is harmless because a push applies everything pending.
+concurrency:
+  group: supabase-migrations-production
+  cancel-in-progress: false
+
+env:
+  SUPABASE_CLI_VERSION: "2.121.0"
+  SUPABASE_PROJECT_REF: kerstlpuvpmstiavxblv
+
+jobs:
+  plan:
+    name: Plan (dry run)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No reviewers; restrict it to main so a workflow edited on another branch
+    # can't read its secrets. Repository secrets also work (less contained).
+    environment: production-db-plan
+    outputs:
+      configured: ${{ steps.secrets.outputs.configured }}
+      pending: ${{ steps.read.outputs.pending }}
+      newest: ${{ steps.read.outputs.newest }}
+      hash: ${{ steps.read.outputs.hash }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Secrets present?
+        id: secrets
+        env:
+          HAS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN != '' }}
+          HAS_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = "true" ] && [ "$HAS_PASSWORD" = "true" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=Migrations not applied::SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD are not set, so nothing was planned or applied. Apply by hand (DATABASE_MIGRATION_INSTRUCTIONS.md) or add the secrets."
+            { echo "### Migrations: skipped"; echo; echo "The secrets are not set. Nothing touched the database."; } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.secrets.outputs.configured == 'true'
+        uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Link (pooler)
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --agent no --yes
+
+      - name: Connection
+        if: steps.secrets.outputs.configured == 'true'
+        run: node scripts/migrations/plan.mjs pooler --file supabase/.temp/pooler-url --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Dry run
+        id: dry
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        # The exit code is kept, not fatal, so the reader can explain a refusal.
+        run: |
+          rc=0
+          supabase db push --linked --dry-run --skip-vault --agent no --output-format json \
+            > "$RUNNER_TEMP/dry-run.json" 2> "$RUNNER_TEMP/dry-run.log" || rc=$?
+          cat "$RUNNER_TEMP/dry-run.log"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Read the dry run
+        id: read
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          RC: ${{ steps.dry.outputs.rc }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          node scripts/migrations/plan.mjs plan --dry-run "$RUNNER_TEMP/dry-run.json" --exit-code "$RC" \
+            --summary "$GITHUB_STEP_SUMMARY" --outputs "$GITHUB_OUTPUT" --mode "$EVENT" --sha "$SHA"
+
+      - name: Database check (read-only)
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase db query --linked --agent no --output-format json -f scripts/migrations/problems.sql \
+            > "$RUNNER_TEMP/problems.json" 2> "$RUNNER_TEMP/problems.log" || { cat "$RUNNER_TEMP/problems.log"; exit 1; }
+
+      - name: Read the database check
+        if: steps.secrets.outputs.configured == 'true'
+        run: node scripts/migrations/plan.mjs gate --after "$RUNNER_TEMP/problems.json" --warn-only --summary "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Apply to production
+    needs: plan
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.plan.outputs.configured == 'true' && needs.plan.outputs.pending == 'true' &&
+      ((github.event_name == 'push' && vars.MIGRATIONS_REVIEWERS_CONFIGURED == 'true') ||
+       (github.event_name == 'workflow_dispatch' && inputs.apply))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production-db
+    steps:
+      - name: Manual run guards
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+          NEWEST: ${{ needs.plan.outputs.newest }}
+          APPROVERS: ${{ vars.MIGRATION_APPROVERS }}
+          # The person who started this attempt; on "Re-run" that is whoever clicked it.
+          ACTOR: ${{ github.triggering_actor }}
+        run: |
+          if [ -z "$NEWEST" ] || [ "$CONFIRM" != "$NEWEST" ]; then
+            echo "::error::confirm must be $NEWEST, the newest file in the plan."
+            exit 1
+          fi
+          case ",$(printf '%s' "$APPROVERS" | tr -d '[:space:]')," in
+            *",$ACTOR,"*) ;;
+            *) echo "::error::$ACTOR is not in MIGRATION_APPROVERS."; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Link (pooler)
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --agent no --yes
+
+      - name: Dry run again
+        id: dry
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          rc=0
+          supabase db push --linked --dry-run --skip-vault --agent no --output-format json \
+            > "$RUNNER_TEMP/dry-run.json" 2> "$RUNNER_TEMP/dry-run.log" || rc=$?
+          cat "$RUNNER_TEMP/dry-run.log"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse if the list changed since the plan
+        env:
+          RC: ${{ steps.dry.outputs.rc }}
+          HASH: ${{ needs.plan.outputs.hash }}
+        run: node scripts/migrations/plan.mjs plan --dry-run "$RUNNER_TEMP/dry-run.json" --exit-code "$RC" --expect-hash "$HASH" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Database check before
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase db query --linked --agent no --output-format json -f scripts/migrations/problems.sql \
+            > "$RUNNER_TEMP/before.json" 2> "$RUNNER_TEMP/before.log" || { cat "$RUNNER_TEMP/before.log"; exit 1; }
+
+      # Read now, so an unreadable answer stops the run before anything is applied.
+      - name: Read the database check before
+        run: node scripts/migrations/plan.mjs gate --after "$RUNNER_TEMP/before.json" --warn-only
+
+      # Each file runs in its own transaction and is recorded as it lands, so a
+      # failure leaves the earlier files applied (see the runbook).
+      - name: Apply
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: supabase db push --linked --skip-vault --agent no --yes
+
+      - name: Database check after
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase db query --linked --agent no --output-format json -f scripts/migrations/problems.sql \
+            > "$RUNNER_TEMP/after.json" 2> "$RUNNER_TEMP/after.log" || { cat "$RUNNER_TEMP/after.log"; exit 1; }
+
+      - name: Compare the database checks
+        run: node scripts/migrations/plan.mjs gate --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Migration history
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+        run: |
+          { echo "### Migration history after the apply"; echo; echo '```'; supabase migration list --linked --agent no 2>/dev/null | tail -n 15; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: What to do now
+        if: failure()
+        run: |
+          {
+            echo "### Migrations: this apply did not finish cleanly"
+            echo
+            echo "Files applied before the failure stay applied (each is its own transaction). Railway skips this commit's deploy when it waits for CI."
+            echo "Fix forward with a new migration, then start a new run (or Re-run all jobs). Re-running only the failed job reuses the old plan and is refused."
+            echo "Once production's schema is right, redeploy the Railway service by hand if its deploy was skipped. Runbook: DATABASE_MIGRATION_INSTRUCTIONS.md."
+          } >> "$GITHUB_STEP_SUMMARY"
