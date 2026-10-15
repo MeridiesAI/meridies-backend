@@ -37,6 +37,7 @@
 import { readFileSync } from "node:fs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import { replaceTags } from "../linearText.js";
 import { parseCsv } from "./ipeds.js";
 import { isAllowedDownloadUrl, type WikimediaClient } from "./wikimedia.js";
 
@@ -71,8 +72,9 @@ const ENTITIES: Record<string, string> = { amp: "&", quot: '"', apos: "'", lt: "
 /** Commons' Artist/Attribution HTML as plain text: tags out, entities decoded, whitespace collapsed. */
 export function stripHtml(html: unknown): string {
   if (typeof html !== "string") return "";
-  return html
-    .replace(/<[^>]*>/g, " ")
+  // Tags out with an indexOf scan (lib/linearText.ts), the same as
+  // `/<[^>]*>/g`, which rescans to the end from every "<" when no ">" follows.
+  return replaceTags(html, " ", true)
     .replace(/&(#x[0-9a-f]{1,6}|#[0-9]{1,7}|[a-z]{2,6});/gi, (m, e: string) => {
       if (e[0] === "#") {
         const cp = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);

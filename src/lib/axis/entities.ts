@@ -30,6 +30,28 @@ export type Tok = {
   prev: string | null;
 };
 
+const SENTENCE_END = new Set([".", "!", "?", ":", "\n", "•", "*", "-"]);
+
+/**
+ * Whether the token at `at` opens a sentence: nothing but whitespace before
+ * it, or a sentence mark and then only whitespace. That is
+ * `!/\S/.test(before) || /[.!?:\n•*-]\s*$/.test(before)` on the text before
+ * the token, read backwards from the token instead, so a message costs time
+ * linear in its length (the expressions read the whole prefix for every
+ * token, and rescanned a run of newlines from each one).
+ */
+function startsSentence(text: string, at: number): boolean {
+  let i = at - 1;
+  while (i >= 0) {
+    const c = text[i]!;
+    // A newline is both whitespace and a sentence mark.
+    if (c === "\n") return true;
+    if (!/\s/.test(c)) return SENTENCE_END.has(c);
+    i--;
+  }
+  return true;
+}
+
 export function scanTokens(text: string): Tok[] {
   const out: Tok[] = [];
   const re = /[\p{L}\p{N}]+(?:['’][\p{L}]+)?/gu;
@@ -38,11 +60,10 @@ export function scanTokens(text: string): Tok[] {
     const raw = m[0];
     const possessive = /['’]s$/i.test(raw);
     const core = raw.replace(/['’]s$/i, "").replace(/['’]/g, "");
-    const before = text.slice(0, m.index);
     out.push({
       norm: fold(core),
       cap: /\p{Lu}/u.test(core),
-      sentenceStart: !/\S/.test(before) || /[.!?:\n•*-]\s*$/.test(before),
+      sentenceStart: startsSentence(text, m.index),
       possessive,
       prev: out.length ? out[out.length - 1]!.norm : null,
     });
