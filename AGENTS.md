@@ -62,7 +62,9 @@ src/
 │   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── inviteDelivery.ts  # an invitation's (or a composer attempt's) delivery status, as the webhooks left it
-│   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id is missing
+│   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id or meeting_id is missing
+│   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
+│   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), linkCheck.ts, run.ts
@@ -1028,6 +1030,83 @@ reason and the app files the prompts as plain essay records. These calls go to f
 with provider-issued ids, so they are not the `lib/links.ts` SSRF surface.
 Every route answers 503 with the missing setting when a provider is unset.
 
+### Emailed calendar invites (no Google or Microsoft needed)
+
+The Google / Outlook event above has no attendees and emails nobody. A
+meeting's own invites are Meridies' (`lib/meetingInvites.ts`, `lib/ics.ts`,
+`20261023090001`): with `sendInvites: true` on `POST /meetings` (or
+`PATCH`), each invited student is emailed an iCalendar file through Resend
+(`text/calendar; method=…` attachment, Reply-To the counselor) that any
+calendar can add.
+
+- **Who.** Each invited student (primary and `meeting_attendees`) at their
+  contact email, else their login email. Their guardians only when the
+  meeting has `guardians_invited`, the student's `copy_parents` is on
+  (`loadAlertPrefs`, fail closed) and the guardian's own `alerts_enabled`
+  is on, at most four per student. The meeting's owner (`meetings.counselor_id`,
+  never the caller: a write collaborator may edit) is the ORGANIZER and gets a
+  PUBLISH copy when the meeting isn't on their connected calendar. A student
+  who is archived, unreadable, or off the owner's caseload (their counselor
+  or a `student_collaborators` row) receives nothing, and nor do their
+  guardians. Recipients are read on the caller's client before the
+  response; any read that errors drops what it decides (the whole round for
+  the roster or the owner's address, the guardians for their reads).
+  One email per address: an invite outranks a cancellation, and an address
+  still invited (a guardian of two siblings) is never sent a cancellation.
+- **One file per recipient**, whose only ATTENDEE is that recipient, with
+  `RSVP=FALSE` (Meridies has no inbound mail). UID `meeting-<id>@meridiesai.com`
+  for the life of the meeting; SEQUENCE is `meetings.ics_sequence`, written
+  only by a trigger that raises it on every change a calendar shows (and on
+  `send_invites` switching) and ignores any client value. Delete sends the
+  last sequence plus one. Times are UTC; typed text is escaped as TEXT or a
+  quoted parameter so it can't start a property.
+- **What goes out.** Booking, switching invites on, and un-cancelling: REQUEST
+  `meeting-invite`. A move, title, place, link, mode or agenda change: REQUEST
+  `meeting-update` to everyone kept. Students added: an invite; removed: a
+  cancellation; the guardians flag toggled: an invite or a cancellation to
+  the kept students' guardians. Cancelling, deleting, or switching invites
+  off after they went out: CANCEL `meeting-cancel` to everyone who held it.
+  Held, no-show and a meeting already over send nothing. `notifyAttendees:
+  false` on a PATCH (default true) keeps a change to Meridies; switching
+  `sendInvites` either way always sends. An end time is required while
+  invites are on: the route answers 400 and the CHECK
+  `meetings_invites_need_end` refuses a direct write.
+- **Transactional.** Quiet hours don't hold an invite and the student's own
+  reminder channels don't gate it, like a task assignment. A round that sends
+  an invite or update costs one of 60 an hour per meeting owner
+  (`consumeRateLimit`, `meeting-invites:<owner>`); a round of cancellations is
+  never held back, and a throttled mixed round still sends its cancellations.
+- **Delivery.** The response carries `invites` (`{ status: "sending",
+  recipients, skipped, note? } | { status: "none" } | { status: "skipped" |
+  "unavailable", reason }`, `recipients` counting students and guardians,
+  not the counselor's copy); the sends run after it, one at a time 250 ms
+  apart, each retried once on a Resend 429 after Retry-After, each a
+  `message_deliveries` row (templates `meeting-invite`, `meeting-update`,
+  `meeting-cancel`; `student_id` the invited student, `meeting_id` the
+  meeting, null for a deleted meeting's cancellations). A failed send never
+  fails the save; a restart mid-round loses the rest of it (rows exist only
+  for attempts that ran). The round runs on what persisted even if the
+  attendee write fails after the row update. `GET /meetings/:id/invites`
+  (counselor) lists the newest send per address with its delivery status;
+  the student's own invites show in `GET /me/messages`.
+- **AxIS.** `meetings.update` always sends `notifyAttendees: notify_attendees
+  === true`, so an auto change emails nobody; `notify_attendees` and
+  `send_invites` (either way) make it a Confirm card, as does `send_invites`
+  on `meetings.create`. `meetings.delete` (already Confirm) cancels emailed
+  invites. Undo restores `send_invites` and re-notifies a notified change.
+- **Deploy order.** Either order is safe. Before `20261023090001` is applied,
+  `invitesReady` (a zero-row probe; ready kept for the process, missing for
+  30 s) is false: no write names `send_invites`, `sendInvites` is accepted and
+  answered `invites: { status: "unavailable" }`, `sendInvites` reads false,
+  the invites list is empty, and `insertDelivery` drops `meeting_id` the same
+  way it drops `invitation_id`. Not in `REQUIRED_SCHEMA`. Invites reach
+  families only once `INVITE_FROM_EMAIL` is on a verified Resend domain.
+  Known limits: Outlook desktop may show the attachment as a file to open
+  rather than an inline meeting request, Google may show an "Add to calendar"
+  button instead of adding it for an unknown sender, and a student removed and
+  re-added with no other change gets an invite at the same SEQUENCE as their
+  cancellation.
+
 ### Documents and AI context
 
 Files live in the private `student-documents` Storage bucket
@@ -1650,10 +1729,12 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   delivered, and `reason` (bounced/failed only) never names a server setting.
   **Apply `20261018000002` to light up delivery status.** Until then invites
   work and show "Pending": the list reads `delivery: null`, and the delivery
-  row insert (`lib/deliveryInsert.ts`) retries once without `invitation_id`
+  row insert (`lib/deliveryInsert.ts`) retries without `invitation_id`
   when the column is missing (42703 / PGRST204), remembering that for five
   minutes per process so each send doesn't fail first. It is deliberately not
-  in `REQUIRED_SCHEMA`.
+  in `REQUIRED_SCHEMA`. `meeting_id` (`20261023090001`, meeting invites) gets
+  the same treatment, each column cached on its own, and a row whose meeting
+  was deleted mid-send is kept without the link.
 - **Data rights.** `GET /account/export` (self) and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
   client, so an export holds exactly what that person can already see (the
@@ -1684,14 +1765,16 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   the import pipeline (`import-*`: parsing and the zip guard, the capped
   child process, profile and masking, sensitive values, the plan and presets,
   the AI mapping with its spend, rows and matching, values, rollout),
-  and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  meeting invites (`ics`, `meeting-invites`, `email-attachments`,
+  `delivery-insert`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
   including `context-layer`, `context-documents`, `research-tables` (RLS and
   hidden tasks), `research-api` (the routes, with the test double),
   `intake-sync` and `intake-held-backfill` (the questionnaire, every field
-  and rule, against held imports, and the backfill), the
+  and rule, against held imports, and the backfill),
+  `meeting-invites` (emailed calendar invites), the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`), the import pipeline (`imports-*`; step 2's
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,

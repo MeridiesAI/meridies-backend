@@ -46,6 +46,9 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   `production-db` has required reviewers), turn on Railway's "Wait for CI", then do one manual run with
   apply off and read the plan before anything is applied. Until the secrets exist the workflow skips
   with a notice and migrations are applied by hand.
+- [ ] **Meeting invites migration** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, last section). Apply
+  `20261023090001_meeting_calendar_invites.sql` before or after the code; until it is in, "Email
+  calendar invites" answers that invites aren't switched on yet and nothing is emailed.
 
 ### Railway variables
 
@@ -155,6 +158,11 @@ Run against app.meridiesai.com and Railway once P0 and P1 are done.
 
 **Messaging and background jobs**
 - [ ] A task with email + SMS produces two `sent` rows in `message_deliveries`
+- [ ] A meeting booked with "Email calendar invites" (`20261023090001` applied) reaches a test
+  student as an invite that adds to the calendar, then a move updates it and a cancel removes it, in
+  Gmail, Outlook.com, Outlook desktop and iOS Mail (Outlook desktop may show the attached file rather
+  than an inline meeting request: note what each client does). Each send is a `message_deliveries`
+  row with the meeting's `meeting_id`; needs the verified Resend domain above
 - [ ] A scheduled message sends within one dispatch interval (this proves cron 2 runs)
 - [ ] The sweep raises a stall alert with no dashboard open (this proves cron 1, or the interval,
   runs)

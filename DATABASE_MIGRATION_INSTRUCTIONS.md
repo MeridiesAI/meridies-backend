@@ -415,3 +415,30 @@ select column_name from information_schema.columns
  where table_name = 'practice_settings' and column_name like 'caseload_%';                            -- 2 rows
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;                  -- expect 0
 ```
+
+---
+
+# Meetings: emailed calendar invites (one more migration)
+
+Apply after every earlier file (`supabase db push`, or paste it into the SQL
+editor). It adds columns, a CHECK, a trigger and an index, and deletes
+nothing. Either order is safe: until it is applied, meetings work as before,
+`sendInvites` is answered `invites: { status: "unavailable" }`, and no invite
+email is sent.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023090001_meeting_calendar_invites.sql` | `meetings.send_invites` (default false) with the CHECK `meetings_invites_need_end` (invites need an end time), `meetings.ics_sequence` written only by the trigger `meetings_ics_sequence` (raised on every change a calendar shows), and `message_deliveries.meeting_id` (on delete set null) with its index |
+
+Check:
+
+```sql
+select column_name from information_schema.columns
+ where table_schema = 'public' and table_name = 'meetings' and column_name in ('send_invites', 'ics_sequence');  -- 2 rows
+select column_name from information_schema.columns
+ where table_schema = 'public' and table_name = 'message_deliveries' and column_name = 'meeting_id';            -- 1 row
+select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tgname = 'meetings_ics_sequence';  -- 1 row
+```
+
+Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
+domain (`LAUNCH_CHECKLIST.md`).
