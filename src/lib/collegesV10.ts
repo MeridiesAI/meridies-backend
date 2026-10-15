@@ -501,9 +501,10 @@ export const toOfficialStats = (r: Row, now = Date.now()) => ({
   pellRate: numOrNull(r.pell_rate),
   federalLoanRate: numOrNull(r.federal_loan_rate),
   medianDebt: numOrNull(r.median_debt),
-  // latest.completion.consumer_rate: the rate Scorecard's site shows, Outcome
-  // Measures (an award within 8 years, all entering students) where reported,
-  // else the first-time full-time rate at 150% of normal time. Not a 6-year rate.
+  // latest.completion.consumer_rate: the graduation rate Scorecard's site sorts
+  // by (Outcome Measures, an award within 8 years for all entering students,
+  // where reported; else first-time full-time within 150% of normal time).
+  // Never a 6-year rate: gradRate150 below is the timed one.
   gradRate: numOrNull(r.grad_rate),
   medianEarnings10yr: numOrNull(r.median_earnings_10yr),
   // The coded fields, raw and labelled.

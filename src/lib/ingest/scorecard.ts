@@ -49,9 +49,11 @@ export const BASE_FIELDS = [
     `latest.cost.net_price.private.by_income_level.${b}`,
   ]),
   "latest.aid.pell_grant_rate", "latest.aid.federal_loan_rate", "latest.aid.median_debt.completers.overall",
-  // The rate Scorecard's own site shows and sorts by: Outcome Measures (all
-  // entering students, an award within 8 years) where reported, else the
-  // first-time full-time rate at 150% of normal time. Not a "6-year" rate.
+  // The graduation rate Scorecard's own site sorts and filters by. The site
+  // displays Outcome Measures (an award within 8 years, all entering students)
+  // where reported, else the first-time full-time rate at 150% of normal time;
+  // that consumer_rate is that blend is inferred (see the field reference).
+  // Never a "6-year" rate: grad_rate_150 is the timed one.
   "latest.completion.consumer_rate", "latest.earnings.10_yrs_after_entry.median",
   `${PROGRAM}.code`, `${PROGRAM}.title`, `${PROGRAM}.credential.level`, `${PROGRAM}.counts.ipeds_awards2`,
   `${PROGRAM}.earnings.4_yr.overall_median_earnings`, `${PROGRAM}.debt.staff_grad_plus.all.eval_inst.median`,
