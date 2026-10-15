@@ -20,7 +20,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
-import { failingAlerts, isFailing, isStale } from "../lib/heartbeat.js";
+import { summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
 import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
@@ -172,21 +172,7 @@ export default async function internalRoutes(app: FastifyInstance) {
     if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });
     const { data, error } = await svc.from("job_heartbeats").select("job, last_ok_at, last_error_at, expected_every");
     if (error) return reply.code(503).send({ status: "degraded", reason: "heartbeats unreadable" });
-    const rows = (data ?? []) as { job: string; last_ok_at: string | null; last_error_at: string | null; expected_every: string }[];
-    const jobs = rows.map((j) => ({
-      job: j.job,
-      lastOkAt: j.last_ok_at,
-      lastErrorAt: j.last_error_at,
-      // Not yet run at all reads as overdue only once something should have run.
-      overdue: isStale(j.last_ok_at, j.expected_every),
-      // The last run failed or was degraded (a Scorecard load that keeps
-      // falling back without its extended fields beats as not clean).
-      failing: isFailing(j.last_ok_at, j.last_error_at),
-    }));
-    const overdue = jobs.filter((j) => j.overdue).map((j) => j.job);
-    const failing = jobs.filter((j) => j.failing).map((j) => j.job);
-    const alerting = rows.filter((j, i) => jobs[i]!.failing && failingAlerts(j.expected_every)).map((j) => j.job);
-    const status = overdue.length ? "overdue" : alerting.length ? "failing" : "all-ok";
-    return reply.code(status === "all-ok" ? 200 : 503).send({ status, overdue, failing, jobs });
+    const summary = summarizeHeartbeats((data ?? []) as HeartbeatRow[]);
+    return reply.code(summary.status === "all-ok" ? 200 : 503).send(summary);
   });
 }

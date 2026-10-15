@@ -57,3 +57,24 @@ export function intervalMs(v: string): number {
   if (hms) ms += (Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3])) * 1000;
   return ms;
 }
+
+export type HeartbeatRow = { job: string; last_ok_at: string | null; last_error_at: string | null; expected_every: string };
+
+/** What GET /internal/status answers: "overdue" first, then "failing" (only jobs that alert on it), else "all-ok". */
+export function summarizeHeartbeats(rows: HeartbeatRow[], now = Date.now()) {
+  const jobs = rows.map((j) => ({
+    job: j.job,
+    lastOkAt: j.last_ok_at,
+    lastErrorAt: j.last_error_at,
+    // Not yet run at all reads as overdue only once something should have run.
+    overdue: isStale(j.last_ok_at, j.expected_every, now),
+    // The last run failed or was degraded (a Scorecard load that keeps
+    // falling back without its extended fields beats as not clean).
+    failing: isFailing(j.last_ok_at, j.last_error_at),
+  }));
+  const overdue = jobs.filter((j) => j.overdue).map((j) => j.job);
+  const failing = jobs.filter((j) => j.failing).map((j) => j.job);
+  const alerting = rows.filter((j, i) => jobs[i]!.failing && failingAlerts(j.expected_every));
+  const status = overdue.length ? "overdue" : alerting.length ? "failing" : "all-ok";
+  return { status, overdue, failing, jobs } as const;
+}

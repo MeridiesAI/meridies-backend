@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { toOfficialStats } from "../../src/lib/collegesV10.js";
-import { failingAlerts, isFailing } from "../../src/lib/heartbeat.js";
+import { failingAlerts, isFailing, summarizeHeartbeats } from "../../src/lib/heartbeat.js";
 import {
   carnegieBasicLabel,
   carnegieSizeSettingLabel,
@@ -166,4 +166,25 @@ test("heartbeats: a degraded or failed last run is failing, and alerts at once f
   assert.equal(failingAlerts("31 days"), true);
   assert.equal(failingAlerts("7 days"), true);
   assert.equal(failingAlerts("00:15:00"), false);
+});
+
+test("status: a failing monthly job turns it, a failing frequent one is only listed", () => {
+  const now = Date.parse("2026-10-15T12:00:00Z");
+  const fresh = "2026-10-15T11:55:00Z";
+  const clean = [
+    { job: "accountability-sweep", last_ok_at: fresh, last_error_at: null, expected_every: "00:15:00" },
+    { job: "scorecard-ingest", last_ok_at: "2026-10-01T00:00:00Z", last_error_at: null, expected_every: "31 days" },
+  ];
+  assert.equal(summarizeHeartbeats(clean, now).status, "all-ok");
+  const degraded = [clean[0]!, { ...clean[1]!, last_error_at: "2026-10-15T00:00:00Z" }];
+  const d = summarizeHeartbeats(degraded, now);
+  assert.equal(d.status, "failing");
+  assert.deepEqual(d.failing, ["scorecard-ingest"]);
+  assert.deepEqual(d.overdue, []);
+  const blip = [{ ...clean[0]!, last_error_at: "2026-10-15T11:58:00Z" }, clean[1]!];
+  const b = summarizeHeartbeats(blip, now);
+  assert.equal(b.status, "all-ok");
+  assert.deepEqual(b.failing, ["accountability-sweep"]);
+  const late = [{ ...clean[0]!, last_ok_at: "2026-10-15T10:00:00Z" }, ...degraded.slice(1)];
+  assert.equal(summarizeHeartbeats(late, now).status, "overdue");
 });
