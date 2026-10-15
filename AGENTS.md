@@ -190,8 +190,9 @@ match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 **Merged but not yet applied to production.** Everything after
 `20261022000001`: the questionnaire sync (`20261023010001`-`04`), import
 pipeline step 2 (`20261023020001`-`03`), caseload transfer
-(`20261023030001`-`03`), campus photos (`20261023070001`) and emailed meeting
-invites (`20261023090001`). They go in later, in filename order
+(`20261023030001`-`03`), campus photos (`20261023070001`), the extended
+College Scorecard columns (`20261023080001`) and emailed meeting invites
+(`20261023090001`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -199,7 +200,9 @@ that has none of them), and each new feature says it isn't switched on yet
 rather than failing: `503 imports_unavailable` (and `GET /imports` reads
 `available: false`), `503 caseload_transfer_unavailable` (removing a firm
 member falls back to the old function), `invites: { status: "unavailable" }`
-on meetings, `photo: null` on colleges, `fromQuestionnaire: []` and
+on meetings, `photo: null` on colleges, the extended Scorecard figures null
+on extras and Compare (the monthly load writes the older ones and stays
+clean), `fromQuestionnaire: []` and
 `transferredFrom: null` on the info card, and a questionnaire save that copies
 nothing. Keep it that way until they are applied: a feature that needs one of
 these files degrades, it never 500s.
