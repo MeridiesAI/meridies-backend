@@ -25,3 +25,32 @@ export function documentAiDecision(
 export function isRestrictedDocument(doc: { kind: string; ferpa_waived?: boolean }): boolean {
   return (doc.kind === "recommendation-letter" && doc.ferpa_waived === true) || doc.kind === "iep-504" || doc.kind === "counselor-only";
 }
+
+/**
+ * Kinds a student hands in for a task that the context layer leaves out only because nobody categorized them
+ * (`other`) or because it never reads them as background (`essay`, `common-app`). Handing one in for a check is
+ * the explicit request to read that file, so submission review reads them.
+ */
+export const HAND_IN_READABLE_KINDS = ["other", "essay", "common-app"] as const;
+
+/**
+ * Whether AxIS may read a file handed in for a task (lib/submissionReview.ts): documentAiDecision in its fixed
+ * order (keep-out, a waived recommendation letter, the practice's document-reading switch, `ai_access =
+ * 'excluded'`), so every per-file and per-practice switch holds. The one widening is HAND_IN_READABLE_KINDS;
+ * every other kind outside the defaults (IEP/504, counselor-only, financial, award letters, recommendation
+ * letters) stays out unless the counselor set the file to `allowed`.
+ */
+export function handInAiDecision(
+  doc: { kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean },
+  practiceReadsDocuments: boolean
+): { allowed: boolean; reason: DocumentAiReason } {
+  const decision = documentAiDecision(doc, practiceReadsDocuments);
+  if (decision.allowed) return decision;
+  if (
+    (decision.reason === "not-categorized" || decision.reason === "kind-excluded") &&
+    (HAND_IN_READABLE_KINDS as readonly string[]).includes(doc.kind)
+  ) {
+    return { allowed: true, reason: null };
+  }
+  return decision;
+}

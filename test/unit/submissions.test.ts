@@ -96,3 +96,29 @@ test("printed figures become facts the counselor reads; missing or garbled ones 
   assert.equal(garbled.verdict, "accepted");
   assert.deepEqual(garbled.facts, []);
 });
+
+test("a hand-in follows the shared per-document AI rule before anything is read", async () => {
+  const { handInAiDecision } = await import("../../src/lib/context/documentAi.js");
+  const { aiRuleSkipReason } = await import("../../src/lib/submissionReview.js");
+  const doc = (over: Partial<{ kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean }>) => ({
+    kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, ...over,
+  });
+  // read: the defaults, plus what a student hands in that nobody categorized
+  for (const kind of ["transcript", "resume", "test-report", "activity-list", "other", "essay", "common-app"]) {
+    assert.deepEqual(handInAiDecision(doc({ kind }), true), { allowed: true, reason: null }, kind);
+  }
+  // never read
+  assert.equal(handInAiDecision(doc({ available_to_llm: false }), true).reason, "keep-out");
+  assert.equal(handInAiDecision(doc({ kind: "recommendation-letter", ferpa_waived: true, ai_access: "allowed" }), true).reason, "waived");
+  assert.equal(handInAiDecision(doc({}), false).reason, "practice-setting");
+  assert.equal(handInAiDecision(doc({ ai_access: "excluded" }), true).reason, "excluded");
+  assert.equal(handInAiDecision(doc({ kind: "other", ai_access: "excluded" }), true).reason, "excluded");
+  for (const kind of ["iep-504", "counselor-only", "financial", "award-letter", "recommendation-letter"]) {
+    assert.equal(handInAiDecision(doc({ kind }), true).allowed, false, kind);
+    // a counselor's explicit allow still opens a restricted kind (never a waived letter)
+    assert.equal(handInAiDecision(doc({ kind, ai_access: "allowed" }), true).allowed, true, kind);
+  }
+  for (const r of ["keep-out", "waived", "practice-setting", "excluded", "kind-excluded"] as const) {
+    assert.ok(aiRuleSkipReason(r).length > 10);
+  }
+});

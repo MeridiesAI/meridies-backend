@@ -28,6 +28,7 @@ import { logHost } from "../lib/requestLog.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
+import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePath } from "../lib/storagePath.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
 import {
   ensurePracticeFolders,
@@ -351,6 +352,12 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const b = documentBody.parse(request.body);
       assertCounselorSetsRestrictions(request, b);
+      // The bucket and path are the client's word for where it uploaded, and
+      // other code downloads by them: only the documents bucket, only a path
+      // the bucket's insert policy could have accepted (lib/storagePath.ts;
+      // the database refuses the same since 20261024000041).
+      if (!isDocumentsBucket(b.bucket)) throw badRequest("Files are registered in the documents bucket only");
+      if (!isSafeStoragePath(b.storagePath)) throw badRequest("That file path isn't one the app uploads to");
       await enforceQuota(
         request.auth.userId,
         "uploads",
@@ -383,7 +390,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           owner_id: request.auth.userId,
           student_id: studentId,
           folder_id: folderId,
-          bucket: b.bucket ?? "student-documents",
+          bucket: DOCUMENTS_BUCKET,
           storage_path: b.storagePath,
           filename: b.filename,
           title: b.title ?? null,

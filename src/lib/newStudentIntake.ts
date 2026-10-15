@@ -172,12 +172,28 @@ export async function saveMyAnswer(request: FastifyRequest, taskId: string, answ
  * and the counselor gets one notification and one email.
  */
 export async function submitMyIntake(request: FastifyRequest): Promise<string[]> {
+  // What is already with the counselor before this Submit: only items that
+  // move to review now get an AxIS read and a mention to the counselor, so a
+  // repeated Submit re-reads nothing and emails nobody. submit_intake returns
+  // only the items it moved since 20261024000043; this keeps the rule on a
+  // database without it.
+  const { data: before, error: beforeError } = await request.db
+    .from("deliverables")
+    .select("id, status")
+    .eq("student_id", request.auth.userId)
+    .not("intake_request_id", "is", null);
+  if (beforeError) throw fromPostgrest(beforeError);
+  const alreadyWithCounselor = new Set(
+    ((before ?? []) as Row[]).filter((t) => t.status === "review" || t.status === "complete").map((t) => String(t.id))
+  );
+
   const { data, error } = await request.db.rpc("submit_intake");
   if (error) {
     if (error.code === "23514" || error.code === "P0002") throw badRequest(error.message);
     throw fromPostgrest(error);
   }
-  const taskIds = ((data ?? []) as string[]).map(String);
+  const taskIds = ((data ?? []) as string[]).map(String).filter((id) => !alreadyWithCounselor.has(id));
+  if (!taskIds.length) return [];
 
   if (taskIds.length) {
     const { data: docs } = await request.db

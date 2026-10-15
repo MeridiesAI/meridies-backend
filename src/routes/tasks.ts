@@ -44,9 +44,9 @@ import {
 } from "../lib/email.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
-import { limit } from "../lib/limits.js";
+import { enforceRateLimit, limit } from "../lib/limits.js";
 import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
-import { startSubmissionReview } from "../lib/submissionReview.js";
+import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 
 type Row = Record<string, unknown>;
@@ -794,6 +794,23 @@ export default async function taskRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (existing && existing.role !== "submission") {
         throw conflict("That file is already on this task as reference material");
+      }
+      // The same file again while it waits on a check: nothing new for AxIS
+      // to read or for the counselor to hear about.
+      if (existing && task.status === "review") {
+        return reply.code(200).send({
+          task: await freshTask(request, id),
+          review: { status: "skipped", reason: "This file is already handed in and waiting on a check." },
+        });
+      }
+      // A hand-in runs an AxIS read (charged to the caller's AI quota) and
+      // tells the counselor: per task and per student caps, DB-backed, so a
+      // loop of hand-ins can't flood the counselor's inbox or spend AI.
+      // A New student request is only attached here; its Submit is capped on
+      // its own route.
+      if (!(task.intake_request_id && request.profile.role === "student")) {
+        await enforceRateLimit(`hand-in:task:${id}`, HAND_INS_PER_TASK_HOUR, 3600, "That's a lot of hand-ins for one task. Try again in an hour.");
+        await enforceRateLimit(`hand-in:student:${studentId}`, HAND_INS_PER_STUDENT_DAY, 86_400, "That's a lot of hand-ins for one day. Try again tomorrow.");
       }
       if (!existing) {
         const { error } = await request.db.from("deliverable_documents").insert({
