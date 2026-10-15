@@ -23,6 +23,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # The import parser's child process, from dist/ (the unit tests run the source).
+      - run: node scripts/smoke/parse-worker.mjs
       - run: npm test
 
   integration:
