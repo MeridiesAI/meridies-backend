@@ -21,10 +21,19 @@ const shared = await studentOf(b, "caseload-shared");
 const other = await studentOf(b, "caseload-other");
 await sql(`update public.profiles set archived_at = now() where id = '${archived.id}'`);
 await sql(`insert into public.student_collaborators (student_id, counselor_id, access) values ('${shared.id}', '${a.id}', 'read')`);
+// A write collaborator sees the same as a read one.
+const c = await user("caseload-c");
+const writeShared = await studentOf(c, "caseload-write");
+await sql(`insert into public.student_collaborators (student_id, counselor_id, access) values ('${writeShared.id}', '${a.id}', 'write')`);
+// A firm owner (an admin) reads only what RLS gave them before the filter: their
+// own and shared students, never a member's unshared ones.
+const firmId = await sql(`with f as (insert into public.firms (name, owner_id, plan, seats) values ('Caseload firm', '${a.id}', 'practice', 5) returning id) select id from f`);
+await sql(`update public.profiles set firm_id = '${firmId}' where id in ('${a.id}', '${b.id}')`);
+await sql(`insert into public.firm_members (firm_id, profile_id, seat_role) values ('${firmId}', '${b.id}', 'counselor')`);
 
 const tag = Date.now().toString(36);
 const titles = {};
-for (const [k, s] of Object.entries({ own, archived, shared, other })) {
+for (const [k, s] of Object.entries({ own, archived, shared, writeShared, other })) {
   titles[k] = `Caseload ${k} ${tag}`;
   const taskId = await sql(`with d as (insert into public.deliverables (student_id, kind, title, status, due_date, source)
     values ('${s.id}', 'custom', '${titles[k]}', 'in-progress', '${day(5)}', 'counselor') returning id) select id from d`);
@@ -39,17 +48,18 @@ const taskTitles = new Set((Array.isArray(tasks.body) ? tasks.body : []).map((t)
 check("tasks: own student's task is listed", taskTitles.has(titles.own));
 check("tasks: archived student's task is still listed", taskTitles.has(titles.archived));
 check("tasks: shared student's task is listed", taskTitles.has(titles.shared));
-check("tasks: another practice's task is not", !taskTitles.has(titles.other));
+check("tasks: write-shared student's task is listed", taskTitles.has(titles.writeShared));
+check("tasks: a firm member's unshared student's task is not", !taskTitles.has(titles.other));
 
 const feed = await call(a.token, "GET", `/calendar/feed?from=${day(-1)}&to=${day(10)}&tz=UTC`);
 check("GET /calendar/feed answers 200", feed.status === 200, String(feed.status));
 const feedTitles = (feed.body?.items ?? []).map((i) => i.title).join("\n");
-for (const k of ["own", "archived", "shared"]) {
+for (const k of ["own", "archived", "shared", "writeShared"]) {
   check(`feed: ${k} student's deadline is on it`, feedTitles.includes(`Deadline ${k} ${tag}`));
   check(`feed: ${k} student's task is on it`, feedTitles.includes(titles[k]));
 }
-check("feed: another practice's deadline is not", !feedTitles.includes(`Deadline other ${tag}`));
-check("feed: another practice's task is not", !feedTitles.includes(titles.other));
+check("feed: a firm member's unshared student's deadline is not", !feedTitles.includes(`Deadline other ${tag}`));
+check("feed: a firm member's unshared student's task is not", !feedTitles.includes(titles.other));
 
 // Student and per-student reads are unchanged.
 const mine = await call(own.token, "GET", "/tasks");
