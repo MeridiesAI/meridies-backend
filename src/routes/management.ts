@@ -14,10 +14,26 @@
  *
  * `GET /management/tasks/mine` is what My Work Queue reads for the tasks a
  * consultant has been assigned here.
+ *
+ * Caseload transfer (spec 2026-10-15-caseload-transfer-design.md), firm
+ * owners/admins only, decided in SQL (transfer_caseload, SECURITY DEFINER):
+ *   GET  /management/consultants/:id/transfer-preview  what would move
+ *   POST /management/consultants/:id/transfer          move the students, all or nothing
+ *   GET  /management/transfers                         the firm's last 50 transfers
+ * It is not in the AxIS catalog.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import {
+  listTransfers,
+  loadPreview,
+  notifyTransfer,
+  plannedEmails,
+  runTransfer,
+  toTransferResponse,
+  transferBody,
+} from "../lib/caseloadTransfer.js";
 import { crmError, fillTemplate, loadWorkspace, paragraphs } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
 import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
@@ -88,6 +104,8 @@ export type Consultant = {
   seatRole: string;
   isYou: boolean;
   studentCount: number;
+  /** Archived students still on their caseload (a removal counts them; a transfer moves them). */
+  archivedCount: number;
   /** Null when the caller may not see this consultant's figures. */
   alerts: { overdue: number; noActivity: number; progressPct: number | null } | null;
 };
@@ -103,6 +121,7 @@ async function loadConsultants(request: FastifyRequest): Promise<Consultant[]> {
     seatRole: String(r.seat_role ?? "counselor"),
     isYou: r.profile_id === request.auth.userId,
     studentCount: Number(r.student_count ?? 0),
+    archivedCount: Number(r.archived_count ?? 0),
     alerts: r.alerts_visible
       ? {
           overdue: Number(r.overdue_count ?? 0),
@@ -197,6 +216,43 @@ export default async function managementRoutes(app: FastifyInstance) {
       }));
     }
   );
+
+  /** Caseload transfer: what would move, for the transfer popup (firm owner/admin). */
+  app.get(
+    "/consultants/:id/transfer-preview",
+    { preHandler: [...counselor, limit("management:transfer-preview", 60, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      return loadPreview(request, id);
+    }
+  );
+
+  /**
+   * Caseload transfer: move the consultant's students, and their records, in
+   * one transaction. The emails go after the commit and never fail the call.
+   */
+  app.post(
+    "/consultants/:id/transfer",
+    { preHandler: [...counselor, limit("management:transfer", 30, 3600)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const body = transferBody.parse(request.body);
+      const result = await runTransfer(request, id, body);
+      const planned = plannedEmails(result, body.notifyStudents);
+      void notifyTransfer(request.log, request.db, result, {
+        notifyStudents: body.notifyStudents,
+        adminId: request.auth.userId,
+      });
+      return toTransferResponse(result, { planned });
+    }
+  );
+
+  /** The firm's recent transfers: everything for an owner/admin, what involves them for anyone else (RLS). */
+  app.get("/transfers", { preHandler: [...counselor, limit("management:read", 120, 60)] }, async (request) => {
+    const ws = await loadWorkspace(request);
+    if (!ws.firmId) return [];
+    return listTransfers(request.db, ws.firmId);
+  });
 
   /**
    * Assign task (v9), or the row's "Add" (a title, optionally under a task).
