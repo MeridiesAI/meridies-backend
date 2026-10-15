@@ -61,3 +61,17 @@ export function xlsx(o: XlsxOptions): Uint8Array {
 }
 
 export const csv = (text: string) => new TextEncoder().encode(text);
+
+/** import_fields as 20261014000001 seeds it. */
+export const FIELDS = [
+  ["student_academics", "gpa_unweighted", "gpa", 3], ["student_academics", "gpa_weighted", "gpa", 3],
+  ["student_academics", "gpa_scale", "text:20", 3], ["student_academics", "class_rank", "text:40", 3],
+  ["student_academics", "class_rank_value", "text:40", 3], ["student_academics", "test_status", "enum:test_status", 3],
+  ["student_academics", "sat_ebrw", "sat_section", 3], ["student_academics", "sat_math", "sat_section", 3],
+  ["student_academics", "sat_superscore", "sat_total", 3], ["student_academics", "act_composite", "act_composite", 3],
+  ["student_personal_details", "contact_email", "email", 1], ["student_personal_details", "address", "text:400", 2],
+  ["student_personal_details", "gender", "enum:gender", 2], ["student_personal_details", "birthday", "date", 2],
+  ["student_personal_details", "citizenship", "enum:citizenship", 2], ["student_personal_details", "first_gen", "bool", 2],
+  ["student_personal_details", "intended_majors", "text[]", 1],
+  ["test_scores", "*", "row:test_score", 3], ["courses", "*", "row:course", 1], ["activities", "*", "row:activity", 1],
+].map(([table, field, valueType, sensitivity]) => ({ table: String(table), field: String(field), valueType: String(valueType), sensitivity: Number(sensitivity) }));
