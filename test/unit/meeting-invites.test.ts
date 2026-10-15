@@ -458,3 +458,15 @@ test("the invites list: newest attempt per address, reasons safe to show", () =>
   ]);
   assert.equal(list[1]!.reason, "Email isn't set up on the server yet");
 });
+
+test("the summary counts invitees, not the counselor's copy, and notes only guardians it meant to email", async () => {
+  const r = await prepareInviteRound(req(fakeDb(baseTables())), { before: null, after: m({ guardiansInvited: true }), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: async () => true, now: NOW });
+  assert.deepEqual(r.summary, { status: "sending", recipients: 2, skipped: 0 });
+  assert.equal(r.round?.recipients.length, 3);
+
+  // B leaves, A stays with guardians (no change for A): A's parents being off is not news here.
+  const t = baseTables({ student_alert_prefs: [{ student_id: A, copy_parents: false, copy_student: false }] });
+  const leave = await prepareInviteRound(req(fakeDb(t)), { before: m({ guardiansInvited: true }), after: m({ guardiansInvited: true }), attendeesBefore: [A, B], attendeesAfter: [A], notify: true }, { consume: async () => true, now: NOW });
+  assert.equal(leave.summary.status, "sending");
+  if (leave.summary.status === "sending") assert.equal(leave.summary.note, undefined);
+});

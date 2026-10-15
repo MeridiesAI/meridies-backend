@@ -53,7 +53,7 @@ const booked = await call(c.token, "POST", "/meetings", {
 });
 const mid = booked.body?.id;
 check("booking with invites answers 201 and says who is being emailed", booked.status === 201 && booked.body?.invites?.status === "sending" && booked.body?.sendInvites === true, JSON.stringify(booked.body?.invites));
-check("…the student, the guardian with alerts on and the counselor's copy", booked.body?.invites?.recipients === 3, JSON.stringify(booked.body?.invites));
+check("…the student and the guardian with alerts on (the counselor's copy isn't counted)", booked.body?.invites?.recipients === 2, JSON.stringify(booked.body?.invites));
 
 let sent = await rows(`meeting_id='${mid}'`, 3);
 check("a meeting-invite row for the student", has(sent, s1.email, "meeting-invite", "student"), JSON.stringify(sent));

@@ -367,6 +367,8 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
   const wantGuardians = uniq(
     [...plan.messages, ...plan.keep].filter((m) => m.audience === "guardians" && onRoster.has(m.studentId)).map((m) => m.studentId)
   );
+  // Notes speak only of guardians this round meant to email, not of those it only checks against.
+  const emailing = new Set(plan.messages.filter((m) => m.audience === "guardians").map((m) => m.studentId));
   const guardiansOf = new Map<string, Row[]>();
   if (wantGuardians.length > 0) {
     const allowed: string[] = [];
@@ -376,9 +378,9 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
       try {
         const prefs = await loadAlertPrefs({ db }, id);
         if (prefs.copy_parents) allowed.push(id);
-        else parentsOff = true;
+        else if (emailing.has(id)) parentsOff = true;
       } catch {
-        prefsUnreadable = true;
+        if (emailing.has(id)) prefsUnreadable = true;
       }
     }
     if (prefsUnreadable) notes.push("Some guardians weren't emailed: their settings couldn't be read");
@@ -391,7 +393,7 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
         .order("is_primary", { ascending: false })
         .order("created_at", { ascending: true });
       if (error) {
-        notes.push("Guardians weren't emailed: they couldn't be read");
+        if (allowed.some((id) => emailing.has(id))) notes.push("Guardians weren't emailed: they couldn't be read");
       } else {
         for (const g of (data ?? []) as Row[]) {
           if (g.alerts_enabled !== true) continue;
@@ -626,6 +628,7 @@ export async function deliverInviteRound(
 // ---------------------------------------------------------------------------
 
 export type InviteRoundSummary =
+  /** recipients: the students and guardians being emailed (the counselor's own copy isn't counted). */
   | { status: "sending"; recipients: number; skipped: number; note?: string }
   | { status: "none" }
   | { status: "skipped" | "unavailable"; reason: string };
@@ -666,7 +669,8 @@ export async function prepareInviteRound(
     const resolved = await resolveRound(request.db, plan);
     if ("skip" in resolved) return { summary: { status: "skipped", reason: resolved.skip }, round: null };
     notes.push(...resolved.notes);
-    if (!resolved.recipients.some((r) => r.kind !== "counselor")) {
+    const invitees = resolved.recipients.filter((r) => r.kind !== "counselor").length;
+    if (invitees === 0) {
       return {
         summary: { status: "skipped", reason: notes[0] ?? "No one invited has an email address on file" },
         round: null,
@@ -675,7 +679,7 @@ export async function prepareInviteRound(
     return {
       summary: {
         status: "sending",
-        recipients: resolved.recipients.length,
+        recipients: invitees,
         skipped: resolved.skipped,
         ...(notes.length ? { note: notes.join(". ") } : {}),
       },

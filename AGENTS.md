@@ -1010,7 +1010,8 @@ calendar can add.
   never held back, and a throttled mixed round still sends its cancellations.
 - **Delivery.** The response carries `invites` (`{ status: "sending",
   recipients, skipped, note? } | { status: "none" } | { status: "skipped" |
-  "unavailable", reason }`); the sends run after it, one at a time 250 ms
+  "unavailable", reason }`, `recipients` counting students and guardians,
+  not the counselor's copy); the sends run after it, one at a time 250 ms
   apart, each retried once on a Resend 429 after Retry-After, each a
   `message_deliveries` row (templates `meeting-invite`, `meeting-update`,
   `meeting-cancel`; `student_id` the invited student, `meeting_id` the
