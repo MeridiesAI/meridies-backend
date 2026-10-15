@@ -390,7 +390,8 @@ begin
     where it.import_id = p_import and it.match_status = 'new_invite'
       and (it.invite_state in ('unsent','failed')
            or (it.invite_state = 'sending' and it.invite_claimed_at < now() - interval '10 minutes'))
-    order by it.created_at, it.id
+    -- Never-tried first, so a retry of failing addresses can't starve the rest.
+    order by (it.invite_state = 'failed'), it.created_at, it.id
     limit least(greatest(coalesce(p_limit, 25), 1), 100)
     for update skip locked
   ), u as (
