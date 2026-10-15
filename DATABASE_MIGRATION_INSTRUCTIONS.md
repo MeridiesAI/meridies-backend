@@ -380,6 +380,16 @@ set's own section below says what it does and how to check it.
 
 (Nineteen files in eight sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
+Then the security fixes for submission review and student reminders, after the files above (they
+depend on none of them), in this order: `20261024000041_document_storage_paths.sql` (a documents row
+names only the documents bucket and a path the bucket's insert policy could have taken, and never
+moves; client roles only), `20261024000042_counselor_recorded_phone.sql`
+(`profiles.phone_recorded_by_counselor`, trigger-written; reminder texts go only to it, so until it
+is applied no reminder text is sent) and `20261024000043_submit_intake_once.sql` (a repeated New
+student Submit moves and returns nothing). The code already enforces each in the API; check after
+applying with `test/integration/submission-hardening.test.mjs` and `student-reminders.test.mjs`
+(their database checks run only once the files are in).
+
 Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
 `import_items.invite_state` / `invite_claimed_at` (file 5). Applying the files in the order above
