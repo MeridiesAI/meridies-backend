@@ -561,7 +561,9 @@ export async function requireCronSecret(request: FastifyRequest): Promise<void> 
 /**
  * Deliver every scheduled message whose time has come. Service-role client:
  * the recipients come from the row (frozen when the counselor wrote it), never
- * from a caller. Each row is claimed with a conditional scheduled -> queued
+ * from a caller, and each one is checked again against the student and the
+ * guardians on file before anything goes out (`allowedRecipients`), because a
+ * row is not proof the composer route wrote it. Each row is claimed with a conditional scheduled -> queued
  * update first, so two runs cannot send it twice. A row that falls inside its
  * counselor's quiet hours waits for the next window.
  */
@@ -609,9 +611,10 @@ export async function dispatchDueMessages(
 
     // The recipients were frozen when the counselor wrote the message, but
     // who may receive it is re-decided now, failing closed: the student must
-    // still be this counselor's, the parents still switched on, each guardian
-    // still on file with alerts on and the same address, and an alert still
-    // clear of the throttle. Anything unreadable holds the send.
+    // still be this counselor's, a message to the student goes only to their
+    // address or phone on file, the parents must still be switched on, each
+    // guardian still on file with alerts on and the same address, and an
+    // alert still clear of the throttle. Anything unreadable holds the send.
     let recipients: Recipient[];
     try {
       const blocked = await sendBlockedReason(svc, row, settings);
@@ -679,20 +682,66 @@ async function sendBlockedReason(
     if (throttled) return throttled;
   }
   if (row.audience !== "parent") {
-    return { recipients: row.recipients };
+    // The student's own address or phone as it is on file now, never what
+    // the row says: a row written straight to the table could name anyone.
+    const student = await loadStudentContact(svc, row.student_id);
+    const recipients = allowedRecipients(row, { student, family: [] });
+    if (recipients.length === 0) return "The student's contact details on file no longer match this message";
+    return { recipients };
   }
 
   const prefs = await loadAlertPrefs({ db: svc }, row.student_id);
   if (!prefs.copy_parents) return "Messages to the parents were switched off before this went out";
   const family = await loadFamily(svc, row.student_id);
-  const allowed = new Map(
-    family
-      .filter((g) => g.receivesMessages && g.email)
-      .map((g) => [g.id, (g.email as string).trim().toLowerCase()])
-  );
-  const recipients = row.recipients.filter(
-    (r) => r.kind === "guardian" && r.email && allowed.get(r.id) === r.email.trim().toLowerCase()
-  );
+  const recipients = allowedRecipients(row, { student: null, family });
   if (recipients.length === 0) return "No parent on file still receives messages";
   return { recipients };
+}
+
+const normEmail = (v: string | null | undefined): string | null => {
+  const t = (v ?? "").trim().toLowerCase();
+  return t ? t : null;
+};
+const normPhone = (v: string | null | undefined): string | null => {
+  const t = (v ?? "").replace(/[^\d+]/g, "");
+  return t ? t : null;
+};
+
+/**
+ * Which of a stored message's frozen recipients may still receive it, decided
+ * against what is on file at send time. Every recipient must be one the
+ * composer would have resolved for this student itself: for a message to the
+ * student, the student (by id) at their address or phone on file; for one to
+ * the parents, a guardian of this student who still receives messages, at
+ * the same email. Anything else on the row is dropped, and what is returned
+ * carries the addresses on file, not the row's. Pure, so it is unit-tested.
+ */
+export function allowedRecipients(
+  row: Pick<MessageRow, "student_id" | "audience" | "channel" | "recipients">,
+  onFile: { student: StudentContact | null; family: FamilyContact[] }
+): Recipient[] {
+  const frozen = Array.isArray(row.recipients) ? row.recipients : [];
+  if (row.audience === "student") {
+    const st = onFile.student;
+    if (!st || st.id !== row.student_id) return [];
+    const ok = frozen.some((r) => {
+      if (!r || r.kind !== "student" || r.id !== row.student_id) return false;
+      if (row.channel === "email") return normEmail(st.email) !== null && normEmail(r.email) === normEmail(st.email);
+      if (row.channel === "sms") return normPhone(st.phone) !== null && normPhone(r.phone) === normPhone(st.phone);
+      return false;
+    });
+    return ok ? [{ kind: "student", id: st.id, name: st.name, email: st.email, phone: st.phone }] : [];
+  }
+  if (row.audience !== "parent" || row.channel !== "email") return [];
+  const byId = new Map(onFile.family.filter((g) => g.receivesMessages && normEmail(g.email)).map((g) => [g.id, g]));
+  const out: Recipient[] = [];
+  const seen = new Set<string>();
+  for (const r of frozen) {
+    if (!r || r.kind !== "guardian" || seen.has(r.id)) continue;
+    const g = byId.get(r.id);
+    if (!g || normEmail(g.email) !== normEmail(r.email)) continue;
+    seen.add(g.id);
+    out.push({ kind: "guardian", id: g.id, name: g.name, email: g.email, phone: g.phone });
+  }
+  return out;
 }
