@@ -819,6 +819,20 @@ What shipped differs from the design above in these places; AGENTS.md
 
 - **Parsing** runs in a forked child process (see §7.3, amended), with a
   256 MB heap, a 20 s kill and an environment holding only PATH.
+- **What a parse hands back is capped too** (security review, 2026-10). A
+  small XLSX can point every cell at one shared string: the child holds one
+  string, but V8's serializer sends one copy per cell, so the answer over IPC
+  was gigabytes the API process had to take. The child now counts characters
+  before answering (32,767 a cell, Excel's own limit; 8 million for all of an
+  import's files, which registration and staging both hand out file by file)
+  and refuses by name; the answer comes back as JSON on a pipe whose bytes the
+  parent counts, stopping and killing the child past 32 MiB; and the parent
+  checks its shape before using it.
+- **Headers the model sees** (§7.2): a header goes out as text only when it
+  reads as a label. A file with no header row makes its first student's row
+  the headers, so a header shaped like a value or like the column under it is
+  masked as a cell is, and a row where several headers look like data is
+  masked whole.
 - **Rollout** (§11) is an environment flag: `IMPORTS_ROLLOUT=off|pilot|all`
   and `IMPORTS_PILOT` (firm or solo counselor ids). Changing the pilot list
   needs a redeploy. `IMPORTS_AI=off` is the AI kill switch.
@@ -838,9 +852,26 @@ What shipped differs from the design above in these places; AGENTS.md
   the key because a retry after a failure sends a new invitation). Only the
   uploader sends them. One invitation per address per import: siblings on a
   parent's email are skipped, and the counselor may invite one of them.
-- **Staff approval** (§5.1) is by hand: a first import over 50 invitations is
-  saved, its invitations wait until `invites_approved_at` is set, and one
-  email goes to `ACCESS_REVIEW_EMAIL`.
+  **Across imports too:** an address whose pending or revoked invitation (the
+  set `accept_invitation` sweeps) already carries a different student's held
+  data is skipped at staging ("Another import is already inviting this
+  address for a different student"), can't be invited from review, and is
+  refused when sending, so a later sibling can't revoke the earlier one's
+  invitation and land both students' data on one account. The same student
+  again (a re-import) still follows their email. Known limit: a firm admin
+  staging a member's import can't read the member's invitations, so the
+  staging check sees nothing for them; the send check (uploader only) still
+  refuses.
+- **Staff approval** (§5.1) is by hand and per counselor, not per import:
+  once the invitations a counselor's saved imports have sent or still hold,
+  with this import's, pass 50, the import is saved but its invitations wait
+  until Meridies sets `invites_approved_at` on one of their imports (which
+  releases it and every later one), and one email goes to
+  `ACCESS_REVIEW_EMAIL`. (Amended after review: holding only a first import
+  over 50 let a split list, or a one-row import saved first, skip it.) The
+  API applies the rule after each commit request and before every send;
+  `20261024000061` makes `request_import_commit` apply it too. Items received
+  through a caseload transfer count toward the receiver's 50.
 - **Retention** (§5.10) runs on every sweep, outside
   `IMPORT_HOLD_EXPIRY_ENABLED` (which still holds back the 30-day expiry of
   accepted data and its warnings until the app's Ready to apply page ships).

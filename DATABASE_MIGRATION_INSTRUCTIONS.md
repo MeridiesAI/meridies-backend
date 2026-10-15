@@ -339,7 +339,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twenty-three files are merged ahead of production's database on purpose: the code was written to
+These twenty-four files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -381,8 +381,9 @@ set's own section below says what it does and how to check it.
 | 21 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
 | 22 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
 | 23 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
+| 24 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitation review (after file 7) |
 
-(Twenty-three files: the first thirteen are six feature sets, the other ten are four sets of security
+(Twenty-four files: the first thirteen are six feature sets, the other eleven are five sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 20-22, the security fixes for submission review and student reminders, depend on none of the
@@ -402,7 +403,7 @@ satisfies both. No function, policy or trigger is defined in two of these files;
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all twenty-three:
+After all twenty-four:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -509,9 +510,12 @@ update public.import_items
  where match_status = 'awaiting_counselor';
 ```
 
-A counselor's first import that would send more than 50 invitations saves its data but holds the
-invitations; an email goes to `ACCESS_REVIEW_EMAIL`. Approve by hand:
+Once a counselor's saved imports would send more than 50 invitations in all (and Meridies has
+approved none of their imports yet), the import saves its data but holds the invitations; an email
+goes to `ACCESS_REVIEW_EMAIL`. Approve by hand, which releases this import and every later one of
+that counselor:
 `update public.roster_imports set invites_approved_at = now() where id = '<import id>';`
+The API applies this rule itself; `20261024000061` (below) makes the database apply it too.
 
 ---
 
@@ -672,4 +676,25 @@ Check:
 ```sql
 select polname from pg_policy where polname in
   ('ai_conversations_insert_counselor', 'ai_messages_insert_counselor', 'ai_attachments_insert_counselor', 'axis_attachments_insert_counselor');  -- 4 rows
+```
+
+---
+
+## Import invitation review per counselor: `20261024000061`
+
+Apply after `20261023020003` (it replaces that file's `request_import_commit(uuid, integer)` with
+the same signature and body, except the hold). Either order with the code is safe: the API holds
+invitations by the same rule after each commit request and before every send, writing
+`invites_held_reason` through the service role, and the previous code reads that column as before.
+Not in `REQUIRED_SCHEMA`.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261024000061_import_invite_review_per_counselor.sql` | `request_import_commit` holds an import's invitations when none of the counselor's imports is approved yet and the invitations their saved imports have sent or still hold, plus this import's, pass 50 (it held only a first import over 50, which a split list or a one-row import saved first skipped) |
+
+Check:
+
+```sql
+select prosrc like '%v_prior + v_invites > 50%' from pg_proc
+ where oid = to_regprocedure('public.request_import_commit(uuid,integer)');   -- true
 ```

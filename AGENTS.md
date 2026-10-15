@@ -198,9 +198,10 @@ College Scorecard columns (`20261023080001`), emailed meeting invites
 (`20261023090001`), the meeting owner guard (`20261024000011`, a security
 fix that depends only on applied files and can go in ahead of the rest),
 the RLS and ownership fixes (`20261024000021`-`25`, below), the
-submission-review and reminder security fixes (`20261024000041`-`43`) and
+submission-review and reminder security fixes (`20261024000041`-`43`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
-the API already refuses students on `/chat`). They go in later, in filename order
+the API already refuses students on `/chat`) and the per-counselor import
+invitation review (`20261024000061`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -1904,11 +1905,25 @@ step 1's and is never gated.
   that passed, rezipped uncompressed, so it never re-reads the original
   archive and never starts fflate's helper threads. Formulas give cached
   values only. `scripts/smoke/parse-worker.mjs` checks the built child (CI).
+  **What comes back is capped too** (`caps.ts`): the heap flag protects the
+  child, not the API, and a small XLSX whose cells all point at one shared
+  string answers with a copy per cell. So the child counts characters before
+  it answers (`MAX_CELL_CHARS` 32,767 a cell; `MAX_PARSED_CHARS` 8 million
+  for all of an import's files, each profile keeping its count, registration
+  and staging each handing a parse what the earlier files left) and refuses
+  by name (`too-large-unpacked`, `cell-too-long`, `import-too-large`); the
+  answer never goes back over IPC but as JSON on fd 3, whose bytes the parent
+  counts, killing the child past `MAX_PARSE_OUTPUT_BYTES` (32 MiB); and
+  `checkOutcome` (zod) checks its shape and recounts before anyone uses it.
 - **What the model sees** (`profile.ts`, `mask.ts`, `aiPlan.ts`, module
   `import-mapping`, Haiku through `runStructured`): masked headers, column
   counts and shapes, numeric min/max only for small numbers (at most 2,100),
   a date column's year range, sheets numbered not named, sensitive columns
-  left out; wrapped as untrusted data. Never a real text cell. Its answer is
+  left out; wrapped as untrusted data. Never a real text cell, and a header
+  only when it reads as a label (`headerIsLabel`): a file with no header row
+  makes its first student's row the headers, so a header shaped like a value
+  or like its column is masked as a cell (`maskHeader`), and a row where
+  several do is masked whole (`headerRowIsData`). Its answer is
   filtered to the columns it was asked about and targets on the fixed list;
   a score column's exam comes from the file's header. Two retries, then the
   counselor maps by hand. Spend per import (`onUsage` on `runStructured`,
@@ -1928,7 +1943,14 @@ step 1's and is never gated.
   + birthday or grad year + school: suggested; else invite or skip. Siblings on
   a parent's email are never merged, matched or invited on their own;
   `stage_import` keeps one invitation per address and the review's "invite"
-  refuses a second at the same address.
+  refuses a second at the same address. Across imports, `heldAddresses.ts`:
+  an address whose pending or revoked invitation (what `accept_invitation`
+  sweeps) carries a different student's held data is skipped at staging and
+  refused when sending (a read that fails holds the batch), because a new
+  invitation would revoke the old one and acceptance would put both
+  students' data on one account. The same student again still follows their
+  email. A firm admin staging a member's import can't read the member's
+  invitations; the send (uploader only) still checks.
 - **Staging defaults** (`stage_import`, `private.import_assess`): old values
   read with `import_current_value`; equal values dropped (3.8 = 3.800); rows
   already on the record dropped and counted, near matches kept back as
@@ -1952,10 +1974,19 @@ step 1's and is never gated.
   and tied to the item before the email goes out (`insertInvitation`, then
   `import_link_invitation`, then `emailInvitation` with the Resend
   idempotency key `import-invite/<item>/<invitation>`); 25 per request; the
-  `invites` quota (100 a day, 50 for an account under 14 days). A counselor's
-  first import over 50 invitations is saved but its invitations wait
-  (`invites_held_reason`) until Meridies sets `invites_approved_at` by hand;
-  one email goes to `ACCESS_REVIEW_EMAIL`.
+  `invites` quota (100 a day, 50 for an account under 14 days). **Meridies
+  looks once per counselor** (`inviteReview`): when the invitations their
+  saved imports have sent or still hold, with this import's, pass 50 and none
+  of their imports is approved yet, the import is saved but its invitations
+  wait (`invites_held_reason = 'first-import-review'`, written through the
+  service role) until Meridies sets `invites_approved_at` on one of their
+  imports by hand, which releases it and every later one; one email goes to
+  `ACCESS_REVIEW_EMAIL`. Splitting a list or saving a one-row import first no
+  longer skips it. Checked after each commit request and again before every
+  send, so it holds without `20261024000061` (which makes
+  `request_import_commit` apply the same rule; either deploy order, not in
+  `REQUIRED_SCHEMA`). Items a caseload transfer brought count toward the
+  receiver's 50.
 - **Retention** (`retention.ts`, `import_retention`), every sweep, not behind
   `IMPORT_HOLD_EXPIRY_ENABLED`: drafts and reviews expire after 7 days with
   their staged values; never-sent invitations' data expires 14 days after the
@@ -2175,7 +2206,7 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`), the import pipeline (`imports-*`; step 2's
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
-  `-retention`, `-guard`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`)
+  `-retention`, `-guard`, `-security`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`),
   `caseload-transfer` (every persona, every table that follows a student,
   removal, the firm setting), `regex-dos` (the regular-expression attacks:
   a student's document, a Mass invite paste, an import file; `/health` keeps
