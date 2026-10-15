@@ -80,6 +80,9 @@ jobs:
           TWILIO_AUTH_TOKEN: local-twilio-test-token-123
           # Research test double (no model or web calls); refuses to boot in production.
           RESEARCH_FAKE: fixture
+          # The Import page for every test counselor, with presets only (no model calls).
+          IMPORTS_ROLLOUT: all
+          IMPORTS_AI: "off"
         run: |
           npx tsx src/index.ts > api.log 2>&1 &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done
