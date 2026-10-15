@@ -1,0 +1,1 @@
+{"_tag":"Error","error":{"code":"DbPushMissingRemoteError","message":"Found local migration files to be inserted before the last migration on remote database.","suggestion":"\nRerun the command with --include-all flag to apply these migrations:\nsupabase/migrations/20200101000000_old.sql\n"}}

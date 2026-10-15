@@ -1,0 +1,1 @@
+{"upToDate":false,"dryRun":true,"migrations":["29991231000000_ci_parser_check.sql","29991231000001_ci_parser_second.sql"],"seeds":[],"roles":[],"message":"Finished supabase db push."}
