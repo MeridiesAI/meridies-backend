@@ -29,6 +29,25 @@ export function isStale(lastOkAt: string | null, expectedEvery: string, now = Da
   return now - Date.parse(lastOkAt) > 2 * intervalMs(expectedEvery);
 }
 
+/** The last run of the job failed or was degraded: its last error is newer than its last clean run. */
+export function isFailing(lastOkAt: string | null, lastErrorAt: string | null): boolean {
+  if (!lastErrorAt) return false;
+  const err = Date.parse(lastErrorAt);
+  if (!Number.isFinite(err)) return false;
+  return !lastOkAt || !(Date.parse(lastOkAt) >= err);
+}
+
+/**
+ * Whether a failing job should turn /internal/status non-ok now rather than
+ * when it goes overdue. A job that runs daily or less often (the monthly
+ * Scorecard load) would otherwise sit failing for weeks before twice its
+ * interval passed; a frequent one gets another try within minutes, so for it
+ * the overdue rule stays the alarm and a single failure is only listed.
+ */
+export function failingAlerts(expectedEvery: string): boolean {
+  return intervalMs(expectedEvery) >= 86_400_000;
+}
+
 /** Postgres interval text ("00:15:00", "7 days", "31 days") -> ms. */
 export function intervalMs(v: string): number {
   let ms = 0;

@@ -28,7 +28,8 @@ const PER_PAGE = 100;
 export const SCORECARD_DATA_YEAR = "Scorecard latest";
 
 const PROGRAM = "latest.programs.cip_4_digit";
-export const SCORECARD_FIELDS = [
+/** The fields every run has asked for since the catalog was first loaded. */
+export const BASE_FIELDS = [
   "id", "ope8_id",
   "school.name", "school.alias", "school.city", "school.state", "school.zip", "school.school_url",
   "school.ownership", "school.locale", "school.carnegie_size_setting", "school.religious_affiliation",
@@ -48,10 +49,81 @@ export const SCORECARD_FIELDS = [
     `latest.cost.net_price.private.by_income_level.${b}`,
   ]),
   "latest.aid.pell_grant_rate", "latest.aid.federal_loan_rate", "latest.aid.median_debt.completers.overall",
+  // The rate Scorecard's own site shows and sorts by: Outcome Measures (all
+  // entering students, an award within 8 years) where reported, else the
+  // first-time full-time rate at 150% of normal time. Not a "6-year" rate.
   "latest.completion.consumer_rate", "latest.earnings.10_yrs_after_entry.median",
   `${PROGRAM}.code`, `${PROGRAM}.title`, `${PROGRAM}.credential.level`, `${PROGRAM}.counts.ipeds_awards2`,
   `${PROGRAM}.earnings.4_yr.overall_median_earnings`, `${PROGRAM}.debt.staff_grad_plus.all.eval_inst.median`,
 ];
+
+/** Race/ethnicity keys, as Scorecard names them under student.demographics.race_ethnicity. */
+export const RACE_KEYS = ["white", "black", "hispanic", "asian", "aian", "nhpi", "two_or_more", "non_resident_alien", "unknown"] as const;
+export type RaceKey = (typeof RACE_KEYS)[number];
+/** The completion fields spell three of the keys differently. */
+const COMPLETION_RACE_SUFFIX: Record<RaceKey, string> = {
+  white: "white",
+  black: "black",
+  hispanic: "hispanic",
+  asian: "asian",
+  aian: "aian",
+  nhpi: "nhpi",
+  two_or_more: "2ormore",
+  non_resident_alien: "nonresident.alien",
+  unknown: "race.unknown",
+};
+
+const COMPLETION = "latest.completion";
+const RETENTION = "latest.student.retention_rate_suppressed";
+const DEMOGRAPHICS = "latest.student.demographics";
+
+/**
+ * Added later, in groups. Every name is checked against the Scorecard data
+ * dictionary or the field list of Scorecard's own site
+ * (test/fixtures/scorecard-field-reference.json says which, with the
+ * dictionary's variable name). The API refuses a whole request that names a
+ * field it doesn't know, so when a run is refused the fetcher finds out which
+ * groups are at fault and carries on without them (scorecardFetcher).
+ */
+export const EXTENDED_FIELD_GROUPS = {
+  // IPEDS Graduation Rates, first-time full-time: four-year institutions
+  // (C100_4, C150_4) or less-than-four-year ones (C100_L4, C150_L4).
+  completion: [
+    `${COMPLETION}.completion_rate_4yr_100nt`,
+    `${COMPLETION}.completion_rate_4yr_150nt`,
+    `${COMPLETION}.completion_rate_less_than_4yr_100nt`,
+    `${COMPLETION}.completion_rate_less_than_4yr_150nt`,
+  ],
+  completionByRace4yr: RACE_KEYS.map((k) => `${COMPLETION}.completion_rate_4yr_150_${COMPLETION_RACE_SUFFIX[k]}`),
+  completionByRaceL4: RACE_KEYS.map((k) => `${COMPLETION}.completion_rate_l4yr_150_${COMPLETION_RACE_SUFFIX[k]}`),
+  students: [
+    `${RETENTION}.four_year.full_time_pooled`,
+    `${RETENTION}.lt_four_year.full_time_pooled`,
+    "latest.student.part_time_share",
+    "latest.student.grad_students",
+    `${DEMOGRAPHICS}.student_faculty_ratio`,
+  ],
+  demographics: [`${DEMOGRAPHICS}.women`, `${DEMOGRAPHICS}.men`, ...RACE_KEYS.map((k) => `${DEMOGRAPHICS}.race_ethnicity.${k}`)],
+  cost: ["latest.cost.roomboard.oncampus", "latest.cost.booksupply"],
+  outcomes: [
+    "latest.earnings.6_yrs_after_entry.median",
+    "latest.aid.median_debt.completers.monthly_payments",
+    "latest.aid.median_debt.noncompleters",
+  ],
+  carnegie: ["school.carnegie_basic"],
+} as const satisfies Record<string, readonly string[]>;
+
+export const EXTENDED_FIELDS: string[] = Object.values(EXTENDED_FIELD_GROUPS).flat();
+export const SCORECARD_FIELDS: string[] = [...BASE_FIELDS, ...EXTENDED_FIELDS];
+
+/** The college_stats columns the extended fields fill (migration 20261023080001). */
+export const EXTENDED_STAT_COLUMNS = [
+  "completion_basis", "grad_rate_on_time", "grad_rate_150", "completion_by_race",
+  "retention_rate", "part_time_share", "student_faculty_ratio", "grad_students", "demographics",
+  "room_board_on_campus", "books_supplies",
+  "median_earnings_6yr", "median_debt_monthly", "median_debt_noncompleters",
+  "carnegie_basic",
+] as const;
 
 export const INCOME_BANDS = ["0-30000", "30001-48000", "48001-75000", "75001-110000", "110001-plus"] as const;
 
@@ -70,9 +142,48 @@ const inRange = (v: unknown, lo: number, hi: number): number | null => {
   const n = int(v);
   return n === null || n < lo || n > hi ? null : n;
 };
+/** A count or dollar figure: rounded, and null when negative (the columns refuse it). */
+const nonNegative = (v: unknown): number | null => {
+  const n = int(v);
+  return n === null || n < 0 ? null : n;
+};
 const text = (v: unknown, max = 300): string | null =>
   typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
 const flag = (v: unknown): boolean => v === 1 || v === true;
+
+/** Named shares (0-1) from one record; anything that isn't a finite 0-1 number is left out. */
+function shares(r: Raw, field: (key: RaceKey | "women" | "men") => string, keys: readonly (RaceKey | "women" | "men")[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of keys) {
+    const v = rate(r[field(k)]);
+    if (v !== null) out[k] = v;
+  }
+  return out;
+}
+
+export type CompletionBasis = "four-year" | "less-than-four-year";
+
+/**
+ * The completion figures, all from one IPEDS cohort: a four-year institution
+ * reports C100_4 / C150_4 (within 4 and 6 years for a bachelor's), a
+ * less-than-four-year one C100_L4 / C150_L4 (100% and 150% of normal time for
+ * its programs, e.g. 3 years for an associate's). The cohort with an overall
+ * 150% rate wins, four-year first; the two are never mixed.
+ */
+export function completionOf(r: Raw): { basis: CompletionBasis | null; onTime: number | null; within150: number | null; byRace: Record<string, number> } {
+  const cohort = (fourYear: boolean) => ({
+    onTime: rate(r[`${COMPLETION}.completion_rate_${fourYear ? "4yr" : "less_than_4yr"}_100nt`]),
+    within150: rate(r[`${COMPLETION}.completion_rate_${fourYear ? "4yr" : "less_than_4yr"}_150nt`]),
+    byRace: shares(r, (k) => `${COMPLETION}.completion_rate_${fourYear ? "4yr" : "l4yr"}_150_${COMPLETION_RACE_SUFFIX[k as RaceKey]}`, RACE_KEYS),
+  });
+  const four = cohort(true);
+  const l4 = cohort(false);
+  const any = (c: typeof four) => c.onTime !== null || c.within150 !== null || Object.keys(c.byRace).length > 0;
+  const pick =
+    four.within150 !== null ? four : l4.within150 !== null ? l4 : any(four) ? four : any(l4) ? l4 : null;
+  if (!pick) return { basis: null, onTime: null, within150: null, byRace: {} };
+  return { basis: pick === four ? "four-year" : "less-than-four-year", ...pick };
+}
 
 export const CONTROL_BY_OWNERSHIP: Record<number, "public" | "private" | "private-for-profit"> = {
   1: "public",
@@ -185,6 +296,7 @@ export function mapScorecardSchool(r: Raw): MappedSchool | null {
     });
   }
 
+  const completion = completionOf(r);
   const admit = rate(r["latest.admissions.admission_rate.overall"]);
   const size = int(r["latest.student.size"]);
   const opeRaw = text(r.ope8_id, 10);
@@ -237,6 +349,28 @@ export function mapScorecardSchool(r: Raw): MappedSchool | null {
       median_debt: int(r["latest.aid.median_debt.completers.overall"]),
       grad_rate: rate(r["latest.completion.consumer_rate"]),
       median_earnings_10yr: int(r["latest.earnings.10_yrs_after_entry.median"]),
+      // Extended fields (EXTENDED_STAT_COLUMNS; migration 20261023080001).
+      completion_basis: completion.basis,
+      grad_rate_on_time: completion.onTime,
+      grad_rate_150: completion.within150,
+      completion_by_race: completion.byRace,
+      retention_rate:
+        rate(r[`${RETENTION}.four_year.full_time_pooled`]) ?? rate(r[`${RETENTION}.lt_four_year.full_time_pooled`]),
+      part_time_share: rate(r["latest.student.part_time_share"]),
+      student_faculty_ratio: inRange(r[`${DEMOGRAPHICS}.student_faculty_ratio`], 1, 200),
+      grad_students: nonNegative(r["latest.student.grad_students"]),
+      demographics: shares(
+        r,
+        (k) => (k === "women" || k === "men" ? `${DEMOGRAPHICS}.${k}` : `${DEMOGRAPHICS}.race_ethnicity.${k}`),
+        ["women", "men", ...RACE_KEYS]
+      ),
+      room_board_on_campus: nonNegative(r["latest.cost.roomboard.oncampus"]),
+      books_supplies: nonNegative(r["latest.cost.booksupply"]),
+      median_earnings_6yr: nonNegative(r["latest.earnings.6_yrs_after_entry.median"]),
+      median_debt_monthly: nonNegative(r["latest.aid.median_debt.completers.monthly_payments"]),
+      median_debt_noncompleters: nonNegative(r["latest.aid.median_debt.noncompleters"]),
+      // -2 not applicable and 0 not classified carry no class: null.
+      carnegie_basic: inRange(r["school.carnegie_basic"], 1, 99),
     },
     programs,
   };
@@ -245,21 +379,52 @@ export function mapScorecardSchool(r: Raw): MappedSchool | null {
 // ---- Fetching ---------------------------------------------------------------------
 
 export type FetchPage = (page: number) => Promise<{ total: number; results: Raw[] }>;
+/** A FetchPage that may have left out extended field groups Scorecard refused. */
+export type ScorecardFetchPage = FetchPage & { refusedGroups: () => string[] };
 
-/** A real fetch against the API, with backoff on 429 and 5xx. */
-export function scorecardFetcher(apiKey: string, opts: { baseUrl?: string; sleep?: (ms: number) => Promise<void> } = {}): FetchPage {
+/** A refused request. The message names the status and page only, never the body (it can echo the key). */
+export class ScorecardHttpError extends Error {
+  constructor(
+    readonly status: number,
+    page: number
+  ) {
+    super(`Scorecard returned ${status} for page ${page}`);
+    this.name = "ScorecardHttpError";
+  }
+}
+
+/**
+ * A real fetch against the API, with backoff on 429 and 5xx.
+ *
+ * The API answers 400 to a request that names any field it doesn't know, so a
+ * renamed or retired extended field would otherwise stop the whole load. On
+ * the first 400, the fetcher asks once for the base fields alone (a 400 there
+ * is a genuine failure and is thrown as before), then for the base fields plus
+ * each extended group in turn (one school each), keeps the groups that pass and
+ * re-asks for the page. `refusedGroups()` names what was left out, so the run
+ * records it and its heartbeat is not counted clean.
+ */
+export function scorecardFetcher(
+  apiKey: string,
+  opts: { baseUrl?: string; sleep?: (ms: number) => Promise<void>; fetchImpl?: typeof fetch } = {}
+): ScorecardFetchPage {
   const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  return async (page: number) => {
+  const doFetch = opts.fetchImpl ?? fetch;
+  let fields: string[] = SCORECARD_FIELDS;
+  let probed = false;
+  const refused: string[] = [];
+
+  const get = async (page: number, list: readonly string[], perPage = PER_PAGE) => {
     const url = new URL(opts.baseUrl ?? SCORECARD_API);
     url.searchParams.set("api_key", apiKey);
     url.searchParams.set("school.operating", "1");
     url.searchParams.set("school.degrees_awarded.predominant", "2,3,4");
-    url.searchParams.set("fields", SCORECARD_FIELDS.join(","));
-    url.searchParams.set("per_page", String(PER_PAGE));
+    url.searchParams.set("fields", list.join(","));
+    url.searchParams.set("per_page", String(perPage));
     url.searchParams.set("page", String(page));
     url.searchParams.set("sort", "id");
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+      const res = await doFetch(url, { signal: AbortSignal.timeout(60_000) });
       if (res.ok) {
         const body = (await res.json()) as { metadata?: { total?: number }; results?: Raw[] };
         return { total: Number(body.metadata?.total ?? 0), results: body.results ?? [] };
@@ -269,13 +434,92 @@ export function scorecardFetcher(apiKey: string, opts: { baseUrl?: string; sleep
         await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000 * 2 ** attempt);
         continue;
       }
-      // The body can echo the request (and so the key); report the status only.
-      throw new Error(`Scorecard returned ${res.status} for page ${page}`);
+      throw new ScorecardHttpError(res.status, page);
     }
   };
+
+  const fetchPage = async (page: number) => {
+    try {
+      return await get(page, fields);
+    } catch (err) {
+      if (probed || !(err instanceof ScorecardHttpError) || err.status !== 400) throw err;
+      await get(0, BASE_FIELDS, 1);
+      const accepted: string[] = [];
+      const left: string[] = [];
+      for (const [name, group] of Object.entries(EXTENDED_FIELD_GROUPS)) {
+        try {
+          await get(0, [...BASE_FIELDS, ...group], 1);
+          accepted.push(...group);
+        } catch (e) {
+          if (!(e instanceof ScorecardHttpError) || e.status !== 400) throw e;
+          left.push(name);
+        }
+      }
+      // Only a probe that finished decides; one cut short by an outage is tried again on the next page.
+      probed = true;
+      refused.push(...left);
+      fields = [...BASE_FIELDS, ...accepted];
+      return get(page, fields);
+    }
+  };
+  return Object.assign(fetchPage, { refusedGroups: () => [...refused] });
+}
+
+function refusedGroupsOf(fetchPage: FetchPage): string[] {
+  const f = fetchPage as Partial<ScorecardFetchPage>;
+  return typeof f.refusedGroups === "function" ? f.refusedGroups() : [];
 }
 
 // ---- Writing ----------------------------------------------------------------------
+
+/**
+ * The college_stats upsert, surviving a database without migration
+ * 20261023080001 (applied by hand, possibly after the code). An upsert naming a
+ * missing column fails whole, which would stop every existing figure from
+ * refreshing; so when it is refused for one of the extended columns, it is
+ * retried once without them, and the miss is remembered for a few minutes so
+ * the run's later pages leave them out up front (the lib/deliveryInsert.ts
+ * pattern). `stripped` tells the run, which records it as degraded.
+ */
+type PgError = { code?: string; message: string };
+export type StatsUpsert = (rows: Raw[]) => PromiseLike<{ error: PgError | null }>;
+
+export const MISSING_STATS_COLUMNS_TTL_MS = 5 * 60_000;
+let statsColumnsMissingUntil = 0;
+
+/** For tests. */
+export function resetStatsColumnCache(): void {
+  statsColumnsMissingUntil = 0;
+}
+
+/** Postgres "undefined column" or PostgREST's schema-cache miss, naming one of the extended columns. */
+export function isMissingStatsColumn(error: PgError | null): boolean {
+  if (!error || (error.code !== "42703" && error.code !== "PGRST204")) return false;
+  return EXTENDED_STAT_COLUMNS.some((c) => new RegExp(`\\b${c}\\b`).test(error.message));
+}
+
+const withoutExtended = (row: Raw): Raw => {
+  const out = { ...row };
+  for (const c of EXTENDED_STAT_COLUMNS) delete out[c];
+  return out;
+};
+
+export async function upsertStats(
+  upsert: StatsUpsert,
+  rows: Raw[],
+  now: number = Date.now()
+): Promise<{ error: PgError | null; stripped: boolean }> {
+  if (now < statsColumnsMissingUntil) {
+    const { error } = await upsert(rows.map(withoutExtended));
+    return { error, stripped: true };
+  }
+  const first = await upsert(rows);
+  if (!isMissingStatsColumn(first.error)) return { error: first.error, stripped: false };
+  statsColumnsMissingUntil = now + MISSING_STATS_COLUMNS_TTL_MS;
+  const { error } = await upsert(rows.map(withoutExtended));
+  return { error, stripped: true };
+}
+
 
 type Existing = { id: string; unitid: number | null; slug: string; catalog_source: string };
 
@@ -284,8 +528,8 @@ export async function writePage(
   svc: SupabaseClient,
   schools: MappedSchool[],
   ingestedAt: string
-): Promise<{ upserted: number; skipped: number }> {
-  if (!schools.length) return { upserted: 0, skipped: 0 };
+): Promise<{ upserted: number; skipped: number; extendedColumnsMissing: boolean }> {
+  if (!schools.length) return { upserted: 0, skipped: 0, extendedColumnsMissing: false };
   const unitids = schools.map((s) => s.unitid);
   const { data: found, error } = await svc
     .from("colleges")
@@ -368,8 +612,8 @@ export async function writePage(
       source_verified_at: ingestedAt,
       updated_at: ingestedAt,
     }));
-  const { error: e5 } = await svc.from("college_stats").upsert(stats, { onConflict: "college_id" });
-  if (e5) throw new Error(`upsert stats: ${e5.code}`);
+  const written = await upsertStats((rows) => svc.from("college_stats").upsert(rows, { onConflict: "college_id" }), stats);
+  if (written.error) throw new Error(`upsert stats: ${written.error.code}`);
 
   // Fields of study: replace each school's set, so a program Scorecard dropped goes.
   const ids = stats.map((s) => s.college_id as string);
@@ -385,7 +629,7 @@ export async function writePage(
     if (e7) throw new Error(`insert fields: ${e7.code}`);
   }
 
-  return { upserted: stats.length, skipped: schools.length - stats.length };
+  return { upserted: stats.length, skipped: schools.length - stats.length, extendedColumnsMissing: written.stripped };
 }
 
 // ---- The run ----------------------------------------------------------------------
@@ -397,6 +641,12 @@ export type IngestOutcome = {
   skipped: number;
   pages: number;
   errors: string[];
+  /**
+   * Why the run loaded less than it should every time, not a passing fault:
+   * Scorecard refused extended fields, or college_stats lacks their columns.
+   * Also the first entries of `errors`. A run with any is not a clean heartbeat.
+   */
+  degraded: string[];
 };
 
 export async function runScorecardIngest(
@@ -419,6 +669,7 @@ export async function runScorecardIngest(
   let skipped = 0;
   let pages = 0;
   let total = Infinity;
+  let extendedColumnsMissing = false;
   for (let page = 0; page * PER_PAGE < total; page++) {
     if (opts.maxPages !== undefined && pages >= opts.maxPages) break;
     pages++;
@@ -431,6 +682,7 @@ export async function runScorecardIngest(
       const w = await writePage(svc, keep, ingestedAt);
       upserted += w.upserted;
       skipped += w.skipped;
+      if (w.extendedColumnsMissing) extendedColumnsMissing = true;
       log.info({ page, total, upserted }, "scorecard ingest: page written");
       if (body.results.length === 0) break;
     } catch (err) {
@@ -441,6 +693,17 @@ export async function runScorecardIngest(
     }
   }
 
+  const degraded: string[] = [];
+  const refused = refusedGroupsOf(fetchPage);
+  if (refused.length) {
+    degraded.push(`Scorecard refused extended fields (${refused.join(", ")}); loaded without them`);
+    log.error({ refused: refused.map((g) => [g, ...EXTENDED_FIELD_GROUPS[g as keyof typeof EXTENDED_FIELD_GROUPS]]) }, "scorecard ingest: extended fields refused");
+  }
+  if (extendedColumnsMissing) {
+    degraded.push("college_stats lacks the extended columns; apply migration 20261023080001");
+    log.error({}, "scorecard ingest: college_stats extended columns missing; apply 20261023080001");
+  }
+  errors.unshift(...degraded);
   const status: IngestOutcome["status"] = errors.length === 0 ? "succeeded" : upserted > 0 ? "partial" : "failed";
   if (runId) {
     await svc
@@ -455,5 +718,5 @@ export async function runScorecardIngest(
       })
       .eq("id", runId);
   }
-  return { runId, status, upserted, skipped, pages, errors };
+  return { runId, status, upserted, skipped, pages, errors, degraded };
 }
