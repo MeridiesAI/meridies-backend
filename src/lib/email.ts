@@ -64,6 +64,11 @@ type SendEmailArgs = DeliveryColumns & {
    * was sent: an email whose text carries a one-time link records this instead.
    */
   recordText?: string;
+  /**
+   * Resend's Idempotency-Key: a retry with the same key within 24 hours is
+   * answered from the first send instead of mailing again.
+   */
+  idempotencyKey?: string;
   logger?: Logger;
 };
 
@@ -135,6 +140,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
         headers: {
           Authorization: `Bearer ${env.RESEND_API_KEY}`,
           "Content-Type": "application/json",
+          ...(args.idempotencyKey ? { "Idempotency-Key": args.idempotencyKey.slice(0, 256) } : {}),
         },
         body: JSON.stringify({ from: env.INVITE_FROM_EMAIL, to: [to], subject, html, text }),
       });
@@ -442,6 +448,8 @@ type SendInviteArgs = {
   note?: string | null;
   /** v10 sync (overview): a referred family is invited, not a student. */
   audience?: "student" | "family";
+  /** Passed to Resend (see SendEmailArgs.idempotencyKey). */
+  idempotencyKey?: string;
 };
 
 export async function sendInviteEmail(
@@ -474,6 +482,7 @@ export async function sendInviteEmail(
     student_id: studentId,
     invitation_id: invitationId,
     recipient_kind: "student",
+    idempotencyKey: args.idempotencyKey,
     logger,
   });
 
