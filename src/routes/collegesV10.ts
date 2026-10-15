@@ -531,7 +531,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     if (list.length > 12) throw badRequest("Compare up to 12 schools at a time");
     if (list.some((id) => !z.string().uuid().safeParse(id).success)) throw badRequest("ids takes college ids");
 
-    const [colleges, facts, aid, ratings, bands, admitted, lists] = await Promise.all([
+    const [colleges, facts, aid, ratings, bands, admitted, lists, photos] = await Promise.all([
       request.db.from("colleges").select("*").in("id", list),
       request.db.from("college_profile_facts").select("*").in("college_id", list),
       request.db.from("college_aid_profiles").select("*").in("college_id", list),
@@ -539,9 +539,10 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       request.db.from("college_aid_band_ratings").select("*").in("college_id", list).order("sort_order"),
       request.db.from("college_admitted_profiles").select("*").in("college_id", list),
       request.db.from("college_list_profiles").select("college_id, campus_setting").in("college_id", list),
+      // Never throws, so it stays out of the error check below.
+      loadCollegePhotos(request.db, list, request.log),
     ]);
     for (const r of [colleges, facts, aid, ratings, bands, admitted, lists]) if (r.error) throw fromPostgrest(r.error);
-    const photos = await loadCollegePhotos(request.db, list, request.log);
 
     const by = (rows: unknown) => {
       const m = new Map<string, Row[]>();

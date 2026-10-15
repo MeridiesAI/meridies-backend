@@ -73,7 +73,7 @@ export default async function collegeRoutes(app: FastifyInstance) {
   app.get("/colleges/:id", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
 
-    const [college, intel, stats, aid, rating, bandRatings, cds, requirements, flags] =
+    const [college, intel, stats, aid, rating, bandRatings, cds, requirements, flags, photos] =
       await Promise.all([
         request.db.from("colleges").select("*").eq("id", id).maybeSingle(),
         request.db.from("college_intel_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -110,12 +110,12 @@ export default async function collegeRoutes(app: FastifyInstance) {
           .is("college_major_id", null)
           .order("severity")
           .limit(50),
+        // Never throws: a missing table or a failed read is no photo.
+        loadCollegePhotos(request.db, [id], request.log),
       ]);
 
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
-    // After the 404, so an unknown id costs no photo read. Never throws.
-    const photos = await loadCollegePhotos(request.db, [id], request.log);
 
     const cdsRows = (cds.data ?? []) as Row[];
     const latestCdsYear = cdsRows.length
