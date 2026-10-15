@@ -87,6 +87,20 @@ export function stripHtml(html: unknown): string {
     .trim();
 }
 
+/**
+ * One cell of the dry-run review CSV. A cell that a spreadsheet would read as
+ * a formula (it starts with = + - @, a tab or a carriage return, after any
+ * leading spaces) gets a leading apostrophe, the OWASP CSV-injection rule:
+ * the credit and the title come from Commons, where anyone can write them,
+ * and the team opens this file in Excel or Sheets. Then the usual quoting for
+ * a comma, a quote or a line break.
+ */
+export function csvCell(v: string | number): string {
+  let s = String(v);
+  if (typeof v === "string" && /^[ ]*[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 // ---- Titles --------------------------------------------------------------------------
 
 /**

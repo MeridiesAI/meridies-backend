@@ -26,6 +26,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  csvCell,
   loadPicks,
   runCollegePhotoIngest,
   supabasePhotoStore,
@@ -70,11 +71,6 @@ const log = {
   error: (o: object, m?: string) => console.error(m ?? "", JSON.stringify(o)),
 };
 const NO_SCHEMA = "Apply supabase/migrations/20261023070001_college_photos.sql first.";
-
-const csvCell = (v: string | number) => {
-  const s = String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
 
 function report(outcome: PhotoOutcome | null): never {
   if (!outcome) {
