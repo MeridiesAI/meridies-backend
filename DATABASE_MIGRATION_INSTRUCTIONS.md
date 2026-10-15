@@ -221,3 +221,49 @@ select to_regclass('public.ai_attachments');                                    
 select id, public from storage.buckets where id = 'axis-attachments';                  -- 1 row, public = false
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
 ```
+
+---
+
+# Import pipeline step 2 (CSV/XLSX path): three more migrations
+
+Apply after every earlier file, in this order, the same way (paste each file whole into the SQL
+editor, or the Management API; rehearse on a staging copy first). All three are additive: they add
+columns and functions, re-create one trigger function as a superset, and delete nothing. Applying
+them before the code is safe (nothing calls the new functions, and the old roster flow keeps
+working). The code is safe before them too: every step-2 route answers
+`503 { code: "imports_unavailable" }`, `GET /imports` answers `{ available: false }`, and Ready to
+apply, commit, undo and the status poll keep working. None of it is in `REQUIRED_SCHEMA`.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023020001_imports_step2_schema.sql` | `roster_imports.plan`, `stats`, `staged_at`, `invites_held_reason`, `invites_approved_at`; `import_files.row_count`; `import_items.flags` and `invite_claimed_at` (and `invite_state` gains `sending`); `import_changes.alternatives`, `source_column`, `flags`. Re-creates `private.roster_imports_guard_client()`: every new column is client-proof, and a row `start_import` created is the API's alone (no client update or delete). Adds `import-mapping` and `import-cleanup` to `ai_runs_module_check`, additively |
+| 2 | `20261023020002_imports_step2_functions.sql` | The import worker's functions (register a file, the plan, templates, AI spend, the roster for matching, staging) and the helpers they share. EXECUTE to `import_worker` and `service_role` only |
+| 3 | `20261023020003_imports_step2_review.sql` | What the browser may call (`start_import`, review decisions, discard, templates, the invitation claim), the review reads, retention for the sweep, and `imports_step2_ready()` last. Replaces `request_import_commit(uuid)` with `request_import_commit(uuid, integer default null)` (the invitation count); calls with only `p_import` keep working |
+
+Check:
+
+```sql
+select to_regprocedure('public.imports_step2_ready()') is not null;                  -- true
+select to_regprocedure('public.stage_import(uuid,uuid,jsonb)') is not null;          -- true
+select plan, stats from public.roster_imports limit 0;                                -- no error
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
+select pg_get_constraintdef(oid) from pg_constraint
+ where conname = 'ai_runs_module_check';                                              -- includes import-mapping
+```
+
+Settings outside the database (Railway): `IMPORTS_ROLLOUT` (default `pilot`) and `IMPORTS_PILOT`
+(firm ids or solo counselor ids) decide who sees the Import page; `IMPORTS_AI=off` is the kill switch
+for the AI column mapping. `IMPORT_DATABASE_URL` and the `/internal/imports/sweep` cron must already
+be in place (step 1). Leave `IMPORT_HOLD_EXPIRY_ENABLED` unset until the app's Ready to apply page is
+live in production, then run the grace update below first, so nothing held since step 1 expires
+unseen:
+
+```sql
+update public.import_items
+   set held_until = greatest(held_until, now() + interval '14 days'), hold_warned_at = null
+ where match_status = 'awaiting_counselor';
+```
+
+A counselor's first import that would send more than 50 invitations saves its data but holds the
+invitations; an email goes to `ACCESS_REVIEW_EMAIL`. Approve by hand:
+`update public.roster_imports set invites_approved_at = now() where id = '<import id>';`

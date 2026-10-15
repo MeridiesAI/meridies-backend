@@ -115,6 +115,15 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 - [ ] **Leaked-password protection**: Supabase Auth > Attack Protection. Needs the Supabase Pro plan;
   the project is on Free, which also has no daily backups. The upgrade is pending a team decision.
 
+- [ ] **Import pipeline step 2 (the Import page)**: apply `20261023020001`-`20261023020003`
+  (`DATABASE_MIGRATION_INSTRUCTIONS.md`); confirm `IMPORT_DATABASE_URL` (logs in as `import_worker`
+  through the session pooler) and the `/internal/imports/sweep` cron (every 5 to 15 minutes, which now
+  also runs retention); set `IMPORTS_PILOT` to the pilot practices' ids (`IMPORTS_ROLLOUT` defaults to
+  `pilot`; `all` once spec §13's blockers are cleared: five real anonymized exports tested and
+  Anthropic zero data retention confirmed in writing). Changing the pilot list needs a redeploy.
+  Leave `IMPORT_HOLD_EXPIRY_ENABLED` unset until the app's Ready to apply page is live, then run the
+  grace update in the runbook and set it to `true`.
+
 ---
 
 ## P2: production smoke test

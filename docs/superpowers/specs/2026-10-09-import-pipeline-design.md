@@ -513,12 +513,19 @@ MM/DD from DD/MM, without values. Headers that look like personal names are
 masked too (§5.2).
 
 ### 7.3 Parsing hardening
-- Parse in a `worker_threads` worker with `resourceLimits` (heap cap) and a
-  wall-clock timeout; kill on breach.
+- Parse in a separate process with its own heap cap and a wall-clock
+  timeout; kill on breach. (Amended in v1.0: a forked child process, not a
+  `worker_threads` worker, because a process-wide `--max-old-space-size`, as
+  hosts set through NODE_OPTIONS, silently overrides a worker's
+  `resourceLimits`.)
 - Enforce an uncompressed-size cap on XLSX (zip bomb) and disable external
   entities / entity expansion in XML parsing.
-- Library: `exceljs` (or SheetJS's own CDN build), **not** npm `xlsx`, which is
-  stuck at 0.18.5 with known prototype-pollution and ReDoS issues.
+- Library: `read-excel-file` (its `universal` build: fflate for the zip,
+  saxen for XML, which expands no entities) and `csv-parse`, **not** npm
+  `xlsx`, which is stuck at 0.18.5 with known prototype-pollution and ReDoS
+  issues. (Amended in v1.0: `exceljs` has been unmaintained since 2023. The
+  parser reads only the XML parts the zip guard checked, stored uncompressed,
+  so it never re-reads the original archive.)
 - File type from magic bytes, not the declared MIME type.
 
 ### 7.4 Sensitive values
@@ -799,3 +806,45 @@ through `import_fields.value_type` (§4.2).
   permission checkbox; first-customer tools first in real-file tests;
   sensitive-data categories; lawyer checks state laws for the family launch;
   starter templates as a follow-up.
+
+## Appendix E. v1.0 as built (step 2, the CSV/XLSX path)
+
+What shipped differs from the design above in these places; AGENTS.md
+("Import pipeline (step 2)") is the operational reference.
+
+- **Parsing** runs in a forked child process (see §7.3, amended), with a
+  256 MB heap, a 20 s kill and an environment holding only PATH.
+- **Rollout** (§11) is an environment flag: `IMPORTS_ROLLOUT=off|pilot|all`
+  and `IMPORTS_PILOT` (firm or solo counselor ids). Changing the pilot list
+  needs a redeploy. `IMPORTS_AI=off` is the AI kill switch.
+- **Statuses.** A new-pipeline import uses `draft` while files are added (the
+  bucket's insert policy needs it), `mapping` once a plan is stored,
+  `staging`, `review`, then step 1's. `profiling` is unused: profiling happens
+  while registering each file. A new-pipeline row is told apart by
+  `permission_confirmed_at`, and the client guard refuses any client change
+  to one.
+- **The column mapping** sits under the practice's "reading uploaded
+  documents" switch. The model never sees a sheet's name (tabs and files can
+  be named after a student), and a score column's test name comes from the
+  file's header, not the model.
+- **Invitations** are claimed per item (`invite_state = 'sending'`), tied to
+  their invitation before the email is sent, and carry the Resend idempotency
+  key `import-invite/<item_id>/<invitation_id>` (the invitation id is part of
+  the key because a retry after a failure sends a new invitation). Only the
+  uploader sends them. One invitation per address per import: siblings on a
+  parent's email are skipped, and the counselor may invite one of them.
+- **Staff approval** (§5.1) is by hand: a first import over 50 invitations is
+  saved, its invitations wait until `invites_approved_at` is set, and one
+  email goes to `ACCESS_REVIEW_EMAIL`.
+- **Retention** (§5.10) runs on every sweep, outside
+  `IMPORT_HOLD_EXPIRY_ENABLED` (which still holds back the 30-day expiry of
+  accepted data and its warnings until the app's Ready to apply page ships).
+  Invitations never sent expire 14 days after the save.
+- **old_source** for a stored value no import wrote is recorded as `student`
+  (nothing says who typed it; the safest reading), so it defaults to
+  `keep_old` and sorts first.
+- **Deferred:** AI cell cleanup (§5.5; the `import-cleanup` label exists),
+  pausing on bounce or complaint rates (§6.5), the §12 metrics dashboard,
+  PDFs (v1.1), direct Google Sheets, shared starter templates, `high_school`
+  and `grad_year` as import targets, and template management beyond list and
+  delete. Header presets stay conservative until the §13 real files arrive.
