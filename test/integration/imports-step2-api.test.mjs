@@ -3,8 +3,8 @@
 // layout, stage, review, commit with the invitation count, invitations,
 // acceptance into Ready to apply, undo, and the old roster routes staying out
 // of the new pipeline's way. Needs IMPORTS_ROLLOUT=all on the API.
-import { API, CRON_SECRET, call, check, rest, sql, user } from "./harness.mjs";
-import { academics, addImportFile, enc, q, studentOf, waitStatus } from "./imports-helpers.mjs";
+import { call, check, rest, sql, user } from "./harness.mjs";
+import { academics, addImportFile, enc, q, runSweep, studentOf, waitStatus } from "./imports-helpers.mjs";
 
 const c = await user("imp2-api");
 const tag = Date.now();
@@ -191,9 +191,8 @@ check("another counselor can't delete the layout", (await call(other.token, "DEL
 check("its owner can", (await call(c.token, "DELETE", `/imports/templates/${tpl}`)).status === 200);
 
 // ---- the sweep: retention ---------------------------------------------------------------------
-const sweep = await fetch(`${API}/internal/imports/sweep`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
-const sweepBody = await sweep.json();
-check("the sweep runs retention", sweep.status === 200 && sweepBody.retention?.ran === true, JSON.stringify(sweepBody));
+const sweep = await runSweep();
+check("the sweep runs retention", sweep.status === 200 && sweep.body.retention?.ran === true, JSON.stringify(sweep.body));
 check("raw files of a saved import are deleted", (await sql(`select count(*) from public.import_files where import_id = '${imp}' and deleted_at is null`)) === "0");
 check("and gone from the bucket", (await sql(`select count(*) from storage.objects where bucket_id = 'imports' and name like '${q(c.id)}/${imp}/%'`)) === "0");
 check("masked samples are wiped after commit", (await sql(`select count(*) from public.import_files where import_id = '${imp}' and profile is not null`)) === "0");

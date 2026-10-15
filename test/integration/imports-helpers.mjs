@@ -119,3 +119,15 @@ export async function workerSql(query) {
   const { execFileSync } = await import("node:child_process");
   return execFileSync(process.env.PSQL ?? "psql", [url, "-tAc", query], { stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
 }
+
+/** POST /internal/imports/sweep, waiting out another suite's sweep (409 while its lease is held). */
+export async function runSweep() {
+  const { API, CRON_SECRET } = await import("./harness.mjs");
+  for (let i = 0; i < 30; i++) {
+    const r = await fetch(`${API}/internal/imports/sweep`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+    const body = await r.json();
+    if (r.status !== 409) return { status: r.status, body };
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  throw new Error("the import sweep stayed busy");
+}

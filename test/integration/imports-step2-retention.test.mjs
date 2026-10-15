@@ -4,13 +4,10 @@
 // to mapping; objects nobody registered go after 24 hours; and before the
 // step-2 migrations the sweep still beats, skipping retention.
 import { randomUUID } from "node:crypto";
-import { API, CRON_SECRET, call, check, rest, sql, user } from "./harness.mjs";
-import { addImportFile, enc, stagedImport, studentOf, waitStatus } from "./imports-helpers.mjs";
+import { call, check, rest, sql, user } from "./harness.mjs";
+import { addImportFile, enc, runSweep, stagedImport, studentOf, waitStatus } from "./imports-helpers.mjs";
 
-const sweep = async () => {
-  const r = await fetch(`${API}/internal/imports/sweep`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
-  return { status: r.status, body: await r.json() };
-};
+const sweep = runSweep;
 const tag = Date.now();
 const mail = (n) => `${n}-${tag}@test.local`;
 
