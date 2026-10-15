@@ -97,6 +97,7 @@ declare
   v_n integer;
   v_dec text;
   v_stats jsonb;
+  v_src text;
 begin
   v := private.import_v2_lock(p_import, v_me, array['review']);
   if p_body is null or jsonb_typeof(p_body) <> 'object' then
@@ -139,16 +140,16 @@ begin
      where id = ch.id;
     -- 'intake': the value is still exactly what the student's questionnaire
     -- wrote (20261023010003), the same reading private.import_assess makes.
+    select case when private.import_absent(c.old_value) then 'empty'
+                when c.op = 'set_field'
+                     and private.intake_owns_current(it.student_id, c.target_table, c.field, c.old_value) then 'intake'
+                else 'student' end
+      into v_src
+      from public.import_changes c where c.id = ch.id;
     update public.import_changes c
-       set old_source = case when c.op = 'insert_row' then null else src.v end,
-           risk = private.import_risk(f.sensitivity, src.v, f.value_type, c.old_value, c.new_value, it.match_confidence)
+       set old_source = case when c.op = 'insert_row' then null else v_src end,
+           risk = private.import_risk(f.sensitivity, v_src, f.value_type, c.old_value, c.new_value, it.match_confidence)
       from public.import_fields f
-      cross join lateral (
-        select case when private.import_absent(c.old_value) then 'empty'
-                    when c.op = 'set_field'
-                         and private.intake_owns_current(it.student_id, c.target_table, c.field, c.old_value) then 'intake'
-                    else 'student' end as v
-      ) src
      where c.id = ch.id and f.target_table = c.target_table and f.field = c.field;
   end loop;
 
