@@ -18,6 +18,7 @@ import { serviceClient } from "../supabase.js";
 import { assertNoIdentity, briefHash, identityTokens, IdentityLeakError, toResearchBrief, type ResearchBrief } from "./brief.js";
 import { researchFakeAllowed, type FakeEnv } from "./bootGuard.js";
 import { keepCandidates } from "./citations.js";
+import { repeatsFor, type RepeatOf } from "./repeats.js";
 import { fakeSeam } from "./fake.js";
 import {
   buildMatchPrompt, buildResearchQuestion, dropStudentInfoInSuggestions, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
@@ -35,6 +36,13 @@ export type RecommendationDto = {
   sources: { url: string; title: string | null; checkedAt: string }[];
   status: "suggested" | "accepted" | "dismissed";
   acceptedAs: { type: "student_college" | "task"; id: string } | null;
+  createdAt: string;
+  /**
+   * Set only on a `suggested` row that repeats another (`lib/research/repeats.ts`): `suggested` points at the newest
+   * copy, which stands for this one (a list shows the newest only); `accepted` points at the accepted row whose
+   * college-list row or task still exists (Accept is refused with 409 `already_accepted`; Dismiss still works).
+   */
+  repeatOf: RepeatOf | null;
 };
 
 export type ResearchResponse = {
@@ -125,10 +133,19 @@ export function toDto(r: Row): RecommendationDto {
     sources: r.sources as RecommendationDto["sources"],
     status: r.status as RecommendationDto["status"],
     acceptedAs: (r.accepted_as as RecommendationDto["acceptedAs"]) ?? null,
+    createdAt: r.created_at as string,
+    repeatOf: null,
   };
 }
 
-export const REC_COLUMNS = "id, feature, title, why, details, sources, status, accepted_as";
+export const REC_COLUMNS = "id, feature, title, why, details, sources, status, accepted_as, created_at";
+
+/** Each row with its `repeatOf`, decided against the student's other suggested and accepted rows (caller's client). */
+export async function withRepeats(request: FastifyRequest, studentId: string, recs: RecommendationDto[]): Promise<RecommendationDto[]> {
+  if (!recs.length) return recs;
+  const marks = await repeatsFor(request, studentId, recs);
+  return recs.map((r) => ({ ...r, repeatOf: marks.get(r.id) ?? null }));
+}
 
 /** When the sources were checked: the earliest check on the run's recommendations, else when the run was made. */
 function checkedAtOf(recs: RecommendationDto[], fallback: string): string {
@@ -192,7 +209,7 @@ export async function runResearch(
         .order("created_at", { ascending: false });
       if (recError) throw fromPostgrest(recError);
       // A run whose answer held no candidates at all is cached too (see expiryFor); one that lost them downstream isn't.
-      const recommendations = (rows ?? []).map((r) => toDto(r as Row));
+      const recommendations = await withRepeats(request, studentId, (rows ?? []).map((r) => toDto(r as Row)));
       return { runId: hit.id as string, checkedAt: checkedAtOf(recommendations, hit.created_at as string), cached: true, recommendations, contextUsed };
     }
   }
@@ -318,6 +335,12 @@ export async function runResearch(
     const counts: RunCounts = { parts: result.parts.length, objects, parsed: candidates.length, kept: kept.length, picked: drafts.length, stored: recommendations.length };
     request.log.info({ runId, counts }, "research run counts");
     await finish("succeeded", null, expiryFor(counts));
+    // The run is paid for and stored; a failed repeat read must not lose it. Accept still refuses a repeat on its own.
+    try {
+      recommendations = await withRepeats(request, studentId, recommendations);
+    } catch (err) {
+      request.log.error({ runId, code: err instanceof HttpError ? err.statusCode : undefined }, "research repeat marks failed");
+    }
     return { runId, checkedAt: checkedAtOf(recommendations, created.created_at as string), cached: false, recommendations, contextUsed };
   } catch (err) {
     // Discarded and refused runs are already settled; anything else is a failure with a code, never a message.
