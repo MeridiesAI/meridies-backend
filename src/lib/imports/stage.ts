@@ -18,7 +18,7 @@
 import type { FastifyRequest } from "fastify";
 import { badRequest, conflict, HttpError } from "../errors.js";
 import { serializeErr } from "../requestLog.js";
-import { MAX_ROWS } from "./caps.js";
+import { MAX_PARSED_CHARS, MAX_ROWS } from "./caps.js";
 import { withWorkerTransaction } from "./db.js";
 import { fromImportRpc } from "./errors.js";
 import { loadFields } from "./fields.js";
@@ -61,12 +61,22 @@ export async function stageImport(request: FastifyRequest, importId: string): Pr
     if (error) throw new Error("files unreadable");
     const used = new Set(check.plan.sheets.map((s) => s.fileId));
     const parsed: ParsedFile[] = [];
+    // Every file's cells are held here at once, so the files share one
+    // character budget: each parse gets what the earlier ones left.
+    let chars = 0;
     for (const f of (paths ?? []) as Row[]) {
       if (!used.has(String(f.id))) continue;
       const { data: blob, error: dlErr } = await request.db.storage.from("imports").download(String(f.storage_path));
       if (dlErr || !blob) throw new HttpError(409, `${String(f.filename)} is no longer available. Start a new import.`);
-      const out = await parseInWorker(new Uint8Array(await blob.arrayBuffer()), String(f.filename), { maxRows: MAX_ROWS });
-      if (!out.ok) throw new HttpError(400, parseFailureMessage(out.reason, String(f.filename)));
+      const out = await parseInWorker(new Uint8Array(await blob.arrayBuffer()), String(f.filename), {
+        maxRows: MAX_ROWS,
+        maxChars: MAX_PARSED_CHARS - chars,
+      });
+      if (!out.ok) {
+        const reason = out.reason === "too-large-unpacked" && chars > 0 ? "import-too-large" : out.reason;
+        throw new HttpError(400, parseFailureMessage(reason, String(f.filename)));
+      }
+      chars += out.chars;
       parsed.push({ fileId: String(f.id), filename: String(f.filename), sheets: out.sheets });
     }
 

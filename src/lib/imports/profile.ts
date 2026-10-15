@@ -47,7 +47,12 @@ export type SheetProfile = {
   columns: ColumnProfile[];
 };
 
-export type FileProfile = { fingerprint: string; sheets: SheetProfile[] };
+export type FileProfile = {
+  fingerprint: string;
+  sheets: SheetProfile[];
+  /** Characters the parse handed back (headers and cells), toward the import's budget (caps.ts). */
+  chars?: number;
+};
 
 const SAFE_RANGE_MAX = 2100;
 const SLASH = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/;
