@@ -46,6 +46,7 @@ src/
 │   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
 │   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
+│   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
 │   ├── oauth.ts           # Google/Microsoft OAuth (code + PKCE), token refresh/revoke
@@ -175,6 +176,23 @@ after the code that reads the old shape has shipped. Never `--include-all` on
 production: a file older than production's newest version gets a new
 timestamp. The CLI version is pinned in both workflows (a unit test checks they
 match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
+
+**Merged but not yet applied to production.** Everything after
+`20261022000001`: the questionnaire sync (`20261023010001`-`04`), import
+pipeline step 2 (`20261023020001`-`03`), caseload transfer
+(`20261023030001`-`03`), campus photos (`20261023070001`) and emailed meeting
+invites (`20261023090001`). They go in later, in filename order
+(`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
+`REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
+route works as before (origin/main's persona suites pass against a database
+that has none of them), and each new feature says it isn't switched on yet
+rather than failing: `503 imports_unavailable` (and `GET /imports` reads
+`available: false`), `503 caseload_transfer_unavailable` (removing a firm
+member falls back to the old function), `invites: { status: "unavailable" }`
+on meetings, `photo: null` on colleges, `fromQuestionnaire: []` and
+`transferredFrom: null` on the info card, and a questionnaire save that copies
+nothing. Keep it that way until they are applied: a feature that needs one of
+these files degrades, it never 500s.
 
 **The v10 sync added 24 migrations (`20261005*`)**, applied by hand on
 2026-10-06 before the workflow existed. `DATABASE_MIGRATION_INSTRUCTIONS.md`
@@ -421,9 +439,11 @@ the database (`20261010*`):
   and `/me/overview` (info card keys still as the questionnaire left them)
   and `source` plus `fromQuestionnaire` on each `GET /application/sheets`
   row, read through `intake_filled_fields(p_student)` (`can_view_student`),
-  degrading to no marks without the migration. `20261023010004` backfilled
-  everyone who had answered; `select private.backfill_intake_answers();` (or
-  `('<student id>')`) re-runs it safely and skips archived students. Data
+  degrading to no marks without the migration. `20261023010004` backfills
+  everyone who has answered when it is applied (not yet in production);
+  `select private.backfill_intake_answers();` (or `('<student id>')`) re-runs
+  it safely and skips archived students. Before `20261023010002` a save
+  stores the answers as it always did and copies nothing. Data
   the student reports clears the matching setup steps (`lib/studentSetup.ts`)
   like any other data, before the counselor has checked it.
 - **Files is "My documents".** A student lists, uploads into and pastes links
@@ -1661,9 +1681,16 @@ step 1's and is never gated.
   `possible_duplicate`; an empty field fills (`auto` on a high-confidence
   email match, else `accept`); a value an earlier import from the same
   `source_system` or template wrote, unedited since, is `accept`; anything
-  else `keep_old` (an unknown author counts as the student). Conflicting
-  values in one file are one change flagged `conflict_in_file` with its
-  `alternatives`.
+  else `keep_old` (an unknown author counts as the student), except a value
+  the student's onboarding questionnaire wrote and nobody changed since,
+  which is `accept` with old source `intake` (`private.intake_owns_current`,
+  the same rule as Ready to apply; a review fix reads it the same way).
+  Conflicting values in one file are one change flagged `conflict_in_file`
+  with its `alternatives`. `student_academics.gpa_band` and the `profiles`
+  and `awards` rows are on `import_fields` for the questionnaire only: no
+  column maps to them (`QUESTIONNAIRE_ONLY` in `lib/imports/fields.ts`,
+  refused by `validatePlan`), though `values.ts` validates their types and
+  `import_row_presence` knows the award key (name and year).
 - **Invitations** (`invitations.ts`): only the uploader sends (accepting makes
   the inviter the counselor), so a firm admin gets 403. Items are claimed
   (`invite_state = 'sending'`, SKIP LOCKED; a claim older than ten minutes
@@ -1744,7 +1771,9 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   carrier import owned by the student's receiver (no import function
   changes). Practice items (pending invitations, imports, templates, the firm
   pipeline rows they made) move only with the whole caseload and when the
-  consultant is leaving. "Transfer and remove" removes the member inside the
+  consultant is leaving, and not while one of their imports is saving or its
+  invitations are being sent (a fresh step-2 `sending` claim finishes only for
+  the uploader): 409, try again in a few minutes. "Transfer and remove" removes the member inside the
   same transaction. A transfer is recorded in `caseload_transfers` /
   `caseload_transfer_students` and `audit_log`.
 - **No addresses from SQL.** The functions return ids and names; the API
@@ -1821,7 +1850,9 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   the answer parser, the match validation and the boot check), the
   counselor approval gate (`access`, `access-review`, `service-callsites`),
   the questionnaire sync's read side and activity-type list (`intake-sync`),
-  the import pipeline (`import-*`: parsing and the zip guard, the capped
+  caseload transfer bodies and answers (`caseload-transfer`), campus photos
+  (`college-photos*`), /health's key check (`anthropic-key-check`), the
+  import pipeline (`import-*`: parsing and the zip guard, the capped
   child process, profile and masking, sensitive values, the plan and presets,
   the AI mapping with its spend, rows and matching, values, rollout),
   meeting invites (`ics`, `meeting-invites`, `email-attachments`,
@@ -1833,7 +1864,7 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   hidden tasks), `research-api` (the routes, with the test double),
   `intake-sync` and `intake-held-backfill` (the questionnaire, every field
   and rule, against held imports, and the backfill),
-  `meeting-invites` (emailed calendar invites), the
+  `meeting-invites` (emailed calendar invites), `college-photos`, the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`), the import pipeline (`imports-*`; step 2's
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,

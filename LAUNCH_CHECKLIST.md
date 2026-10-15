@@ -46,9 +46,14 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   `production-db` has required reviewers), turn on Railway's "Wait for CI", then do one manual run with
   apply off and read the plan before anything is applied. Until the secrets exist the workflow skips
   with a notice and migrations are applied by hand.
-- [ ] **Meeting invites migration** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, last section). Apply
-  `20261023090001_meeting_calendar_invites.sql` before or after the code; until it is in, "Email
-  calendar invites" answers that invites aren't switched on yet and nothing is emailed.
+- [ ] **The twelve migrations after `20261022000001`** (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet
+  applied"): the questionnaire sync, import pipeline step 2, caseload transfer, campus photos and emailed
+  meeting invites. Merged ahead of the database on purpose and not applied yet; apply them in that
+  section's order, after a backup, when the team decides. Until then each feature says it isn't switched
+  on yet (meetings: "Email calendar invites" answers that invites aren't switched on and nothing is
+  emailed; imports and caseload transfer answer 503 with a code; photos read null) and nothing else
+  changes. Applying `20261023030003` changes one existing behaviour: removing a firm member who still
+  has students is refused until their caseload is transferred or released.
 
 ### Railway variables
 

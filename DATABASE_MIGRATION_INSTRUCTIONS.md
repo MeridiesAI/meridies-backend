@@ -337,7 +337,91 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 ---
 
-# Import pipeline step 2 (CSV/XLSX path): three more migrations
+# Not yet applied: everything after `20261022000001`
+
+These twelve files are merged ahead of production's database on purpose: the code was written to
+run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
+plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
+unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
+`/health` stays green and Railway keeps deploying.
+
+What works without them: every existing screen and route, unchanged (the persona suites from before
+these files pass against a database that has none of them). Each new feature answers that it isn't
+switched on yet: the questionnaire save stores the answers and copies nothing (`fromQuestionnaire: []`),
+step-2 import routes `503 { code: "imports_unavailable" }` and `GET /imports` `{ available: false }`,
+caseload transfer `503 { code: "caseload_transfer_unavailable" }` (removing a firm member keeps today's
+behaviour), meetings `invites: { status: "unavailable" }`, colleges `photo: null`.
+
+Apply in this order, after taking a backup (the workflow, or `supabase db push` from a laptop). Each
+set's own section below says what it does and how to check it.
+
+| # | File | Set |
+|---|---|---|
+| 1 | `20261023010001_intake_import_targets.sql` | Questionnaire sync |
+| 2 | `20261023010002_intake_profile_sync.sql` | Questionnaire sync |
+| 3 | `20261023010003_intake_held_import_default.sql` | Questionnaire sync |
+| 4 | `20261023010004_intake_profile_backfill.sql` | Questionnaire sync (runs the backfill) |
+| 5 | `20261023020001_imports_step2_schema.sql` | Import pipeline step 2 |
+| 6 | `20261023020002_imports_step2_functions.sql` | Import pipeline step 2 |
+| 7 | `20261023020003_imports_step2_review.sql` | Import pipeline step 2 |
+| 8 | `20261023030001_caseload_transfer.sql` | Caseload transfer |
+| 9 | `20261023030002_caseload_transfer_functions.sql` | Caseload transfer |
+| 10 | `20261023030003_remove_firm_member_caseload.sql` | Caseload transfer |
+| 11 | `20261023070001_college_photos.sql` | Campus photos |
+| 12 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
+
+(Twelve files in five sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
+
+Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
+`private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
+`import_items.invite_state` / `invite_claimed_at` (file 5). Applying the files in the order above
+satisfies both. No function, policy or trigger is defined in two of these files; the shared CHECK
+constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
+additively, each file reading the current list back.
+
+After all twelve:
+
+```sql
+select count(*) from public.import_fields;                                            -- 25
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
+```
+
+and `node --test test/integration/approval-db.test.mjs` against a staging copy finds the approval gate
+on every new table.
+
+---
+
+## Questionnaire sync: `20261023010001`-`04`
+
+The onboarding questionnaire's answers (`profiles.profile.intakeAnswers`) fill the real fields, fill
+only what is empty, through the import pipeline's compare-and-set (AGENTS.md, "The questionnaire
+fills the record"). Additive: no import function changes signature or behaviour for its callers.
+Either order with the code is safe: before the files, a save stores the answers as it always did,
+the info card's `fromQuestionnaire` is `[]`, sheet rows carry no `fromQuestionnaire`, and the held
+queue has no `currentSource`.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023010001_intake_import_targets.sql` | Adds `import_fields` rows `profiles.high_school` / `hometown` / `grad_year`, `student_academics.gpa_band` and `awards *` (25 in all; the `target_table` CHECK widened); re-creates `import_value_ok_raw` (type `grad_year`, `row:award`, activity keys `timing` / `continuing` / `uc_description`), `import_current_value`, `import_set_field`, `import_row_snapshot` and `import_delete_row` (awards branch only) as supersets; a 4-argument `import_insert_row(target, student, row, source)` with the 3-argument form kept as a wrapper stamping `'import'` |
+| 2 | `20261023010002_intake_profile_sync.sql` | `intake_fills` (what the questionnaire last wrote, as hashes; RLS, the approval gate, no client writes), the sync (`private.sync_intake_answers` and its helpers), the AFTER trigger `profiles_fill_from_questionnaire` on `profiles.profile`, and `public.intake_filled_fields(p_student)` for the counselor's marks |
+| 3 | `20261023010003_intake_held_import_default.sql` | `private.intake_owns_current`; re-creates `import_held_queue()` and `request_held_apply(uuid, jsonb)` so a field the questionnaire filled (unchanged) defaults to accept and reports `currentSource: 'intake'` |
+| 4 | `20261023010004_intake_profile_backfill.sql` | `private.backfill_intake_answers(p_only uuid default null)`, then runs it once for every student with answers on file (archived students skipped; one `audit_log` row, counts only). Re-running it changes nothing |
+
+Check:
+
+```sql
+select count(*) from public.import_fields;                                             -- 25
+select to_regclass('public.intake_fills');                                             -- non-null
+select tgname from pg_trigger where tgname = 'profiles_fill_from_questionnaire';       -- 1 row
+select to_regprocedure('public.intake_filled_fields(uuid)') is not null;               -- true
+select action, metadata from public.audit_log
+ where action like 'intake.backfill%' order by created_at desc limit 1;                -- the backfill's counts
+select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
+```
+
+---
+
+## Import pipeline step 2 (CSV/XLSX path): `20261023020001`-`03`
 
 Apply after every earlier file, in this order, the same way (paste each file whole into the SQL
 editor, or the Management API; rehearse on a staging copy first). All three are additive: they add
@@ -383,7 +467,7 @@ invitations; an email goes to `ACCESS_REVIEW_EMAIL`. Approve by hand:
 
 ---
 
-# Caseload transfer (three more migrations)
+## Caseload transfer: `20261023030001`-`03`
 
 Spec: `docs/superpowers/specs/2026-10-15-caseload-transfer-design.md`. Apply in
 this order, after every earlier file. Nothing is deleted. Either order with the
@@ -418,34 +502,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 ---
 
-# Meetings: emailed calendar invites (one more migration)
-
-Apply after every earlier file (`supabase db push`, or paste it into the SQL
-editor). It adds columns, a CHECK, a trigger and an index, and deletes
-nothing. Either order is safe: until it is applied, meetings work as before,
-`sendInvites` is answered `invites: { status: "unavailable" }`, and no invite
-email is sent.
-
-| # | File | What it does |
-|---|---|---|
-| 1 | `20261023090001_meeting_calendar_invites.sql` | `meetings.send_invites` (default false) with the CHECK `meetings_invites_need_end` (invites need an end time), `meetings.ics_sequence` written only by the trigger `meetings_ics_sequence` (raised on every change a calendar shows), and `message_deliveries.meeting_id` (on delete set null) with its index |
-
-Check:
-
-```sql
-select column_name from information_schema.columns
- where table_schema = 'public' and table_name = 'meetings' and column_name in ('send_invites', 'ics_sequence');  -- 2 rows
-select column_name from information_schema.columns
- where table_schema = 'public' and table_name = 'message_deliveries' and column_name = 'meeting_id';            -- 1 row
-select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tgname = 'meetings_ics_sequence';  -- 1 row
-```
-
-Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
-domain (`LAUNCH_CHECKLIST.md`).
-
----
-
-# Campus photos (one more migration)
+## Campus photos: `20261023070001`
 
 Apply after every earlier file. It adds a table and the project's first
 **public** bucket, and deletes nothing. Either order is safe: until it is
@@ -469,3 +526,30 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 Then load the photos once by hand (`npx tsx --env-file=.env scripts/ingest/college-photos.ts`,
 after a `--dry-run` to look the list over), or `/internal/status` reads the new job overdue
 until the first monthly run.
+
+---
+
+## Meetings, emailed calendar invites: `20261023090001`
+
+Apply after every earlier file (`supabase db push`, or paste it into the SQL
+editor). It adds columns, a CHECK, a trigger and an index, and deletes
+nothing. Either order is safe: until it is applied, meetings work as before,
+`sendInvites` is answered `invites: { status: "unavailable" }`, and no invite
+email is sent.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023090001_meeting_calendar_invites.sql` | `meetings.send_invites` (default false) with the CHECK `meetings_invites_need_end` (invites need an end time), `meetings.ics_sequence` written only by the trigger `meetings_ics_sequence` (raised on every change a calendar shows), and `message_deliveries.meeting_id` (on delete set null) with its index |
+
+Check:
+
+```sql
+select column_name from information_schema.columns
+ where table_schema = 'public' and table_name = 'meetings' and column_name in ('send_invites', 'ics_sequence');  -- 2 rows
+select column_name from information_schema.columns
+ where table_schema = 'public' and table_name = 'message_deliveries' and column_name = 'meeting_id';            -- 1 row
+select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tgname = 'meetings_ics_sequence';  -- 1 row
+```
+
+Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
+domain (`LAUNCH_CHECKLIST.md`).
