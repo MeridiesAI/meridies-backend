@@ -1,7 +1,7 @@
 // Fixtures for the import-pipeline suites. Everything here writes as the
 // postgres superuser through psql, the way step 2's staging code will write
 // as the backend: the browser never inserts items or changes.
-import { sql, user } from "./harness.mjs";
+import { ANON, SB, call, sql, user } from "./harness.mjs";
 
 export const q = (s) => String(s).replace(/'/g, "''");
 export const lit = (v) => (v === null || v === undefined ? "null" : `'${q(JSON.stringify(v))}'::jsonb`);
@@ -62,4 +62,72 @@ export async function changeRow(changeId) {
 export async function academics(studentId) {
   const raw = await sql(`select row_to_json(a) from public.student_academics a where student_id = '${studentId}'`);
   return raw ? JSON.parse(raw) : null;
+}
+
+// ---- step 2 ------------------------------------------------------------------
+
+/** PUT bytes to a signed upload URL, as uploadToSignedUrl does. */
+export async function putSigned(token, path, uploadToken, bytes, mime) {
+  const r = await fetch(`${SB}/storage/v1/object/upload/sign/imports/${path}?token=${encodeURIComponent(uploadToken)}`, {
+    method: "PUT",
+    headers: { apikey: ANON, Authorization: `Bearer ${token}`, "Content-Type": mime, "x-upsert": "false" },
+    body: bytes,
+  });
+  return { status: r.status, body: await r.text() };
+}
+
+/** upload-url -> PUT -> register. Returns the register response. */
+export async function addImportFile(user, importId, name, bytes, mime = "text/csv") {
+  const u = await call(user.token, "POST", `/imports/${importId}/files/upload-url`, { fileName: name, mimeType: mime, sizeBytes: bytes.length });
+  if (u.status !== 200) return { stage: "upload-url", ...u };
+  const put = await putSigned(user.token, u.body.path, u.body.token, bytes, mime);
+  if (put.status !== 200) return { stage: "put", ...put };
+  return call(user.token, "POST", `/imports/${importId}/files`, { fileId: u.body.fileId, path: u.body.path, fileName: name });
+}
+
+/** Wait for GET /imports/:id to leave a status. */
+export async function waitStatus(token, id, leaving) {
+  for (let i = 0; i < 80; i++) {
+    const r = await call(token, "GET", `/imports/${id}`);
+    if (r.body?.status !== leaving) return r.body;
+    await new Promise((res) => setTimeout(res, 500));
+  }
+  throw new Error(`timed out waiting for import ${id} to leave ${leaving}`);
+}
+
+export const enc = (s) => new TextEncoder().encode(s);
+
+/** Start, upload one CSV, take the preset plan (optionally edited) and stage. Returns { id, plan, stage }. */
+export async function stagedImport(owner, csvText, { stager = owner, edit } = {}) {
+  const id = (await call(owner.token, "POST", "/imports", { permissionConfirmed: true })).body.id;
+  const reg = await addImportFile(owner, id, "roster.csv", enc(csvText));
+  if (reg.body?.status !== "profiled") throw new Error("register failed " + JSON.stringify(reg.body));
+  let plan = (await call(owner.token, "POST", `/imports/${id}/plan`)).body.plan;
+  if (edit) {
+    plan = edit(plan) ?? plan;
+    const put = await call(owner.token, "PUT", `/imports/${id}/plan`, { plan });
+    if (put.status !== 200) throw new Error("plan failed " + JSON.stringify(put.body));
+  }
+  const stage = await call(stager.token, "POST", `/imports/${id}/stage`);
+  return { id, plan, stage };
+}
+
+/** psql as import_worker (IMPORT_DATABASE_URL), the way the API's job connection runs. */
+export async function workerSql(query) {
+  const url = process.env.IMPORT_DATABASE_URL;
+  if (!url) throw new Error("IMPORT_DATABASE_URL is required for this suite");
+  const { execFileSync } = await import("node:child_process");
+  return execFileSync(process.env.PSQL ?? "psql", [url, "-tAc", query], { stdio: ["ignore", "pipe", "pipe"] }).toString().trim();
+}
+
+/** POST /internal/imports/sweep, waiting out another suite's sweep (409 while its lease is held). */
+export async function runSweep() {
+  const { API, CRON_SECRET } = await import("./harness.mjs");
+  for (let i = 0; i < 30; i++) {
+    const r = await fetch(`${API}/internal/imports/sweep`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+    const body = await r.json();
+    if (r.status !== 409) return { status: r.status, body };
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  throw new Error("the import sweep stayed busy");
 }

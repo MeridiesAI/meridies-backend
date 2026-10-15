@@ -13,6 +13,7 @@
  * already seen the parsed values on screen by the time they get here.
  */
 
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { sendInviteEmail } from "../lib/email.js";
@@ -70,6 +71,8 @@ export default async function rosterRoutes(app: FastifyInstance) {
         .from("roster_imports")
         .select("*")
         .eq("counselor_id", request.auth.userId)
+        // The Import page's imports (permission on record) are listed there, not here.
+        .is("permission_confirmed_at", null)
         .order("created_at", { ascending: false })
         .limit(50);
       if (error) throw fromPostgrest(error);
@@ -113,21 +116,21 @@ export default async function rosterRoutes(app: FastifyInstance) {
       const numbers = new Set(body.rows.map((r) => r.rowNumber));
       if (numbers.size !== body.rows.length) throw badRequest("Row numbers must be unique");
 
-      const { data: created, error: createError } = await request.db
-        .from("roster_imports")
-        .insert({
-          counselor_id: request.auth.userId,
-          filename: body.filename,
-          source: body.source ?? "csv",
-          mapping: body.mapping,
-          status: "mapping",
-          rows_total: body.rows.length,
-        })
-        .select("*")
-        .single();
+      // The id is made here and the insert returns nothing: roster_imports'
+      // select policy asks can_view_import, which can't see a row inserted in
+      // the same statement, so insert-and-return is refused.
+      const importId = randomUUID();
+      const { error: createError } = await request.db.from("roster_imports").insert({
+        id: importId,
+        counselor_id: request.auth.userId,
+        filename: body.filename,
+        source: body.source ?? "csv",
+        mapping: body.mapping,
+        status: "mapping",
+        rows_total: body.rows.length,
+      });
       if (createError) throw fromPostgrest(createError);
 
-      const importId = created.id as string;
       const staged = body.rows.map((r) => {
         const skipReason = !r.email
           ? "No email address in this row"
@@ -310,6 +313,8 @@ async function loadImport(request: FastifyRequest, id: string): Promise<Row> {
     .select("*")
     .eq("id", id)
     .eq("counselor_id", request.auth.userId)
+    // An Import-page import (permission on record) is never acted on here.
+    .is("permission_confirmed_at", null)
     .maybeSingle();
   if (error) throw fromPostgrest(error);
   if (!data) throw notFound("That import doesn't exist");

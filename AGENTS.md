@@ -80,7 +80,9 @@ src/
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
-│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule
+│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule;
+│   │                      #   step 2: parse (capped child process), profile + masking, plan + presets + AI mapping,
+│   │                      #   rows + matching, staging, review, invitations, retention, rollout flag
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
@@ -338,7 +340,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -1431,6 +1433,130 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   A value the questionnaire filled and nobody changed since defaults to
   accept in the held queue (`private.intake_owns_current`).
 
+### Import pipeline (step 2: the CSV/XLSX path)
+
+Spec as above (§5.1-§5.10, "v1.0 as built" at its end). The Import page's API;
+Ready to apply (`GET /imports/held`, `POST /imports/held/:itemId/apply`) is
+step 1's and is never gated.
+
+- **Rollout.** `IMPORTS_ROLLOUT=off|pilot|all` (default `pilot`) and
+  `IMPORTS_PILOT` (comma-separated firm ids, or a solo counselor's own id;
+  `lib/imports/rollout.ts`). Env-based, so a new pilot practice needs a
+  redeploy. `IMPORTS_AI=off` is the kill switch for the AI column mapping.
+  `GET /imports/availability` and `GET /imports` answer `{ enabled, available,
+  aiAvailable }` and never 503; every other step-2 route answers
+  `403 { code: "imports_not_enabled" }` outside the rollout and
+  `503 { code: "imports_unavailable" }` before the migrations or without
+  `IMPORT_DATABASE_URL` (`lib/imports/availability.ts`). Invitations, discard
+  and template delete ask only for the migrations, so a saved import can
+  still send after its practice leaves the pilot.
+- **Deploy order.** `20261023020001`-`20261023020003`, either order (see
+  `DATABASE_MIGRATION_INSTRUCTIONS.md`). The readiness probe asks for
+  `imports_step2_ready()`, the last object of the last file; a ready answer is
+  kept for the process, a missing one for 30 s. Not in `REQUIRED_SCHEMA`: no
+  request outside `/imports` needs it.
+- **Which rows are which.** A new-pipeline import is one `start_import`
+  created: `permission_confirmed_at` is set (the family-permission box, who
+  ticked it and when). The old roster flow's rows have it null. `/roster/*`
+  never lists or acts on a new-pipeline import, `/imports` never lists an old
+  one, and **the client guard makes a new-pipeline row the API's alone**: no
+  client update or delete at all. A new `roster_imports` column must be added
+  to `private.roster_imports_guard_client()` (it names every protected column).
+- **Flow.** `POST /imports { permissionConfirmed: true }` (draft, 7-day
+  expiry; shares `roster:import`'s 20 an hour) -> `POST /:id/files/upload-url`
+  (signed upload into `imports/<uid>/<import>/<file>-<name>`, minted on the
+  counselor's token; only the uploader, only a draft) -> `POST /:id/files`
+  (download on the same token, size, sha256, magic bytes, parse and profile;
+  a bad file fails by name and the rest go on; up to 20 files and 5,000 rows)
+  -> `POST /:id/plan` (template by header fingerprint, then presets, then the
+  AI fallback; the import moves to `mapping`) -> `PUT /:id/plan` (every edit;
+  a plan with problems is stored with them, staging refuses until there are
+  none; `saveTemplate: { name }` is "Remember this layout") -> `POST /:id/stage`
+  (synchronous, about 30 s for 5,000 rows; a double click gets 409) ->
+  `GET /:id/review?section=summary|groups|changes|suggested|invites|skipped|problems`
+  and `PATCH /:id/review` (one transaction: `fixes`, `items` confirm/skip/invite,
+  `changes`, `patterns`) -> `POST /:id/commit { invitations: N }` (required, and
+  equal to the staged count, whenever the import invites anyone: `409 { code:
+  "confirm-invitations", count }`; checked again under the lock) ->
+  `POST /:id/invitations` -> `POST /:id/undo`. `DELETE /:id` discards a draft or
+  review; `DELETE /templates/:id`.
+- **Parsing** (`lib/imports/sheet.ts`, `parse.ts`). In a forked child process,
+  not a worker thread: a process-wide `--max-old-space-size` (NODE_OPTIONS)
+  silently overrides a worker's `resourceLimits`. The child gets its own heap
+  flag (256 MB), a 20 s kill, an environment holding only PATH, and no stdout.
+  Type from bytes (UTF-8 or windows-1252 CSV; XLSX by its content types; xls,
+  xlsm and the rest refused). XLSX: declared sizes (100 MiB in all, 50 MiB an
+  entry, 2,000 entries), no external links, no DOCTYPE/ENTITY in any XML part;
+  the parser (`read-excel-file/universal`, saxen) then reads only the parts
+  that passed, rezipped uncompressed, so it never re-reads the original
+  archive and never starts fflate's helper threads. Formulas give cached
+  values only. `scripts/smoke/parse-worker.mjs` checks the built child (CI).
+- **What the model sees** (`profile.ts`, `mask.ts`, `aiPlan.ts`, module
+  `import-mapping`, Haiku through `runStructured`): masked headers, column
+  counts and shapes, numeric min/max only for small numbers (at most 2,100),
+  a date column's year range, sheets numbered not named, sensitive columns
+  left out; wrapped as untrusted data. Never a real text cell. Its answer is
+  filtered to the columns it was asked about and targets on the fixed list;
+  a score column's exam comes from the file's header. Two retries, then the
+  counselor maps by hand. Spend per import (`onUsage` on `runStructured`,
+  `spend.ts`) is capped at 200 cents. It is under the practice's "reading
+  uploaded documents" switch (`practiceSettings.ts` `DOCUMENT_MODULES`). AI
+  cell cleanup (`import-cleanup`) is deferred: a cell that won't clean is a
+  manual fix in review.
+- **Sensitive values** (`sensitive.ts`, §7.4): a header naming a never-stored
+  category is forced to ignore whoever mapped it (`validatePlan`); an
+  SSN-shaped value is dropped and counted; a bare 9-digit value is flagged
+  `nine_digit_id`, never blocked.
+- **Matching** (`match.ts`; `import_roster_for_matching`): only the
+  uploader's own caseload (their students and write collaborations),
+  intersected with what the actor may write, so a firm admin staging a
+  member's import never matches the admin's wider reach. Email + name:
+  matched; email with a different name: suggested, confirmed one by one; name
+  + birthday or grad year + school: suggested; else invite or skip. Siblings on
+  a parent's email are never merged, matched or invited on their own;
+  `stage_import` keeps one invitation per address and the review's "invite"
+  refuses a second at the same address.
+- **Staging defaults** (`stage_import`, `private.import_assess`): old values
+  read with `import_current_value`; equal values dropped (3.8 = 3.800); rows
+  already on the record dropped and counted, near matches kept back as
+  `possible_duplicate`; an empty field fills (`auto` on a high-confidence
+  email match, else `accept`); a value an earlier import from the same
+  `source_system` or template wrote, unedited since, is `accept`; anything
+  else `keep_old` (an unknown author counts as the student). Conflicting
+  values in one file are one change flagged `conflict_in_file` with its
+  `alternatives`.
+- **Invitations** (`invitations.ts`): only the uploader sends (accepting makes
+  the inviter the counselor), so a firm admin gets 403. Items are claimed
+  (`invite_state = 'sending'`, SKIP LOCKED; a claim older than ten minutes
+  can be retaken), never-tried addresses first; the invitation row is inserted
+  and tied to the item before the email goes out (`insertInvitation`, then
+  `import_link_invitation`, then `emailInvitation` with the Resend
+  idempotency key `import-invite/<item>/<invitation>`); 25 per request; the
+  `invites` quota (100 a day, 50 for an account under 14 days). A counselor's
+  first import over 50 invitations is saved but its invitations wait
+  (`invites_held_reason`) until Meridies sets `invites_approved_at` by hand;
+  one email goes to `ACCESS_REVIEW_EMAIL`.
+- **Retention** (`retention.ts`, `import_retention`), every sweep, not behind
+  `IMPORT_HOLD_EXPIRY_ENABLED`: drafts and reviews expire after 7 days with
+  their staged values; never-sent invitations' data expires 14 days after the
+  save, sent ones' when the invitation does; matching dead for ten minutes
+  returns to mapping; masked samples go at commit; raw files once an import is
+  saved, undone or expired; objects nobody registered after 24 hours (through
+  the Storage API on the service client). Skipped before the migrations;
+  isolated, so it never fails the sweep's heartbeat. The 30-day expiry of
+  accepted, waiting data and its warnings stay behind the flag.
+- **Ready to apply** carries each student's current `gpaScale`, and
+  dismissing an entry (every change `reject`) needs no typed name. The
+  name check's 409 (`name-confirmation-required`) carries its sentence as
+  `error`, the shape every client reads (and as `message`).
+- **Not built** (v1.0): AI cell cleanup; pausing invitations on bounce or
+  complaint rates (§6.5) and the §12 metrics (counts are in `stats` and
+  `job_result`); PDFs (v1.1); direct Google Sheets; shared starter templates;
+  `high_school` and `grad_year` as import targets (matching keys and the
+  invitation's grad year only); template management beyond list and delete;
+  a database-held pilot list. Header presets and source-system detection are
+  deliberately conservative until real exports arrive (spec §13).
+
 ## Safe coding standards
 
 - TypeScript strict — no `any`
@@ -1506,6 +1632,9 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   the answer parser, the match validation and the boot check), the
   counselor approval gate (`access`, `access-review`, `service-callsites`),
   the questionnaire sync's read side and activity-type list (`intake-sync`),
+  the import pipeline (`import-*`: parsing and the zip guard, the capped
+  child process, profile and masking, sensitive values, the plan and presets,
+  the AI mapping with its spend, rows and matching, values, rollout),
   and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
@@ -1513,9 +1642,13 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
   including `context-layer`, `context-documents`, `research-tables` (RLS and
   hidden tasks), `research-api` (the routes, with the test double),
   `intake-sync` and `intake-held-backfill` (the questionnaire, every field
-  and rule, against held imports, and the backfill) and the
+  and rule, against held imports, and the backfill), the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
-  `approval-jobs`). The harness's `user()` approves the counselors it makes;
+  `approval-jobs`) and the import pipeline (`imports-*`; step 2's
+  `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
+  `-retention`, `-guard`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`).
+  `npm run test:imports-load` (pre-release) commits and undoes 5,000 rows and
+  stages 5,000 more through the API. The harness's `user()` approves the counselors it makes;
   pass `{ approved: false }` for a pending one.
 - `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
   (every action pinned to a commit); typecheck, build, unit tests (including
@@ -1550,6 +1683,8 @@ npm run dev               # http://localhost:4000
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
+| `IMPORTS_ROLLOUT` / `IMPORTS_PILOT` | The Import page: `off`, `pilot` (default; only the practices in `IMPORTS_PILOT`, firm or solo counselor ids, comma-separated) or `all`. Ready to apply is never gated |
+| `IMPORTS_AI` | `on` (default) or `off`: the AI column mapping's kill switch |
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |

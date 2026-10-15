@@ -17,6 +17,7 @@ import { env } from "../../env.js";
 import { withWorkerTransaction } from "./db.js";
 import { isCounselorApproved } from "../access.js";
 import { redactText } from "../requestLog.js";
+import { runImportRetention, type RetentionOutcome } from "./retention.js";
 
 export type ImportJobKind = "commit" | "undo" | "apply";
 export type ImportJobOutcome = { status: string } & Record<string, unknown>;
@@ -87,7 +88,7 @@ export function kickImportJob(kind: ImportJobKind, id: string, actor: string, lo
 }
 
 export type ImportSweepOutcome =
-  | { ran: true; jobs: number; expired: number; warned: number; compacted: number }
+  | { ran: true; jobs: number; expired: number; warned: number; compacted: number; retention: RetentionOutcome }
   | { ran: false; reason: "no-service-role" | "no-worker" | "locked" | "lease-error" };
 
 const LEASE = "import-sweep";
@@ -141,8 +142,12 @@ export async function runImportSweep(log: Log): Promise<ImportSweepOutcome> {
       return Number(rows[0].n);
     });
 
+    // Step 2's retention: always on (not behind IMPORT_HOLD_EXPIRY_ENABLED),
+    // skipped before its migrations, and isolated so it never fails the beat.
+    const retention = await runImportRetention(log);
+
     await beat("import-sweep", true, undefined, log);
-    const outcome = { ran: true as const, jobs: due.length, expired: holds.expired, warned: holds.warn.length, compacted };
+    const outcome = { ran: true as const, jobs: due.length, expired: holds.expired, warned: holds.warn.length, compacted, retention };
     log.info(outcome, "import sweep finished");
     return outcome;
   } catch (err) {
