@@ -20,9 +20,12 @@ export const MAX_BYTES = 3 * 1024 * 1024;
 
 /**
  * Every college with an IPEDS unitid (P1771) and, when it has one, its main
- * image (P18). `wdt:` gives best-rank values only.
+ * image (P18). `wdt:` gives best-rank values only. `schema:dateModified` is
+ * when the item was last edited, for the review gate: a main image changed
+ * within the week is held (lib/ingest/collegePhotos.ts, reviewDecision).
  */
-export const SPARQL_QUERY = "SELECT ?item ?unitid ?image WHERE { ?item wdt:P1771 ?unitid . OPTIONAL { ?item wdt:P18 ?image } }";
+export const SPARQL_QUERY =
+  "SELECT ?item ?unitid ?image ?modified WHERE { ?item wdt:P1771 ?unitid . OPTIONAL { ?item wdt:P18 ?image } OPTIONAL { ?item schema:dateModified ?modified } }";
 
 /** The extmetadata fields the license rules read; asking for only these keeps the answer small. */
 const EXTMETADATA = "LicenseShortName|LicenseUrl|Artist|Attribution|NonFree|Restrictions";
@@ -60,7 +63,11 @@ const RETRY_STATUS = new Set([429, 502, 503, 504]);
 
 export type WikimediaClient = {
   sparql(): Promise<unknown>;
-  /** One batched imageinfo query (at most 50 titles), redirects followed. `full` adds size, mime, sha1 and license metadata. */
+  /**
+   * One batched imageinfo query (at most 50 titles), redirects followed.
+   * `full` adds size, mime, sha1, license metadata, the current version's
+   * upload time and the description page's latest revision time.
+   */
   imageinfo(titles: string[], width: number, full: boolean): Promise<unknown>;
   download(url: string): Promise<Uint8Array>;
 };
@@ -124,14 +131,16 @@ export function wikimediaClient(opts: { fetch?: Fetch; sleep?: Sleep; minGapMs?:
         action: "query",
         format: "json",
         formatversion: "2",
-        prop: "imageinfo",
-        iiprop: full ? "url|size|mime|sha1|extmetadata" : "url",
+        prop: full ? "imageinfo|revisions" : "imageinfo",
+        iiprop: full ? "timestamp|url|size|mime|sha1|extmetadata" : "url",
         iiurlwidth: String(width),
         redirects: "1",
         maxlag: "5",
         titles: titles.join("|"),
       });
       if (full) {
+        // With many titles, revisions gives each page's latest revision; only its time is asked for.
+        params.set("rvprop", "timestamp");
         params.set("iiextmetadatafilter", EXTMETADATA);
         params.set("iiextmetadatalanguage", "en");
       }

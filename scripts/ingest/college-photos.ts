@@ -6,8 +6,8 @@
  *   npx tsx --env-file=.env scripts/ingest/college-photos.ts                 # every college, under the job's lease
  *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --limit 50      # a trial run
  *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --only 166683,243744
- *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --dry-run       # writes nothing; prints a CSV of what it would attach
- *   npx tsx scripts/ingest/college-photos.ts --fixture-dir test/fixtures/college-photos [--picks <csv>]
+ *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --dry-run       # writes nothing; prints a CSV of what it would attach and what it holds
+ *   npx tsx scripts/ingest/college-photos.ts --fixture-dir test/fixtures/college-photos [--picks <csv>] [--now <ISO time>]
  *                                                                           # recorded answers, no network (tests, offline dev)
  *
  * Look the new photos over: run with --dry-run, open each title's Commons
@@ -15,6 +15,15 @@
  * wrong building, aerial blur or close-up of people in
  * scripts/ingest/data/college-photo-picks.csv, either as a better
  * `File:...` title or as `none` to suppress the college. The next run applies it.
+ *
+ * The CSV's action column: `add` / `replace` go live on the next run;
+ * `held-new` / `held-replace` are waiting for a week without edits on
+ * Wikidata and Commons (the reasons column says which clock is running; see
+ * reviewDecision in src/lib/ingest/collegePhotos.ts), or for a later run to
+ * see them unchanged. To publish a held photo now, put its title in the picks
+ * file; to keep it off, put `none` or a better title. A real run keeps the
+ * same list in the college_photo_candidates table and its counts on its
+ * ingest_runs row (held-new, held-replace, hold:<reason>).
  *
  * Run it once by hand right after applying 20261023070001_college_photos.sql:
  * /internal/status reads the job overdue until its first clean run.
@@ -60,6 +69,12 @@ const onlyIds = only?.map(Number);
 const dryRun = flag("dry-run");
 const fixtureDir = arg("fixture-dir");
 const picksFile = arg("picks");
+const nowArg = arg("now");
+if (nowArg !== undefined && (!fixtureDir || !Number.isFinite(Date.parse(nowArg)))) {
+  console.error("--now takes an ISO time, and only with --fixture-dir (the fixtures' timestamps are read against it)");
+  process.exit(1);
+}
+const now = nowArg !== undefined ? () => new Date(Date.parse(nowArg)) : undefined;
 if (picksFile && !fixtureDir && !dryRun) {
   console.error("--picks is for --fixture-dir and --dry-run; a real run reads scripts/ingest/data/college-photo-picks.csv");
   process.exit(1);
@@ -82,10 +97,12 @@ function report(outcome: PhotoOutcome | null): never {
     process.exit(1);
   }
   if (outcome.dryRun) {
-    console.log("\nunitid,name,title,license,credit,source");
-    for (const a of outcome.attach) console.log([a.unitid, a.name, a.title, a.license, a.credit, a.source].map(csvCell).join(","));
+    console.log("\naction,unitid,name,title,license,credit,source,current_title,reasons");
+    for (const a of [...outcome.attach, ...outcome.review]) {
+      console.log([a.action, a.unitid, a.name, a.title, a.license, a.credit, a.source, a.current ?? "", a.reasons.join(";")].map(csvCell).join(","));
+    }
   }
-  const { attach: _attach, ...summary } = outcome;
+  const { attach: _attach, review: _review, ...summary } = outcome;
   console.log(JSON.stringify(summary, null, 2));
   process.exit(outcome.status === "failed" ? 1 : 0);
 }
@@ -115,7 +132,7 @@ if (fixtureDir || dryRun) {
     const wm = wikimediaClient();
     deps = { sparql: wm.sparql, imageinfo: wm.imageinfo, download: wm.download, picks };
   }
-  report(await runCollegePhotoIngest(supabasePhotoStore(svc), deps, log, { trigger: "script", limit, only: onlyIds, dryRun }));
+  report(await runCollegePhotoIngest(supabasePhotoStore(svc), deps, log, { trigger: "script", limit, only: onlyIds, dryRun, now }));
 }
 
 const r = await startCollegePhotoIngest(log, "script", { limit, only: onlyIds });

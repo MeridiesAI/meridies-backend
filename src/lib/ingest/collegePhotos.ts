@@ -32,8 +32,25 @@
  * its objects. Deletions the picks file didn't ask for are held when they
  * would remove more than a tenth of the stored photos (and more than five):
  * a truncated or vandalised Wikidata answer must not wipe the catalog's photos.
+ *
+ * The review gate (reviewDecision, migration 20261024000071): Wikidata and
+ * Commons are crowd-edited, so a new or changed photo is published only once
+ * it has been stable for STABLE_DAYS. Stable means the Wikidata item (its
+ * schema:dateModified, from the same SPARQL query), the Commons file version
+ * (imageinfo timestamp) and its description page (latest revision) were all
+ * last edited at least that long before the run, and the file wasn't reached
+ * through a redirect; or a run at least that long ago saw this exact
+ * candidate (title, sha1, credit and license) and held it. A replacement of a
+ * photo already shown always needs that earlier sighting. A held candidate is
+ * written to college_photo_candidates and the stored photo keeps serving. A
+ * team pick is published at once, unless it is a new version uploaded over
+ * the file the team picked, which is a replacement like any other. A
+ * description page edited within the window doesn't refresh a stored photo's
+ * credit either. Without the migration nothing is remembered: new photos
+ * still pass on their timestamps, replacements are held.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
@@ -51,6 +68,9 @@ export const CREDIT_MAX = 500;
 export const BATCH = 50;
 /** Hold deletions past this share of the stored photos, once they also pass the floor. */
 export const DELETE_GUARD = { fraction: 0.1, floor: 5 } as const;
+/** A new or changed photo waits until Wikidata and Commons have been quiet about it this long. */
+export const STABLE_DAYS = 7;
+export const STABLE_MS = STABLE_DAYS * 86_400_000;
 export const PICKS_FILE = new URL("../../../scripts/ingest/data/college-photo-picks.csv", import.meta.url);
 
 // ---- Licenses and credits (pure; unit-tested) ---------------------------------------
@@ -134,9 +154,16 @@ export function fileTitleFromUri(uri: unknown): string | null {
 
 // ---- Wikidata ------------------------------------------------------------------------
 
+/** An ISO 8601 date-time from Wikidata or Commons, normalised; null when absent or unreadable. */
+export function isoTime(v: unknown): string | null {
+  if (typeof v !== "string" || v.length > 40 || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(v.trim())) return null;
+  const t = Date.parse(v.trim());
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
 export type SparqlResult = {
-  /** unitid -> the one item that claims it, and its main images (sorted). */
-  byUnitid: Map<number, { qid: string; titles: string[] }>;
+  /** unitid -> the one item that claims it, its main images (sorted) and when the item was last edited (null: unknown). */
+  byUnitid: Map<number, { qid: string; titles: string[]; modified: string | null }>;
   /** unitids claimed by two items, or by an item that claims more than one. */
   ambiguous: Set<number>;
   /** Bindings whose unitid or item wasn't readable. */
@@ -151,6 +178,7 @@ export function parseSparql(json: unknown): SparqlResult {
   const itemsByUnitid = new Map<number, Set<string>>();
   const unitidsByItem = new Map<string, Set<number>>();
   const titlesByItem = new Map<string, Set<string>>();
+  const modifiedByItem = new Map<string, number>();
   let invalid = 0;
   for (const b of bindings as Raw[]) {
     const item = (b?.item as Raw | undefined)?.value;
@@ -169,8 +197,10 @@ export function parseSparql(json: unknown): SparqlResult {
     if (!titlesByItem.has(qid)) titlesByItem.set(qid, new Set());
     const title = fileTitleFromUri((b?.image as Raw | undefined)?.value);
     if (title) titlesByItem.get(qid)!.add(title);
+    const modified = isoTime((b?.modified as Raw | undefined)?.value);
+    if (modified !== null) modifiedByItem.set(qid, Math.max(modifiedByItem.get(qid) ?? 0, Date.parse(modified)));
   }
-  const byUnitid = new Map<number, { qid: string; titles: string[] }>();
+  const byUnitid = new Map<number, { qid: string; titles: string[]; modified: string | null }>();
   const ambiguous = new Set<number>();
   for (const [unitid, items] of itemsByUnitid) {
     const [qid] = [...items];
@@ -178,7 +208,8 @@ export function parseSparql(json: unknown): SparqlResult {
       ambiguous.add(unitid);
       continue;
     }
-    byUnitid.set(unitid, { qid: qid!, titles: [...titlesByItem.get(qid!)!].sort() });
+    const modified = modifiedByItem.get(qid!);
+    byUnitid.set(unitid, { qid: qid!, titles: [...titlesByItem.get(qid!)!].sort(), modified: modified === undefined ? null : new Date(modified).toISOString() });
   }
   return { byUnitid, ambiguous, invalid, bindings: bindings.length };
 }
@@ -242,15 +273,16 @@ export function loadPicks(file: URL | string = PICKS_FILE): Picks {
 
 // ---- Commons -------------------------------------------------------------------------
 
-type Page = Raw & { title?: string; missing?: boolean; invalid?: boolean; imageinfo?: Raw[] };
+type Page = Raw & { title?: string; missing?: boolean; invalid?: boolean; imageinfo?: Raw[]; revisions?: unknown };
 
 /**
  * Each requested title's page in an imageinfo answer, following Commons'
  * normalisation (spaces for underscores, a capital first letter) and, with
  * redirects=1, a moved file to its new name. Without this a moved file would
- * read as missing and lose its photo.
+ * read as missing and lose its photo. Titles reached through a redirect are
+ * added to `redirected`: the review gate can't see when the redirect was made.
  */
-export function resolvePages(json: unknown, requested: string[]): Map<string, Page | null> {
+export function resolvePages(json: unknown, requested: string[], redirected?: Set<string>): Map<string, Page | null> {
   const q = (json as { query?: Raw } | null)?.query;
   if (!q || typeof q !== "object") throw new Error("Commons answer has no query");
   const map = (list: unknown) =>
@@ -266,7 +298,9 @@ export function resolvePages(json: unknown, requested: string[]): Map<string, Pa
   const out = new Map<string, Page | null>();
   for (const r of requested) {
     let t = normalized.get(r) ?? r;
-    for (let hops = 0; hops < 3 && redirects.has(t); hops++) t = redirects.get(t)!;
+    let hops = 0;
+    for (; hops < 3 && redirects.has(t); hops++) t = redirects.get(t)!;
+    if (hops > 0) redirected?.add(r);
     out.set(r, pages.get(t) ?? null);
   }
   return out;
@@ -282,6 +316,10 @@ export type ChosenPhoto = {
   licenseUrl: string | null;
   sourceUrl: string;
   fullUrl: string;
+  /** When the current version of the file was uploaded (imageinfo timestamp); null when Commons didn't say. */
+  uploadedAt: string | null;
+  /** When the description page (credit, license) was last edited; null when Commons didn't say. */
+  pageEditedAt: string | null;
 };
 
 export type RejectReason =
@@ -347,6 +385,8 @@ export function choosePhoto(page: Page | null | undefined, opts: { picked?: bool
       licenseUrl: licenseUrl || null,
       sourceUrl,
       fullUrl,
+      uploadedAt: isoTime(info.timestamp),
+      pageEditedAt: isoTime((Array.isArray(page.revisions) ? (page.revisions as Raw[])[0] : undefined)?.timestamp),
     },
   };
 }
@@ -363,6 +403,136 @@ export function storagePaths(unitid: number, sha1: string): { full: string; thum
   if (!Number.isInteger(unitid) || unitid < 100000 || unitid > 999999) throw new Error("unitid out of range");
   if (!/^[0-9a-f]{40}$/.test(sha1)) throw new Error("sha1 malformed");
   return { full: `${unitid}/${sha1}-${WIDTHS.full}.jpg`, thumb: `${unitid}/${sha1}-${WIDTHS.thumb}.jpg` };
+}
+
+// ---- The review gate (pure; unit-tested) -------------------------------------------------
+
+/** What a run held back and why: a college_photo_candidates row (migration 20261024000071). */
+export type PhotoCandidate = {
+  college_id: string;
+  source: "wikidata" | "pick";
+  commons_title: string;
+  commons_sha1: string;
+  text_hash: string;
+  reasons: HoldReason[];
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+export type HoldReason =
+  /** The current version of the file was uploaded within the window (or Commons didn't say when). */
+  | "file-recent"
+  /** The description page (credit, license) was edited within the window (or Commons didn't say when). */
+  | "page-recent"
+  /** The Wikidata item was edited within the window (or the query didn't say when). */
+  | "wikidata-recent"
+  /** Wikidata's title reached the file through a redirect, whose age the APIs don't give. */
+  | "redirected"
+  /** It would replace a photo already shown: that needs a sighting by an earlier run. */
+  | "replacement"
+  /** Before 20261024000071: no memory of earlier sightings, so a replacement can't be confirmed. */
+  | "no-review-table";
+
+export type ReviewDecision =
+  | { publish: true; via: "pick" | "stable" | "observed" }
+  | { publish: false; reasons: HoldReason[] };
+
+/** The credit and license a candidate carried, so an edited credit is a new candidate. */
+export function candidateTextHash(photo: Pick<ChosenPhoto, "credit" | "license" | "licenseUrl">): string {
+  return createHash("sha1").update(`${photo.license}\n${photo.credit}\n${photo.licenseUrl ?? ""}`).digest("hex");
+}
+
+/** Whether an edit at `at` is at least STABLE_MS before `now`. Unknown or future times are never stable. */
+export function stableSince(at: string | null, now: Date): boolean {
+  if (at === null) return false;
+  const t = Date.parse(at);
+  return Number.isFinite(t) && now.getTime() - t >= STABLE_MS;
+}
+
+/**
+ * Whether a new or changed photo (its Commons sha1 differs from what is
+ * stored, or nothing is stored) may be published on this run.
+ *
+ *   - A team pick is published at once, unless the stored photo is that same
+ *     pick and only the file under it changed: a new version uploaded over a
+ *     picked file is a replacement like any other.
+ *   - Otherwise it waits for STABLE_DAYS of quiet: the file version, its
+ *     description page and (for Wikidata's choice) the item last edited at
+ *     least that long ago, and not reached through a redirect.
+ *   - A replacement of a photo already shown always waits for a sighting by
+ *     an earlier run.
+ *   - A sighting counts when a run at least STABLE_DAYS ago held this exact
+ *     candidate (same source, title, sha1, credit and license) and it is
+ *     unchanged now. It stands in for every reason: unchanged across a week
+ *     is what the timestamps would have shown.
+ */
+export function reviewDecision(i: {
+  source: "wikidata" | "pick";
+  photo: ChosenPhoto;
+  itemModified: string | null;
+  redirected: boolean;
+  prev: Pick<StoredPhoto, "source" | "commons_title" | "commons_sha1"> | undefined;
+  candidate: PhotoCandidate | undefined;
+  /** False before migration 20261024000071: there is no memory of sightings. */
+  candidatesAvailable: boolean;
+  now: Date;
+}): ReviewDecision {
+  const { source, photo, prev, now } = i;
+  const newVersionOfPick = prev !== undefined && prev.source === "pick" && prev.commons_title === photo.title;
+  if (source === "pick" && !newVersionOfPick) return { publish: true, via: "pick" };
+
+  const reasons: HoldReason[] = [];
+  if (!stableSince(photo.uploadedAt, now)) reasons.push("file-recent");
+  if (!stableSince(photo.pageEditedAt, now)) reasons.push("page-recent");
+  if (source === "wikidata") {
+    if (!stableSince(i.itemModified, now)) reasons.push("wikidata-recent");
+    if (i.redirected) reasons.push("redirected");
+  }
+  if (prev !== undefined) reasons.push("replacement");
+  if (reasons.length === 0) return { publish: true, via: "stable" };
+
+  const c = i.candidate;
+  const observed =
+    i.candidatesAvailable &&
+    c !== undefined &&
+    c.source === source &&
+    c.commons_title === photo.title &&
+    c.commons_sha1 === photo.sha1 &&
+    c.text_hash === candidateTextHash(photo) &&
+    stableSince(c.first_seen_at, now);
+  if (observed) return { publish: true, via: "observed" };
+  if (!i.candidatesAvailable && prev !== undefined) reasons.push("no-review-table");
+  return { publish: false, reasons };
+}
+
+/** The candidate row to write for a held photo: first_seen kept while it is the same candidate. */
+export function nextCandidate(
+  collegeId: string,
+  source: "wikidata" | "pick",
+  photo: ChosenPhoto,
+  reasons: HoldReason[],
+  existing: PhotoCandidate | undefined,
+  now: Date
+): PhotoCandidate {
+  const textHash = candidateTextHash(photo);
+  const at = now.toISOString();
+  const same =
+    existing !== undefined &&
+    existing.source === source &&
+    existing.commons_title === photo.title &&
+    existing.commons_sha1 === photo.sha1 &&
+    existing.text_hash === textHash &&
+    Date.parse(existing.first_seen_at) <= now.getTime();
+  return {
+    college_id: collegeId,
+    source,
+    commons_title: photo.title,
+    commons_sha1: photo.sha1,
+    text_hash: textHash,
+    reasons,
+    first_seen_at: same ? existing.first_seen_at : at,
+    last_seen_at: at,
+  };
 }
 
 // ---- The store (the database and bucket, behind a narrow interface) -------------------
@@ -393,7 +563,11 @@ export type PhotoStore = {
   /** "no-schema" when the migration isn't applied: nothing may be written then. */
   probe(): Promise<"ok" | "no-schema" | "error">;
   startRun(trigger: Trigger): Promise<string | null>;
-  finishRun(id: string, f: { status: string; rows_upserted: number; rows_skipped: number; errors: string[]; duration_ms: number }): Promise<void>;
+  /** `counts` goes to ingest_runs.counts (20261024000071); the row is finished without it before that. */
+  finishRun(
+    id: string,
+    f: { status: string; rows_upserted: number; rows_skipped: number; errors: string[]; duration_ms: number; counts: Record<string, number> }
+  ): Promise<void>;
   colleges(): Promise<{ id: string; unitid: number; name: string }[]>;
   existing(): Promise<StoredPhoto[]>;
   upsert(row: PhotoRow): Promise<void>;
@@ -401,10 +575,15 @@ export type PhotoStore = {
   remove(collegeId: string): Promise<void>;
   upload(path: string, bytes: Uint8Array): Promise<void>;
   removeObjects(paths: string[]): Promise<void>;
+  /** The review queue by college; null before migration 20261024000071 (nothing is remembered then). */
+  candidates(): Promise<Map<string, PhotoCandidate> | null>;
+  saveCandidates(rows: PhotoCandidate[]): Promise<void>;
+  clearCandidates(collegeIds: string[]): Promise<void>;
 };
 
 export const PHOTO_BUCKET = "college-photos";
 const MISSING_TABLE = new Set(["42P01", "PGRST205"]);
+const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
 
 /** The real store: the service client (the loader is a job, not a user). Errors carry codes only. */
 export function supabasePhotoStore(svc: SupabaseClient): PhotoStore {
@@ -422,10 +601,13 @@ export function supabasePhotoStore(svc: SupabaseClient): PhotoStore {
       return (data as Raw | null)?.id ? String((data as Raw).id) : null;
     },
     async finishRun(id, f) {
-      await svc
-        .from("ingest_runs")
-        .update({ ...f, errors: f.errors.slice(0, 50), finished_at: new Date().toISOString() })
-        .eq("id", id);
+      const row = { ...f, errors: f.errors.slice(0, 50), finished_at: new Date().toISOString() };
+      const { error } = await svc.from("ingest_runs").update(row).eq("id", id);
+      // Before 20261024000071 there is no counts column: finish the row without it.
+      if (error && MISSING_COLUMN.has(error.code ?? "") && /counts/.test(error.message ?? "")) {
+        const { counts: _counts, ...rest } = row;
+        await svc.from("ingest_runs").update(rest).eq("id", id);
+      }
     },
     async colleges() {
       const out: { id: string; unitid: number; name: string }[] = [];
@@ -479,6 +661,33 @@ export function supabasePhotoStore(svc: SupabaseClient): PhotoStore {
       const { error } = await svc.storage.from(PHOTO_BUCKET).remove(paths);
       if (error) throw new Error("object delete failed");
     },
+    async candidates() {
+      const out = new Map<string, PhotoCandidate>();
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await svc
+          .from("college_photo_candidates")
+          .select("college_id, source, commons_title, commons_sha1, text_hash, reasons, first_seen_at, last_seen_at")
+          .order("college_id")
+          .range(from, from + 999);
+        if (error && MISSING_TABLE.has(error.code ?? "")) return null;
+        fail("read review queue", error);
+        const rows = (data ?? []) as unknown as PhotoCandidate[];
+        for (const r of rows) out.set(r.college_id, r);
+        if (rows.length < 1000) return out;
+      }
+    },
+    async saveCandidates(rows) {
+      for (let i = 0; i < rows.length; i += 500) {
+        const { error } = await svc.from("college_photo_candidates").upsert(rows.slice(i, i + 500), { onConflict: "college_id" });
+        fail("write review queue", error);
+      }
+    },
+    async clearCandidates(ids) {
+      for (let i = 0; i < ids.length; i += 200) {
+        const { error } = await svc.from("college_photo_candidates").delete().in("college_id", ids.slice(i, i + 200));
+        fail("clear review queue", error);
+      }
+    },
   };
 }
 
@@ -496,12 +705,31 @@ export type PhotoOutcome = {
   counts: Record<string, number>;
   /** Deletions held back by the guard. */
   held: number;
+  /** New or changed photos held by the review gate (the stored photo, if any, keeps serving). */
+  heldForReview: number;
+  /** Whether the review queue (migration 20261024000071) was there to remember sightings. */
+  reviewTable: boolean;
   errors: string[];
   /** What a dry run would attach (new or replaced), for spot review. */
-  attach: { unitid: number; name: string; title: string; license: string; credit: string; source: "wikidata" | "pick" }[];
+  attach: ReviewItem[];
+  /** What the review gate held back on this run (dry or not), and why. */
+  review: ReviewItem[];
 };
 
-type Target = { title: string; source: "wikidata" | "pick"; qid: string | null };
+export type ReviewItem = {
+  action: "add" | "replace" | "held-new" | "held-replace";
+  unitid: number;
+  name: string;
+  title: string;
+  license: string;
+  credit: string;
+  source: "wikidata" | "pick";
+  /** The title shown today, for a replacement. */
+  current: string | null;
+  reasons: HoldReason[];
+};
+
+type Target = { title: string; source: "wikidata" | "pick"; qid: string | null; itemModified: string | null };
 
 async function inPool<T>(items: T[], size: number, fn: (t: T) => Promise<void>): Promise<void> {
   let next = 0;
@@ -522,19 +750,22 @@ export async function runCollegePhotoIngest(
   const counts: Record<string, number> = {};
   const bump = (k: string) => (counts[k] = (counts[k] ?? 0) + 1);
   const errors: string[] = [];
-  const attach: PhotoOutcome["attach"] = [];
-  const base = { dryRun, counts, held: 0, errors, attach };
+  const attach: ReviewItem[] = [];
+  const review: ReviewItem[] = [];
+  const base = { dryRun, counts, held: 0, heldForReview: 0, reviewTable: false, errors, attach, review };
 
   const probe = await store.probe();
   if (probe !== "ok") return { ...base, runId: null, status: "failed", reason: probe === "no-schema" ? "no-schema" : "db-error" };
 
   const started = Date.now();
-  const checkedAt = (opts.now?.() ?? new Date()).toISOString();
+  const now = opts.now?.() ?? new Date();
+  const checkedAt = now.toISOString();
   const runId = dryRun ? null : await store.startRun(opts.trigger ?? "manual");
   let written = 0;
   let unchanged = 0;
   let deleted = 0;
   let skipped = 0;
+  let reviewTable = false;
 
   const finish = async (status: PhotoOutcome["status"], reason?: PhotoOutcome["reason"], held = 0): Promise<PhotoOutcome> => {
     if (runId) {
@@ -544,10 +775,11 @@ export async function runCollegePhotoIngest(
         rows_skipped: skipped,
         errors,
         duration_ms: Date.now() - started,
+        counts,
       });
     }
-    log.info({ status, counts, held, errors: errors.length, dryRun }, "college photos: finished");
-    return { ...base, runId, status, reason, held };
+    log.info({ status, counts, held, heldForReview: review.length, errors: errors.length, dryRun }, "college photos: finished");
+    return { ...base, runId, status, reason, held, heldForReview: review.length, reviewTable };
   };
 
   // Everything that decides what to touch is read first; any failure here ends
@@ -556,6 +788,7 @@ export async function runCollegePhotoIngest(
   let sparql: SparqlResult;
   let colleges: { id: string; unitid: number; name: string }[];
   let stored: StoredPhoto[];
+  let candidates: Map<string, PhotoCandidate> | null;
   try {
     picks = deps.picks();
   } catch (err) {
@@ -563,7 +796,7 @@ export async function runCollegePhotoIngest(
     return finish("failed", "picks");
   }
   try {
-    [colleges, stored] = await Promise.all([store.colleges(), store.existing()]);
+    [colleges, stored, candidates] = await Promise.all([store.colleges(), store.existing(), store.candidates()]);
   } catch (err) {
     errors.push(err instanceof Error ? err.message.slice(0, 300) : "database read failed");
     return finish("failed", "db-error");
@@ -576,11 +809,14 @@ export async function runCollegePhotoIngest(
     return finish("failed", "sparql");
   }
   log.info({ bindings: sparql.bindings, colleges: sparql.byUnitid.size, ambiguous: sparql.ambiguous.size, invalid: sparql.invalid }, "college photos: wikidata read");
+  reviewTable = candidates !== null;
+  if (!reviewTable) log.warn({}, "college photos: no review queue (apply 20261024000071); replacements are held");
 
   const only = opts.only?.length ? new Set(opts.only) : null;
   let scope = colleges.filter((c) => !only || only.has(c.unitid)).sort((a, b) => a.unitid - b.unitid);
   if (opts.limit !== undefined) scope = scope.slice(0, Math.max(0, opts.limit));
   const storedBy = new Map(stored.map((s) => [s.college_id, s]));
+  const scopeIds = new Set(scope.map((c) => c.id));
 
   type Deletion = { college: (typeof scope)[number]; reason: string; suppressed: boolean };
   const deletions: Deletion[] = [];
@@ -595,11 +831,11 @@ export async function runCollegePhotoIngest(
       continue;
     }
     if (pick) {
-      targets.set(c.id, { title: pick, source: "pick", qid: wd?.qid ?? null });
+      targets.set(c.id, { title: pick, source: "pick", qid: wd?.qid ?? null, itemModified: wd?.modified ?? null });
       continue;
     }
     if (wd && wd.titles.length) {
-      targets.set(c.id, { title: wd.titles[0]!, source: "wikidata", qid: wd.qid });
+      targets.set(c.id, { title: wd.titles[0]!, source: "wikidata", qid: wd.qid, itemModified: wd.modified });
       continue;
     }
     const reason = sparql.ambiguous.has(c.unitid) ? "ambiguous" : wd ? "no-image" : "not-in-wikidata";
@@ -612,10 +848,11 @@ export async function runCollegePhotoIngest(
   // leaves its colleges exactly as they are.
   const titles = [...new Set([...targets.values()].map((t) => t.title))];
   const pages = new Map<string, Page | null>();
+  const redirected = new Set<string>();
   for (let i = 0; i < titles.length; i += BATCH) {
     const batch = titles.slice(i, i + BATCH);
     try {
-      for (const [t, p] of resolvePages(await deps.imageinfo(batch, WIDTHS.full, true), batch)) pages.set(t, p);
+      for (const [t, p] of resolvePages(await deps.imageinfo(batch, WIDTHS.full, true), batch, redirected)) pages.set(t, p);
     } catch (err) {
       errors.push(`commons batch ${i / BATCH + 1}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
     }
@@ -624,11 +861,26 @@ export async function runCollegePhotoIngest(
   type Plan = { college: (typeof scope)[number]; target: Target; photo: ChosenPhoto; prev: StoredPhoto | undefined };
   const toDownload: Plan[] = [];
   const toTouch: Plan[] = [];
+  const toHold: { plan: Plan; reasons: HoldReason[] }[] = [];
+  // Colleges whose review-queue row stays as it is: held now, or not looked at.
+  const keepCandidate = new Set<string>();
+  const item = (p: Plan, action: ReviewItem["action"], reasons: HoldReason[] = []): ReviewItem => ({
+    action,
+    unitid: p.college.unitid,
+    name: p.college.name,
+    title: p.photo.title,
+    license: p.photo.license,
+    credit: p.photo.credit,
+    source: p.target.source,
+    current: p.prev?.commons_title ?? null,
+    reasons,
+  });
   for (const c of scope) {
     const target = targets.get(c.id);
     if (!target) continue;
     if (!pages.has(target.title)) {
       bump("commons-unavailable");
+      keepCandidate.add(c.id);
       continue;
     }
     const chosen = choosePhoto(pages.get(target.title), { picked: target.source === "pick" });
@@ -640,9 +892,33 @@ export async function runCollegePhotoIngest(
       continue;
     }
     const plan = { college: c, target, photo: chosen.photo, prev };
-    if (prev && prev.commons_sha1 === chosen.photo.sha1) toTouch.push(plan);
-    else toDownload.push(plan);
+    if (prev && prev.commons_sha1 === chosen.photo.sha1) {
+      toTouch.push(plan);
+      continue;
+    }
+    const decision = reviewDecision({
+      source: target.source,
+      photo: chosen.photo,
+      itemModified: target.itemModified,
+      redirected: redirected.has(target.title),
+      prev,
+      candidate: candidates?.get(c.id),
+      candidatesAvailable: candidates !== null,
+      now,
+    });
+    if (decision.publish) {
+      if (decision.via === "observed") bump("confirmed");
+      toDownload.push(plan);
+      continue;
+    }
+    toHold.push({ plan, reasons: decision.reasons });
+    keepCandidate.add(c.id);
+    skipped++;
+    bump(prev ? "held-replace" : "held-new");
+    for (const r of decision.reasons) bump(`hold:${r}`);
+    review.push(item(plan, prev ? "held-replace" : "held-new", decision.reasons));
   }
+  if (toHold.length) log.info({ held: toHold.length }, "college photos: new or changed photos held for review");
 
   // The guard: deletions nobody asked for, past a tenth of what is stored.
   const unasked = deletions.filter((d) => !d.suppressed);
@@ -676,17 +952,33 @@ export async function runCollegePhotoIngest(
     if (toTouch.length) counts.unchanged = toTouch.length;
     for (const p of toDownload) {
       bump(p.prev ? "would-replace" : "would-add");
-      attach.push({ unitid: p.college.unitid, name: p.college.name, title: p.photo.title, license: p.photo.license, credit: p.photo.credit, source: p.target.source });
+      attach.push(item(p, p.prev ? "replace" : "add"));
     }
     for (const d of toDelete) bump(`would-delete-${d.suppressed ? "suppressed" : "other"}`);
     return finish(errors.length || hold ? "partial" : "succeeded", undefined, heldCount);
   }
 
-  // Unchanged: the same file. Refresh the text Commons may have corrected.
+  // The review queue: what is held now, remembered for the run that confirms it.
+  if (candidates !== null && toHold.length) {
+    try {
+      await store.saveCandidates(toHold.map((h) => nextCandidate(h.plan.college.id, h.plan.target.source, h.plan.photo, h.reasons, candidates.get(h.plan.college.id), now)));
+    } catch (err) {
+      errors.push(`review queue: ${err instanceof Error ? err.message.slice(0, 200) : "write failed"}`);
+    }
+  }
+
+  // Unchanged: the same file. Refresh the text Commons may have corrected,
+  // unless the description page was edited within the window: then only
+  // checked_at moves, and the credit shown stays as it was.
   for (const p of toTouch) {
     try {
       const { college_id: _id, storage_path: _s, thumb_path: _t, commons_sha1: _h, ...fields } = rowOf(p, { full: p.prev!.storage_path, thumb: p.prev!.thumb_path });
-      await store.touch(p.college.id, fields);
+      if (stableSince(p.photo.pageEditedAt, now)) {
+        await store.touch(p.college.id, fields);
+      } else {
+        await store.touch(p.college.id, { checked_at: checkedAt });
+        bump("text-held");
+      }
       bump("unchanged");
       unchanged++;
     } catch (err) {
@@ -724,6 +1016,7 @@ export async function runCollegePhotoIngest(
       }
     } catch (err) {
       bump("download-failed");
+      keepCandidate.add(p.college.id);
       errors.push(`${p.college.unitid}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
     }
   });
@@ -741,6 +1034,17 @@ export async function runCollegePhotoIngest(
     await store.removeObjects([prev.storage_path, prev.thumb_path]).catch(() => {
       errors.push(`${d.college.unitid}: objects left in the bucket`);
     });
+  }
+
+  // Everything else in scope with a queue row was published, is unchanged, or
+  // has no photo now: its row goes, so a later candidate starts its wait afresh.
+  if (candidates !== null) {
+    const clear = [...candidates.keys()].filter((id) => scopeIds.has(id) && !keepCandidate.has(id));
+    if (clear.length) {
+      await store.clearCandidates(clear).catch((err: unknown) => {
+        errors.push(`review queue: ${err instanceof Error ? err.message.slice(0, 200) : "clear failed"}`);
+      });
+    }
   }
 
   const status: PhotoOutcome["status"] =

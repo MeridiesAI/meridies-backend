@@ -3,8 +3,15 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   allowedLicense,
+  candidateTextHash,
   choosePhoto,
   csvCell,
+  isoTime,
+  nextCandidate,
+  reviewDecision,
+  stableSince,
+  type ChosenPhoto,
+  type PhotoCandidate,
   fileTitleFromUri,
   loadPicks,
   normalizeTitle,
@@ -15,6 +22,7 @@ import {
   stripHtml,
   thumbUrlOf,
   CREDIT_MAX,
+  STABLE_MS,
 } from "../../src/lib/ingest/collegePhotos.js";
 import { isAllowedDownloadUrl, isJpeg, readJpeg, wikimediaClient, USER_AGENT } from "../../src/lib/ingest/wikimedia.js";
 
@@ -79,16 +87,36 @@ test("fileTitleFromUri: Special:FilePath URIs decoded, anything else refused", (
 
 test("parseSparql: one item per unitid, padded ids trimmed, bad ids and shared items skipped, images sorted", () => {
   const r = parseSparql(fixture("wdqs-p1771.json"));
-  assert.deepEqual(r.byUnitid.get(166683), { qid: "Q49108", titles: ["File:Great dome of MIT, Feb 2021.jpg"] });
+  assert.deepEqual(r.byUnitid.get(166683), { qid: "Q49108", titles: ["File:Great dome of MIT, Feb 2021.jpg"], modified: "2026-08-01T09:30:00.000Z" });
   assert.equal(r.byUnitid.get(110635)?.qid, "Q168756", "a padded unitid is trimmed");
   assert.equal(r.byUnitid.get(110635)?.titles[0], "File:Sather Tower été.jpg", "the title is passed on for Commons to normalize");
-  assert.deepEqual(r.byUnitid.get(130794), { qid: "Q49112", titles: [] }, "no image");
+  assert.deepEqual(r.byUnitid.get(130794), { qid: "Q49112", titles: [], modified: "2026-08-01T09:30:00.000Z" }, "no image");
   assert.deepEqual(r.byUnitid.get(217156)?.titles, ["File:Aerial view of Brown University.jpg", "File:Richardsonian Romanesque Brown.jpg"]);
   assert.ok(r.ambiguous.has(190415), "a unitid on two items");
   assert.ok(r.ambiguous.has(199998) && r.ambiguous.has(199999), "an item claiming two unitids");
   assert.ok(!r.byUnitid.has(190415) && !r.byUnitid.has(199998));
   assert.equal(r.invalid, 1, "the five-digit id");
   assert.equal(r.byUnitid.has(12345), false);
+});
+
+test("parseSparql: when the item was last edited, the latest across its rows; unknown is null", () => {
+  const b = (q: string, unitid: string, modified?: string) => ({
+    item: { value: `http://www.wikidata.org/entity/${q}` },
+    unitid: { value: unitid },
+    ...(modified !== undefined ? { modified: { value: modified } } : {}),
+  });
+  const r = parseSparql({
+    results: { bindings: [b("Q1", "100001", "2026-01-01T00:00:00Z"), b("Q1", "100001", "2026-03-01T00:00:00Z"), b("Q2", "100002"), b("Q3", "100003", "yesterday")] },
+  });
+  assert.equal(r.byUnitid.get(100001)?.modified, "2026-03-01T00:00:00.000Z");
+  assert.equal(r.byUnitid.get(100002)?.modified, null);
+  assert.equal(r.byUnitid.get(100003)?.modified, null, "an unreadable time is unknown, never stable");
+});
+
+test("isoTime: ISO date-times only", () => {
+  assert.equal(isoTime("2026-10-14T12:00:00Z"), "2026-10-14T12:00:00.000Z");
+  assert.equal(isoTime("2026-10-14T12:00:00+02:00"), "2026-10-14T10:00:00.000Z");
+  for (const bad of ["2026-10-14", "yesterday", "", 1760443200, null, undefined, "2026-13-45T99:99:99Z"]) assert.equal(isoTime(bad), null, String(bad));
 });
 
 test("parseSparql: a document that isn't a results set throws (the run stops touching nothing)", () => {
@@ -134,7 +162,9 @@ const full = fixture("commons-imageinfo-1280.json");
 const pageFor = (title: string) => resolvePages(full, [title]).get(title);
 
 test("resolvePages: a normalized title and a moved file both find their page", () => {
-  const m = resolvePages(full, ["File:Sather Tower été.jpg", "File:College Hall Penn old name.jpg", "File:Not in the answer.jpg"]);
+  const redirected = new Set<string>();
+  const m = resolvePages(full, ["File:Sather Tower été.jpg", "File:College Hall Penn old name.jpg", "File:Not in the answer.jpg"], redirected);
+  assert.deepEqual([...redirected], ["File:College Hall Penn old name.jpg"], "only the move counts as a redirect, not normalization");
   assert.equal(m.get("File:Sather Tower été.jpg")?.title, "File:Sather Tower été.jpg");
   assert.equal(m.get("File:College Hall Penn old name.jpg")?.title, "File:College Hall, University of Pennsylvania.jpg");
   assert.equal(m.get("File:Not in the answer.jpg"), null);
@@ -154,6 +184,100 @@ test("choosePhoto: an accepted file carries everything attribution needs", () =>
   assert.match(r.photo.fullUrl, /^https:\/\/upload\.wikimedia\.org\/.*\/1280px-/);
   assert.equal(r.photo.width, 1280);
   assert.equal(r.photo.height, 853);
+  assert.equal(r.photo.uploadedAt, "2021-01-10T12:00:00.000Z", "the current version's upload time");
+  assert.equal(r.photo.pageEditedAt, "2026-06-01T08:00:00.000Z", "the description page's latest revision");
+});
+
+test("choosePhoto: a page without its times is still a candidate, with the times unknown", () => {
+  const page = structuredClone(pageFor("File:Great dome of MIT, Feb 2021.jpg")!) as Record<string, unknown> & { imageinfo: Record<string, unknown>[] };
+  delete page.revisions;
+  delete page.imageinfo[0]!.timestamp;
+  const r = choosePhoto(page);
+  assert.ok(r.ok && r.photo.uploadedAt === null && r.photo.pageEditedAt === null);
+});
+
+// ---- The review gate ---------------------------------------------------------------------
+
+const NOW = new Date("2026-10-15T00:00:00Z");
+const ago = (days: number) => new Date(NOW.getTime() - days * 86_400_000).toISOString();
+const photo = (over: Partial<ChosenPhoto> = {}): ChosenPhoto => ({
+  title: "File:Campus.jpg", sha1: "a".repeat(40), width: 1280, height: 853, credit: "Someone", license: "CC BY 4.0",
+  licenseUrl: null, sourceUrl: "https://commons.wikimedia.org/wiki/File:Campus.jpg", fullUrl: "https://upload.wikimedia.org/x.jpg",
+  uploadedAt: ago(400), pageEditedAt: ago(60), ...over,
+});
+const decide = (over: Partial<Parameters<typeof reviewDecision>[0]> = {}) =>
+  reviewDecision({ source: "wikidata", photo: photo(), itemModified: ago(30), redirected: false, prev: undefined, candidate: undefined, candidatesAvailable: true, now: NOW, ...over });
+const seen = (p: ChosenPhoto, daysAgo: number, over: Partial<PhotoCandidate> = {}): PhotoCandidate => ({
+  college_id: "c1", source: "wikidata", commons_title: p.title, commons_sha1: p.sha1, text_hash: candidateTextHash(p),
+  reasons: ["replacement"], first_seen_at: ago(daysAgo), last_seen_at: ago(daysAgo), ...over,
+});
+
+test("stableSince: a week or more before now; unknown and future times never", () => {
+  assert.equal(stableSince(ago(7), NOW), true);
+  assert.equal(stableSince(new Date(NOW.getTime() - STABLE_MS + 1000).toISOString(), NOW), false);
+  assert.equal(stableSince(null, NOW), false);
+  assert.equal(stableSince("2099-01-01T00:00:00Z", NOW), false);
+  assert.equal(stableSince("garbage", NOW), false);
+});
+
+test("reviewDecision: a new photo quiet for a week on Wikidata and Commons is published at once", () => {
+  assert.deepEqual(decide(), { publish: true, via: "stable" });
+});
+
+test("reviewDecision: each recent edit holds a new photo, and says which", () => {
+  assert.deepEqual(decide({ itemModified: ago(1) }), { publish: false, reasons: ["wikidata-recent"] });
+  assert.deepEqual(decide({ itemModified: null }), { publish: false, reasons: ["wikidata-recent"] });
+  assert.deepEqual(decide({ photo: photo({ uploadedAt: ago(2) }) }), { publish: false, reasons: ["file-recent"] });
+  assert.deepEqual(decide({ photo: photo({ uploadedAt: null }) }), { publish: false, reasons: ["file-recent"] });
+  assert.deepEqual(decide({ photo: photo({ pageEditedAt: ago(0) }) }), { publish: false, reasons: ["page-recent"] });
+  assert.deepEqual(decide({ redirected: true }), { publish: false, reasons: ["redirected"] });
+});
+
+test("reviewDecision: a replacement always needs a sighting at least a week old, of exactly this candidate", () => {
+  const prev = { source: "wikidata" as const, commons_title: "File:Campus.jpg", commons_sha1: "b".repeat(40) };
+  assert.deepEqual(decide({ prev }), { publish: false, reasons: ["replacement"] });
+  const p = photo();
+  assert.deepEqual(decide({ prev, candidate: seen(p, 7) }), { publish: true, via: "observed" });
+  assert.deepEqual(decide({ prev, candidate: seen(p, 6) }), { publish: false, reasons: ["replacement"] }, "six days");
+  assert.equal(decide({ prev, candidate: seen(p, 9, { commons_sha1: "c".repeat(40) }) }).publish, false, "another version");
+  assert.equal(decide({ prev, candidate: seen(p, 9, { commons_title: "File:Other.jpg" }) }).publish, false, "another file");
+  assert.equal(decide({ prev, candidate: seen(p, 9, { text_hash: candidateTextHash({ ...p, credit: "Someone else" }) }) }).publish, false, "the credit was edited");
+  assert.equal(decide({ prev, candidate: seen(p, 9, { source: "pick" }) }).publish, false, "seen as a pick");
+  assert.equal(decide({ prev, candidate: seen(p, 9), candidatesAvailable: false }).publish, false);
+});
+
+test("reviewDecision: a sighting a week old stands in for every clock", () => {
+  const p = photo({ uploadedAt: ago(1), pageEditedAt: ago(1) });
+  assert.deepEqual(decide({ photo: p, itemModified: ago(1), redirected: true, candidate: seen(p, 8) }), { publish: true, via: "observed" });
+});
+
+test("reviewDecision: a team pick is published at once, unless a new version was uploaded over the picked file", () => {
+  const fresh = photo({ uploadedAt: ago(0), pageEditedAt: ago(0) });
+  assert.deepEqual(decide({ source: "pick", photo: fresh, itemModified: ago(0), redirected: true }), { publish: true, via: "pick" });
+  const wikidataPrev = { source: "wikidata" as const, commons_title: "File:Campus.jpg", commons_sha1: "b".repeat(40) };
+  assert.deepEqual(decide({ source: "pick", photo: fresh, prev: wikidataPrev }), { publish: true, via: "pick" }, "a pick replaces Wikidata's photo at once");
+  const pickPrev = { source: "pick" as const, commons_title: "File:Campus.jpg", commons_sha1: "b".repeat(40) };
+  assert.deepEqual(decide({ source: "pick", photo: fresh, prev: pickPrev, itemModified: ago(0) }), { publish: false, reasons: ["file-recent", "page-recent", "replacement"] }, "the Wikidata clock doesn't apply to a pick");
+  assert.deepEqual(decide({ source: "pick", photo: photo(), prev: pickPrev, candidate: seen(photo(), 8, { source: "pick" }) }), { publish: true, via: "observed" });
+});
+
+test("reviewDecision: without the review queue a replacement says it can't be confirmed", () => {
+  const prev = { source: "wikidata" as const, commons_title: "File:Campus.jpg", commons_sha1: "b".repeat(40) };
+  assert.deepEqual(decide({ prev, candidatesAvailable: false }), { publish: false, reasons: ["replacement", "no-review-table"] });
+  assert.deepEqual(decide({ candidatesAvailable: false }), { publish: true, via: "stable" }, "a new, quiet photo doesn't need the queue");
+});
+
+test("nextCandidate: the wait counts from the first sighting of the same candidate, and restarts on any change", () => {
+  const p = photo();
+  const first = nextCandidate("c1", "wikidata", p, ["replacement"], undefined, NOW);
+  assert.equal(first.first_seen_at, NOW.toISOString());
+  const later = new Date(NOW.getTime() + 3 * 86_400_000);
+  assert.equal(nextCandidate("c1", "wikidata", p, ["replacement"], first, later).first_seen_at, NOW.toISOString());
+  assert.equal(nextCandidate("c1", "wikidata", p, ["replacement"], first, later).last_seen_at, later.toISOString());
+  assert.equal(nextCandidate("c1", "wikidata", photo({ sha1: "d".repeat(40) }), ["replacement"], first, later).first_seen_at, later.toISOString());
+  assert.equal(nextCandidate("c1", "wikidata", photo({ credit: "Other" }), ["replacement"], first, later).first_seen_at, later.toISOString());
+  const past = new Date(NOW.getTime() - 86_400_000);
+  assert.equal(nextCandidate("c1", "wikidata", p, ["replacement"], first, past).first_seen_at, past.toISOString(), "a clock that went back starts afresh");
 });
 
 test("choosePhoto: each refusal has its reason", () => {
@@ -288,6 +412,10 @@ test("the client: pinned hosts, our User-Agent, redirects refused, POSTed titles
   assert.equal(body.get("maxlag"), "5");
   assert.equal(body.get("iiurlwidth"), "1280");
   assert.match(body.get("iiprop") ?? "", /sha1/);
+  assert.match(body.get("iiprop") ?? "", /\btimestamp\b/, "the current version's upload time");
+  assert.equal(body.get("prop"), "imageinfo|revisions");
+  assert.equal(body.get("rvprop"), "timestamp", "the description page's latest edit, and nothing else of it");
+  assert.match(decodeURIComponent(calls[0]!.url), /schema:dateModified/, "when each item was last edited");
   for (const c of calls) {
     assert.equal(c.init.redirect, "error");
     assert.equal((c.init.headers as Record<string, string>)["User-Agent"], USER_AGENT);
