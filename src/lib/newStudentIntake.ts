@@ -241,6 +241,30 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
 }
 
 /**
+ * Whether the profile an invitation names as having accepted it is really a
+ * student on the caller's roster. Only accept_invitation should write the
+ * accepted state, but a database without 20261024000023 still lets a
+ * counselor write it on their own invitation, so the API never acts on an
+ * acceptance (emails, notifications, task changes) that the roster doesn't
+ * bear out. Read on the caller's client: RLS shows a counselor only their own
+ * students. An errored read throws (fail closed).
+ */
+export async function acceptedStudentOnRoster(request: FastifyRequest, studentId: string): Promise<boolean> {
+  const { data, error } = await request.db
+    .from("profiles")
+    .select("id, role, counselor_id")
+    .eq("id", studentId)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  return isRosterStudent(data as Row | null, request.auth.userId);
+}
+
+/** The pure half of acceptedStudentOnRoster. */
+export function isRosterStudent(profile: Row | null, counselorId: string): boolean {
+  return !!profile && profile.role === "student" && profile.counselor_id === counselorId;
+}
+
+/**
  * The counselor sends one item back: the task returns to the student with the
  * note, the files they attached come off it (they stay in My documents), and
  * Submit opens again. The student hears by notification and email.

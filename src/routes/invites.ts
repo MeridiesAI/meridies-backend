@@ -12,7 +12,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
+import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
   addressStatuses,
@@ -106,6 +106,8 @@ async function onboardingStep(
   const row = data as unknown as Record<string, unknown>;
   const inv = toInvitationDetail(row);
   if (inv.status !== "accepted" || !inv.acceptedBy) throw conflict("They haven't joined yet.");
+  // The accepted state is only trusted when the roster bears it out.
+  if (!(await acceptedStudentOnRoster(request, inv.acceptedBy))) throw conflict("They haven't joined yet.");
   if (inv.confirmedAt) throw conflict("This student is already confirmed.");
 
   const step = body.receive ?? body.sendBack;
@@ -117,6 +119,7 @@ async function onboardingStep(
       .select("id, status, title")
       .eq("intake_invitation_id", id)
       .eq("intake_request_id", step.requestId)
+      .eq("student_id", inv.acceptedBy)
       .maybeSingle();
     if (taskError) throw fromPostgrest(taskError);
 
