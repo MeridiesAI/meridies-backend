@@ -199,9 +199,14 @@ begin
       'pendingInvitations', (select count(*) from public.invitations i
                               where i.counselor_id = p_from and i.status = 'pending'),
       'imports', (select count(*) from public.roster_imports i where i.counselor_id = p_from),
+      -- An import whose invitations are mid-send (import pipeline step 2's
+      -- claim, fresh for ten minutes) counts as in flight too.
       'importsInFlight', (select count(*) from public.roster_imports i
                            where i.counselor_id = p_from
-                             and i.status in ('committing', 'undoing', 'profiling', 'staging')),
+                             and (i.status in ('committing', 'undoing', 'profiling', 'staging')
+                                  or exists (select 1 from public.import_items it
+                                              where it.import_id = i.id and it.invite_state = 'sending'
+                                                and it.invite_claimed_at >= now() - interval '10 minutes'))),
       'templates', (select count(*) from public.import_templates t where t.counselor_id = p_from),
       'pipelineContacts', (select count(*) from public.pipeline_contacts c
                             where c.firm_id = v_firm and (c.counselor_id = p_from or c.owner_id = p_from)),
@@ -414,6 +419,17 @@ begin
                 and (i.status in ('committing', 'undoing')
                      or (v_practice and i.status in ('profiling', 'staging')))) then
     raise exception 'An import is still saving. Try again in a few minutes.' using errcode = 'P0001';
+  end if;
+  -- Invitations go out in the uploader's name and finish only for them
+  -- (import_finish_invite keys on roster_imports.counselor_id), so moving an
+  -- import while its invitations are being sent would strand the claim and
+  -- let the receiver send the same invitation again ten minutes later.
+  if v_practice and exists (select 1 from public.import_items it
+                              join public.roster_imports i on i.id = it.import_id
+                             where i.counselor_id = p_from and it.invite_state = 'sending'
+                               and it.invite_claimed_at >= now() - interval '10 minutes') then
+    raise exception 'Invitations from an import are still being sent. Try again in a few minutes.'
+      using errcode = 'P0001';
   end if;
   if exists (select 1 from public.import_items it
                join public.roster_imports i on i.id = it.import_id

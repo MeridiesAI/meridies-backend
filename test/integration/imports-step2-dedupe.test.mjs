@@ -87,3 +87,20 @@ await call(c.token, "DELETE", `/imports/${f.id}`);
 await sql(`update public.student_academics set gpa_weighted = 3.8 where student_id = '${s.id}'`);
 const g = await stagedImport(c, ["Email,Name,Weighted GPA", `${email},Lena Ortiz,3.80`].join("\n"));
 check("a value equal to what is stored isn't a change", g.stage.body.stats?.changes === 0, JSON.stringify(g.stage.body.stats));
+
+// The student's onboarding questionnaire wrote the value and nobody changed it
+// since (20261023010003, private.intake_owns_current): the counselor's import
+// wins by default, as it does in Ready to apply. Once anyone edits it, it is
+// theirs again.
+await sql(`update public.student_academics set sat_superscore = 1300 where student_id = '${s.id}'`);
+await sql(`insert into public.intake_fills (student_id, target_table, field, value_hash, run)
+  values ('${s.id}', 'student_academics', 'sat_superscore',
+          private.import_value_hash(private.import_current_value('student_academics', 'sat_superscore', '${s.id}')), 'save')
+  on conflict (student_id, target_table, field) where field <> '*' do update set value_hash = excluded.value_hash`);
+const h = await stagedImport(c, satCsv(1450), { edit: satPlan("scoir") });
+check("a questionnaire value, unchanged since: accept, old source intake", (await satDecision(h.id)) === "accept|intake");
+await call(c.token, "DELETE", `/imports/${h.id}`);
+await sql(`update public.student_academics set sat_superscore = 1310 where student_id = '${s.id}'`);
+const k = await stagedImport(c, satCsv(1450), { edit: satPlan("scoir") });
+check("…edited since the questionnaire: keep what is there", (await satDecision(k.id)) === "keep_old|student");
+await call(c.token, "DELETE", `/imports/${k.id}`);

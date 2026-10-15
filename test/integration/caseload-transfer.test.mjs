@@ -184,6 +184,15 @@ r = await tr(Ad, A, { mode: "one_person", toId: C.id });
 check("an admin can't transfer the owner's caseload", r.status === 403 && /Only the firm owner/.test(JSON.stringify(r.body)), JSON.stringify(r.body));
 r = await rest(B.token, "POST", "/rest/v1/rpc/transfer_caseload", { p_from: B.id, p_all_to: C.id });
 check("…and not through PostgREST either", r.status === 403 || r.status === 400, `${r.status} ${JSON.stringify(r.body)}`);
+// Import pipeline step 2: invitations from B's import are mid-send (a fresh
+// claim). Practice items can't move until they finish or the claim goes stale.
+const sendingItem = await one(`with i as (insert into public.import_items (import_id, match_status, imported_name, match_key, invite_state, invite_claimed_at)
+  values ('${impCommitted}', 'new_invite', 'Sending Student', '{"email":"ct-sending-${tag}@example.test"}'::jsonb, 'sending', now()) returning id) select id from i`);
+r = await tr(A, B, { mode: "one_person", toId: C.id, removeAfter: true });
+check("practice items wait while an import's invitations are being sent", r.status === 409 && /still being sent/.test(JSON.stringify(r.body)), `${r.status} ${JSON.stringify(r.body)}`);
+r = await call(A.token, "GET", `/management/consultants/${B.id}/transfer-preview`);
+check("…and the preview counts that import in flight", r.status === 200 && r.body.practiceItems?.importsInFlight >= 1, JSON.stringify(r.body.practiceItems));
+await sql(`delete from public.import_items where id = '${sendingItem}'`);
 check("nothing changed after the refusals", (await snapshot()) === before, `${before} vs ${await snapshot()}`);
 
 // ---------------------------------------------------------------------------
