@@ -125,3 +125,44 @@ const gone = await sql(`select private.import_insert_row('activities', '${s2.id}
 await sql(`select private.import_delete_row('activities', '${gone}')`);
 check("snapshot of a deleted row is null", (await sql(`select coalesce(private.import_row_snapshot('activities', '${gone}')::text, 'null')`)) === "null");
 check("deleting an already deleted row returns false", (await sql(`select private.import_delete_row('activities', '${gone}')`)) === "f");
+
+// ---- Questionnaire sync (20261023010001): the targets it added -------------
+check("grad_year 2027 is valid", await ok("grad_year", "2027"));
+check("grad_year 27 and a number are not valid", (await raw("grad_year", "27")) === "f" && (await raw("grad_year", 2027)) === "f");
+check("row:award valid", await ok("row:award", { name: "National Merit Semifinalist", level: "National", year: "2025", recognition_levels: ["national"], uc_level: "national", grade_levels: ["11"] }));
+check("row:award with a bad recognition level is not valid", (await raw("row:award", { name: "X", recognition_levels: ["galactic"] })) === "f");
+check("row:award with an unknown key is not valid", (await raw("row:award", { name: "X", prize_money: "100" })) === "f");
+check("row:award without a name is not valid", (await raw("row:award", { year: "2025" })) === "f");
+check("row:activity with timing, continuing and uc_description is valid",
+  await ok("row:activity", { name: "Robotics", timing: ["school"], continuing: true, uc_description: "Built a robot." }));
+check("row:activity with an unknown timing is not valid", (await raw("row:activity", { name: "Robotics", timing: ["summer"] })) === "f");
+check("row:activity with continuing as text is not valid", (await raw("row:activity", { name: "Robotics", continuing: "yes" })) === "f");
+
+const s3 = await studentOf(c, "values-profile");
+await sql(`update public.profiles set high_school = '  ' where id = '${s3.id}'`);
+check("a blank high school reads as empty", (await sql(`select coalesce(private.import_current_value('profiles','high_school','${s3.id}')::text, 'null')`)) === "null");
+check("import_set_field fills an empty high school",
+  (await sql(`select private.import_set_field('profiles','high_school','${s3.id}', null, '"Lincoln High"'::jsonb)`)) === "t" &&
+  (await sql(`select high_school from public.profiles where id = '${s3.id}'`)) === "Lincoln High");
+check("…and doesn't overwrite it the second time",
+  (await sql(`select private.import_set_field('profiles','high_school','${s3.id}', null, '"Other High"'::jsonb)`)) === "f" &&
+  (await sql(`select high_school from public.profiles where id = '${s3.id}'`)) === "Lincoln High");
+check("gpa_band reads and sets with compare-and-set",
+  (await sql(`select private.import_set_field('student_academics','gpa_band','${s3.id}', null, '"3.7–3.99 unweighted"'::jsonb)`)) === "t" &&
+  (await sql(`select private.import_current_value('student_academics','gpa_band','${s3.id}') #>> '{}'`)) === "3.7–3.99 unweighted");
+
+const imported = await sql(`select private.import_insert_row('awards', '${s3.id}', ${lit({ name: "Honor Roll", year: "2024" })})`);
+check("the 3-argument import_insert_row still stamps source = 'import'", (await sql(`select source from public.awards where id = '${imported}'`)) === "import");
+check("the same award name in another year inserts", isId(await sql(`select coalesce(private.import_insert_row('awards', '${s3.id}', ${lit({ name: "Honor Roll", year: "2025" })})::text, 'null')`)));
+check("the same award name and year is a duplicate", (await sql(`select coalesce(private.import_insert_row('awards', '${s3.id}', ${lit({ name: "honor roll", year: "2024" })})::text, 'null')`)) === "null");
+const fromIntake = await sql(`select private.import_insert_row('activities', '${s3.id}', ${lit({ name: "Key Club", timing: ["year"], continuing: false })}, 'intake')`);
+check("the 4-argument import_insert_row stamps the source it is given",
+  (await sql(`select source || ',' || array_to_string(timing, '|') || ',' || continuing::text from public.activities where id = '${fromIntake}'`)) === "intake,year,false");
+const second = await sql(`select private.import_insert_row('activities', '${s3.id}', ${lit({ name: "Band" })}, 'intake')`);
+check("inserted activities go to the end of the sheet",
+  (await sql(`select (select sort_order from public.activities where id = '${second}') - (select sort_order from public.activities where id = '${fromIntake}')`)) === "1");
+let badSource = false;
+try { await sql(`select private.import_insert_row('activities', '${s3.id}', ${lit({ name: "Chess" })}, 'manual')`); } catch { badSource = true; }
+check("any other source is refused", badSource);
+check("an award snapshot carries its columns", JSON.parse(await sql(`select private.import_row_snapshot('awards', '${imported}')`)).year === "2024");
+check("an award row is deleted by id", (await sql(`select private.import_delete_row('awards', '${imported}')`)) === "t");
