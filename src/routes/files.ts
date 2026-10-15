@@ -25,6 +25,7 @@ import { runStructured } from "../lib/anthropic.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, normalizeLink } from "../lib/links.js";
 import { logHost } from "../lib/requestLog.js";
+import { assertAiAllowed } from "../lib/practiceSettings.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
@@ -717,7 +718,18 @@ export default async function fileRoutes(app: FastifyInstance) {
  */
 async function readLink(request: FastifyRequest, row: Row) {
   const id = row.id as string;
-  await request.db.from("document_links").update({ status: "reading" }).eq("id", id);
+
+  // "Keep out of AI" is a data-handling switch: a link marked so is never fetched for a
+  // summary, and nothing about it reaches a model. It stays saved, as a plain link.
+  if (row.available_to_llm === false) {
+    const { data } = await request.db
+      .from("document_links")
+      .update({ status: "skipped", error: "Kept out of AI, so it wasn't read or summarized." })
+      .eq("id", id)
+      .select("*")
+      .maybeSingle();
+    return toDocumentLink((data ?? { ...row, status: "skipped" }) as Row);
+  }
 
   const fail = async (message: string) => {
     const { data } = await request.db
@@ -728,6 +740,16 @@ async function readLink(request: FastifyRequest, row: Row) {
       .maybeSingle();
     return toDocumentLink((data ?? { ...row, status: "failed", error: message }) as Row);
   };
+
+  // The practice's "AI summaries" switch, before anything is fetched: a counselor's own
+  // practice, a student's counselor's (runStructured checks again before the model).
+  try {
+    await assertAiAllowed(request, "link-digest");
+  } catch (err) {
+    return fail(publicMessage(err, "AI summaries aren't available"));
+  }
+
+  await request.db.from("document_links").update({ status: "reading" }).eq("id", id);
 
   let page;
   try {
