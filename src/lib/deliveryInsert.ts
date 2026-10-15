@@ -38,6 +38,11 @@ export function isMissingInvitationColumn(error: { code?: string; message: strin
   return isMissingColumn(error, "invitation_id");
 }
 
+/** The meeting_id foreign key refused the row: the meeting was deleted in the meantime. */
+export function isGoneMeeting(error: { code?: string; message: string } | null): boolean {
+  return error?.code === "23503" && /meeting_id/.test(error.message);
+}
+
 function without(row: Row, column: OptionalColumn): Row {
   const { [column]: _dropped, ...rest } = row;
   return rest;
@@ -50,8 +55,14 @@ export async function insertDelivery(insert: DeliveryInserter, row: Row, now: nu
   }
   for (let retries = 0; ; retries++) {
     const result = await insert(current);
+    if (retries > OPTIONAL_COLUMNS.length) return result;
+    // A meeting deleted while its invites were still going out: keep the row, unlinked.
+    if ("meeting_id" in current && isGoneMeeting(result.error)) {
+      current = without(current, "meeting_id");
+      continue;
+    }
     const missing = OPTIONAL_COLUMNS.find((c) => c in current && isMissingColumn(result.error, c));
-    if (!missing || retries >= OPTIONAL_COLUMNS.length) return result;
+    if (!missing) return result;
     missingUntil[missing] = now + MISSING_COLUMN_TTL_MS;
     current = without(current, missing);
   }

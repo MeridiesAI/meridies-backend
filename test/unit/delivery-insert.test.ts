@@ -146,3 +146,22 @@ test("each column's miss is cached on its own", async () => {
   await insertDelivery(later.insert, { meeting_id: "m3" }, MISSING_COLUMN_TTL_MS + 1);
   assert.equal(later.calls[0]!.meeting_id, "m3");
 });
+
+test("a meeting deleted mid-send: the row is kept without its meeting link", async () => {
+  resetDeliveryColumnCache();
+  const calls: Row[] = [];
+  const insert = async (row: Row) => {
+    calls.push(row);
+    if ("meeting_id" in row) {
+      return { data: null, error: { code: "23503", message: 'insert or update on table "message_deliveries" violates foreign key constraint "message_deliveries_meeting_id_fkey"' } };
+    }
+    return { data: { id: "d" }, error: null };
+  };
+  const r = await insertDelivery(insert, { to_email: "a@x", meeting_id: "m1" }, 0);
+  assert.equal(r.error, null);
+  assert.equal(calls.length, 2);
+  // Not cached: the column exists, only that meeting is gone.
+  const next: Row[] = [];
+  await insertDelivery(async (row) => (next.push(row), { data: { id: "e" }, error: null }), { meeting_id: "m2" }, 1);
+  assert.equal(next[0]!.meeting_id, "m2");
+});
