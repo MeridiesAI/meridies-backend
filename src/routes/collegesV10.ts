@@ -485,7 +485,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     if (list.length > 12) throw badRequest("Compare up to 12 schools at a time");
     if (list.some((id) => !z.string().uuid().safeParse(id).success)) throw badRequest("ids takes college ids");
 
-    const [colleges, facts, aid, ratings, bands, admitted, lists] = await Promise.all([
+    const [colleges, facts, aid, ratings, bands, admitted, lists, stats] = await Promise.all([
       request.db.from("colleges").select("*").in("id", list),
       request.db.from("college_profile_facts").select("*").in("college_id", list),
       request.db.from("college_aid_profiles").select("*").in("college_id", list),
@@ -493,8 +493,9 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       request.db.from("college_aid_band_ratings").select("*").in("college_id", list).order("sort_order"),
       request.db.from("college_admitted_profiles").select("*").in("college_id", list),
       request.db.from("college_list_profiles").select("college_id, campus_setting").in("college_id", list),
+      request.db.from("college_stats").select("*").in("college_id", list),
     ]);
-    for (const r of [colleges, facts, aid, ratings, bands, admitted, lists]) if (r.error) throw fromPostgrest(r.error);
+    for (const r of [colleges, facts, aid, ratings, bands, admitted, lists, stats]) if (r.error) throw fromPostgrest(r.error);
 
     const by = (rows: unknown) => {
       const m = new Map<string, Row[]>();
@@ -510,6 +511,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     const bd = by(bands.data);
     const ad = by(admitted.data);
     const ls = by(lists.data);
+    const st = by(stats.data);
     const rows = new Map(((colleges.data ?? []) as Row[]).map((c) => [String(c.id), c]));
 
     // In the order asked, so the columns stay where the counselor put them.
@@ -527,6 +529,9 @@ export default async function collegeV10Routes(app: FastifyInstance) {
           aidBandRatings: (bd.get(id) ?? []).map(toAidBandRating),
           admittedProfile: ad.get(id)?.[0] ? toAdmittedProfile(ad.get(id)![0]) : null,
           rounds: roundsFrom(c.deadlines),
+          // Federal figures (College Scorecard), with their own freshness; kept
+          // apart from the curated facts and aid profile above.
+          official: st.get(id)?.[0] ? toOfficialStats(st.get(id)![0]) : null,
         };
       });
   });
@@ -536,7 +541,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   app.get("/:id/extras", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const counselorView = request.profile.role === "counselor";
-    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, policies, requirements, majorAdmits] = await Promise.all([
+    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, associateMajors, policies, requirements, majorAdmits] = await Promise.all([
       request.db.from("colleges").select("id, name, website, deadlines").eq("id", id).maybeSingle(),
       request.db.from("college_profile_facts").select("*").eq("college_id", id).maybeSingle(),
       request.db.from("college_admitted_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -571,6 +576,14 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         .eq("credential_level", 3)
         .order("awards", { ascending: false, nullsFirst: false })
         .limit(150),
+      // Associate's programs, the same way: what a two-year school offers.
+      request.db
+        .from("college_fields_of_study")
+        .select("cip_code, title, credential_level, awards, earnings_4yr, median_debt")
+        .eq("college_id", id)
+        .eq("credential_level", 2)
+        .order("awards", { ascending: false, nullsFirst: false })
+        .limit(150),
       request.db.from("college_policies").select("*").eq("college_id", id).maybeSingle(),
       request.db.from("college_application_requirements").select("*").eq("college_id", id).order("cycle", { ascending: false }).limit(1),
       request.db
@@ -583,7 +596,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     ]);
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
-    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, policies, requirements, majorAdmits]) {
+    for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, associateMajors, policies, requirements, majorAdmits]) {
       if (r.error) throw fromPostgrest(r.error);
     }
     const supplementRows = (supplements.data ?? []) as Row[];
@@ -600,7 +613,10 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       official: {
         stats: stats.data ? toOfficialStats(stats.data as Row) : null,
         admissionFactors: factors.data ? toAdmissionFactors(factors.data as Row) : null,
+        // Bachelor's (credential level 3) and associate's (2) fields of study,
+        // each most awarded first; stats.predominantDegree says which leads.
         majors: ((majors.data ?? []) as Row[]).map(toFieldOfStudy),
+        associateMajors: ((associateMajors.data ?? []) as Row[]).map(toFieldOfStudy),
       },
       // Curated by Meridies from College Board, Common App, UC/CSU and the
       // schools' own pages, each field with its source.
