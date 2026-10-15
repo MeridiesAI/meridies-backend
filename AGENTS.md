@@ -1480,6 +1480,16 @@ and reachability only, never values, URLs or error text. `database` is a 2s HEAD
 probe on `colleges` (cached 5s); when it fails the route returns **503** with
 `status: "degraded"`, so a Railway healthcheck sees an unreachable database.
 
+`anthropic` is `true` when Anthropic accepted the key (asked with one cheap
+`models.list` call, re-checked every 10 minutes), `false` when no key is set or
+Anthropic refused it (401 or 403, re-checked every minute), and `null` until a
+check has given a firm answer (right after a deploy). A timeout, an outage, a
+rate limit or any other error keeps the last firm answer and asks again a
+minute later (`lib/anthropicKeyCheck.ts`). /health waits at most 2 s for the
+check and otherwise answers from the cache while it finishes. Like
+`serviceRole`, it never changes the status code. The AxIS fail-safe and the
+503 gates read only whether the key is set (`hasAnthropic`), never this check.
+
 `schema` is whether the tables and columns this build cannot run without
 exist (`REQUIRED_SCHEMA` in `lib/schemaCheck.ts`); when one is missing the route
 returns **503** too. `railway.json` points Railway's healthcheck at `/health`,

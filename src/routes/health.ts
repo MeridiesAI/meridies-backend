@@ -76,13 +76,16 @@ export default async function healthRoutes(app: FastifyInstance) {
     const [database, schema, anthropic] = await Promise.all([
       databaseReachable(app.log),
       schemaPresent(app.log),
-      anthropicKeyWorks(app.log),
+      // Never waits past the probe timeout: a slow Anthropic can't slow the healthcheck.
+      anthropicKeyWorks(app.log, { waitMs: PROBE_TIMEOUT_MS }),
     ]);
     const healthy = database && schema;
     // Config presence and reachability only — never values, URLs or error text.
-    // `anthropic` is whether the key is accepted, not merely set. AxIS being
-    // down doesn't make the API unhealthy, so only the database and its schema
-    // set the code. Railway's healthcheck reads that code (railway.json): a
+    // `anthropic` is true when Anthropic accepted the key, false only when no
+    // key is set or Anthropic refused it (401/403), and null before the first
+    // firm answer; a slow or failing Anthropic keeps the last answer. AxIS
+    // being down doesn't make the API unhealthy, so only the database and its
+    // schema set the code. Railway's healthcheck reads that code (railway.json): a
     // build whose migration has not been applied answers 503 and never goes live.
     return reply.code(healthy ? 200 : 503).send({
       status: healthy ? "ok" : "degraded",

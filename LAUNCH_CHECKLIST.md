@@ -151,6 +151,9 @@ Run against app.meridiesai.com and Railway once P0 and P1 are done.
 - [ ] `curl https://meridies-backend-production.up.railway.app/health` returns 200 with
   `database: true` and no secrets in the body. (The 503 path when the database is unreachable is in
   `src/routes/health.ts`; don't take production down to test it.)
+- [ ] The same response has `anthropic: true`. `null` is fine only right after a deploy (the first
+  key check hasn't answered yet; ask again in a few seconds). `false` means a key problem: the key is
+  unset, or Anthropic refused it (401/403). A timeout or an Anthropic outage never reads `false`.
 - [ ] Re-run `scripts/verify-v10.mjs` and the security advisors
 
 ---
