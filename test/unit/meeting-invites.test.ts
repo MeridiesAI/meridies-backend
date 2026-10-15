@@ -10,6 +10,7 @@ import {
   inviteEmail,
   inviteEndError,
   invitesReady,
+  latestInvitePerAddress,
   planInviteRound,
   prepareInviteRound,
   resetInvitesReady,
@@ -441,4 +442,19 @@ test("delivery: one email per recipient with its own .ics, linked to the meeting
     now: () => NOW,
   });
   assert.equal(sent[0]!.meeting_id, null);
+});
+
+test("the invites list: newest attempt per address, reasons safe to show", () => {
+  const rows = [
+    { to_email: "Avery@example.com", recipient_kind: "student", template: "meeting-update", status: "sent", channel: "email", sent_at: "2026-10-15T12:05:00Z", created_at: "2026-10-15T12:05:00Z" },
+    { to_email: "avery@example.com", recipient_kind: "student", template: "meeting-invite", status: "delivered", channel: "email", sent_at: "2026-10-15T12:00:00Z", delivered_at: "2026-10-15T12:00:05Z", created_at: "2026-10-15T12:00:00Z" },
+    { to_email: "pat@example.com", recipient_kind: "guardian", template: "meeting-invite", status: "failed", channel: "email", error: "RESEND_API_KEY unset", created_at: "2026-10-15T12:00:00Z" },
+    { to_email: null, status: "sent" },
+  ];
+  const list = latestInvitePerAddress(rows);
+  assert.deepEqual(list.map((d) => [d.email, d.recipientKind, d.template, d.status]), [
+    ["avery@example.com", "student", "meeting-update", "sent"],
+    ["pat@example.com", "guardian", "meeting-invite", "failed"],
+  ]);
+  assert.equal(list[1]!.reason, "Email isn't set up on the server yet");
 });

@@ -35,6 +35,7 @@ import { env } from "../env.js";
 import { loadAlertPrefs, loadSettings } from "./accountability.js";
 import { isTimeZone } from "./calendarFeed.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
+import { toInviteDelivery, type InviteDelivery } from "./inviteDelivery.js";
 import { buildMeetingIcs, mailto, meetingWhere, plainLine, type IcsMethod, type IcsMode } from "./ics.js";
 import { consumeRateLimit } from "./limits.js";
 import { serializeErr } from "./requestLog.js";
@@ -698,4 +699,26 @@ export async function loadAttendeeIds(db: SupabaseClient, meeting: Pick<MeetingS
   if (error) throw error;
   const others = ((data ?? []) as Row[]).map((r) => String(r.student_id)).filter((id) => id !== meeting.primaryStudentId);
   return [meeting.primaryStudentId, ...uniq(others)];
+}
+
+export type MeetingInviteDelivery = InviteDelivery & {
+  email: string;
+  recipientKind: "student" | "guardian" | "counselor";
+  template: string;
+};
+
+/** The newest attempt per address, from delivery rows ordered newest first (GET /meetings/:id/invites). */
+export function latestInvitePerAddress(rows: Row[]): MeetingInviteDelivery[] {
+  const seen = new Set<string>();
+  const out: MeetingInviteDelivery[] = [];
+  for (const r of rows) {
+    const email = s(r.to_email)?.toLowerCase();
+    if (!email || seen.has(email)) continue;
+    const d = toInviteDelivery(r);
+    if (!d) continue;
+    seen.add(email);
+    const kind = r.recipient_kind === "guardian" || r.recipient_kind === "counselor" ? r.recipient_kind : "student";
+    out.push({ email, recipientKind: kind, template: String(r.template ?? ""), ...d });
+  }
+  return out;
 }

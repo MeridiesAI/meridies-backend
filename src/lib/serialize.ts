@@ -724,6 +724,8 @@ export const toMeeting = (r: Row) => ({
   deadlineId: nstr(r.deadline_id),
   /** Set when the API booked it on a connected Google / Outlook calendar. */
   calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | null,
+  /** Emailed calendar invites on (lib/meetingInvites.ts). False before 20261023090001. */
+  sendInvites: r.send_invites === true,
   createdAt: nstr(r.created_at),
 });
 
