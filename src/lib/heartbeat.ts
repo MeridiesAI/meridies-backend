@@ -30,6 +30,25 @@ export function isStale(lastOkAt: string | null, expectedEvery: string, now = Da
   return now - Date.parse(lastOkAt) > 2 * intervalMs(expectedEvery);
 }
 
+/** The last run of the job failed or was degraded: its last error is newer than its last clean run. */
+export function isFailing(lastOkAt: string | null, lastErrorAt: string | null): boolean {
+  if (!lastErrorAt) return false;
+  const err = Date.parse(lastErrorAt);
+  if (!Number.isFinite(err)) return false;
+  return !lastOkAt || !(Date.parse(lastOkAt) >= err);
+}
+
+/**
+ * Whether a failing job should turn /internal/status non-ok now rather than
+ * when it goes overdue. A job that runs daily or less often (the monthly
+ * Scorecard load) would otherwise sit failing for weeks before twice its
+ * interval passed; a frequent one gets another try within minutes, so for it
+ * the overdue rule stays the alarm and a single failure is only listed.
+ */
+export function failingAlerts(expectedEvery: string): boolean {
+  return intervalMs(expectedEvery) >= 86_400_000;
+}
+
 /** Postgres interval text ("00:15:00", "7 days", "31 days") -> ms. */
 export function intervalMs(v: string): number {
   let ms = 0;
@@ -38,4 +57,25 @@ export function intervalMs(v: string): number {
   const hms = /(\d{1,2}):(\d{2}):(\d{2})/.exec(v);
   if (hms) ms += (Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3])) * 1000;
   return ms;
+}
+
+export type HeartbeatRow = { job: string; last_ok_at: string | null; last_error_at: string | null; expected_every: string };
+
+/** What GET /internal/status answers: "overdue" first, then "failing" (only jobs that alert on it), else "all-ok". */
+export function summarizeHeartbeats(rows: HeartbeatRow[], now = Date.now()) {
+  const jobs = rows.map((j) => ({
+    job: j.job,
+    lastOkAt: j.last_ok_at,
+    lastErrorAt: j.last_error_at,
+    // Not yet run at all reads as overdue only once something should have run.
+    overdue: isStale(j.last_ok_at, j.expected_every, now),
+    // The last run failed or was degraded (a Scorecard load that keeps
+    // falling back without its extended fields beats as not clean).
+    failing: isFailing(j.last_ok_at, j.last_error_at),
+  }));
+  const overdue = jobs.filter((j) => j.overdue).map((j) => j.job);
+  const failing = jobs.filter((j) => j.failing).map((j) => j.job);
+  const alerting = rows.filter((j, i) => jobs[i]!.failing && failingAlerts(j.expected_every));
+  const status = overdue.length ? "overdue" : alerting.length ? "failing" : "all-ok";
+  return { status, overdue, failing, jobs } as const;
 }

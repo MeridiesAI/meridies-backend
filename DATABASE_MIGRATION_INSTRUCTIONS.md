@@ -339,7 +339,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twelve files are merged ahead of production's database on purpose: the code was written to
+These thirteen files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -350,7 +350,8 @@ these files pass against a database that has none of them). Each new feature ans
 switched on yet: the questionnaire save stores the answers and copies nothing (`fromQuestionnaire: []`),
 step-2 import routes `503 { code: "imports_unavailable" }` and `GET /imports` `{ available: false }`,
 caseload transfer `503 { code: "caseload_transfer_unavailable" }` (removing a firm member keeps today's
-behaviour), meetings `invites: { status: "unavailable" }`, colleges `photo: null`.
+behaviour), meetings `invites: { status: "unavailable" }`, colleges `photo: null`, and the extended
+Scorecard figures read null (the monthly load writes every older figure).
 
 Apply in this order, after taking a backup (the workflow, or `supabase db push` from a laptop). Each
 set's own section below says what it does and how to check it.
@@ -368,9 +369,10 @@ set's own section below says what it does and how to check it.
 | 9 | `20261023030002_caseload_transfer_functions.sql` | Caseload transfer |
 | 10 | `20261023030003_remove_firm_member_caseload.sql` | Caseload transfer |
 | 11 | `20261023070001_college_photos.sql` | Campus photos |
-| 12 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
+| 12 | `20261023080001_college_stats_scorecard_more.sql` | College Scorecard figures |
+| 13 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
 
-(Twelve files in five sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
+(Thirteen files in six sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
@@ -379,7 +381,7 @@ satisfies both. No function, policy or trigger is defined in two of these files;
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all twelve:
+After all thirteen:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -526,6 +528,37 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 Then load the photos once by hand (`npx tsx --env-file=.env scripts/ingest/college-photos.ts`,
 after a `--dry-run` to look the list over), or `/internal/status` reads the new job overdue
 until the first monthly run.
+
+---
+
+## College Scorecard: more figures on college_stats: `20261023080001`
+
+Apply after every earlier file, the same way. It adds columns to `college_stats`
+and deletes nothing; no new table, so no new policies (the table keeps its
+select policy, its approval gate and service-role-only writes). Either order is
+safe: before it, the profile serves the new figures as null, and the Scorecard
+load writes every older figure, records the run as degraded and leaves the
+`scorecard-ingest` heartbeat not clean, so `GET /internal/status` reports the
+job as failing until this is applied and the load has run again.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261023080001_college_stats_scorecard_more.sql` | Adds the completion cohort and rates (`completion_basis`, `grad_rate_on_time`, `grad_rate_150`, `completion_by_race`), `retention_rate`, `part_time_share`, `student_faculty_ratio`, `grad_students`, `demographics`, `room_board_on_campus`, `books_supplies`, `median_earnings_6yr`, `median_debt_monthly`, `median_debt_noncompleters` and `carnegie_basic` |
+
+Then run the Scorecard load once (`POST /internal/ingest/scorecard` with the
+cron secret, or `npx tsx --env-file=.env scripts/ingest/scorecard.ts`), or the
+columns stay empty until the monthly cron.
+
+Check:
+
+```sql
+select count(*) from information_schema.columns
+ where table_schema = 'public' and table_name = 'college_stats'
+   and column_name in ('completion_basis', 'grad_rate_150', 'demographics', 'carnegie_basic');  -- expect 4
+-- after the load:
+select count(*) filter (where completion_basis is not null), count(*) from college_stats;
+select status, errors from ingest_runs where source = 'scorecard' order by started_at desc limit 1;  -- succeeded, []
+```
 
 ---
 

@@ -22,7 +22,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
-import { isStale } from "../lib/heartbeat.js";
+import { summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
 import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
@@ -188,22 +188,17 @@ export default async function internalRoutes(app: FastifyInstance) {
 
   /**
    * For a monitor (an uptime check with a keyword match on "all-ok"): every
-   * scheduled job's last clean run, and whether it's overdue. 503 when any is,
-   * so a plain status-code monitor alerts too.
+   * scheduled job's last clean run, whether it's overdue, and whether its last
+   * run failed. 503 when any is overdue, or when a job that runs daily or less
+   * often is failing (lib/heartbeat.ts failingAlerts), so a plain status-code
+   * monitor alerts too.
    */
   app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (_request, reply) => {
     const svc = serviceClient();
     if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });
     const { data, error } = await svc.from("job_heartbeats").select("job, last_ok_at, last_error_at, expected_every");
     if (error) return reply.code(503).send({ status: "degraded", reason: "heartbeats unreadable" });
-    const jobs = ((data ?? []) as { job: string; last_ok_at: string | null; last_error_at: string | null; expected_every: string }[]).map((j) => ({
-      job: j.job,
-      lastOkAt: j.last_ok_at,
-      lastErrorAt: j.last_error_at,
-      // Not yet run at all reads as overdue only once something should have run.
-      overdue: isStale(j.last_ok_at, j.expected_every),
-    }));
-    const overdue = jobs.filter((j) => j.overdue).map((j) => j.job);
-    return reply.code(overdue.length ? 503 : 200).send({ status: overdue.length ? "overdue" : "all-ok", overdue, jobs });
+    const summary = summarizeHeartbeats((data ?? []) as HeartbeatRow[]);
+    return reply.code(summary.status === "all-ok" ? 200 : 503).send(summary);
   });
 }

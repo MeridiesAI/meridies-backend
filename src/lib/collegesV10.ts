@@ -8,6 +8,15 @@
  */
 
 import { z } from "zod";
+import { consideration, testPolicyFrom } from "./ingest/ipeds.js";
+import { RACE_KEYS, type RaceKey } from "./ingest/scorecard.js";
+import {
+  carnegieBasicLabel,
+  carnegieSizeSettingLabel,
+  completionLabels,
+  isReligiouslyAffiliated,
+  predominantDegreeLabel,
+} from "./scorecardCodes.js";
 
 type Row = Record<string, unknown>;
 
@@ -448,6 +457,25 @@ export function freshness(verifiedAt: unknown, dataYear: unknown, now = Date.now
 
 const numOrNull = (v: unknown) => (v == null ? null : Number(v));
 
+/** A 0-1 share from a jsonb object, or null: a missing column, key or junk value all read as not reported. */
+const shareOf = (obj: unknown, key: string): number | null => {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return null;
+  const v = (obj as Record<string, unknown>)[key];
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+};
+const byRace = (obj: unknown) => Object.fromEntries(RACE_KEYS.map((k) => [k, shareOf(obj, k)])) as Record<RaceKey, number | null>;
+
+/** Smallint codes from college_stats; undefined (a column the migration hasn't added) is null. */
+const codeOf = (v: unknown): number | null => {
+  const n = numOrNull(v);
+  return n !== null && Number.isInteger(n) ? n : null;
+};
+
+/**
+ * Every key below `medianEarnings10yr` comes from migration 20261023080001 or
+ * from a coded column stored before but not served; each is null (or all-null)
+ * when its column is absent, so this serves the same shape before the migration.
+ */
 export const toOfficialStats = (r: Row, now = Date.now()) => ({
   admitRate: numOrNull(r.admit_rate),
   openAdmissions: r.open_admissions == null ? null : Boolean(r.open_admissions),
@@ -473,8 +501,49 @@ export const toOfficialStats = (r: Row, now = Date.now()) => ({
   pellRate: numOrNull(r.pell_rate),
   federalLoanRate: numOrNull(r.federal_loan_rate),
   medianDebt: numOrNull(r.median_debt),
+  // latest.completion.consumer_rate: the graduation rate Scorecard's site sorts
+  // by (Outcome Measures, an award within 8 years for all entering students,
+  // where reported; else first-time full-time within 150% of normal time).
+  // Never a 6-year rate: gradRate150 below is the timed one.
   gradRate: numOrNull(r.grad_rate),
   medianEarnings10yr: numOrNull(r.median_earnings_10yr),
+  // The coded fields, raw and labelled.
+  testRequirements: codeOf(r.test_requirements),
+  predominantDegree: codeOf(r.predominant_degree),
+  carnegieSizeSetting: codeOf(r.carnegie_size_setting),
+  carnegieBasic: codeOf(r.carnegie_basic),
+  religious: isReligiouslyAffiliated(codeOf(r.religious_affiliation)),
+  labels: {
+    // The curated campus-setting words, so a catalog school and a profiled one read alike.
+    setting: settingFromLocale(codeOf(r.locale)),
+    carnegieSizeSetting: carnegieSizeSettingLabel(codeOf(r.carnegie_size_setting)),
+    carnegieBasic: carnegieBasicLabel(codeOf(r.carnegie_basic)),
+    // The catalog's test-policy words (required, recommended, optional, blind).
+    testPolicy: testPolicyFrom(consideration(r.test_requirements == null ? undefined : String(r.test_requirements))),
+    predominantDegree: predominantDegreeLabel(codeOf(r.predominant_degree)),
+    gradRateOnTime: completionLabels(nstr(r.completion_basis)).onTime,
+    gradRate150: completionLabels(nstr(r.completion_basis)).within150,
+  },
+  // First-time full-time completion, from one IPEDS cohort (completionBasis).
+  completionBasis: r.completion_basis === "four-year" || r.completion_basis === "less-than-four-year" ? r.completion_basis : null,
+  gradRateOnTime: numOrNull(r.grad_rate_on_time),
+  gradRate150: numOrNull(r.grad_rate_150),
+  completionByRace: byRace(r.completion_by_race),
+  retentionRate: numOrNull(r.retention_rate),
+  partTimeShare: numOrNull(r.part_time_share),
+  studentFacultyRatio: numOrNull(r.student_faculty_ratio),
+  gradStudents: numOrNull(r.grad_students),
+  // Shares of degree-seeking undergraduates.
+  demographics: {
+    women: shareOf(r.demographics, "women"),
+    men: shareOf(r.demographics, "men"),
+    race: byRace(r.demographics),
+  },
+  roomBoardOnCampus: numOrNull(r.room_board_on_campus),
+  booksSupplies: numOrNull(r.books_supplies),
+  medianEarnings6yr: numOrNull(r.median_earnings_6yr),
+  medianDebtMonthly: numOrNull(r.median_debt_monthly),
+  medianDebtNoncompleters: numOrNull(r.median_debt_noncompleters),
   provenance: "sourced" as const,
   sourceUrl: String(r.source_url ?? ""),
   ...freshness(r.source_verified_at, r.data_year, now),
