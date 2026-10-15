@@ -445,4 +445,22 @@ for (const [answers, want] of [
   const forStranger = await rest(stranger.token, "POST", "/rest/v1/rpc/intake_filled_fields", { p_student: s.id });
   check("…and answers a stranger with nothing", Array.isArray(forStranger.body) && forStranger.body.length === 0);
 
+  // What the counselor's screens show.
+  let info = await call(c.token, "GET", `/student-page/${s.id}/info`);
+  check("the info card lists the GPA as from the questionnaire", info.status === 200 && info.body.fromQuestionnaire?.includes("gpaUnweighted"), JSON.stringify(info.body.fromQuestionnaire));
+  const me = await call(s.token, "GET", "/me/overview");
+  check("so does the student's own overview", me.status === 200 && JSON.stringify(me.body).includes("gpaUnweighted"));
+  const sheets = await call(c.token, "GET", `/application/sheets?studentId=${s.id}`);
+  const art = sheets.body.activities?.find((x) => x.organization === "Art Club");
+  check("the sheets carry source and fromQuestionnaire", art?.source === "intake" && art?.fromQuestionnaire === true, JSON.stringify(art));
+
+  await call(c.token, "PATCH", `/student-page/${s.id}/info`, { gpaUnweighted: 3.8 });
+  await sql(`update public.activities set description = 'Edited' where student_id = '${s.id}'`);
+  const rpc2 = await rest(c.token, "POST", "/rest/v1/rpc/intake_filled_fields", { p_student: s.id });
+  check("after the counselor's edit the GPA is no longer marked", (rpc2.body ?? []).find((f) => f.field === "gpa_unweighted")?.matchesCurrent === false);
+  info = await call(c.token, "GET", `/student-page/${s.id}/info`);
+  check("…and the info card drops it", info.status === 200 && !info.body.fromQuestionnaire.includes("gpaUnweighted") && info.body.gpaUnweighted === 3.8, JSON.stringify(info.body.fromQuestionnaire));
+  const sheets2 = await call(c.token, "GET", `/application/sheets?studentId=${s.id}`);
+  const art2 = sheets2.body.activities?.find((x) => x.organization === "Art Club");
+  check("an edited row keeps source intake but loses fromQuestionnaire", art2?.source === "intake" && art2?.fromQuestionnaire === false, JSON.stringify(art2));
 }

@@ -65,7 +65,7 @@ export default async function studentPageRoutes(app: FastifyInstance) {
   app.get("/:id/info", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const student = await resolveStudentId(request, id, "view");
-    const info = await loadStudentInfo(request.db, student);
+    const info = await loadStudentInfo(request.db, student, request.log);
     if (!info) throw notFound("That student isn't on your roster");
     return info;
   });
