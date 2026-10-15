@@ -97,7 +97,9 @@ export type AiModule =
   // AxIS on Claude Haiku 5.5 (lib/axis): the turn, the adjudicator, the memory fold, the cache pre-warm.
   | "axis" | "axis-verify" | "axis-memory" | "axis-warm"
   // Events Hub: finding a college's upcoming events on its own site (lib/eventsDiscovery.ts).
-  | "events-discovery";
+  | "events-discovery"
+  // Import pipeline step 2: the column mapping (lib/imports/aiPlan.ts); cell cleanup is deferred.
+  | "import-mapping" | "import-cleanup";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
@@ -109,7 +111,7 @@ export type AiAttachment = {
   title?: string;
 };
 
-type RunOptions<T> = {
+export type RunOptions<T> = {
   request: FastifyRequest;
   module: AiModule;
   studentId?: string | null;
@@ -126,6 +128,12 @@ type RunOptions<T> = {
   validate?: (value: unknown) => T;
   /** Which context sections the prompt carried (names only), stored on the audit row. */
   contextUsage?: ContextUsage;
+  /**
+   * Token usage, reported as soon as the model answers (before `validate`, so
+   * an answer that fails validation is still counted). A throwing callback is
+   * ignored. Used for per-import AI spend (lib/imports/spend.ts).
+   */
+  onUsage?: (u: { inputTokens: number; outputTokens: number; model: string }) => void | Promise<void>;
 };
 
 function userContent(prompt: string, attachments: AiAttachment[] | undefined): Anthropic.MessageParam["content"] {
@@ -214,6 +222,14 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
       ],
       tool_choice: { type: "tool", name: opts.toolName },
     });
+
+    if (opts.onUsage) {
+      try {
+        await opts.onUsage({ inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens, model });
+      } catch {
+        // Spend accounting must never break the call it describes.
+      }
+    }
 
     const block = response.content.find((c) => c.type === "tool_use");
     if (!block || block.type !== "tool_use") {

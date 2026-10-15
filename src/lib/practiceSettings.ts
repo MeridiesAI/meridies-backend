@@ -54,8 +54,22 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   "link-digest",
 ]);
 
-/** Modules that read uploaded documents on their own: "Auto-parse uploaded documents". */
-const DOCUMENT_MODULES: ReadonlySet<AiModule> = new Set<AiModule>(["file-filing", "document-tracker", "submission-review"]);
+/**
+ * Modules that read uploaded documents on their own: "Auto-parse uploaded
+ * documents". An import's column mapping sees only masked headers and shapes,
+ * but it is still AI reading a file the practice uploaded, so a practice that
+ * switched this off gets presets, templates and its own mapping instead.
+ */
+const DOCUMENT_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
+  "file-filing", "document-tracker", "submission-review", "import-mapping", "import-cleanup",
+]);
+
+/** Which Data & privacy switch gates a module, if any. */
+export function aiSwitchFor(module: AiModule): "aiSummaries" | "autoParseDocuments" | null {
+  if (SUMMARY_MODULES.has(module)) return "aiSummaries";
+  if (DOCUMENT_MODULES.has(module)) return "autoParseDocuments";
+  return null;
+}
 
 /**
  * Throws when the caller's practice has switched this kind of AI off. Only
