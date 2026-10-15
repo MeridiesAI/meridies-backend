@@ -9,6 +9,7 @@
 import type { ColumnProfile, SheetProfile } from "./profile.js";
 import { normalizeHeader } from "./profile.js";
 import { dropIncompleteGroups, type ParsePlan, type PlanColumn, type PlanSheet, type ProfiledFile, type SourceSystem, type Target } from "./plan.js";
+import { scoreColumnParts } from "./textShapes.js";
 import { testKindOf } from "./values.js";
 
 const f = (table: "student_academics" | "student_personal_details", field: string): Target => ({ kind: "field", table, field });
@@ -60,8 +61,6 @@ const PRESETS: ReadonlyArray<[RegExp, Target]> = [
   [/^(grade levels|grades participated|participation grade levels)$/, row("activities", "grade_levels")],
 ];
 
-/** A score column named for its test: "AP Biology", "AP Calculus BC Score", "IB Math HL". */
-const SCORE_COLUMN = /^(ap|ib)\s+(.+?)(\s+(score|exam score|result))?$/i;
 
 const norm = (h: string) => normalizeHeader(h).replace(/[^\p{L}\p{N} ]+/gu, " ").replace(/\s+/g, " ").trim();
 
@@ -74,9 +73,10 @@ function dateHints(c: ColumnProfile, sheet: SheetProfile): PlanColumn["parse"] {
 export function presetTarget(header: string): Target | null {
   const h = norm(header);
   for (const [re, t] of PRESETS) if (re.test(h)) return t;
-  const m = SCORE_COLUMN.exec(header.trim());
-  if (m && m[2].trim().length >= 2) {
-    const exam = `${m[1].toUpperCase()} ${m[2].trim()}`.slice(0, 80);
+  // A score column named for its test: "AP Biology", "AP Calculus BC Score", "IB Math HL".
+  const m = scoreColumnParts(header.trim());
+  if (m && m[1].trim().length >= 2) {
+    const exam = `${m[0].toUpperCase()} ${m[1].trim()}`.slice(0, 80);
     return { kind: "score_column", exam, testKind: testKindOf(exam) };
   }
   return null;

@@ -82,8 +82,38 @@ export function inspectXlsx(bytes: Uint8Array, caps: Caps = DEFAULT_CAPS): ZipVe
     if (MARKERS.some((m) => containsMarker(data, m))) return { ok: false, reason: "unsafe-xml" };
     if (/^xl\/workbook\.xml$/i.test(name)) {
       const head = new TextDecoder().decode(data.subarray(0, Math.min(data.length, 65536)));
-      date1904 = /<(?:\w+:)?workbookPr\b[^>]*\bdate1904\s*=\s*["'](1|true)["']/i.test(head);
+      date1904 = workbookUses1904(head);
     }
   }
   return { ok: true, date1904, parts };
+}
+
+/**
+ * Whether `head` (the start of xl/workbook.xml) sets `date1904`, as
+ * `/<(?:\w+:)?workbookPr\b[^>]*\bdate1904\s*=\s*["'](1|true)["']/i` reads it:
+ * a `date1904="1"` or `"true"` attribute after a `workbookPr` tag name and
+ * before the next ">". The expression's `[^>]*` rescanned to the end of the
+ * part from every "<workbookPr" when no ">" followed, which a crafted
+ * workbook.xml made cost most of a second; here each tag start and each
+ * attribute is found once and matched up in one pass.
+ */
+export function workbookUses1904(head: string): boolean {
+  const attributes: number[] = [];
+  for (const m of head.matchAll(/\bdate1904\s*=\s*["'](?:1|true)["']/gi)) attributes.push(m.index);
+  if (attributes.length === 0) return false;
+  let next = 0;
+  let gtFrom = -1;
+  let gt = -1;
+  for (const m of head.matchAll(/<(?:\w+:)?workbookPr\b/gi)) {
+    const after = m.index + m[0].length;
+    if (gtFrom === -1 || gt !== -1 && gt < after) {
+      gtFrom = after;
+      gt = head.indexOf(">", after);
+    }
+    const end = gt === -1 ? head.length : gt;
+    while (next < attributes.length && attributes[next]! < after) next++;
+    if (next === attributes.length) return false;
+    if (attributes[next]! < end) return true;
+  }
+  return false;
 }

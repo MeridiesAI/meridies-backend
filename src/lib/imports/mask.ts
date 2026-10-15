@@ -8,8 +8,8 @@
  */
 
 import { parseName } from "./names.js";
+import { isEmailShape } from "./textShapes.js";
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}(t[\d:.]+z?)?$/i;
 const SLASH_DATE = /^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}$/;
 const MONTH_DATE = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+\d{2,4}$|^\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{2,4}$/i;
@@ -48,7 +48,7 @@ export function maskValue(raw: string): string {
   if (v === "") return "<empty>";
   const lower = v.toLowerCase();
   if (SAFE_WORDS.has(lower)) return v.length <= 20 ? lower : "<word>";
-  if (EMAIL.test(v)) return "<email>";
+  if (isEmailShape(v)) return "<email>";
   if (ISO_DATE.test(v) || SLASH_DATE.test(v) || MONTH_DATE.test(v)) return "<date>";
   if (RATIO.test(v)) return "<number>/<number>";
   if (NUMBER.test(v)) {
@@ -103,7 +103,7 @@ export function maskHeader(header: string): string {
   const h = header.trim();
   if (h === "") return "<blank>";
   if (headerLooksLikeName(h)) return "<name>";
-  if (EMAIL.test(h)) return "<email>";
+  if (isEmailShape(h)) return "<email>";
   if (/\d{3}-\d{2}-\d{4}/.test(h) || /^\d{7,}$/.test(h)) return "<number>";
   return h.slice(0, 80);
 }

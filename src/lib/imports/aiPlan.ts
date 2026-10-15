@@ -23,6 +23,7 @@ import { KEY_KINDS, ROW_PARTS, ROW_TABLES, singleFields, type FieldDef } from ".
 import { SOURCE_SYSTEMS, type PlanColumn, type SourceSystem, type Target } from "./plan.js";
 import { modelView, type SheetProfile } from "./profile.js";
 import { costCents } from "./spend.js";
+import { scoreSuffixStart } from "./textShapes.js";
 import { testKindOf } from "./values.js";
 
 export type Unmapped = { fileId: string; sheet: SheetProfile; indexes: Set<number> };
@@ -118,7 +119,10 @@ export function buildPrompt(unmapped: Unmapped[], targets: string[]): string {
 }
 
 function scoreExam(header: string): string {
-  return header.trim().replace(/\s+(score|exam score|result)$/i, "").slice(0, 80);
+  // `.replace(/\s+(score|exam score|result)$/i, "")`, in linear time.
+  const h = header.trim();
+  const suffix = scoreSuffixStart(h);
+  return (suffix === -1 ? h : h.slice(0, suffix)).slice(0, 80);
 }
 
 /** The model's answer, filtered to what it was asked and what exists. */
