@@ -324,6 +324,14 @@ export default async function importRoutes(app: FastifyInstance) {
     requireWorker();
     const { id } = idParam.parse(request.params);
     const body = request.body === undefined || request.body === null ? null : commitBody.parse(request.body);
+    // Before step 2's migrations only request_import_commit(uuid) exists and
+    // no import can hold invitations to confirm: commit exactly as step 1 did.
+    if (!(await step2Migrated(request))) {
+      const { error } = await request.db.rpc("request_import_commit", { p_import: id });
+      if (error) throw fromImportRpc(error);
+      kickImportJob("commit", id, request.auth.userId, request.log);
+      return reply.code(202).send({ status: "committing" });
+    }
     // Say how many invitations this will send before anything moves; the
     // RPC checks the same count again under its lock (MI001).
     const { count, error: countErr } = await request.db
