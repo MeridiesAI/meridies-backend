@@ -4,7 +4,7 @@ import { assertCanViewStudent, requireRole } from "../lib/guards.js";
 import { fromPostgrest } from "../lib/errors.js";
 import { limit } from "../lib/limits.js";
 import { acceptRecommendation, dismissRecommendation } from "../lib/research/accept.js";
-import { REC_COLUMNS, runResearch, toDto } from "../lib/research/run.js";
+import { REC_COLUMNS, runResearch, toDto, withRepeats } from "../lib/research/run.js";
 
 const studentParam = z.object({ id: z.string().uuid() });
 const researchParams = z.object({ id: z.string().uuid(), feature: z.enum(["college-list", "activities"]) });
@@ -40,7 +40,7 @@ export default async function researchRoutes(app: FastifyInstance) {
       if (feature) q = q.eq("feature", feature);
       const { data, error } = await q.order("created_at", { ascending: false }).limit(200);
       if (error) throw fromPostgrest(error);
-      return (data ?? []).map((r) => toDto(r as Record<string, unknown>));
+      return withRepeats(request, id, (data ?? []).map((r) => toDto(r as Record<string, unknown>)));
     }
   );
 
