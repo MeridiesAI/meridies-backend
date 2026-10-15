@@ -410,6 +410,11 @@ for (const [answers, want] of [
   check("answers that aren't an object still save", r2.status === 200);
   const big = await call(s.token, "PATCH", "/auth/me", { profile: { intakeAnswers: { note: "x".repeat(210_000) } } });
   check("an oversized profile is refused with 400", big.status === 400, `status ${big.status}`);
+  // The onboarding page asks for the time zone back, so it sends one only when none is on file.
+  const before = await call(s.token, "GET", "/auth/me");
+  check("GET /auth/me carries timezone, null when none is saved", before.status === 200 && "timezone" in before.body && before.body.timezone === null, JSON.stringify(before.body.timezone));
+  await call(s.token, "PATCH", "/auth/me", { timezone: "America/Chicago" });
+  check("…and the saved one after PATCH", (await call(s.token, "GET", "/auth/me")).body.timezone === "America/Chicago");
 }
 
 // ---- Trigger scope ---------------------------------------------------------------------------------
