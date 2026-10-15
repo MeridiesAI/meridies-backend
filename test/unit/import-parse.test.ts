@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { strToU8, zipSync } from "fflate";
 import { detectType } from "../../src/lib/imports/magic.js";
-import { parseFailureMessage, parseInWorker } from "../../src/lib/imports/parse.js";
+import { MAX_CONCURRENT_PARSES, parseFailureMessage, parseInWorker, parsesRunning } from "../../src/lib/imports/parse.js";
 import { findHeaderRow, parseSpreadsheet, sniffDelimiter } from "../../src/lib/imports/sheet.js";
 import { containsMarker, inspectXlsx } from "../../src/lib/imports/zipGuard.js";
 import { csv, xlsx } from "./import-fixtures.js";
@@ -153,6 +153,16 @@ test("the parse process is killed at its heap cap, whatever NODE_OPTIONS says", 
   const big = "a,b\n" + "x,y\n".repeat(2_000_000);
   const out = await parseInWorker(csv(big), "big.csv", { maxRows: 5_000_000, heapMb: 64, timeoutMs: 60_000 });
   assert.deepEqual(out, { ok: false, detectedType: "unknown", reason: "memory" });
+});
+
+test("no more than a few parse processes run at once; the rest wait", async () => {
+  let peak = 0;
+  const timer = setInterval(() => (peak = Math.max(peak, parsesRunning())), 5);
+  const outs = await Promise.all(Array.from({ length: 8 }, (_, i) => parseInWorker(csv(`Name,Email\nA ${i},a${i}@x.org\n`), `f${i}.csv`, { maxRows: 10 })));
+  clearInterval(timer);
+  assert.ok(outs.every((o) => o.ok));
+  assert.ok(peak <= MAX_CONCURRENT_PARSES && peak > 0, `peak ${peak}`);
+  assert.equal(parsesRunning(), 0);
 });
 
 test("failure messages name the file and never echo anything else", () => {

@@ -138,9 +138,9 @@ async function heldQueue(request: FastifyRequest): Promise<HeldEntry[]> {
   const entries = (data ?? []) as Omit<HeldEntry, "nameMismatch" | "gpaScale">[];
   const ids = [...new Set(entries.map((e) => e.studentId))];
   const scales = new Map<string, string | null>();
-  if (ids.length > 0) {
-    // Best effort under RLS: a scale the counselor can't read shows as unknown.
-    const { data: rows } = await request.db.from("student_academics").select("student_id, gpa_scale").in("student_id", ids);
+  // Best effort under RLS: a scale the counselor can't read shows as unknown.
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data: rows } = await request.db.from("student_academics").select("student_id, gpa_scale").in("student_id", ids.slice(i, i + 100));
     for (const r of (rows ?? []) as Row[]) scales.set(String(r.student_id), (r.gpa_scale as string | null) ?? null);
   }
   return entries.map((e) => ({

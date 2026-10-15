@@ -25,13 +25,46 @@ const CHILD = fileURLToPath(new URL(fromSource ? "./parseWorker.ts" : "./parseWo
 
 export type ParseLimits = { timeoutMs?: number; heapMb?: number; maxRows: number };
 
+/**
+ * At most this many parse processes per API instance; the rest wait their
+ * turn (the timeout starts when a file's own process starts). Without it a
+ * burst of registrations would fork a 256 MB process each.
+ */
+export const MAX_CONCURRENT_PARSES = 3;
+let running = 0;
+const waiting: Array<() => void> = [];
+
+async function slot(): Promise<() => void> {
+  if (running >= MAX_CONCURRENT_PARSES) await new Promise<void>((r) => waiting.push(r));
+  running += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    running -= 1;
+    waiting.shift()?.();
+  };
+}
+
+/** For tests: processes running now. */
+export const parsesRunning = () => running;
+
 function childArgs(heapMb: number): string[] {
   const args = [`--max-old-space-size=${heapMb}`, "--max-semi-space-size=16", "--stack-size=4000"];
   if (fromSource) args.push("--import", import.meta.resolve("tsx"));
   return args;
 }
 
-export function parseInWorker(bytes: Uint8Array, fileName: string, limits: ParseLimits): Promise<ParseOutcome> {
+export async function parseInWorker(bytes: Uint8Array, fileName: string, limits: ParseLimits): Promise<ParseOutcome> {
+  const release = await slot();
+  try {
+    return await parseOnce(bytes, fileName, limits);
+  } finally {
+    release();
+  }
+}
+
+function parseOnce(bytes: Uint8Array, fileName: string, limits: ParseLimits): Promise<ParseOutcome> {
   const heap = limits.heapMb ?? WORKER_HEAP_MB;
   return new Promise<ParseOutcome>((resolve) => {
     let settled = false;
