@@ -9,8 +9,8 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { fromPostgrest, notFound } from "../lib/errors.js";
-import { assertCanEditStudent, assertCanViewStudent, requireRole } from "../lib/guards.js";
+import { forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { assertCanEditStudent, assertCanViewStudent, canArchive, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
   toActivity,
@@ -176,6 +176,13 @@ export default async function studentRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       await assertCanEditStudent(request, id);
       const patch = patchStudentSchema.parse(request.body);
+      // Archiving takes a student out of the escalation sweep, scheduled
+      // parent messages and reminders, so it is the counselor's call alone:
+      // a student can neither archive nor restore themselves (the database
+      // refuses it too, 20261024000025).
+      if (patch.archived !== undefined && !canArchive(request.profile.role, request.auth.userId, id)) {
+        throw forbidden("Only the student's counselor can archive or restore them");
+      }
 
       const { data: current } = await request.db
         .from("profiles")
