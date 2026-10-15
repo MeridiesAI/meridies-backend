@@ -43,7 +43,7 @@ import {
   type TaskNotification,
 } from "../lib/email.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
-import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { startSubmissionReview } from "../lib/submissionReview.js";
@@ -300,8 +300,12 @@ export default async function taskRoutes(app: FastifyInstance) {
     if (q.studentId || request.profile.role === "student") {
       const student = await resolveStudentId(request, q.studentId, "view");
       builder = builder.eq("student_id", student);
+    } else {
+      // The whole caseload. RLS already scopes a counselor to their own; naming
+      // the students lets Postgres read only theirs (lib/guards.ts).
+      const caseload = await caseloadStudentIds(request);
+      if (caseload) builder = builder.in("student_id", caseload);
     }
-    // Otherwise the whole roster: RLS already scopes a counselor to their own.
 
     if (q.status) builder = builder.eq("status", q.status);
     else if (q.includeComplete !== "true") builder = builder.neq("status", "complete");

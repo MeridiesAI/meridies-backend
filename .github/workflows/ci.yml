@@ -48,7 +48,7 @@ jobs:
   integration:
     name: Migrations + RLS persona suite (local Supabase)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -142,6 +142,28 @@ jobs:
           API_URL: http://127.0.0.1:4100
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
         run: npm run test:integration
+
+      # The app's signed-in suite seeds its stack with this; keep it running. The
+      # accounts it prints stay out of the log.
+      - name: E2E stack seed runs
+        env:
+          API_URL: http://127.0.0.1:4100
+        run: npm run seed:e2e -- --students 5 --roster 3 > /dev/null
+
+      # B14. Report only: runners are too noisy to gate a merge on 500 ms. It
+      # still fails when the seed or a timed call breaks. PERF_ENFORCE=1 by hand.
+      - name: 60-student speed test (report only)
+        env:
+          API_URL: http://127.0.0.1:4100
+        run: npm run test:perf
+
+      - name: Keep the speed test's numbers
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-roster
+          path: perf-roster.json
+          if-no-files-found: ignore
 
       - if: failure()
         run: cat api.log || true

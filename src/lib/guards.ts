@@ -6,7 +6,7 @@
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { forbidden, notFound } from "./errors.js";
+import { forbidden, fromPostgrest, notFound } from "./errors.js";
 import type { Role } from "./serialize.js";
 
 export function requireRole(role: Role) {
@@ -92,4 +92,36 @@ export async function resolveStudentId(
   if (mode === "edit") await assertCanEditStudent(request, requested);
   else await assertCanViewStudent(request, requested);
   return requested;
+}
+
+/** The most students a scoped list query names in its URL; past it the query runs on RLS alone, as before. */
+export const CASELOAD_SCOPE_MAX = 250;
+
+/**
+ * Every student a counselor can see: their roster (archived included), the
+ * students shared with them, and their own id, which is exactly what
+ * `private.can_view_student` lets through. A list query over all of a
+ * counselor's students (the calendar feed, the task list) filters on these ids
+ * so Postgres reads this caseload's rows by index; without the filter it reads
+ * every practice's rows and RLS checks each one, so the page slows down as
+ * other practices grow. RLS still applies on top, so the filter can only
+ * narrow what a query returns.
+ *
+ * Null when the caller isn't a counselor, or the caseload is over
+ * CASELOAD_SCOPE_MAX ids (the URL would grow too long): run the query
+ * unscoped then. A failed read throws rather than scoping to nothing.
+ */
+export async function caseloadStudentIds(request: FastifyRequest): Promise<string[] | null> {
+  if (request.profile.role !== "counselor") return null;
+  const me = request.auth.userId;
+  const [own, shared] = await Promise.all([
+    request.db.from("profiles").select("id").eq("counselor_id", me).limit(CASELOAD_SCOPE_MAX + 1),
+    request.db.from("student_collaborators").select("student_id").eq("counselor_id", me).limit(CASELOAD_SCOPE_MAX + 1),
+  ]);
+  if (own.error) throw fromPostgrest(own.error);
+  if (shared.error) throw fromPostgrest(shared.error);
+  const ids = new Set<string>([me]);
+  for (const r of (own.data ?? []) as Array<{ id: string }>) ids.add(r.id);
+  for (const r of (shared.data ?? []) as Array<{ student_id: string }>) ids.add(r.student_id);
+  return ids.size > CASELOAD_SCOPE_MAX + 1 ? null : [...ids];
 }
