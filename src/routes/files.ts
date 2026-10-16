@@ -30,6 +30,7 @@ import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
 import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePath } from "../lib/storagePath.js";
+import { assertPathClaimable, removeDeletedDocumentObject } from "../lib/documentClaim.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
 import {
   ensurePracticeFolders,
@@ -423,6 +424,10 @@ export default async function fileRoutes(app: FastifyInstance) {
       // the database refuses the same since 20261024000041).
       if (!isDocumentsBucket(b.bucket)) throw badRequest("Files are registered in the documents bucket only");
       if (!isSafeStoragePath(b.storagePath)) throw badRequest("That file path isn't one the app uploads to");
+      // A row is a key to its object (Storage reads follow documents rows):
+      // only where the caller could upload, and never over someone else's
+      // object (lib/documentClaim.ts; the database since 20261024000045).
+      await assertPathClaimable(request, b.storagePath);
       await enforceQuota(
         request.auth.userId,
         "uploads",
@@ -569,19 +574,11 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       const { error } = await request.db.from("documents").delete().eq("id", id);
       if (error) throw fromPostgrest(error);
-      // The file goes with its row, on the caller's own client, so Storage's
-      // delete policy decides: whoever uploaded it can remove it (a file the
-      // student uploaded stays in Storage, unreachable without its row). Best
-      // effort, after the row; (bucket, storage_path) is unique, so no other
-      // row points at the object.
-      const path = typeof existing.storage_path === "string" ? existing.storage_path : "";
-      if (path) {
-        const removed = await request.db.storage
-          .from(String(existing.bucket ?? "student-documents"))
-          .remove([path])
-          .catch(() => null);
-        if (!removed || removed.error) request.log.warn("document file left in storage");
-      }
+      // The file goes with its row, whoever uploaded it, so a deleted file
+      // leaves no object behind for anyone to claim with a new row. Only after
+      // the caller's own delete went through (RLS decided they may), and only
+      // for a path of the shape the app writes (lib/documentClaim.ts).
+      await removeDeletedDocumentObject(request, existing);
       return { deleted: true };
     }
   );

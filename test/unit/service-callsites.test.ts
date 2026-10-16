@@ -27,7 +27,9 @@ const REVIEWED = [
   // addresses of exactly the profiles transfer_caseload returned, to mail them. Outbound delivery only.
   // lib/practiceSettings.ts: inside a student's own request, reads their counselor's Data & privacy row
   // (keyed by the caller's own profile, re-read from the database), and asks isCounselorApproved first.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/documentClaim.ts: inside the caller's own request, after authenticate; asks Storage whether an object is
+  // at a path the caller may file into, and removes the object of a documents row the caller just deleted.
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
