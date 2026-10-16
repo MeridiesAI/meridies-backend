@@ -205,7 +205,9 @@ fix that depends only on applied files and can go in ahead of the rest),
 the RLS and ownership fixes (`20261024000021`-`25`, below), the
 submission-review and reminder security fixes (`20261024000041`-`45`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
-the API already refuses students on `/chat`), the per-counselor import
+the API already refuses students on `/chat`) and its other AI guardrails
+(`20261024000052`-`54`: identity text, a student's practice AI switches,
+kept-out links hold no digest), the per-counselor import
 invitation review and the same-student rule for held data (`20261024000061`-`62`), the campus photo review queue
 (`20261024000071`), the profile column bounds (`20261024000081`), the
 caseload transfer's file rule (`20261024000082`, which replaces

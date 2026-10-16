@@ -386,7 +386,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These thirty-two files are merged ahead of production's database on purpose: the code was written to
+These thirty-five files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -430,15 +430,18 @@ set's own section below says what it does and how to check it.
 | 23 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
 | 24 | `20261024000044_intake_items_stay_submitted.sql` | Security: submission review and reminders |
 | 25 | `20261024000045_document_path_claims.sql` | Security: submission review and reminders |
-| 26 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
-| 27 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
-| 28 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
-| 29 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
-| 30 | `20261024000081_profile_size_limit.sql` | Security: profile bounds and files by student |
-| 31 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: profile bounds and files by student (after file 9) |
-| 32 | `20261024000083_files_one_student_tree.sql` | Security: profile bounds and files by student |
+| 26 | `20261024000051_chat_counselor_only.sql` | Security: AI guardrails |
+| 27 | `20261024000052_profile_identity_text.sql` | Security: AI guardrails |
+| 28 | `20261024000053_student_practice_ai_settings.sql` | Security: AI guardrails |
+| 29 | `20261024000054_link_keep_out_clears_digest.sql` | Security: AI guardrails |
+| 30 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
+| 31 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
+| 32 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
+| 33 | `20261024000081_profile_size_limit.sql` | Security: profile bounds and files by student |
+| 34 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: profile bounds and files by student (after file 9) |
+| 35 | `20261024000083_files_one_student_tree.sql` | Security: profile bounds and files by student |
 
-(Thirty-two files: the first thirteen are six feature sets, the other nineteen are seven sets of security
+(Thirty-five files: the first thirteen are six feature sets, the other twenty-two are seven sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 21-25, the security fixes for submission review and student reminders, depend on none of the
@@ -457,18 +460,18 @@ applying with `test/integration/submission-hardening.test.mjs` and `student-remi
 Order between the files matters in these places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3; the caseload transfer (file 9) reads step 2's
 `import_items.invite_state` / `invite_claimed_at` (file 5); file 15 clears rows the guard in file 14
-would have refused (run it again if it went in first); file 27 replaces `request_import_commit` and
-`import_claim_invites` from file 7, file 28 replaces `accept_invitation` (last defined in the applied
-`20261017000001`), file 29 extends the campus photos of file 11, and file 31 replaces
+would have refused (run it again if it went in first); file 30 replaces `request_import_commit` and
+`import_claim_invites` from file 7, file 31 replaces `accept_invitation` (last defined in the applied
+`20261017000001`), file 32 extends the campus photos of file 11, and file 34 replaces
 `transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body), and
 file 25 replaces `private.documents_guard_storage_path` from file 21 (the same set).
 Applying the files in the order above satisfies all of them. Apart from those replacements
-(`request_import_commit` and `import_claim_invites`, files 7 and 27; `transfer_caseload`, files 9 and
-31; `documents_guard_storage_path`, files 21 and 25), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
+(`request_import_commit` and `import_claim_invites`, files 7 and 30; `transfer_caseload`, files 9 and
+34; `documents_guard_storage_path`, files 21 and 25), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
 (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
 file reading the current list back.
 
-After all thirty-two:
+After all thirty-five:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -769,6 +772,26 @@ Check:
 ```sql
 select polname from pg_policy where polname in
   ('ai_conversations_insert_counselor', 'ai_messages_insert_counselor', 'ai_attachments_insert_counselor', 'axis_attachments_insert_counselor');  -- 4 rows
+```
+
+---
+
+## AI guardrails, more: `20261024000052`-`54`
+
+Three independent files, each safe in either order with the code and with the build before it; none
+is in `REQUIRED_SCHEMA`.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261024000052_profile_identity_text.sql` | Trigger `profiles_guard_identity_text`: a new `grad_year` is four digits (or empty) and a new `full_name` at most 200 characters (23514 on update; on insert the name is cut and a malformed year dropped), since AxIS reads both as labels |
+| 2 | `20261024000053_student_practice_ai_settings.sql` | `public.my_practice_ai_settings()`: the caller's own practice's two AI switches, for a student's request when the API has no service-role key (two booleans, no argument, null for anyone but a student of an approved counselor) |
+| 3 | `20261024000054_link_keep_out_clears_digest.sql` | Trigger `document_links_keep_out_clears_digest`: a link kept out of AI holds no summary, key points or extraction notes, and a `read` status becomes `skipped` |
+
+Check:
+
+```sql
+select tgname from pg_trigger where tgname in ('profiles_guard_identity_text', 'document_links_keep_out_clears_digest');  -- 2 rows
+select to_regprocedure('public.my_practice_ai_settings()') is not null;                                          -- true
 ```
 
 ---
