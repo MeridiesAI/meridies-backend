@@ -906,7 +906,11 @@ there).
   copies are uploaded only if title, sha1 and upload time are unchanged (a
   revert is a new upload with a new time). Otherwise nothing downloaded is
   kept: `changed-during-run`, the stored photo and its queue row stay. A
-  failed re-check keeps nothing either.
+  failed re-check keeps nothing either. The bytes themselves aren't hashed
+  (the sha1 is of the original, often over the 3 MB cap, and the copies are
+  thumbnails), so this leans on Wikimedia purging a file's thumbnails on
+  every upload: a stale cached thumbnail of a swapped version served after
+  the purge failed is the residual case.
 - **Credits and licenses wait too** (`textDecision`). The credit is shown
   on every surface and on `/colleges/photo-credits`. For an unchanged file,
   new text (compared by hash with what the row shows) replaces it only after
