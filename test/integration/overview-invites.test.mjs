@@ -11,6 +11,29 @@ const intake = await call(c.token, "POST", "/invites", { email: `intake-${tag}@t
 check("New student invite is recorded", intake.status === 201 || intake.status === 200, `status ${intake.status} ${JSON.stringify(intake.body).slice(0, 120)}`);
 const bulk = await call(c.token, "POST", "/invites/bulk", { recipients: [{ email: `mass-${tag}@test.local`, name: "Mass Student" }] });
 check("Mass invite is recorded", bulk.status === 200 && bulk.body.results?.length === 1, `status ${bulk.status}`);
+// New student, several at once: each row keeps its grade and time zone, and the
+// shared request list lands on every invitation.
+const reqs = [
+  { id: "transcript", label: "Transcript", provided: false },
+  { id: "resume", label: "Resume", provided: false },
+];
+const many = await call(c.token, "POST", "/invites/bulk", {
+  recipients: [
+    { email: `bulk-a-${tag}@test.local`, name: "Ada Lane", gradeLevel: "11th", gradYear: 2028, timezone: "PT · Pacific" },
+    { email: `bulk-b-${tag}@test.local`, name: "Ben Ito", gradeLevel: "12th", gradYear: 2027, timezone: "ET · Eastern" },
+  ],
+  intakeRequests: reqs,
+  sendRequests: true,
+});
+check("bulk with basics sends both", many.status === 200 && many.body.results?.length === 2, `status ${many.status} ${JSON.stringify(many.body).slice(0, 160)}`);
+const manyRows = await rest(c.token, "GET", `/rest/v1/invitations?email=in.(bulk-a-${tag}@test.local,bulk-b-${tag}@test.local)&select=email,full_name,grade_level,grad_year,timezone,note,intake_requests,source`);
+const rowA = (manyRows.body ?? []).find((r) => r.email === `bulk-a-${tag}@test.local`);
+check("bulk row keeps grade, year and time zone", rowA?.grade_level === "11th" && rowA?.grad_year === 2028 && rowA?.timezone === "PT · Pacific", JSON.stringify(rowA));
+check("bulk row carries the shared requests", rowA?.intake_requests?.length === 2 && rowA?.source === "mass", JSON.stringify(rowA));
+check("bulk note lists what to send", String(rowA?.note ?? "").includes("transcript, resume"), JSON.stringify(rowA?.note));
+const again = await call(c.token, "POST", "/invites/bulk", { recipients: [{ email: `bulk-a-${tag}@test.local`, name: "Ada Lane" }] });
+check("a pending address is skipped, not resent", again.body?.skipped === 1 && again.body?.sent + again.body?.queued === 0, JSON.stringify(again.body).slice(0, 160));
+
 await sql(`insert into invitations (counselor_id, email, token, source, audience) values ('${c.id}', 'parent-${tag}@test.local', 'fam-${tag}', 'single', 'family')`);
 
 const building = await call(c.token, "GET", "/invites/building");
