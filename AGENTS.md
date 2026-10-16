@@ -60,7 +60,8 @@ src/
 │   ├── studentPage.ts     # info card, derived polygon scores, recorded-growth scrubber
 │   ├── studentApplication.ts # College list board + Application DTOs and rules
 │   ├── supplementDocs.ts  # supplement Google Docs under drive.file
-│   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
+│   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts (10 MB cap, linear scans)
+│   ├── linearText.ts      # tag/block stripping and line trims in linear time, for text a user supplied
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── inviteDelivery.ts  # an invitation's (or a composer attempt's) delivery status, as the webhooks left it
 │   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id or meeting_id is missing
@@ -87,7 +88,7 @@ src/
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
-│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule;
+│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule, textShapes (linear cell checks);
 │   │                      #   step 2: parse (capped child process), profile + masking, plan + presets + AI mapping,
 │   │                      #   rows + matching, staging, review, invitations, retention, rollout flag
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
@@ -1172,7 +1173,11 @@ false`), so a name that answers a public address to the check and 127.0.0.1 to
 the connection (DNS rebinding) never reaches the second answer; the hostname
 still goes out as the Host header and TLS server name.
 If another feature ever needs to fetch a user-supplied URL, route it through
-there rather than calling `fetch` directly.
+there rather than calling `fetch` directly. What it reads (up to 2 MB) is
+turned into text by `extractText` with the linear scanners in
+`lib/linearText.ts`, never with a regular expression: a page of "<a" or
+"<script" with no closing token made the old patterns run for minutes on the
+event loop every tenant shares (see "Text a user supplied" below).
 
 ### Connected apps (Google / Microsoft OAuth)
 
@@ -1893,6 +1898,23 @@ step 1's and is never gated.
   values; use it on any free text you log outside `err`, and log a
   user-supplied URL as `logHost(url)`. Never log a body, a prompt or essay text.
 - Never commit `.env` — keep `.env.example` current
+- **Text a user supplied is scanned in linear time.** Node serves every
+  tenant from one thread, so a regular expression that rescans the rest of
+  its input from every position (a quantified run followed by something that
+  may be missing: `/<[^>]+>/`, `/<a[\s\S]*?<\/a>/`, `/[ \t]+\n/`,
+  `/\s*@\s*/`, `/[^\s@]+@[^\s@]+\.[^\s@]+/`, `,(?![^(]*\))`, `/x[^>]*y/`,
+  `/[chars]+$/` unanchored, nested `(a+)+`) is a denial of service when the
+  text is a pasted link's page, an uploaded document, a Mass invite paste, an
+  import cell or header, an AxIS message or a model's streamed reply. Use the
+  scanners in `lib/linearText.ts` and `lib/imports/textShapes.ts` (each names
+  the expression it replaces and is checked against it on random input), cap
+  the input before matching (`MAX_DOCUMENT_BYTES` for document text, a window
+  for log redaction), or anchor and bound the pattern so each position does a
+  bounded amount of work. A new scan of such text gets a unit test that feeds
+  the worst case and asserts it finishes in well under 100 ms
+  (`test/unit/regex-dos-helpers.ts`); `test/integration/regex-dos.test.mjs`
+  runs the review's attacks against the API and checks `/health` still
+  answers while each one is in flight.
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
 
@@ -2032,7 +2054,9 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `delivery-insert`), the meeting calendar owner rule (`meeting-calendar`),
   the ownership checks in code (`ownership-guards`:
   who archives, which acceptance is trusted, which frozen recipients a
-  scheduled message may still reach), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  scheduled message may still reach), linear-time text scanning (`linear-text`, `mass-invite`,
+  `import-text-shapes`, `regex-dos`: each scanner against the expression it
+  replaced on random input, and the worst cases under 100 ms), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
@@ -2052,8 +2076,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `approval-jobs`), the import pipeline (`imports-*`; step 2's
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
   `-retention`, `-guard`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`)
-  and `caseload-transfer` (every persona, every table that follows a student,
-  removal, the firm setting). `npm run test:imports-load` (pre-release) commits
+  `caseload-transfer` (every persona, every table that follows a student,
+  removal, the firm setting) and `regex-dos` (the regular-expression attacks:
+  a student's document, a Mass invite paste, an import file; `/health` keeps
+  answering while each runs). `npm run test:imports-load` (pre-release) commits
   and undoes 5,000 rows and stages 5,000 more through the API; `npm run
   test:caseload-load` checks 500 students in one call. The harness's `user()`
   approves the counselors it makes;
