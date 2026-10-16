@@ -148,4 +148,53 @@ check("the owner's cancel clears their own pointer (the delete is best effort)",
 const aPlain = await call(A.token, "POST", "/meetings", { studentId: sa.id, title: "A's booking", startsAt: day(8), endsAt: day(8, 16) });
 check("the owner still books through the API", aPlain.status === 201 && aPlain.body?.counselorId === A.id, JSON.stringify(aPlain.body));
 
+// ---- The owner's invite throttle ---------------------------------------------------------
+
+// A row forged before the guard, naming A as its owner, about M's own student:
+// M passes every edit check on it. Switching emailed invites on (or changing
+// the meeting while they are on) must not spend A's 60 rounds an hour.
+const invitesReady = (await sql(`select count(*) from information_schema.columns where table_name='meetings' and column_name='send_invites'`)) === "1";
+const bucket = async (owner) => Number((await sql(`select coalesce((select count from private.rate_limit_buckets where key='meeting-invites:${owner}'), 0)`)) || 0);
+if (invitesReady) {
+  await sql(`delete from private.rate_limit_buckets where key in ('meeting-invites:${A.id}', 'meeting-invites:${M.id}')`);
+  const burn = await seed(sm.id, A.id, { pointer: false, title: "Forged for the throttle" });
+  const on = await call(M.token, "PATCH", `/meetings/${burn}`, { sendInvites: true, endsAt: day(3, 16) });
+  check("switching invites on for someone else's forged meeting saves", on.status === 200, JSON.stringify(on.body));
+  check("…but sends nothing", on.body?.invites?.status === "skipped", JSON.stringify(on.body?.invites));
+  for (let i = 0; i < 3; i++) await call(M.token, "PATCH", `/meetings/${burn}`, { title: `Burn ${i}`, startsAt: day(10 + i), endsAt: day(10 + i, 16) });
+  check("…and none of those rounds spends the named owner's invite throttle", (await bucket(A.id)) === 0, `count=${await bucket(A.id)}`);
+  check("…nor the caller's", (await bucket(M.id)) === 0);
+
+  const real = await seed(sa.id, A.id, { pointer: false, title: "A's invite meeting" });
+  const realOn = await call(A.token, "PATCH", `/meetings/${real}`, { sendInvites: true, endsAt: day(3, 16) });
+  check("the real owner's invite round still goes out", realOn.status === 200 && realOn.body?.invites?.status === "sending", JSON.stringify(realOn.body?.invites));
+  check("…and is charged once, to the owner", (await bucket(A.id)) === 1, `count=${await bucket(A.id)}`);
+  const bRound = await call(B.token, "PATCH", `/meetings/${real}`, { title: "Moved by the writer", startsAt: day(12), endsAt: day(12, 16) });
+  // Whether B's change is accepted, and whether B may read A's address, decide
+  // whether an update goes; either way the owner is charged exactly when it does.
+  const sent = bRound.status === 200 && bRound.body?.invites?.status === "sending";
+  check(`…and charges the owner's throttle only if it is sent (${sent ? "sent" : bRound.body?.invites?.reason ?? bRound.status})`, (await bucket(A.id)) === (sent ? 2 : 1), `count=${await bucket(A.id)}`);
+} else {
+  console.log("(meeting invites migration absent: throttle checks skipped)");
+}
+
+// ---- 20261024000012: rows forged before the guard lose their pointer ---------------------
+
+const fs = await import("node:fs");
+const backfill = fs.readFileSync(new URL("../../supabase/migrations/20261024000012_meeting_calendar_forged_rows.sql", import.meta.url), "utf8");
+const fForged = await seed(sm.id, A.id, { title: "Forged, pointer" });
+const fOwn = await seed(sa.id, A.id, { title: "A's, pointer" });
+const fWriter = await seed(sa.id, B.id, { title: "Writer's, pointer" });
+const fReader = await seed(sa.id, R.id, { title: "Reader's, pointer" });
+// Run in a transaction that is rolled back, so parallel suites' rows keep theirs.
+const after = await sql(`begin;
+${backfill}
+select json_object_agg(id, calendar_event_id is not null) from meetings where id in ('${fForged}','${fOwn}','${fWriter}','${fReader}');
+rollback;`);
+const kept = JSON.parse(after.split("\n").find((l) => l.startsWith("{")) ?? "{}");
+check("the backfill clears the pointer on a meeting whose owner has no hold on the student", kept[fForged] === false, after);
+check("…and keeps the owner's own", kept[fOwn] === true);
+check("…a write collaborator's", kept[fWriter] === true);
+check("…and a read collaborator's (any access counts)", kept[fReader] === true);
+
 console.log(guardReady ? "(meetings_owner_guard present)" : "(meetings_owner_guard absent)");

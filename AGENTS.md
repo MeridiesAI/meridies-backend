@@ -200,7 +200,7 @@ match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 pipeline step 2 (`20261023020001`-`03`), caseload transfer
 (`20261023030001`-`03`), campus photos (`20261023070001`), the extended
 College Scorecard columns (`20261023080001`), emailed meeting invites
-(`20261023090001`), the meeting owner guard (`20261024000011`, a security
+(`20261023090001`), the meeting owner guard (`20261024000011`-`12`, a security
 fix that depends only on applied files and can go in ahead of the rest),
 the RLS and ownership fixes (`20261024000021`-`25`, below), the
 submission-review and reminder security fixes (`20261024000041`-`43`),
@@ -417,8 +417,14 @@ forget it.
   pass) makes a user session book only as itself, never change
   `counselor_id`, and set, change or clear the pointer only on its own
   meeting; insert, update and delete need `private.counselor_can_edit_student`
-  (read-only collaborators read meetings, never write them). A new route that
-  calls a provider about a stored row checks ownership the same way.
+  (read-only collaborators read meetings, never write them); `20261024000012`
+  clears the pointer on rows forged before the guard (owner neither the
+  student's counselor nor a collaborator). A forged owner also can't be made
+  to pay: an invite round is resolved before `meeting-invites:<owner>` is
+  charged, and a meeting whose own student isn't on its owner's caseload
+  sends nothing and charges nothing. A new route that calls a provider about
+  a stored row, or charges a limit keyed by a stored owner, checks ownership
+  the same way.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the
@@ -1464,7 +1470,8 @@ calendar can add.
 - **Transactional.** Quiet hours don't hold an invite and the student's own
   reminder channels don't gate it, like a task assignment. A round that sends
   an invite or update costs one of 60 an hour per meeting owner
-  (`consumeRateLimit`, `meeting-invites:<owner>`); a round of cancellations is
+  (`consumeRateLimit`, `meeting-invites:<owner>`), charged only after the
+  round is resolved to someone who will receive it; a round of cancellations is
   never held back, and a throttled mixed round still sends its cancellations.
 - **Delivery.** The response carries `invites` (`{ status: "sending",
   recipients, skipped, note? } | { status: "none" } | { status: "skipped" |

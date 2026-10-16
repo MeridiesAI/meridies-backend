@@ -374,7 +374,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twenty-seven files are merged ahead of production's database on purpose: the code was written to
+These twenty-eight files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -407,24 +407,25 @@ set's own section below says what it does and how to check it.
 | 12 | `20261023080001_college_stats_scorecard_more.sql` | College Scorecard figures |
 | 13 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
 | 14 | `20261024000011_meeting_calendar_owner_guard.sql` | Security: meeting owner and calendar pointer guard |
-| 15 | `20261024000021_firm_membership_writes.sql` | Security: RLS and ownership |
-| 16 | `20261024000022_student_files_ownership.sql` | Security: RLS and ownership |
-| 17 | `20261024000023_invitation_accept_state.sql` | Security: RLS and ownership |
-| 18 | `20261024000024_student_message_recipients.sql` | Security: RLS and ownership |
-| 19 | `20261024000025_profile_archive_counselor_only.sql` | Security: RLS and ownership |
-| 20 | `20261024000041_document_storage_paths.sql` | Security: submission review and reminders |
-| 21 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
-| 22 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
-| 23 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
-| 24 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitation review (after file 7) |
-| 25 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
-| 26 | `20261024000081_profile_size_limit.sql` | Security: profile size bound for PostgREST writes |
-| 27 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload transfer moves only the moved students' files (after file 9) |
+| 15 | `20261024000012_meeting_calendar_forged_rows.sql` | Security: meeting owner and calendar pointer guard |
+| 16 | `20261024000021_firm_membership_writes.sql` | Security: RLS and ownership |
+| 17 | `20261024000022_student_files_ownership.sql` | Security: RLS and ownership |
+| 18 | `20261024000023_invitation_accept_state.sql` | Security: RLS and ownership |
+| 19 | `20261024000024_student_message_recipients.sql` | Security: RLS and ownership |
+| 20 | `20261024000025_profile_archive_counselor_only.sql` | Security: RLS and ownership |
+| 21 | `20261024000041_document_storage_paths.sql` | Security: submission review and reminders |
+| 22 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
+| 23 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
+| 24 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
+| 25 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitation review (after file 7) |
+| 26 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
+| 27 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
+| 28 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
 
-(Twenty-seven files: the first thirteen are six feature sets, the other fourteen are seven sets of security
+(Twenty-eight files: the first thirteen are six feature sets, the other fifteen are seven sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
-Files 20-22, the security fixes for submission review and student reminders, depend on none of the
+Files 21-23, the security fixes for submission review and student reminders, depend on none of the
 others: `20261024000041_document_storage_paths.sql` (a documents row
 names only the documents bucket and a path the bucket's insert policy could have taken, and never
 moves; client roles only), `20261024000042_counselor_recorded_phone.sql`
@@ -436,13 +437,13 @@ applying with `test/integration/submission-hardening.test.mjs` and `student-remi
 
 Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
-`import_items.invite_state` / `invite_claimed_at` (file 5), and file 27 replaces
+`import_items.invite_state` / `invite_claimed_at` (file 5), and file 28 replaces
 `transfer_caseload` from file 9 (same signature and grants). Applying the files in the order above
-satisfies all three. Apart from `transfer_caseload` (files 9 and 27), no function, policy or trigger is defined in two of these files; the shared CHECK
+satisfies all three. Apart from `transfer_caseload` (files 9 and 28), no function, policy or trigger is defined in two of these files; the shared CHECK
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all twenty-seven:
+After all twenty-eight:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -678,7 +679,7 @@ select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tg
 Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
 domain (`LAUNCH_CHECKLIST.md`).
 
-## Meetings: the owner and the calendar pointer: `20261024000011`
+## Meetings: the owner and the calendar pointer: `20261024000011`, `20261024000012`
 
 A security fix. A meeting's `calendar_provider` / `calendar_event_id` name an
 event on the calendar of `meetings.counselor_id`, and the API acts on it with
@@ -687,12 +688,34 @@ write a meeting naming another counselor as its owner, and read-only
 collaborators could write meetings. It depends only on files already in
 production, so it can be applied on its own, ahead of the rest of this list.
 Either order with the code is safe (the code already calls a provider only for
-the caller's own meeting). It adds a trigger and replaces policies; it deletes
-nothing.
+the caller's own meeting, and emails invites or spends a counselor's invite
+throttle only for a meeting whose student is on that counselor's caseload). The
+first file adds a trigger and replaces policies; the second clears the
+calendar pointer on rows already in the table whose owner has no hold on the
+student (forged before the guard). Neither deletes anything. Apply them
+together, 11 then 12; if 12 went in first, run it again after 11 (it is
+idempotent).
 
 | # | File | What it does |
 |---|---|---|
 | 1 | `20261024000011_meeting_calendar_owner_guard.sql` | Trigger `meetings_owner_guard` (a user session books only as itself, never changes `counselor_id`, and changes the calendar pointer only on its own meeting; `transfer_caseload` and the service role pass), `meetings_write` replaced by insert/update/delete policies on `private.counselor_can_edit_student`, and `meeting_attendees_write` narrowed to students the caller can edit |
+| 2 | `20261024000012_meeting_calendar_forged_rows.sql` | Clears `calendar_provider` / `calendar_event_id` on every meeting whose `counselor_id` is neither the student's counselor nor a collaborator on the student (any access; approval not asked), and raises a notice with the count. `counselor_id` and the provider's own event are left as they are |
+
+Before applying, list what the second file will clear (read-only):
+
+```sql
+select m.id, m.counselor_id, m.student_id, s.counselor_id as students_counselor, m.calendar_provider, m.created_at
+  from public.meetings m join public.profiles s on s.id = m.student_id
+ where (m.calendar_provider is not null or m.calendar_event_id is not null)
+   and s.counselor_id is distinct from m.counselor_id
+   and not exists (select 1 from public.student_collaborators c
+                    where c.student_id = m.student_id and c.counselor_id = m.counselor_id);
+```
+
+A row there whose owner never worked with the student was forged; tell that
+counselor, since the event it named is on their calendar. A row left by a
+collaborator since removed is harmless either way. After applying, the same
+query returns no rows.
 
 Check:
 
