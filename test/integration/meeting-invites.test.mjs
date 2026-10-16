@@ -151,3 +151,18 @@ check("…and the earlier invite rows lost their link, not their record", (await
 
 const past = await call(c.token, "POST", "/meetings", { studentId: s1.id, title: "Already over", startsAt: "2020-01-01T15:00:00Z", endsAt: "2020-01-01T16:00:00Z", sendInvites: true });
 check("a meeting that is over sends nothing", past.status === 201 && past.body?.invites?.status === "none", JSON.stringify(past.body?.invites));
+
+// ---- A student can't redirect an invite ------------------------------------------------------------
+// student_personal_details is the student's own row (attach_student_policies), so a
+// contact email typed there must never become where the counselor's invite goes.
+
+const planted = `planted-${tag}@evil.test`;
+const plant = await rest(s2.token, "POST", "/rest/v1/student_personal_details?on_conflict=student_id",
+  { student_id: s2.id, contact_email: planted }, { Prefer: "resolution=merge-duplicates,return=minimal" });
+check("the student can write their own contact email (the precondition)", plant.status < 300, `status ${plant.status} ${JSON.stringify(plant.body)}`);
+const redirected = await call(c.token, "POST", "/meetings", { studentId: s2.id, title: "Redirect try", startsAt: day(16), endsAt: day(16, 16), sendInvites: true });
+check("a booking for that student still sends", redirected.status === 201 && redirected.body?.invites?.status === "sending", JSON.stringify(redirected.body?.invites));
+sent = await rows(`meeting_id='${redirected.body?.id}'`, 2);
+check("the invite goes to the student's sign-in email", has(sent, s2.email, "meeting-invite", "student"), JSON.stringify(sent));
+await sleep(600);
+check("…and nothing ever goes to the address the student typed", (await sql(`select count(*) from message_deliveries where lower(to_email)=lower('${planted}')`)) === "0");

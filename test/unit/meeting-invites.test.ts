@@ -250,13 +250,13 @@ function baseTables(over: Partial<Tables> = {}): Tables {
 const emails = (r: Awaited<ReturnType<typeof resolveRound>>) =>
   "skip" in r ? r.skip : r.recipients.map((x) => `${x.kind}:${x.email}:${x.method}`).sort();
 
-test("recipients: the student's contact email, guardians with alerts on, the counselor's copy, deduped", async () => {
+test("recipients: the student's sign-in email, guardians with alerts on, the counselor's copy, deduped", async () => {
   const p = plan({ after: m({ guardiansInvited: true }), attendeesAfter: [A, B] })!;
   const r = await resolveRound(fakeDb(baseTables()), p);
   assert.deepEqual(emails(r), [
     "counselor:dana@practice.test:PUBLISH",
     "guardian:pat@example.com:REQUEST",
-    "student:avery.personal@example.com:REQUEST",
+    "student:avery@example.com:REQUEST",
     "student:blake@example.com:REQUEST",
   ]);
   assert.ok(!("skip" in r));
@@ -292,22 +292,32 @@ test("a student shared with the meeting's counselor is on their caseload", async
 test("copy_parents off, or its read failing, keeps that student's guardians out (fail closed)", async () => {
   const p = plan({ after: m({ guardiansInvited: true }), attendeesAfter: [A] })!;
   const off = await resolveRound(fakeDb(baseTables({ student_alert_prefs: [{ student_id: A, copy_parents: false, copy_student: false }] })), p);
-  assert.deepEqual(emails(off), ["counselor:dana@practice.test:PUBLISH", "student:avery.personal@example.com:REQUEST"]);
+  assert.deepEqual(emails(off), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
   if (!("skip" in off)) assert.match(off.notes.join(" "), /switched off/);
 
   const broken = await resolveRound(fakeDb(baseTables({ student_alert_prefs: { error: { code: "XX000", message: "boom" } } })), p);
-  assert.deepEqual(emails(broken), ["counselor:dana@practice.test:PUBLISH", "student:avery.personal@example.com:REQUEST"]);
+  assert.deepEqual(emails(broken), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
 
   const noGuardians = await resolveRound(fakeDb(baseTables({ guardians: { error: { code: "XX000", message: "boom" } } })), p);
-  assert.deepEqual(emails(noGuardians), ["counselor:dana@practice.test:PUBLISH", "student:avery.personal@example.com:REQUEST"]);
+  assert.deepEqual(emails(noGuardians), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
 });
 
 test("an unreadable roster or organizer skips the whole round", async () => {
   const p = plan({})!;
-  assert.equal(emails(await resolveRound(fakeDb(baseTables({ student_personal_details: { error: { code: "XX000", message: "x" } } })), p)), "Couldn't read who to invite");
+  assert.match(String(emails(await resolveRound(fakeDb(baseTables({ profiles: { error: { code: "XX000", message: "x" } } })), p))), /Couldn't read/);
   const t = baseTables();
   (t.profiles as Record<string, unknown>[])[0]!.email = null;
   assert.match(String(emails(await resolveRound(fakeDb(t), p))), /counselor/);
+});
+
+test("a contact email the student wrote is never followed, and its read isn't needed", async () => {
+  // student_personal_details is student-writable: an invite there would let a
+  // student send the counselor's invite (and its updates) to anyone.
+  const p = plan({ attendeesAfter: [A] })!;
+  const planted = baseTables({ student_personal_details: [{ student_id: A, contact_email: "attacker@evil.test" }] });
+  assert.deepEqual(emails(await resolveRound(fakeDb(planted), p)), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
+  const unreadable = baseTables({ student_personal_details: { error: { code: "XX000", message: "x" } } });
+  assert.deepEqual(emails(await resolveRound(fakeDb(unreadable), p)), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
 });
 
 test("a guardian of two siblings is never cancelled while one sibling is still invited", async () => {

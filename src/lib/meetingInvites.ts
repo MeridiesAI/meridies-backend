@@ -12,6 +12,8 @@
  * applies), and fails closed:
  *  - the meeting's own student must be on its owner's caseload, or nothing
  *    is sent at all;
+ *  - a student at their sign-in address (`profiles.email`), never the
+ *    student-writable contact email, so a student can't redirect an invite;
  *  - a student must still be readable, not archived, and on the meeting
  *    owner's caseload (their counselor, or a collaborator of theirs);
  *  - a guardian only while the student's `copy_parents` is on
@@ -352,14 +354,15 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
     ...plan.keep.map((k) => k.studentId),
   ]);
 
-  const [profiles, details] = await Promise.all([
-    db.from("profiles").select("id, full_name, email, archived_at, counselor_id").in("id", studentIds),
-    db.from("student_personal_details").select("student_id, contact_email").in("student_id", studentIds),
-  ]);
+  // The student's sign-in address only (profiles.email, which no client can
+  // write). student_personal_details.contact_email is student-writable, so
+  // following it would let a student point the counselor's invite, and every
+  // later update and cancellation, at any address (the same rule as the
+  // student's due-tomorrow reminders).
+  const profiles = await db.from("profiles").select("id, full_name, email, archived_at, counselor_id").in("id", studentIds);
   // Fails closed: without these we can't say who may receive what, or at which address.
-  if (profiles.error || details.error) return { skip: "Couldn't read who to invite" };
+  if (profiles.error) return { skip: "Couldn't read who to invite" };
 
-  const contact = new Map(((details.data ?? []) as Row[]).map((d) => [String(d.student_id), validEmail(d.contact_email)]));
   const rows = new Map(((profiles.data ?? []) as Row[]).map((p) => [String(p.id), p]));
 
   // On the owner's caseload: their student, or one shared with them. An unreadable answer is "no".
@@ -426,7 +429,7 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
   }
 
   const studentName = (id: string) => s(rows.get(id)?.full_name);
-  const studentEmail = (id: string) => contact.get(id) ?? validEmail(rows.get(id)?.email);
+  const studentEmail = (id: string) => validEmail(rows.get(id)?.email);
 
   /** Who an audience reaches; counts the invited who can't be reached. */
   const reach = (a: { audience: PlannedMessage["audience"]; studentId: string }, count: boolean) => {

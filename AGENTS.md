@@ -1414,7 +1414,11 @@ meeting's own invites are Meridies' (`lib/meetingInvites.ts`, `lib/ics.ts`,
 calendar can add.
 
 - **Who.** Each invited student (primary and `meeting_attendees`) at their
-  contact email, else their login email. Their guardians only when the
+  sign-in email (`profiles.email`, which no client writes), never
+  `student_personal_details.contact_email`: the student writes that row, so
+  following it would let them send the counselor's invite, and every update
+  and cancellation after it, to any address (the rule the student's
+  due-tomorrow reminders follow too). Their guardians only when the
   meeting has `guardians_invited`, the student's `copy_parents` is on
   (`loadAlertPrefs`, fail closed) and the guardian's own `alerts_enabled`
   is on, at most four per student. The meeting's owner (`meetings.counselor_id`,
