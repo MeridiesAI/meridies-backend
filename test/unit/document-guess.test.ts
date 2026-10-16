@@ -56,3 +56,28 @@ test("false friends and odd names stay unknown without throwing", () => {
   }
   assert.equal(g("x.pdf", "   ").textFound, false);
 });
+
+test("prototype property names in a filename stay unknown", () => {
+  for (const name of ["Constructor University.pdf", "toString.pdf", "__proto__ notes.pdf", "hasOwnProperty valueOf.pdf"]) {
+    const r = g(name, null);
+    assert.equal(r.kind, null, name);
+    assert.equal(r.basis, null, name);
+    assert.equal(r.matched, null, name);
+  }
+});
+
+test("sensitive phrases match in any case, and the spelled-out FAFSA counts", () => {
+  assert.equal(g("a.pdf", "my fafsa confirmation is attached here").kind, "financial");
+  assert.equal(g("a.pdf", "Fafsa submission summary for the family").kind, "financial");
+  assert.equal(g("a.pdf", "wages shown on w-2 for the tax year 2025").kind, "financial");
+  assert.deepEqual(g("a.pdf", "Free Application for Federal Student Aid 2027-28"), { kind: "financial", basis: "text", matched: "Free Application for Federal Student Aid", textFound: true, keepOut: true });
+  assert.equal(g("a.pdf", "annual review of her iep goals and services").kind, "iep-504");
+  assert.equal(g("a.pdf", "Form 1099-INT and the CSS PROFILE worksheet").keepOut, true);
+});
+
+test("a tie between filename words is unknown, even for a spreadsheet", () => {
+  const r = g("Resume activities list.xlsx", null, "application/vnd.google-apps.spreadsheet");
+  assert.equal(r.kind, null);
+  assert.equal(r.basis, null);
+  assert.equal(g("Resume activities.pdf").kind, null);
+});
