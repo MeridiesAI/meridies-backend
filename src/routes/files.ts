@@ -468,14 +468,18 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (b.ferpaWaived !== undefined) update.ferpa_waived = b.ferpaWaived;
       // Setting a kind confirms it, and queues text extraction when the AI may read the file.
       // (A flip to keep-out alone leaves any marker: the worker's conditional write refuses the text.)
+      // Only a counselor confirms: the confirmation and queue columns are guarded in the database,
+      // so a student re-typing their own upload writes `kind` alone, as before.
       if (b.kind !== undefined) {
         update.kind = b.kind;
-        update.kind_confirmed = true;
-        const willBeAvailable = b.availableToLlm ?? (existing as Row).available_to_llm !== false;
-        update.parse_status = "pending";
-        update.extraction_requested_at = willBeAvailable ? new Date().toISOString() : null;
-        update.extraction_attempts = 0;
-        update.extraction_lease_until = null;
+        if (request.profile.role === "counselor") {
+          update.kind_confirmed = true;
+          const willBeAvailable = b.availableToLlm ?? (existing as Row).available_to_llm !== false;
+          update.parse_status = "pending";
+          update.extraction_requested_at = willBeAvailable ? new Date().toISOString() : null;
+          update.extraction_attempts = 0;
+          update.extraction_lease_until = null;
+        }
       }
 
       const { data, error } = await request.db
@@ -512,7 +516,9 @@ export default async function fileRoutes(app: FastifyInstance) {
       const b = confirmBody.parse(request.body);
       const results: { documentId: string; status: "confirmed" | "refused"; reason: string | null; document: ReturnType<typeof toDocument> | null }[] = [];
       const queue: string[] = [];
-      for (const item of b.items) {
+      // One id listed twice is written and queued once; the last entry wins.
+      const unique = [...new Map(b.items.map((i) => [i.documentId, i])).values()];
+      for (const item of unique) {
         try {
           const { data: existing } = await request.db.from("documents").select("id, student_id").eq("id", item.documentId).maybeSingle();
           if (!existing?.student_id) throw notFound("That document isn't on file");
