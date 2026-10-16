@@ -42,7 +42,7 @@ import {
   getRemoteFile,
   listRemoteFiles,
 } from "../lib/suiteApi.js";
-import { assertOwnFolder, studentFolderId } from "./files.js";
+import { assertOwnFolder, assertSameStudentTree, studentFolderId } from "./files.js";
 
 type Row = Record<string, unknown>;
 
@@ -244,9 +244,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
       let folderId: string | null = null;
       if (b.folderId) {
         const folder = await assertOwnFolder(request, b.folderId);
-        if (folder.student_id && folder.student_id !== studentId) {
-          throw badRequest("That folder belongs to a different student");
-        }
+        // Anywhere in another student's folder tree, not just its top folder: a
+        // custom subfolder carries no student_id, and whoever is handed that tree
+        // (a caseload transfer) must never be handed this student's file with it.
+        await assertSameStudentTree(request, folder, studentId);
         folderId = b.folderId;
       } else {
         folderId = await studentFolderId(request, studentId);

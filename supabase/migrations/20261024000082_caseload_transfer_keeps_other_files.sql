@@ -7,19 +7,24 @@
 -- filed in a custom subfolder under the moved student's folder went to the
 -- receiver, who then held another student's transcript or essay
 -- (documents_select grants the owner everything, and Storage follows the row).
--- This replaces the function with the same body except step c): a file moves
--- only when it is about a moved student (to that student's receiver) or has
--- no student and sits in the moved tree (with the tree). A file about anyone
--- else stays with its owner and is taken out of the tree (folder_id null),
--- counted as attention.keptFiles. A moved file whose folder isn't the new
--- owner's afterwards is unfiled rather than left in someone else's folder.
--- POST /files routes refuse filing a file about one student into another
--- student's tree (routes/files.ts), so new rows don't get there.
+-- This replaces the function with the same body except the file steps (b0
+-- and c): a file moves only when it is about a moved student (to that
+-- student's receiver) or has no student and sits in the moved tree (with the
+-- tree). Before any folder moves, a file about anyone other than the tree's
+-- own student is taken out of the tree (folder_id null): one about a student
+-- who stays keeps its owner (attention.keptFiles), one about another moved
+-- student goes to that student's receiver unfiled. A moved file whose folder
+-- isn't the new owner's afterwards (the old counselor's own practice folders)
+-- is unfiled too rather than left in someone else's folder; both are counted
+-- as attention.unfiledFiles, so the answer says where the receiver finds them.
+-- The files routes refuse filing a file about one student into another
+-- student's tree (routes/files.ts, routes/integrations.ts), and
+-- 20261024000083 refuses it in the database, so new rows don't get there.
 --
 -- Deploy order: after 20261023030002, which it replaces (filename order does
 -- that). Safe either way against the code: the function's signature and
--- answer are the same, with one more attention number the API reads as 0
--- when it is missing. Not in REQUIRED_SCHEMA: caseload transfer degrades to
+-- answer are the same, with two more attention numbers the API reads as 0
+-- when they are missing. Not in REQUIRED_SCHEMA: caseload transfer degrades to
 -- 503 without its migrations. Neither 20261023030002 nor this file is applied
 -- to production yet; they go in together, in filename order.
 
@@ -59,6 +64,8 @@ declare
   v_supplement  jsonb := '[]'::jsonb;
   v_drive       integer := 0;
   v_kept        integer := 0;
+  v_unfiled     integer := 0;
+  v_unfiled_n   integer := 0;
   v_cancelled_messages integer := 0;
   v_cancelled_alerts   integer := 0;
   v_carriers    integer := 0;
@@ -265,6 +272,39 @@ begin
   )
   select distinct on (id) id, to_id, root from tree order by id;
 
+  -- b0) Before any folder moves: a file about someone other than the tree's
+  --     own student comes out of the tree (folder_id null), so neither the
+  --     merge below nor the receiver ever holds it inside the moved folders
+  --     (and the one-student-per-tree triggers of 20261024000083 never see
+  --     a moved folder carrying one).
+  --     - about a student who isn't moving: stays with its owner (keptFiles);
+  --     - about another moved student: moves to that student's receiver in
+  --       c), unfiled (unfiledFiles).
+  update public.documents d set folder_id = null
+    from pg_temp._ct_folders t
+   where d.folder_id = t.id and d.owner_id = p_from and d.student_id is not null
+     and not exists (select 1 from pg_temp._ct_moves m where m.student_id = d.student_id);
+  get diagnostics v_kept = row_count;
+  update public.document_links l set folder_id = null
+    from pg_temp._ct_folders t
+   where l.folder_id = t.id and l.owner_id = p_from and l.student_id is not null
+     and not exists (select 1 from pg_temp._ct_moves m where m.student_id = l.student_id);
+  get diagnostics v_n = row_count;
+  v_kept := v_kept + v_n;
+  update public.documents d set folder_id = null
+    from pg_temp._ct_folders t, public.folders rf
+   where d.folder_id = t.id and rf.id = t.root and d.owner_id = p_from and d.student_id is not null
+     and d.student_id is distinct from rf.student_id
+     and exists (select 1 from pg_temp._ct_moves m where m.student_id = d.student_id);
+  get diagnostics v_unfiled = row_count;
+  update public.document_links l set folder_id = null
+    from pg_temp._ct_folders t, public.folders rf
+   where l.folder_id = t.id and rf.id = t.root and l.owner_id = p_from and l.student_id is not null
+     and l.student_id is distinct from rf.student_id
+     and exists (select 1 from pg_temp._ct_moves m where m.student_id = l.student_id);
+  get diagnostics v_n = row_count;
+  v_unfiled := v_unfiled + v_n;
+
   -- The receiver already has a folder for this student: merge into it.
   update pg_temp._ct_folders t
      set into_id = rf.id
@@ -311,17 +351,27 @@ begin
   select t.into_id, t.to_id from pg_temp._ct_folders t where t.into_id is not null
   on conflict (folder_id) do nothing;
 
-  update public.documents d set folder_id = null
-    from pg_temp._ct_tree t
-   where d.folder_id = t.folder_id and d.owner_id = p_from and d.student_id is not null
-     and not exists (select 1 from pg_temp._ct_moves m where m.student_id = d.student_id);
-  get diagnostics v_kept = row_count;
-  update public.document_links l set folder_id = null
-    from pg_temp._ct_tree t
-   where l.folder_id = t.folder_id and l.owner_id = p_from and l.student_id is not null
-     and not exists (select 1 from pg_temp._ct_moves m where m.student_id = l.student_id);
-  get diagnostics v_n = row_count;
-  v_kept := v_kept + v_n;
+  -- (Files about anyone else already came out of the tree in b0.)
+  -- A moved file whose folder isn't the receiver's (the old counselor's own
+  -- practice folders, say) is unfiled below; count those for the answer.
+  select count(*) into v_unfiled_n
+    from public.documents d0
+    left join pg_temp._ct_moves m on m.student_id = d0.student_id
+    left join pg_temp._ct_tree t on t.folder_id = d0.folder_id
+    join public.folders f on f.id = d0.folder_id
+   where d0.owner_id = p_from
+     and (m.student_id is not null or (d0.student_id is null and t.folder_id is not null))
+     and f.owner_id is distinct from coalesce(m.to_id, t.to_id);
+  v_unfiled := v_unfiled + v_unfiled_n;
+  select count(*) into v_unfiled_n
+    from public.document_links l0
+    left join pg_temp._ct_moves m on m.student_id = l0.student_id
+    left join pg_temp._ct_tree t on t.folder_id = l0.folder_id
+    join public.folders f on f.id = l0.folder_id
+   where l0.owner_id = p_from
+     and (m.student_id is not null or (l0.student_id is null and t.folder_id is not null))
+     and f.owner_id is distinct from coalesce(m.to_id, t.to_id);
+  v_unfiled := v_unfiled + v_unfiled_n;
 
   select count(*) into v_drive
     from public.documents d
@@ -623,7 +673,8 @@ begin
                              'groupMeetings', jsonb_array_length(v_group),
                              'supplementDocs', jsonb_array_length(v_supplement),
                              'driveLinkedDocuments', v_drive,
-                             'keptFiles', v_kept));
+                             'keptFiles', v_kept,
+                             'unfiledFiles', v_unfiled));
 
   insert into public.caseload_transfer_students (transfer_id, student_id, student_name, to_counselor_id, to_name)
   select v_transfer, m.student_id, left(s.full_name, 200), m.to_id, left(r.full_name, 200)
@@ -689,6 +740,7 @@ begin
       'supplementDocs', v_supplement,
       'driveLinkedDocuments', v_drive,
       'keptFiles', v_kept,
+      'unfiledFiles', v_unfiled,
       'cancelledMessages', v_cancelled_messages,
       'cancelledAlerts', v_cancelled_alerts)
   ) into v_result;

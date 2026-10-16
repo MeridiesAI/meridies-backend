@@ -374,7 +374,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These thirty-one files are merged ahead of production's database on purpose: the code was written to
+These thirty-two files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -422,10 +422,11 @@ set's own section below says what it does and how to check it.
 | 27 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
 | 28 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
 | 29 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
-| 30 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
-| 31 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
+| 30 | `20261024000081_profile_size_limit.sql` | Security: profile bounds and files by student |
+| 31 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: profile bounds and files by student (after file 9) |
+| 32 | `20261024000083_files_one_student_tree.sql` | Security: profile bounds and files by student |
 
-(Thirty-one files: the first thirteen are six feature sets, the other eighteen are seven sets of security
+(Thirty-two files: the first thirteen are six feature sets, the other nineteen are seven sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 21-25, the security fixes for submission review and student reminders, depend on none of the
@@ -454,7 +455,7 @@ Applying the files in the order above satisfies all of them. Apart from those re
 (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
 file reading the current list back.
 
-After all thirty-one:
+After all thirty-two:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -802,24 +803,27 @@ select prosrc like '%invitation_same_student%' from pg_proc
 
 ---
 
-## Profile size bound: `20261024000081`
+## Profile column bounds: `20261024000081`
 
-A `BEFORE INSERT OR UPDATE` trigger on `public.profiles` (`profiles_column_bounds`, function
-`private.profiles_column_bounds`) bounds every column a signed-in user can write: `full_name`,
-`hometown`, `high_school` and `title` at 200 characters, `headline` 300, `avatar_url` 2048, `phone`
-40, `timezone` 80, `grad_year` 10, and `profile` at 300,000 bytes of its jsonb text (errcode 23514,
-"Profile is too large"). The API measures the merged profile the same way (`lib/profileSize.ts`) on
-`PATCH /auth/me` and `PATCH /students/:id`; this adds the same rule for a direct PostgREST write. A
-trigger, not a CHECK: on UPDATE it refuses only a value over its bound that is longer than the stored
-one, so a row already over a bound still takes every other update (accept_invitation, a transfer, a
-name change) and can shrink; on INSERT (signup) the short text columns are clipped rather than
-refused. It drops `profiles_profile_size`, the name an earlier draft used. Either order with the
-code; not in `REQUIRED_SCHEMA`.
+A `BEFORE INSERT OR UPDATE` trigger on `public.profiles` (`private.profiles_column_bounds`) bounds
+every column the authenticated UPDATE grant lets a user write: `full_name`, `hometown`,
+`high_school`, `title` 200 characters, `headline` 300, `avatar_url` 2048, `phone` 40, `timezone` 80,
+`grad_year` 10, and `profile` 300,000 bytes (`octet_length(profile::text)`, the UTF-8 bytes of the
+jsonb text, which `lib/profileSize.ts` computes the same way for `PATCH /auth/me` and
+`PATCH /students/:id`). On update a value over its bound is refused (23514) only when it is longer
+than the stored one, so a row already over a bound still takes every other update (accept_invitation,
+a transfer, a name change) and can shrink. On insert (signup copies `full_name` and `avatar_url` from
+the user's own metadata) the short columns are clipped and an overlong avatar link is dropped, so a
+signup never fails. Either order with the code; not in `REQUIRED_SCHEMA`.
 
 Check, before applying, how many profiles are already over (they keep working, but can't grow):
 
 ```sql
-select count(*) from public.profiles where octet_length(profile::text) > 300000;
+select count(*) filter (where octet_length(profile::text) > 300000) as profile,
+       count(*) filter (where length(full_name) > 200 or length(headline) > 300 or length(avatar_url) > 2048
+                          or length(hometown) > 200 or length(high_school) > 200 or length(title) > 200
+                          or length(phone) > 40 or length(timezone) > 80 or length(grad_year) > 10) as other
+  from public.profiles;
 select tgname from pg_trigger where tgrelid = 'public.profiles'::regclass and tgname = 'profiles_column_bounds';  -- one row
 ```
 
@@ -828,10 +832,35 @@ select tgname from pg_trigger where tgrelid = 'public.profiles'::regclass and tg
 Replaces `public.transfer_caseload` (file 9 above) with the same signature, grants and body except
 the step that moves documents and links: a file moves only when it is about a moved student (to that
 student's receiver) or has no student and is filed in the moved folder tree (with the tree). A file
-about anyone else filed in that tree stays with its owner and is unfiled; the answer counts these as
-`attention.keptFiles`. Apply after `20261023030002` (filename order does it). Either order with the
-code: the API reads `keptFiles` as 0 when the function doesn't send it. Not in `REQUIRED_SCHEMA`.
+about anyone else filed in that tree is taken out of it before any folder moves: one about a student
+who stays keeps its owner (`attention.keptFiles`), one about another moved student goes to that
+student's receiver unfiled. A moved file whose folder isn't the receiver's afterwards is unfiled too;
+both kinds are counted as `attention.unfiledFiles`. Apply after `20261023030002` (filename order does
+it). Either order with the code: the API reads both numbers as 0 when the function doesn't send them.
+Not in `REQUIRED_SCHEMA`.
 
 ```sql
-select prosrc like '%keptFiles%' from pg_proc where proname = 'transfer_caseload';  -- true
+select prosrc like '%unfiledFiles%' from pg_proc where proname = 'transfer_caseload';  -- true
+```
+
+## Files stay in their student's tree: `20261024000083`
+
+Triggers on `documents` and `document_links` (insert, and any change of `folder_id` or `student_id`)
+refuse a file about one student whose folder sits under another student's folder
+(`private.folder_tree_student` walks `parent_id` to the nearest `kind = 'student'` folder), and a
+trigger on `folders` (any change of `parent_id`, `kind` or `student_id`) refuses putting a folder that
+holds another student's files under a student folder. Errcode 23514. The walk locks the folders it
+reads, so a folder move and a file save can't race past each other. The routes already refuse the same
+(`routes/files.ts`, `routes/integrations.ts`); this covers PostgREST and that race. Rows misfiled
+before it stay as they are (the transfer above unfiles them; it runs its unfiling before it moves
+folders, so it never trips these triggers). Apply after `20261024000082` (filename order). Either
+order with the code. Not in `REQUIRED_SCHEMA`.
+
+```sql
+-- Rows already misfiled (they keep working; a transfer unfiles them):
+select count(*) from public.documents d
+ where d.student_id is not null and d.folder_id is not null
+   and private.folder_tree_student(d.folder_id) is distinct from d.student_id
+   and private.folder_tree_student(d.folder_id) is not null;
+select count(*) from pg_trigger where tgname like '%one_student_tree%';  -- 5
 ```

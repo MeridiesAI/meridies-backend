@@ -168,7 +168,7 @@ export async function folderTreeStudent(request: FastifyRequest, folder: Row): P
 }
 
 /** Refuses filing a file about `studentId` into a folder in another student's tree. */
-async function assertSameStudentTree(request: FastifyRequest, folder: Row, studentId: string | null | undefined): Promise<string | null> {
+export async function assertSameStudentTree(request: FastifyRequest, folder: Row, studentId: string | null | undefined): Promise<string | null> {
   const owner = await folderTreeStudent(request, folder);
   if (owner && studentId && owner !== studentId) throw badRequest("That folder belongs to a different student");
   return owner;

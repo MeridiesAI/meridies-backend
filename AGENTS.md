@@ -207,9 +207,10 @@ submission-review and reminder security fixes (`20261024000041`-`45`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
 the API already refuses students on `/chat`), the per-counselor import
 invitation review and the same-student rule for held data (`20261024000061`-`62`), the campus photo review queue
-(`20261024000071`), the profile size trigger (`20261024000081`) and the
+(`20261024000071`), the profile column bounds (`20261024000081`), the
 caseload transfer's file rule (`20261024000082`, which replaces
-`transfer_caseload` from `20261023030002`). They go in later, in filename order
+`transfer_caseload` from `20261023030002`) and the one-student folder tree
+triggers (`20261024000083`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -2288,11 +2289,15 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   link moves only when it is about a moved student (to that student's
   receiver) or has no student and is filed in the moved folder tree (with
   the tree); one about anybody else filed in that tree stays with its owner,
-  unfiled, and is counted as `attention.keptFiles` (`20261024000082`), and a
-  moved file whose folder isn't the receiver's afterwards is unfiled. The
-  files routes refuse filing a document or link about one student anywhere in
-  another student's folder tree, or moving a folder that holds one there
-  (`folderTreeStudent` in `routes/files.ts`); scheduled sends
+  unfiled, and is counted as `attention.keptFiles` (`20261024000082`); one
+  about another moved student goes to that student's receiver unfiled, as
+  does a moved file whose folder isn't the receiver's afterwards, both
+  counted as `attention.unfiledFiles`. All of that unfiling runs before any
+  folder moves. Nothing files a document or link about one student anywhere
+  in another student's folder tree, or moves a folder that holds one there:
+  the files routes and the Drive/OneDrive import refuse it
+  (`assertSameStudentTree` in `routes/files.ts`), and so does the database
+  for PostgREST writes and races (`20261024000083`, 23514); scheduled sends
   and queued parent alerts are cancelled; a group meeting moves only when
   every attendee goes to the same receiver; held import data moves into a
   carrier import owned by the student's receiver (no import function

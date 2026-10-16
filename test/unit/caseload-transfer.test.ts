@@ -276,4 +276,7 @@ test("keptFiles: read from the answer, 0 when an older function leaves it out", 
   const withKept = { ...rawResult, attention: { ...rawResult.attention, keptFiles: 2 } };
   assert.equal(toTransferResult(withKept).attention.keptFiles, 2);
   assert.equal(toTransferResponse(toTransferResult(withKept), { planned: 0 }).attention.keptFiles, 2);
+  assert.equal(toTransferResult(rawResult).attention.unfiledFiles, 0);
+  const withUnfiled = { ...rawResult, attention: { ...rawResult.attention, unfiledFiles: 3 } };
+  assert.equal(toTransferResponse(toTransferResult(withUnfiled), { planned: 0 }).attention.unfiledFiles, 3);
 });
