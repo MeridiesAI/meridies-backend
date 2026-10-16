@@ -19,7 +19,8 @@ const REVIEWED = [
   // time is up, as the database decides.
   // lib/caseloadTransfer.ts: after an approved firm admin's transfer commits (inside their request), reads the
   // addresses of exactly the profiles transfer_caseload returned, to mail them. Outbound delivery only.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/documentExtraction.ts: after a counselor's confirmation inside their request, and on recovery; re-checks isCounselorApproved per row and writes only that row's text.
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
