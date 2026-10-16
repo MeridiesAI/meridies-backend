@@ -39,7 +39,8 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env, hasAnthropic } from "../env.js";
 import { enforceNoProse, runStructured, type AiAttachment } from "./anthropic.js";
-import { readDocumentText } from "./documentText.js";
+import { maxReadBytes, readDocumentText } from "./documentText.js";
+import { downloadCapped } from "./storageDownload.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
@@ -339,18 +340,23 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
     request.log.warn({ documentId: String(doc.id) }, "submission review: document row names an unsafe storage path");
     return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
   }
-  const dl = await request.db.storage.from(DOCUMENTS_BUCKET).download(doc.storage_path);
-  if (dl.error || !dl.data) return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
+  // size_bytes is the client's word, so the download itself stops past the
+  // cap rather than buffering the whole object first.
+  const dl = await downloadCapped(request.db, DOCUMENTS_BUCKET, String(doc.storage_path), MAX_REVIEW_BYTES);
+  if (dl.status === "error") return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
+  if (dl.status === "too-large") return { status: "skipped", reason: "This file is too large for AxIS to read." };
   if (!hasAnthropic) return { status: "skipped", reason: "AxIS isn't set up on this server yet." };
-  const bytes = Buffer.from(await dl.data.arrayBuffer());
+  const bytes = dl.bytes;
   if (bytes.length === 0) return { status: "skipped", reason: "The uploaded file is empty." };
-  if (bytes.length > MAX_REVIEW_BYTES) return { status: "skipped", reason: "This file is too large for AxIS to read." };
 
   let attachments: AiAttachment[] | undefined;
   let text = "";
   if (mode.kind === "attachment") {
     attachments = [{ mediaType: mode.mediaType, data: bytes.toString("base64"), title: filename }];
   } else {
+    if (bytes.length > maxReadBytes(filename, (doc.mime_type as string | null) ?? null)) {
+      return { status: "skipped", reason: "This file is too large for AxIS to read." };
+    }
     text = readDocumentText(bytes, filename, (doc.mime_type as string | null) ?? null) ?? "";
     if (!text.trim()) return { status: "skipped", reason: "AxIS couldn't read any text in this file." };
   }

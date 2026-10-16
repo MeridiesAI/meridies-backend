@@ -13,7 +13,12 @@ import { asciiLower, replaceBlocks, replaceTags, trimLineEnds } from "../../src/
 import { extractText } from "../../src/lib/links.js";
 import {
   MAX_DOCUMENT_BYTES,
+  MAX_TEXT_CHARS,
+  MAX_TEXT_FILE_BYTES,
+  MAX_XML_BYTES,
   canReadDocumentText,
+  decodeEntities as decodeXmlEntities,
+  maxReadBytes,
   normalizeText,
   readDocumentText,
 } from "../../src/lib/documentText.js";
@@ -234,7 +239,7 @@ test("a .docx reads exactly as the regular expression read it", () => {
   assert.equal(readDocumentText(docx(xml), "a.docx", null), "Dear\t reader & friend\n\nLine\ntwo");
 });
 
-test("a .docx of one long unclosed run reads in well under 100 ms, and a 4 MB part in under a second", () => {
+test("a .docx of one long unclosed run reads in well under 100 ms, and a 4 MB part is refused in under a second", () => {
   for (const unit of ["<w:t ", "<w:t", "<w:t>", "<w:t x>", "<"]) {
     const small = docx(`<w:body><w:p>${fill(unit, REVIEW_SIZE)}</w:p></w:body>`);
     const ms = elapsed(() => readDocumentText(small, "essay.docx", null));
@@ -249,10 +254,126 @@ test("a .docx of one long unclosed run reads in well under 100 ms, and a 4 MB pa
 test("a file over MAX_DOCUMENT_BYTES is unreadable, and is refused before download", () => {
   const big = Buffer.alloc(MAX_DOCUMENT_BYTES + 1, 0x20);
   assert.equal(readDocumentText(big, "essay.txt", "text/plain"), null);
-  assert.equal(canReadDocumentText("essay.txt", "text/plain", MAX_DOCUMENT_BYTES + 1), false);
-  assert.equal(canReadDocumentText("essay.txt", "text/plain", MAX_DOCUMENT_BYTES), true);
+  assert.equal(canReadDocumentText("essay.docx", null, MAX_DOCUMENT_BYTES + 1), false);
+  assert.equal(canReadDocumentText("essay.docx", null, MAX_DOCUMENT_BYTES), true);
   assert.equal(canReadDocumentText("essay.docx", null, 1000), true);
+  // A text file has its own, smaller cap.
+  assert.equal(canReadDocumentText("essay.txt", "text/plain", MAX_TEXT_FILE_BYTES + 1), false);
+  assert.equal(canReadDocumentText("essay.txt", "text/plain", MAX_TEXT_FILE_BYTES), true);
+  assert.equal(maxReadBytes("essay.txt", null), MAX_TEXT_FILE_BYTES);
+  assert.equal(maxReadBytes("essay.docx", null), MAX_DOCUMENT_BYTES);
   assert.equal(canReadDocumentText("essay.pdf", "application/pdf", 1000), false);
   // A row with no recorded size is checked on the bytes instead.
   assert.equal(canReadDocumentText("essay.md", null, null), true);
+});
+
+// ---- The follow-up review: bounded work per request ---------------------------
+
+/** normalizeText as a chain of regular expressions, before it became one scan. */
+function oldNormalizeText(text: string): string {
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+test("normalizeText gives what the chain of regular expressions gave", () => {
+  const rand = seeded(61);
+  const pieces = ["a", "b c", " ", "  ", "\t", "\n", "\r", "\r\n", "\u00a0", "\f", "\v", "\u2003", "é"];
+  for (let i = 0; i < 40000; i++) {
+    const s = randomText(rand, pieces, Math.floor(rand() * 14));
+    assert.equal(normalizeText(s), oldNormalizeText(s), JSON.stringify(s));
+  }
+});
+
+/** The entity decode as seven replaces, before it became one scan. */
+function oldDecode(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec: string) => String.fromCodePoint(Number(dec)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+test("the .docx entity decode decodes once, as XML means it", () => {
+  const rand = seeded(62);
+  const pieces = ["&lt;", "&gt;", "&quot;", "&apos;", "&amp;", "&#65;", "&#x42;", "&#X43;", "&#;", "&#x;", "&", "#", ";", "a", "lt", "x", "1"];
+  for (let i = 0; i < 40000; i++) {
+    const s = randomText(rand, pieces, Math.floor(rand() * 10));
+    // The old chain decoded a second time when one entity's result started
+    // another ("&amp;lt;" survived, "&#38;lt;" did not); away from that the
+    // two agree.
+    const once = oldDecode(s);
+    if (!/&#(?:38|x26|X26);/.test(s)) assert.equal(decodeXmlEntities(s), once, JSON.stringify(s));
+  }
+  assert.equal(decodeXmlEntities("&#38;lt;"), "&lt;");
+  assert.equal(decodeXmlEntities("&amp;lt;"), "&lt;");
+  assert.equal(decodeXmlEntities("&#x110000;&#99999999999999999999;x"), "x");
+  assert.equal(decodeXmlEntities("a & b &am"), "a & b &am");
+});
+
+/** `unit` repeated to `size` characters inside a body. */
+function part(unit: string, size: number, wrap = false): string {
+  const body = wrap ? `<w:p><w:t>${fill(unit, size)}</w:t></w:p>` : fill(unit, size);
+  return `<w:document><w:body>${body}</w:body></w:document>`;
+}
+
+test("the review's inflating .docx files read in well under 100 ms", () => {
+  // Each archive is a few KB to 37 KB; the old 20 MB inflate cap let them
+  // expand to 19 MB and cost 0.8 to 1.6 s of parsing per request.
+  for (const [label, xml] of [
+    ["<w:t>x</w:t> to 19 MB", part("<w:t>x</w:t>", 19_000_000)],
+    ["<w:t>\\r</w:t> to 19 MB", part("<w:t>\r</w:t>", 19_000_000)],
+    ["&#x41; in one run to 19 MB", part("&#x41;", 19_000_000, true)],
+    ["<w:br/></w:p><w:t>a</w:t></w:p> to 19 MB", part("<w:br/></w:p><w:t>a</w:t></w:p>", 19_000_000)],
+  ] as const) {
+    const bytes = docx(xml);
+    assert.ok(bytes.length < 100_000, `${label}: the archive is small`);
+    let text: string | null = "";
+    const ms = elapsed(() => (text = readDocumentText(bytes, "essay.docx", null)));
+    assert.equal(text, null, `${label} is past the inflate cap`);
+    assert.ok(ms < BUDGET_MS, `${label} took ${ms.toFixed(1)} ms`);
+  }
+});
+
+test("a .docx at the inflate cap, of any of the review's shapes, reads in under a second", () => {
+  for (const [label, xml] of [
+    ["one-letter runs", part("<w:t>x</w:t>", MAX_XML_BYTES - 100)],
+    ["carriage returns", part("<w:t>\r</w:t>", MAX_XML_BYTES - 100)],
+    ["entities in one run", part("&#x41;", MAX_XML_BYTES - 100, true)],
+    ["&amp; runs", part("<w:t>&amp;</w:t>", MAX_XML_BYTES - 100)],
+    ["empty paragraphs", part("<w:br/></w:p><w:t>a</w:t></w:p>", MAX_XML_BYTES - 100)],
+  ] as const) {
+    const bytes = docx(xml);
+    const ms = elapsed(() => readDocumentText(bytes, "essay.docx", null));
+    assert.ok(ms < CAP_BUDGET_MS, `${label} took ${ms.toFixed(1)} ms`);
+  }
+});
+
+test("text past MAX_TEXT_CHARS, or a .txt past MAX_TEXT_FILE_BYTES, reads as unreadable", () => {
+  const long = docx(part("<w:t>x</w:t>", 12 * (MAX_TEXT_CHARS + 10)));
+  assert.equal(readDocumentText(long, "essay.docx", null), null);
+  const fits = docx(`<w:body><w:p><w:t>${"word ".repeat(1000)}</w:t></w:p></w:body>`);
+  assert.equal(readDocumentText(fits, "essay.docx", null)?.split(" ").length, 1000);
+  assert.equal(readDocumentText(Buffer.alloc(MAX_TEXT_FILE_BYTES + 1, 0x61), "essay.txt", null), null);
+  assert.equal(readDocumentText(Buffer.alloc(MAX_TEXT_CHARS + 1, 0x61), "essay.txt", null), null);
+  assert.equal(readDocumentText(Buffer.alloc(MAX_TEXT_CHARS, 0x61), "essay.txt", null)?.length, MAX_TEXT_CHARS);
+});
+
+test("a .txt of carriage returns reads in well under 100 ms, at the text cap and at 10 MB", () => {
+  for (const size of [MAX_TEXT_FILE_BYTES, MAX_DOCUMENT_BYTES]) {
+    const bytes = Buffer.alloc(size, 0x0d);
+    const ms = elapsed(() => readDocumentText(bytes, "essay.txt", "text/plain"));
+    assert.ok(ms < BUDGET_MS, `${size} bytes of "\\r" took ${ms.toFixed(1)} ms`);
+  }
+  for (const unit of ["\r", "a\r\n", " \n", "\u00a0"]) {
+    const text = fill(unit, MAX_TEXT_FILE_BYTES);
+    const ms = elapsed(() => normalizeText(text));
+    assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} x 1 MB took ${ms.toFixed(1)} ms`);
+  }
 });

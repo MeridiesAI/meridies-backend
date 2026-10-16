@@ -72,16 +72,24 @@ export function replaceTags(s: string, replacement: string, allowEmpty = false):
  * left alone, as the regular expression leaves it.
  */
 export function trimLineEnds(s: string): string {
-  const lines = s.split("\n");
-  for (let n = 0; n < lines.length - 1; n++) {
-    const line = lines[n]!;
-    let end = line.length;
-    while (end > 0) {
-      const c = line.charCodeAt(end - 1);
+  // One scan from newline to newline, with no array of lines: each backwards
+  // walk stops at the previous "\n" (neither a space nor a tab), so every
+  // character is looked at at most twice.
+  let out = "";
+  let pos = 0;
+  let nl = s.indexOf("\n");
+  while (nl >= 0) {
+    let end = nl;
+    while (end > pos) {
+      const c = s.charCodeAt(end - 1);
       if (c !== 32 && c !== 9) break;
       end--;
     }
-    if (end !== line.length) lines[n] = line.slice(0, end);
+    if (end < nl) {
+      out += s.slice(pos, end);
+      pos = nl;
+    }
+    nl = s.indexOf("\n", nl + 1);
   }
-  return lines.join("\n");
+  return pos === 0 && out === "" ? s : out + s.slice(pos);
 }
