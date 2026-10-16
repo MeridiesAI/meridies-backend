@@ -33,6 +33,11 @@ check("nothing is texted to the number typed in Settings", (await rows(`channel 
 const emailed = await rows(`channel = 'email'`);
 check("email reminders go to the student's sign-in address", emailed > 0 && (await rows(`channel = 'email' and to_email = '${s.email}'`)) === emailed, String(emailed));
 check("…at most five a day", emailed <= 5, String(emailed));
+// The sign-in address is only as good as the signup (with "Confirm email" off,
+// anyone holding an invitation link can sign up as any address): a title the
+// student wrote never rides in Meridies' email, subject or body.
+const carried = await rows(`channel = 'email' and (coalesce(subject, '') like '%evil%' or coalesce(body, '') like '%evil%')`);
+check("…and never carry a title the student wrote", carried === 0, String(carried));
 
 const hasColumn = (await sql(`select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'profiles' and column_name = 'phone_recorded_by_counselor'`)) === "1";
 if (!hasColumn) {

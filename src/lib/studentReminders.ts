@@ -26,7 +26,8 @@
  *   same number. Before that migration, or with no number recorded, no text
  *   goes out.
  * - At most MAX_REMINDERS_PER_DAY per channel per student per due date, and
- *   a title the student wrote never goes into a text (smsTitle).
+ *   a title the student wrote never goes into a text (smsTitle) or an email
+ *   (emailTitle): their own to-dos are reminded with a generic line.
  */
 
 import { hostname } from "node:os";
@@ -123,11 +124,34 @@ export function reminderSms(title: string | null, url: string): string {
   return title ? `Meridies: "${title}" is due tomorrow. ${url}` : `Meridies: a task on your To-Do is due tomorrow. ${url}`;
 }
 
-export function reminderEmail(first: string, title: string, url: string) {
-  const t = oneLine(title, 200);
+/**
+ * What of a task's title an email may carry: a counselor's title (the
+ * counselor wrote it), never one the student wrote. accept_invitation doesn't
+ * compare the account's email with the invitation's, so where Supabase's
+ * "Confirm email" is off the sign-in address is only as good as the signup,
+ * and a student-written title in Meridies' email would be text of their
+ * choosing sent to an address nobody checked.
+ */
+export function emailTitle(title: string, source: unknown): string | null {
+  if (source !== "counselor") return null;
+  return oneLine(title, 200) || null;
+}
+
+/** The reminder's subject line: the counselor's title, or a generic line. */
+export function reminderSubject(title: string | null): string {
+  return title ? oneLine(`Due tomorrow: ${title}`, 120) : "A task on your To-Do is due tomorrow";
+}
+
+/** The first name the greeting uses (the student writes it): one word, short. */
+export function greetingName(fullName: unknown): string {
+  const first = String(fullName ?? "").trim().split(/\s+/)[0] ?? "";
+  return first.slice(0, 40) || "there";
+}
+
+export function reminderEmail(first: string, title: string | null, url: string) {
   return {
-    heading: `Due tomorrow: ${t}`,
-    paragraphs: [`Hi ${first}, "${t}" is due tomorrow.`],
+    heading: title ? `Due tomorrow: ${title}` : "A task on your To-Do is due tomorrow",
+    paragraphs: [title ? `Hi ${first}, "${title}" is due tomorrow.` : `Hi ${first}, a task on your To-Do is due tomorrow.`],
     cta: { label: "Open the task", url },
     footnote: "You're receiving this at your Meridies sign-in email because you turned on email reminders in Settings.",
   };
@@ -249,7 +273,7 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
         continue;
       }
 
-      const first = String(profile.full_name ?? "").trim().split(/\s+/)[0] || "there";
+      const first = greetingName(profile.full_name);
       const template = reminderTemplate(tomorrow);
       let emailBudget = to.email ? MAX_REMINDERS_PER_DAY - (await sentToday(svc, sid, template, "email")) : 0;
       let smsBudget = to.sms ? MAX_REMINDERS_PER_DAY - (await sentToday(svc, sid, template, "sms")) : 0;
@@ -263,11 +287,12 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
           if (emailBudget <= 0 || (await alreadySent(svc, taskId, template, "email"))) skipped += 1;
           else {
             emailBudget -= 1;
-            const message = reminderEmail(first, title, url);
+            const shown = emailTitle(title, t.source);
+            const message = reminderEmail(first, shown, url);
             const r = await sendEmail({
               ...base,
               to: to.email,
-              subject: oneLine(`Due tomorrow: ${title}`, 120),
+              subject: reminderSubject(shown),
               html: brandedEmail(message),
               text: brandedText(message),
             });

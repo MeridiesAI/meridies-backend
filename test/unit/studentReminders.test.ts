@@ -62,3 +62,18 @@ test("a text never carries a title the student wrote, and a counselor's title is
   assert.ok(generic.startsWith("Meridies: a task on your To-Do is due tomorrow."));
   assert.ok(generic.length < 160);
 });
+
+test("an email never carries a title the student wrote, nor a long display name", async () => {
+  const { emailTitle, reminderSubject, reminderEmail, greetingName } = await import("../../src/lib/studentReminders.js");
+  assert.equal(emailTitle("Verify at https://evil.example", "student"), null);
+  assert.equal(emailTitle("Verify at https://evil.example", null), null);
+  assert.equal(emailTitle("Common App essay", "counselor"), "Common App essay");
+  assert.equal(reminderSubject(null), "A task on your To-Do is due tomorrow");
+  assert.equal(reminderSubject("Common App essay"), "Due tomorrow: Common App essay");
+  assert.ok(reminderSubject("x".repeat(400)).length <= 120);
+  const generic = reminderEmail("Ana", null, "https://app.test/x");
+  assert.ok(!JSON.stringify(generic).includes("evil"));
+  assert.equal(greetingName("  Ana Maria Lopez "), "Ana");
+  assert.equal(greetingName(""), "there");
+  assert.equal(greetingName("x".repeat(300)).length, 40);
+});
