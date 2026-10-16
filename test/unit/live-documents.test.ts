@@ -21,3 +21,10 @@ test("liveStatus names the worst state and counts the files it affects", () => {
   assert.deepEqual(liveStatusOf([check("google_reconnect")]), { status: "reconnect", files: 1 });
   assert.deepEqual(liveStatusOf([check("google_reconnect"), check("google_disconnected")]), { status: "disconnected", files: 2 });
 });
+
+test("a grant without Drive (drive_not_granted) holds no-activity and reads as reconnect", () => {
+  assert.equal(holdsNoActivity([check("drive_not_granted")]), true);
+  assert.equal(holdsNoActivity([check(null), check("drive_not_granted")]), true);
+  assert.deepEqual(liveStatusOf([check("drive_not_granted")]), { status: "reconnect", files: 1 });
+  assert.deepEqual(liveStatusOf([check("drive_not_granted"), check("google_disconnected")]), { status: "disconnected", files: 2 });
+});

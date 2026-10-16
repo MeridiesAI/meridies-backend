@@ -2,7 +2,7 @@
  * By-hand check (scripts/smoke/google-picker.md, step 3). Localhost only unless SMOKE_ALLOW_REMOTE=1.
  *   npx tsx --env-file=.env scripts/smoke/google-picker.ts <documentId> [<unpickedFileId>]
  * Reads the document's external_file_id with its owner's stored grant (metadata only), then, if
- * given, a file id that was never picked, which must answer 404.
+ * given, a file id that was never picked, which must answer 404 or 403 (both map to not_found).
  */
 import { env } from "../../src/env.js";
 import { getRemoteFile } from "../../src/lib/suiteApi.js";

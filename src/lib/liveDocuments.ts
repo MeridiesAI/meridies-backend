@@ -113,9 +113,11 @@ export async function checkLiveDocuments(
   return { checks, latestEdit: latest > 0 ? new Date(latest).toISOString() : null };
 }
 
-const isGrantProblem = (code: string | null) => !!code && (code.endsWith("_disconnected") || code.endsWith("_reconnect"));
+/** The grant is gone or lacks Drive (drive_not_granted): the files can't be checked until the counselor reconnects. */
+export const isGrantProblem = (code: string | null) =>
+  !!code && (code.endsWith("_disconnected") || code.endsWith("_reconnect") || code === "drive_not_granted");
 
-/** A task whose linked files can't be checked because the grant is gone must not read as "no activity". */
+/** A task whose linked files can't be checked because the grant is gone (or lacks Drive) must not read as "no activity". */
 export function holdsNoActivity(checks: LiveFileCheck[]): boolean {
   return checks.some((c) => isGrantProblem(c.errorCode));
 }
@@ -123,6 +125,7 @@ export function holdsNoActivity(checks: LiveFileCheck[]): boolean {
 export function liveStatusOf(checks: LiveFileCheck[]): { status: "ok" | "disconnected" | "reconnect"; files: number } {
   const affected = checks.filter((c) => isGrantProblem(c.errorCode));
   if (affected.length === 0) return { status: "ok", files: 0 };
+  // A grant without Drive is fixed by reconnecting, so drive_not_granted alone reads as "reconnect".
   const disconnected = affected.some((c) => c.errorCode!.endsWith("_disconnected"));
   return { status: disconnected ? "disconnected" : "reconnect", files: affected.length };
 }

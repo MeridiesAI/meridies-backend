@@ -5,7 +5,7 @@
  * claims a row by moving it to `parsing` under a 2-minute lease (and counts an attempt), and the
  * result clears the marker. Recovery (on boot and every minute) returns an expired lease to the
  * queue, and after 3 attempts marks the row failed, so every item reaches a final state and the
- * app's polling always ends. Rows without the
+ * app's polling always ends; a request still pending after 24 hours is marked failed too. Rows without the
  * marker (everything that existed before) are never touched: there is no backfill.
  *
  * Runs on the service client, outside the request: every row is re-checked when it runs
@@ -29,6 +29,9 @@ export const LEASE_MS = 120_000;
 export const MAX_ATTEMPTS = 3;
 const RECOVERY_EVERY_MS = 60_000;
 const RECOVERY_WINDOW_HOURS = 24;
+
+/** The only bucket document text is read from. A row naming any other bucket is refused, never downloaded. */
+export const DOCUMENT_BUCKET = "student-documents";
 
 /** What recovery does with an expired lease. */
 export function leaseVerdict(row: { extraction_attempts: number }): "retry" | "give-up" {
@@ -214,7 +217,12 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
     return "empty";
   }
 
-  const file = await db.storage.from(String(row.bucket)).download(String(row.storage_path));
+  // The service role can read every bucket; a row pointing anywhere else must never echo that object back as text.
+  if (row.bucket !== DOCUMENT_BUCKET) {
+    await release({ parse_status: "failed", parse_error: "bad-bucket" });
+    return "failed";
+  }
+  const file = await db.storage.from(DOCUMENT_BUCKET).download(String(row.storage_path));
   if (file.error || !file.data) {
     await release({ parse_status: "failed", parse_error: "unreadable" });
     return "failed";
@@ -279,6 +287,13 @@ export async function recoverExtractions(log: Log): Promise<number> {
     .not("extraction_requested_at", "is", null)
     .or("kind_confirmed.eq.false,available_to_llm.eq.false");
   if (strandedErr) log.warn({ err: serializeErr(strandedErr) }, "extraction marker cleanup failed");
+  // A request older than the recovery window is never picked up again: give up on it so it can't sit at "queued".
+  const { error: staleErr } = await db
+    .from("documents")
+    .update({ parse_status: "failed", parse_error: "gave-up", extraction_requested_at: null, extraction_lease_until: null })
+    .eq("parse_status", "pending")
+    .lt("extraction_requested_at", since);
+  if (staleErr) log.warn({ err: serializeErr(staleErr) }, "extraction stale request cleanup failed");
   const { data, error } = await db
     .from("documents")
     .select("id")

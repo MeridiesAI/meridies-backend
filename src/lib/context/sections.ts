@@ -246,12 +246,15 @@ const tasks: Loader = async (db, studentId) => {
 };
 
 /**
- * An essay body may be read when the essay has no linked file, or its linked file came back and is not
- * kept out of AI. A linked file that did not come back (hidden by RLS) fails closed.
+ * An essay body may be read when the essay has no linked file, or its linked file came back, its type is
+ * confirmed and it is not kept out of AI. A linked file that did not come back (hidden by RLS) fails closed.
+ * Every embed that feeds this selects both `available_to_llm` and `kind_confirmed`.
  */
 export function essayBodyReadable(documentId: unknown, document: unknown): boolean {
   if (documentId === null || documentId === undefined) return true;
-  return typeof document === "object" && document !== null && (document as Row).available_to_llm !== false;
+  if (typeof document !== "object" || document === null) return false;
+  const d = document as Row;
+  return d.available_to_llm !== false && d.kind_confirmed !== false;
 }
 
 const essays: Loader = async (db, studentId, opts) => {
@@ -261,7 +264,7 @@ const essays: Loader = async (db, studentId, opts) => {
     ? (["title", "prompt", "school", "status", "word_count", "body", "document_id"] as const)
     : (["title", "prompt", "school", "status", "word_count", "document_id"] as const);
   const rows = await many(db.from("essays")
-    .select(`${columns("essays", essayCols)}, document:documents(${columns("documents", ["available_to_llm"])})`)
+    .select(`${columns("essays", essayCols)}, document:documents(${columns("documents", ["available_to_llm", "kind_confirmed"])})`)
     .eq("student_id", studentId).order("sort_order").limit(30));
   if (rows.length === 0) return empty("essays");
   const untrusted: { source: string; text: string }[] = [{

@@ -17,7 +17,8 @@ Record what you saw next to each step; anything that differs from "Expect" is a 
    Expect: four imports succeed. The shortcut: record whether it imports, is refused, or answers
    `picked_file_unavailable`.
 3. **Confirm the server can open each picked file** (`npx tsx --env-file=.env scripts/smoke/google-picker.ts <documentId>`:
-   reads the file's metadata with the stored grant). Then confirm it gets 404 on a file id that was never picked
+   reads the file's metadata with the stored grant). Then confirm it gets 404 or 403 (`appNotAuthorizedToFile`;
+   the server maps both to `not_found`) on a file id that was never picked
    (`... <documentId> <unpickedFileId>`).
    Expect: `picked file readable: <name> <mimeType>` for each of the four, and `unpicked file refused as expected`
    for the never-picked id. This proves `setAppId` is right. `UNEXPECTED: an unpicked file was readable` means

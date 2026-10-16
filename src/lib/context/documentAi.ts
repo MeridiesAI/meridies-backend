@@ -8,14 +8,18 @@ export type DocumentAiReason = "keep-out" | "waived" | "excluded" | "not-categor
 
 export type AiDoc = { kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean; kind_confirmed: boolean };
 
-/** A documents row as a decision input. Absent switches read as today's defaults. */
+/**
+ * A documents row as a decision input. Absent switches read as today's defaults, except the type
+ * confirmation: it fails closed, so a reader that forgot to select `kind_confirmed` reads nothing
+ * (REQUIRED_SCHEMA guarantees the column exists).
+ */
 export function toAiDoc(row: Record<string, unknown>): AiDoc {
   return {
     kind: typeof row.kind === "string" ? row.kind : "other",
     available_to_llm: row.available_to_llm !== false,
     ai_access: typeof row.ai_access === "string" && row.ai_access ? row.ai_access : "default",
     ferpa_waived: row.ferpa_waived === true,
-    kind_confirmed: row.kind_confirmed !== false,
+    kind_confirmed: row.kind_confirmed === true,
   };
 }
 
@@ -54,10 +58,32 @@ export function documentReadableForTask(doc: AiDoc, practiceReadsDocuments: bool
 }
 
 /**
+ * The tracker's sentence about attached files nobody has confirmed (spec §4.3), or "" when there are none.
+ * Counts the attached rows whose task-rule reason is `not-categorized`.
+ */
+export function unconfirmedAttachedNote(docs: (Record<string, unknown> | null)[], practiceReadsDocuments: boolean): string {
+  const n = docs.filter((d) => d && documentReadableForTask(toAiDoc(d), practiceReadsDocuments).reason === "not-categorized").length;
+  if (n === 0) return "";
+  return n === 1
+    ? "1 attached file isn't categorized yet. Confirm its type so the tracker can read it."
+    : `${n} attached files aren't categorized yet. Confirm their types so the tracker can read them.`;
+}
+
+/**
  * Documents a student may not see unless they uploaded them (documents_student_restricted_select): a waived
  * recommendation letter, IEP/504 and counselor-only files. Anything that would echo such a file's name to a
  * student (an activity log entry, say) must leave the name out.
  */
 export function isRestrictedDocument(doc: { kind: string; ferpa_waived?: boolean }): boolean {
   return (doc.kind === "recommendation-letter" && doc.ferpa_waived === true) || doc.kind === "iep-504" || doc.kind === "counselor-only";
+}
+
+/**
+ * An import's name must stay out of the student-readable log when the stored kind is restricted, or when the
+ * server's guess for an unconfirmed file is (an IEP/504 guess, or any guess that keeps the file out).
+ */
+export function importNameRestricted(kind: string, guess: { kind: string | null; keepOut: boolean } | null): boolean {
+  if (isRestrictedDocument({ kind })) return true;
+  if (!guess) return false;
+  return guess.keepOut || (guess.kind !== null && isRestrictedDocument({ kind: guess.kind }));
 }

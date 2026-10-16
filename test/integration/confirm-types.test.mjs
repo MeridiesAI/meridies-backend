@@ -87,3 +87,34 @@ const p3 = await sql(`with d as (insert into public.documents (student_id, owner
 const r3 = await call(s.token, "PATCH", `/files/documents/${p3}`, { kind: "resume" });
 check("student kind PATCH on their own upload succeeds and leaves the queue alone", r3.status === 200
   && (await sql(`select kind || ':' || kind_confirmed::text || ':' || (extraction_requested_at is null)::text || ':' || parse_status from public.documents where id = '${p3}'`)) === "resume:false:true:pending", `${r3.status} ${JSON.stringify(r3.body).slice(0, 200)}`);
+
+// An unconfirmed Drive pick can't be filed as an essay: its text would reach the tracker through essays.body.
+const essayDoc = await unconfirmed(s.id, c.id, "essay-draft.txt");
+await sql(`update public.documents set parsed_data = '{"text":"My unconfirmed essay text"}' where id = '${essayDoc}'`);
+const fromDoc = await call(c.token, "POST", "/application/essays/from-document", { studentId: s.id, documentId: essayDoc });
+check("from-document refuses an unconfirmed file with 409 document_unconfirmed",
+  fromDoc.status === 409 && fromDoc.body?.code === "document_unconfirmed" && fromDoc.body?.error === "Choose a type for this file first.", JSON.stringify(fromDoc));
+check("and no essay was created from it", (await sql(`select count(*) from public.essays where document_id = '${essayDoc}'`)) === "0");
+
+// Confirming as kept out doesn't wipe a file's earlier result: parse_status is reset only when text is requested.
+const parsedDoc = await unconfirmed(s.id, c.id, "parsed.pdf");
+await sql(`update public.documents set parse_status = 'parsed', parsed_data = '{"text":"earlier"}' where id = '${parsedDoc}'`);
+const keptOut = await call(c.token, "POST", "/files/documents/confirm-types", { items: [{ documentId: parsedDoc, kind: "financial", keepOut: true }] });
+check("a kept-out confirmation succeeds", keptOut.body?.results?.[0]?.status === "confirmed", JSON.stringify(keptOut.body));
+check("a kept-out confirmation keeps parse_status and requests nothing",
+  (await sql(`select parse_status || ':' || (extraction_requested_at is null)::text from public.documents where id = '${parsedDoc}'`)) === "parsed:true");
+await sql(`update public.documents set kind_confirmed = false where id = '${parsedDoc}'`);
+const patchKeep = await call(c.token, "PATCH", `/files/documents/${parsedDoc}`, { kind: "resume", availableToLlm: false });
+check("a PATCH retype of a kept-out file keeps parse_status", patchKeep.status === 200
+  && (await sql(`select parse_status || ':' || kind_confirmed::text || ':' || (extraction_requested_at is null)::text from public.documents where id = '${parsedDoc}'`)) === "parsed:true:true", JSON.stringify(patchKeep.body));
+const patchRead = await call(c.token, "PATCH", `/files/documents/${parsedDoc}`, { kind: "resume", availableToLlm: true });
+check("a PATCH that allows AI requests text and resets parse_status", patchRead.status === 200
+  && (await sql(`select (parse_status <> 'parsed')::text from public.documents where id = '${parsedDoc}'`)) === "true");
+
+// A student never sees the server's guess.
+const guessed = await unconfirmed(s.id, c.id, "guessed.pdf");
+const stList = await call(s.token, "GET", "/files/documents");
+const stRow = (stList.body ?? []).find((d) => d.id === guessed);
+check("a student's document list carries no kindGuess", stList.status === 200 && stRow && stRow.kindGuess === null, JSON.stringify(stRow));
+const cList = await call(c.token, "GET", `/files/documents?studentId=${s.id}`);
+check("the counselor's list carries the guess", (cList.body ?? []).find((d) => d.id === guessed)?.kindGuess?.kind === "transcript");

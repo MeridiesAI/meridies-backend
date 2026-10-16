@@ -1312,7 +1312,15 @@ never `failed`. PDFs go through `lib/pdfText.ts` (+ `.extract`, `.options`, `.wo
 (import-time guess) work first; 25 MB / 50 pages. **Every reader of documents uses `lib/context/documentAi.ts`:**
 `documentAiDecision` for the context layer and AxIS retrieval, `documentReadableForTask` for the tracker, and
 submission review's `refusalFor`; all three refuse the one shared `SENSITIVE_DOCUMENT_KINDS` (financial, iep-504,
-counselor-only, recommendation-letter, award-letter) and `kind_confirmed = false`. A new reader must use them.
+counselor-only, recommendation-letter, award-letter) and any type not confirmed (`toAiDoc` requires
+`kind_confirmed === true`, so select the column). Text copied out of a document is covered too: essay bodies go
+through `essayBodyReadable` (context layer, Coherence, the tracker's `loadEssayBody`), and
+`POST /application/essays/from-document` answers 409 `document_unconfirmed` for an unconfirmed file, so its text
+never reaches `essays.body`. A new reader must use them. Extraction and submission review download only from the
+`student-documents` bucket (`DOCUMENT_BUCKET`); a row naming another bucket ends `failed` / `bad-bucket`, and
+`POST /files/documents` accepts no other `bucket`. A request still pending after 24 hours is marked `failed` /
+`gave-up` by recovery. The tracker's note appends "N attached file(s) aren't categorized yet…" when attached
+files are unconfirmed (`unconfirmedAttachedNote`, `lib/trackerNote.ts`).
 Do not set `NODE_OPTIONS=--max-old-space-size` on Railway: a process-wide heap flag can override the PDF worker's
 `resourceLimits`.
 
@@ -1361,18 +1369,22 @@ migration is safe to apply first; the previous code ignores the new columns.
 - **Budgets drop whole sections, never cut one.** A section that doesn't fit is
   left out and listed in `omitted` with reason `budget`.
 - **Documents** (`documentAiDecision` in `documentAi.ts`, in this order):
-  keep-out (`available_to_llm = false`) always wins; then a waived
-  recommendation letter (never); then the practice's document-reading setting;
-  then `ai_access` (`excluded` out, `allowed` in); then the kind defaults
-  (transcript, resume, test-report, activity-list); an `other` file is
-  `not-categorized` so the client can ask the counselor to categorize it, and
-  any other kind is out. An allowed document with no parsed text, or with more
+  an unconfirmed type (`kind_confirmed` not true; a row read without the column
+  fails closed) is `not-categorized` first; then keep-out
+  (`available_to_llm = false`); then a waived recommendation letter (never);
+  then the practice's document-reading setting; then `ai_access` (`excluded`
+  out, `allowed` in); then the sensitive kinds (`SENSITIVE_DOCUMENT_KINDS`) are
+  out; then the kind defaults (transcript, resume, test-report, activity-list)
+  are in; an `other` file is `not-categorized` so the client can ask the
+  counselor to categorize it, and any other kind is out. An allowed document with no parsed text, or with more
   than 12,000 characters of it, is reported in `omitted` (`empty`, `budget`)
   rather than dropped silently.
 - **Essays.** The layer's `essays` section selects and renders a body only for
   a feature that asks for bodies (narrative coherence), and leaves it out when
-  the linked document is kept out of AI or isn't readable by the caller
-  (`essayBodyReadable`); a linked file that didn't come back fails closed. No
+  the linked document is kept out of AI, unconfirmed (`kind_confirmed = false`),
+  or isn't readable by the caller (`essayBodyReadable`); a linked file that
+  didn't come back fails closed. The task tracker's essay draft
+  (`loadEssayBody`) applies the same rule. No
   current consumer reads essay bodies through that section: the Application
   page's Coherence builds its ticked essays through `coherenceMaterial.ts`
   (`usableEssay`), which applies the same `essayBodyReadable` rule.

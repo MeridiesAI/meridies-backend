@@ -99,8 +99,9 @@ test("printed figures become facts the counselor reads; missing or garbled ones 
 
 test("submission review refuses an unconfirmed file with a reason the student's counselor can act on", () => {
   assert.equal(refusalFor({ kind: "other", kind_confirmed: false }, true), "Choose a type for this file first, so AxIS knows what it is.");
-  assert.equal(refusalFor({ kind: "other", available_to_llm: false }, true), "This file is kept out of AI, so AxIS didn't read it.");
-  assert.equal(refusalFor({ kind: "essay" }, true), null);
-  assert.equal(refusalFor({ kind: "financial" }, true), "This kind of file stays out of AI, so AxIS didn't read it.");
-  assert.equal(refusalFor({ kind: "essay" }, false), "Automatic document reading is off for this practice.");
+  assert.equal(refusalFor({ kind: "other", available_to_llm: false, kind_confirmed: true }, true), "This file is kept out of AI, so AxIS didn't read it.");
+  assert.equal(refusalFor({ kind: "essay", kind_confirmed: true }, true), null);
+  assert.equal(refusalFor({ kind: "essay" }, true), "Choose a type for this file first, so AxIS knows what it is.", "a row without the column fails closed");
+  assert.equal(refusalFor({ kind: "financial", kind_confirmed: true }, true), "This kind of file stays out of AI, so AxIS didn't read it.");
+  assert.equal(refusalFor({ kind: "essay", kind_confirmed: true }, false), "Automatic document reading is off for this practice.");
 });

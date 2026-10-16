@@ -29,7 +29,7 @@ import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
-import { extractionState, requestExtraction } from "../lib/documentExtraction.js";
+import { DOCUMENT_BUCKET, extractionState, requestExtraction } from "../lib/documentExtraction.js";
 import {
   ensurePracticeFolders,
   findOrCreateChild,
@@ -60,7 +60,8 @@ const documentBody = z
   .object({
     studentId: z.string().uuid().nullable().optional(),
     folderId: z.string().uuid().nullable().optional(),
-    bucket: z.string().trim().max(100).optional(),
+    /** Only the documents bucket: text extraction and review read the object with the service role. */
+    bucket: z.literal(DOCUMENT_BUCKET).optional(),
     storagePath: z.string().trim().min(1).max(500),
     filename: z.string().trim().min(1).max(300),
     title: z.string().trim().max(300).nullable().optional(),
@@ -338,7 +339,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       .order("created_at", { ascending: false })
       .limit(500);
     if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toDocument(r as Row));
+    return (data ?? []).map((r) => toDocument(r as Row, request.profile.role));
   });
 
   /**
@@ -384,7 +385,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           owner_id: request.auth.userId,
           student_id: studentId,
           folder_id: folderId,
-          bucket: b.bucket ?? "student-documents",
+          bucket: DOCUMENT_BUCKET,
           storage_path: b.storagePath,
           filename: b.filename,
           title: b.title ?? null,
@@ -416,7 +417,7 @@ export default async function fileRoutes(app: FastifyInstance) {
         });
       }
 
-      return reply.code(201).send(toDocument(data as Row));
+      return reply.code(201).send(toDocument(data as Row, request.profile.role));
     }
   );
 
@@ -475,10 +476,15 @@ export default async function fileRoutes(app: FastifyInstance) {
         if (request.profile.role === "counselor") {
           update.kind_confirmed = true;
           const willBeAvailable = b.availableToLlm ?? (existing as Row).available_to_llm !== false;
-          update.parse_status = "pending";
-          update.extraction_requested_at = willBeAvailable ? new Date().toISOString() : null;
-          update.extraction_attempts = 0;
-          update.extraction_lease_until = null;
+          // parse_status is reset only when an extraction is requested: a kept-out file keeps its last result.
+          if (willBeAvailable) {
+            update.parse_status = "pending";
+            update.extraction_requested_at = new Date().toISOString();
+            update.extraction_attempts = 0;
+            update.extraction_lease_until = null;
+          } else {
+            update.extraction_requested_at = null;
+          }
         }
       }
 
@@ -491,7 +497,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
       if (update.extraction_requested_at) requestExtraction([id], request.log);
-      return toDocument(data as Row);
+      return toDocument(data as Row, request.profile.role);
     }
   );
 
@@ -530,10 +536,10 @@ export default async function fileRoutes(app: FastifyInstance) {
               kind: item.kind,
               kind_confirmed: true,
               available_to_llm: available,
-              parse_status: "pending",
-              extraction_requested_at: available ? new Date().toISOString() : null,
-              extraction_attempts: 0,
-              extraction_lease_until: null,
+              // parse_status is reset only when an extraction is requested: a kept-out file keeps its last result.
+              ...(available
+                ? { parse_status: "pending", extraction_requested_at: new Date().toISOString(), extraction_attempts: 0, extraction_lease_until: null }
+                : { extraction_requested_at: null }),
             })
             .eq("id", item.documentId)
             .select("*")

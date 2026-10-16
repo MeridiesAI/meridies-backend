@@ -37,6 +37,7 @@ import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
 import { isCounselorApproved } from "./access.js";
 import { documentReadableForTask, toAiDoc } from "./context/documentAi.js";
+import { DOCUMENT_BUCKET } from "./documentExtraction.js";
 
 type Row = Record<string, unknown>;
 type Svc = NonNullable<ReturnType<typeof serviceClient>>;
@@ -296,7 +297,9 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
     return { status: "skipped", reason: "This file is too large for AxIS to read." };
   }
 
-  const dl = await svc.storage.from(String(doc.bucket ?? "student-documents")).download(String(doc.storage_path));
+  // The service role reads every bucket: only the documents bucket is ever downloaded for a review.
+  if ((doc.bucket ?? DOCUMENT_BUCKET) !== DOCUMENT_BUCKET) return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
+  const dl = await svc.storage.from(DOCUMENT_BUCKET).download(String(doc.storage_path));
   if (dl.error || !dl.data) return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
   const bytes = Buffer.from(await dl.data.arrayBuffer());
   if (bytes.length === 0) return { status: "skipped", reason: "The uploaded file is empty." };

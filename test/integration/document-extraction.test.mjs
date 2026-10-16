@@ -90,3 +90,28 @@ await new Promise((r) => setTimeout(r, 3_000));
 check("a file kept out while queued gets no text and its marker is cleared",
   (await sql(`select coalesce(parsed_data->>'text', '') from public.documents where id = '${keep}'`)) === ""
   && (await sql(`select extraction_requested_at is null from public.documents where id = '${keep}'`)) === "t");
+
+// Fix 1: the queue reads only the documents bucket. A row naming another bucket ends failed with no text.
+const imp = await upload("b.txt", new TextEncoder().encode("secret from another bucket"), "text/plain");
+await sql(`update public.documents set bucket = 'imports' where id = '${imp}'`);
+const badConfirm = await call(c.token, "POST", "/files/documents/confirm-types", { items: [{ documentId: imp, kind: "resume", keepOut: false }] });
+check("a row in another bucket can still be confirmed", badConfirm.body?.results?.[0]?.status === "confirmed", JSON.stringify(badConfirm.body));
+const bad = await until([imp], (st) => st[0]?.state === "failed", 10_000);
+check("a confirmed row in another bucket ends failed with no text", bad[0]?.state === "failed"
+  && (await sql(`select coalesce(parse_error, '') || ':' || coalesce(parsed_data->>'text', '') || ':' || (extraction_requested_at is null)::text || ':' || (extraction_lease_until is null)::text from public.documents where id = '${imp}'`)) === "bad-bucket::true:true", JSON.stringify(bad));
+for (const bucket of ["imports", "axis-attachments", "student-banners"]) {
+  const reg = await call(c.token, "POST", "/files/documents", { studentId: s.id, bucket, storagePath: `${s.id}/x-${Date.now()}.pdf`, filename: "x.pdf" });
+  check(`POST /files/documents with bucket ${bucket} is refused`, reg.status === 400, `status ${reg.status}`);
+}
+const okReg = await call(c.token, "POST", "/files/documents", { studentId: s.id, bucket: "student-documents", storagePath: `${s.id}/ok-${Date.now()}.pdf`, filename: "ok.pdf" });
+check("POST /files/documents with the documents bucket still works", okReg.status === 201 && okReg.body.bucket === "student-documents", `status ${okReg.status}`);
+
+// Fix 4: a request still pending after the 24-hour window is given up, so it can't sit at "queued" forever.
+const stale = await upload("s.pdf", textPdf(["Official Transcript"]), "application/pdf");
+await sql(`update public.documents set kind = 'transcript', kind_confirmed = true, available_to_llm = true, parse_status = 'pending',
+  extraction_requested_at = now() - interval '25 hours', extraction_lease_until = null where id = '${stale}'`);
+await recover();
+await new Promise((r) => setTimeout(r, 1_000));
+check("a request older than 24 hours is marked failed / gave-up with its marker cleared",
+  (await sql(`select parse_status || ':' || coalesce(parse_error, '') || ':' || (extraction_requested_at is null)::text || ':' || (extraction_lease_until is null)::text from public.documents where id = '${stale}'`)) === "failed:gave-up:true:true");
+check("and it reports as failed", (await state([stale]))[0]?.state === "failed");

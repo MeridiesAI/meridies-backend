@@ -19,7 +19,7 @@ import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
 import { readDocumentText } from "../lib/documentText.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
-import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
@@ -824,6 +824,8 @@ export default async function applicationRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (docError) throw fromPostgrest(docError);
       if (!doc || doc.student_id !== studentId) throw notFound("That document isn't filed to this student");
+      // An unconfirmed Drive pick's text must not reach an essay body (which AI features read).
+      if (doc.kind_confirmed === false) throw new HttpError(409, "Choose a type for this file first.", "document_unconfirmed");
 
       let text: string | null = null;
       const parsed = (doc.parsed_data ?? {}) as Row;

@@ -23,7 +23,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
-import { isRestrictedDocument } from "../lib/context/documentAi.js";
+import { importNameRestricted } from "../lib/context/documentAi.js";
 import { guessText, requestExtraction } from "../lib/documentExtraction.js";
 import { guessKind, importFields } from "../lib/documentGuess.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -388,7 +388,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
         event: "uploaded",
         actor_id: request.auth.userId,
         // The student reads this log: a restricted file's name stays out of it.
-        metadata: isRestrictedDocument({ kind: String(data.kind ?? "other") }) ? { source: provider } : { filename: download.filename, source: provider },
+        metadata: importNameRestricted(String(data.kind ?? "other"), guess) ? { source: provider } : { filename: download.filename, source: provider },
       });
 
       if (fields.requestExtraction) requestExtraction([String(data.id)], request.log);

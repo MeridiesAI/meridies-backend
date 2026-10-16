@@ -176,19 +176,19 @@ export async function exportDocTextResult(
   // The body is read only for an OK answer whose declared size is acceptable.
   const text = res.ok && declaredBytes <= MAX_EXPORT_BYTES ? await res.text() : null;
   const outcome = docExportOutcome({ status: res.status, declaredBytes, text });
-  if (!outcome.ok && outcome.reason === "failed" && res.status !== 404 && !res.ok) {
+  if (!outcome.ok && outcome.reason === "failed" && res.status !== 404 && res.status !== 403 && !res.ok) {
     log.warn({ status: res.status }, "google doc export failed");
   }
   return outcome;
 }
 
-/** Pure mapping of a Doc export answer: 404 is not-picked, any other failure or oversize is failed. */
+/** Pure mapping of a Doc export answer: 404 or 403 (drive.file's appNotAuthorizedToFile) is not-picked, any other failure or oversize is failed. */
 export function docExportOutcome(a: {
   status: number;
   declaredBytes: number;
   text: string | null;
 }): { ok: true; text: string } | { ok: false; reason: "not-picked" | "failed" } {
-  if (a.status === 404) return { ok: false, reason: "not-picked" };
+  if (a.status === 404 || a.status === 403) return { ok: false, reason: "not-picked" };
   if (a.status < 200 || a.status > 299) return { ok: false, reason: "failed" };
   if (a.declaredBytes > MAX_EXPORT_BYTES || a.text === null || a.text.length > MAX_EXPORT_BYTES) {
     return { ok: false, reason: "failed" };

@@ -69,19 +69,26 @@ async function call(
   return { res, token };
 }
 
+/**
+ * Under drive.file, Drive answers an unpicked file with 404 or with 403 (appNotAuthorizedToFile):
+ * both mean "Meridies can't see that file", so a file read maps both to not_found.
+ */
 export function googleFileFailureCode(status: number): string | null {
-  return status === 404 ? "not_found" : null;
+  return status === 404 || status === 403 ? "not_found" : null;
 }
+
+const FILE_READS = new Set(["file", "file download"]);
 
 /** Map a provider failure to something safe to show. Bodies are never echoed. */
 export function providerFailure(provider: SuiteProvider, res: Response, log: Log, what: string): HttpError {
   log.warn({ provider, status: res.status, what }, "provider request failed");
   const label = providerLabel(provider);
-  if (res.status === 404) {
+  const unpicked = provider === "google" && res.status === 403 && FILE_READS.has(what);
+  if (res.status === 404 || unpicked) {
     return new HttpError(
       404,
       `${label} couldn't find that ${what}, or it isn't shared with you.`,
-      googleFileFailureCode(404) ?? undefined
+      "not_found"
     );
   }
   if (res.status === 403) return conflict(`${label} refused access to that ${what}.`);

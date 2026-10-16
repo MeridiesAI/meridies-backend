@@ -43,10 +43,12 @@ import {
   type TaskNotification,
 } from "../lib/email.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
-import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
+import { documentReadableForTask, toAiDoc, unconfirmedAttachedNote } from "../lib/context/documentAi.js";
+import { essayBodyReadable } from "../lib/context/sections.js";
+import { composeTrackerNote } from "../lib/trackerNote.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
-import { checkLiveDocuments, holdsNoActivity, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
+import { checkLiveDocuments, holdsNoActivity, isGrantProblem, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
@@ -1036,6 +1038,8 @@ export default async function taskRoutes(app: FastifyInstance) {
         (row) => row.doc && documentReadableForTask(toAiDoc(row.doc), practice.autoParseDocuments).allowed
       );
       const status = liveStatusOf(live.checks);
+      // Unconfirmed attachments are why the tracker may have nothing to read: say so in the note.
+      const unconfirmedNote = unconfirmedAttachedNote(attachedDocs.map((r) => r.doc), practice.autoParseDocuments);
 
       const submissions = readable.filter((r) => documentText(r.doc!).length > 0);
 
@@ -1044,7 +1048,7 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       if (stale && !hasWork) {
         if (holdsNoActivity(live.checks)) {
-          const held = live.checks.filter((c) => c.errorCode && /_(disconnected|reconnect)$/.test(c.errorCode));
+          const held = live.checks.filter((c) => isGrantProblem(c.errorCode));
           const label = held[0]!.provider === "google" ? "Google" : "Microsoft";
           throw new HttpError(
             409,
@@ -1061,7 +1065,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           : watched.length > 0
             ? `No edits to ${quoteNames(watched)} since this task was assigned.`
             : "Nothing has happened on this task since it was assigned.";
-        const note = liveCaveat ? `${base} ${liveCaveat}` : base;
+        const note = composeTrackerNote(base, unconfirmedNote, liveCaveat);
 
         const saved = await saveCheck(request, {
           studentId,
@@ -1092,7 +1096,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           deliverableId: id,
           documentId: latest.documentId,
           verdict: "on-track",
-          note: liveCaveat ? `${base} ${liveCaveat}` : base,
+          note: composeTrackerNote(base, unconfirmedNote, liveCaveat),
           daysSinceActivity: daysSince(lastActivity),
           stallAfterDays: settings.stall_after_days,
           documentsChecked: 0,
@@ -1229,14 +1233,18 @@ function documentText(doc: Row): string {
   return "";
 }
 
+/** The linked essay's draft, under the context layer's essay rule (its linked file confirmed and not kept out). */
 async function loadEssayBody(request: FastifyRequest, task: Row): Promise<string> {
   if (!task.essay_id) return "";
   const { data } = await request.db
     .from("essays")
-    .select("body")
+    .select("body, document_id, document:documents(available_to_llm, kind_confirmed)")
     .eq("id", task.essay_id as string)
     .maybeSingle();
-  return String(data?.body ?? "").trim();
+  if (!data) return "";
+  const row = data as unknown as Row;
+  if (!essayBodyReadable(row.document_id, row.document)) return "";
+  return String(row.body ?? "").trim();
 }
 
 /** Collapse to a single line and cap it: the note renders inline in a table. */

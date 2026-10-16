@@ -24,9 +24,9 @@ test("a grant without calendar.events answers calendar_not_enabled; without driv
   assert.doesNotThrow(() => requireScope(token([GOOGLE_SCOPE.driveFile]), "google", GOOGLE_FILE_SCOPE, "x", "drive_not_granted"));
 });
 
-test("a Drive 404 carries not_found so callers can map it", () => {
+test("a Drive 404 or 403 (appNotAuthorizedToFile) carries not_found so callers can map it", () => {
   assert.equal(googleFileFailureCode(404), "not_found");
-  assert.equal(googleFileFailureCode(403), null);
+  assert.equal(googleFileFailureCode(403), "not_found");
   assert.equal(googleFileFailureCode(500), null);
 });
 
@@ -35,14 +35,20 @@ test("providerFailure sets not_found on a 404 and no code on other statuses", ()
   const e404 = providerFailure("google", new Response(null, { status: 404 }), log, "file");
   assert.equal(e404.statusCode, 404);
   assert.equal(e404.code, "not_found");
-  assert.equal(providerFailure("google", new Response(null, { status: 403 }), log, "file").code, undefined);
+  const e403 = providerFailure("google", new Response(null, { status: 403 }), log, "file");
+  assert.equal(e403.statusCode, 404, "an unpicked file under drive.file reads like a 404");
+  assert.equal(e403.code, "not_found");
+  assert.equal(providerFailure("google", new Response(null, { status: 403 }), log, "file download").code, "not_found");
+  assert.equal(providerFailure("google", new Response(null, { status: 403 }), log, "calendar event").code, undefined, "only file reads");
+  assert.equal(providerFailure("microsoft", new Response(null, { status: 403 }), log, "file").code, undefined);
+  assert.equal(providerFailure("google", new Response(null, { status: 500 }), log, "file").code, undefined);
 });
 
 test("docExportOutcome maps a Doc export answer", () => {
   const max = 2 * 1024 * 1024;
   assert.deepEqual(docExportOutcome({ status: 404, declaredBytes: 0, text: null }), { ok: false, reason: "not-picked" });
   assert.deepEqual(docExportOutcome({ status: 500, declaredBytes: 0, text: null }), { ok: false, reason: "failed" });
-  assert.deepEqual(docExportOutcome({ status: 403, declaredBytes: 0, text: null }), { ok: false, reason: "failed" });
+  assert.deepEqual(docExportOutcome({ status: 403, declaredBytes: 0, text: null }), { ok: false, reason: "not-picked" });
   assert.deepEqual(docExportOutcome({ status: 200, declaredBytes: max + 1, text: null }), { ok: false, reason: "failed" });
   assert.deepEqual(docExportOutcome({ status: 200, declaredBytes: 0, text: "x".repeat(max + 1) }), { ok: false, reason: "failed" });
   const ok = docExportOutcome({ status: 200, declaredBytes: 5, text: "Hello\r\nworld" });
