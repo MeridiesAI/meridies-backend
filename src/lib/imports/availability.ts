@@ -57,3 +57,8 @@ export async function assertImportsReady(request: FastifyRequest): Promise<void>
   if (!(await step2Migrated(request))) throw unavailableNow();
   if (!hasImportWorker) throw noWorker();
 }
+
+/** Is the Import page usable for the caller's practice? The same three questions, answered without throwing. */
+export async function step2UsableFor(request: FastifyRequest): Promise<boolean> {
+  return hasImportWorker && (await importsEnabledFor(request)) && (await step2Migrated(request));
+}
