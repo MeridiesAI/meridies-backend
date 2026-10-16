@@ -137,6 +137,55 @@ export async function studentFolderId(
   return (data?.id as string | undefined) ?? null;
 }
 
+/**
+ * The student whose folder tree this folder sits in: the student folder itself,
+ * or the student folder at the top of a custom subfolder's chain. Null for a
+ * folder outside every student's tree. Read on the caller's client; an
+ * unreadable parent ends the walk.
+ *
+ * A file about one student must never be filed in another student's tree:
+ * whoever is handed that tree (a caseload transfer moves it whole, and the
+ * student reads their own folder) would get the other student's file.
+ */
+export async function folderTreeStudent(request: FastifyRequest, folder: Row): Promise<string | null> {
+  let current: Row | null = folder;
+  const seen = new Set<string>();
+  for (let hops = 0; current && hops < 64; hops++) {
+    if (current.kind === "student") return typeof current.student_id === "string" ? current.student_id : null;
+    const parent: string | null = typeof current.parent_id === "string" ? current.parent_id : null;
+    if (!parent || seen.has(parent)) return null;
+    seen.add(parent);
+    const res: { data: unknown; error: { code?: string; message?: string } | null } = await request.db
+      .from("folders")
+      .select("id, parent_id, kind, student_id")
+      .eq("id", parent)
+      .maybeSingle();
+    if (res.error) throw fromPostgrest(res.error);
+    current = (res.data as Row | null) ?? null;
+  }
+  return null;
+}
+
+/** Refuses filing a file about `studentId` into a folder in another student's tree. */
+async function assertSameStudentTree(request: FastifyRequest, folder: Row, studentId: string | null | undefined): Promise<string | null> {
+  const owner = await folderTreeStudent(request, folder);
+  if (owner && studentId && owner !== studentId) throw badRequest("That folder belongs to a different student");
+  return owner;
+}
+
+/** Every folder in the caller's subtree under (and including) `rootId`, capped. */
+async function subtreeIds(request: FastifyRequest, rootId: string): Promise<string[]> {
+  const all = [rootId];
+  let frontier = [rootId];
+  while (frontier.length > 0 && all.length < 2000) {
+    const { data, error } = await request.db.from("folders").select("id").in("parent_id", frontier).limit(2000);
+    if (error) throw fromPostgrest(error);
+    frontier = ((data ?? []) as Row[]).map((r) => String(r.id)).filter((id) => !all.includes(id));
+    all.push(...frontier);
+  }
+  return all;
+}
+
 export default async function fileRoutes(app: FastifyInstance) {
   // ---- Folders --------------------------------------------------------------
 
@@ -247,7 +296,22 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       if (b.parentId) {
         if (b.parentId === id) throw badRequest("A folder can't be inside itself");
-        await assertOwnFolder(request, b.parentId);
+        const parent = await assertOwnFolder(request, b.parentId);
+        // Moved under a student's folder, everything in it becomes part of that
+        // student's tree: refuse when it holds a file about someone else.
+        const treeStudent = await folderTreeStudent(request, parent);
+        if (treeStudent) {
+          const ids = await subtreeIds(request, id);
+          const [docs, links] = await Promise.all([
+            request.db.from("documents").select("id").in("folder_id", ids).not("student_id", "is", null).neq("student_id", treeStudent).limit(1),
+            request.db.from("document_links").select("id").in("folder_id", ids).not("student_id", "is", null).neq("student_id", treeStudent).limit(1),
+          ]);
+          if (docs.error) throw fromPostgrest(docs.error);
+          if (links.error) throw fromPostgrest(links.error);
+          if ((docs.data ?? []).length > 0 || (links.data ?? []).length > 0) {
+            throw badRequest("That folder holds files about another student, so it can't go in this student's folder");
+          }
+        }
       }
       // The student folder is the anchor for that student's filing: rename and
       // recolour it freely, but it stays where the trigger put it.
@@ -377,9 +441,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       let folderId = b.folderId ?? null;
       if (folderId) {
         const folder = await assertFileableFolder(request, folderId);
-        if (folder.kind === "student" && studentId && folder.student_id !== studentId) {
-          throw badRequest("That folder belongs to a different student");
-        }
+        await assertSameStudentTree(request, folder, studentId);
       }
       // Filed into the student's own folder by default — that folder exists for
       // every roster student, so an upload never lands nowhere.
@@ -459,6 +521,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       }
 
       const target = b.folderId ? await assertFileableFolder(request, b.folderId) : null;
+      if (target) await assertSameStudentTree(request, target, existing.student_id as string | null);
 
       const update: Row = {};
       if (b.folderId !== undefined) update.folder_id = b.folderId;
@@ -589,9 +652,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       let folderId = b.folderId ?? null;
       if (folderId) {
         const folder = await assertFileableFolder(request, folderId);
-        if (folder.kind === "student" && studentId && folder.student_id !== studentId) {
-          throw badRequest("That folder belongs to a different student");
-        }
+        await assertSameStudentTree(request, folder, studentId);
       } else if (isStudent && studentId) {
         folderId = await studentFolderId(request, studentId);
       }
@@ -661,14 +722,21 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("document_links")
-        .select("id, owner_id")
+        .select("id, owner_id, student_id, folder_id")
         .eq("id", id)
         .maybeSingle();
       if (!existing || existing.owner_id !== request.auth.userId) {
         throw notFound("That link isn't on file");
       }
-      if (b.folderId) await assertFileableFolder(request, b.folderId);
+      const targetFolder = b.folderId ? await assertFileableFolder(request, b.folderId) : null;
       if (b.studentId) await resolveStudentId(request, b.studentId, "edit");
+      // Whatever the link ends up about, it can't sit in another student's tree.
+      const nextStudent = b.studentId !== undefined ? b.studentId : (existing.student_id as string | null);
+      const nextFolderId = b.folderId !== undefined ? b.folderId : (existing.folder_id as string | null);
+      if (nextStudent && nextFolderId) {
+        const folder = targetFolder ?? (await request.db.from("folders").select("id, parent_id, kind, student_id").eq("id", nextFolderId).maybeSingle()).data;
+        if (folder) await assertSameStudentTree(request, folder as Row, nextStudent);
+      }
       if (request.profile.role === "student" && b.studentId === null) {
         throw badRequest("Your links stay in My documents");
       }
