@@ -5,8 +5,8 @@ import { test } from "node:test";
 import { AI_ALLOWLIST, columns } from "../../src/lib/context/ai-allowlist.js";
 import { documentAiDecision } from "../../src/lib/context/documentAi.js";
 
-const doc = (o: Partial<{ kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean }> = {}) => ({
-  kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, ...o,
+const doc = (o: Partial<{ kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean; kind_confirmed: boolean }> = {}) => ({
+  kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, kind_confirmed: true, ...o,
 });
 
 test("columns() returns only allowlisted names", () => {

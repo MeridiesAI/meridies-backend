@@ -12,7 +12,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "../errors.js";
 import { gpaLabel } from "../gpa.js";
 import { columns } from "./ai-allowlist.js";
-import { documentAiDecision } from "./documentAi.js";
+import { documentAiDecision, toAiDoc } from "./documentAi.js";
 import type { Section } from "./pack.js";
 import type { SectionName } from "./profiles.js";
 import type { ContextUsage, StudentContext } from "./types.js";
@@ -283,13 +283,10 @@ const documents: Loader = async (db, studentId, opts) => {
   }
   // Metadata first: parsed text can be large, and a file the rule keeps out never needs it read.
   const rows = await many(db.from("documents")
-    .select(columns("documents", ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived"]))
+    .select(columns("documents", ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "kind_confirmed"]))
     .eq("student_id", studentId).order("created_at"));
   if (rows.length === 0) return empty("documents");
-  const allowed = rows.filter((d) => documentAiDecision(
-    { kind: str(d.kind), available_to_llm: d.available_to_llm !== false, ai_access: str(d.ai_access) || "default", ferpa_waived: d.ferpa_waived === true },
-    opts.practiceReadsDocuments
-  ).allowed);
+  const allowed = rows.filter((d) => documentAiDecision(toAiDoc(d), opts.practiceReadsDocuments).allowed);
   const parsedById = new Map<string, Row | null>();
   if (allowed.length > 0) {
     const texts = await many(db.from("documents")
@@ -304,10 +301,7 @@ const documents: Loader = async (db, studentId, opts) => {
   let blocked = 0;
   let unparsed = 0;
   for (const d of rows) {
-    const decision = documentAiDecision(
-      { kind: str(d.kind), available_to_llm: d.available_to_llm !== false, ai_access: str(d.ai_access) || "default", ferpa_waived: d.ferpa_waived === true },
-      opts.practiceReadsDocuments
-    );
+    const decision = documentAiDecision(toAiDoc(d), opts.practiceReadsDocuments);
     if (!decision.allowed) {
       if (decision.reason === "not-categorized") uncategorized++;
       else blocked++;
