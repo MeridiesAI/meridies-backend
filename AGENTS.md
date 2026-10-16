@@ -354,7 +354,12 @@ forget it.
   receive it is re-decided at dispatch (`sendBlockedReason` in
   `lib/studentMessages.ts`): the student still on this counselor's roster and
   not archived, parents still switched on, each guardian still on file with
-  alerts on and the same address, an alert still clear of the throttle.
+  alerts on and the same address, an email to the student still addressed to
+  their sign-in email, an alert still clear of the throttle. The student is
+  written to at their sign-in email (`profiles.email`), never the
+  student-writable `student_personal_details.contact_email` (the info card's
+  email is a recorded detail, not a destination), the same rule as meeting
+  invites and the due-tomorrow reminders.
   Anything unreadable holds the send; a refusal cancels it with the reason.
   A row is not proof the route wrote it, so dispatch keeps only recipients
   the composer would have resolved itself (`allowedRecipients`): the student

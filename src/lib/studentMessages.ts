@@ -128,21 +128,41 @@ const normPhone = (v: string | null | undefined): string | null => {
 
 export type StudentContact = { id: string; name: string; email: string | null; phone: string | null };
 
+/**
+ * The student as a composer recipient. Email goes to their sign-in address
+ * (`profiles.email`, which no client can write), never
+ * `student_personal_details.contact_email`: the student can write that row
+ * through PostgREST, so following it would let them send every message their
+ * counselor writes them, scheduled ones included, to any address from
+ * Meridies' domain. The same rule as meeting invites and the due-tomorrow
+ * reminders; the info card's email stays a recorded detail.
+ */
 export async function loadStudentContact(db: SupabaseClient, studentId: string): Promise<StudentContact | null> {
-  const [profile, details] = await Promise.all([
-    db.from("profiles").select("id, full_name, email, phone").eq("id", studentId).maybeSingle(),
-    db.from("student_personal_details").select("contact_email").eq("student_id", studentId).maybeSingle(),
-  ]);
+  const profile = await db.from("profiles").select("id, full_name, email, phone").eq("id", studentId).maybeSingle();
   if (profile.error) throw fromPostgrest(profile.error);
-  if (details.error) throw fromPostgrest(details.error);
   if (!profile.data) return null;
-  const p = profile.data as Row;
+  return studentContactFrom(profile.data as Row);
+}
+
+/** Pure: a profiles row as the composer's student recipient. */
+export function studentContactFrom(p: Row): StudentContact {
   return {
     id: String(p.id),
     name: String(p.full_name ?? ""),
-    email: s((details.data as Row | null)?.contact_email) ?? s(p.email),
+    email: s(p.email),
     phone: s(p.phone),
   };
+}
+
+/**
+ * A scheduled message to the student leaves only for the address still on
+ * file: an email recipient frozen before this rule (when the contact email
+ * was followed) or before a sign-in email change is dropped.
+ */
+export function studentRecipientsStillAllowed(recipients: Recipient[], channel: unknown, loginEmail: unknown): Recipient[] {
+  if (channel !== "email") return recipients;
+  const login = typeof loginEmail === "string" ? loginEmail.trim().toLowerCase() : "";
+  return recipients.filter((r) => r.kind === "student" && !!login && (r.email ?? "").trim().toLowerCase() === login);
 }
 
 /**
@@ -702,7 +722,7 @@ async function sendBlockedReason(
   }
   const { data: student, error } = await svc
     .from("profiles")
-    .select("counselor_id, archived_at")
+    .select("counselor_id, archived_at, email")
     .eq("id", row.student_id)
     .maybeSingle();
   if (error) throw fromPostgrest(error);
@@ -719,6 +739,12 @@ async function sendBlockedReason(
     const student = await loadStudentContact(svc, row.student_id);
     const recipients = allowedRecipients(row, { student, family: [] });
     if (recipients.length === 0) return "No address on file for the student any more";
+    // An email frozen with another address (written when the contact email
+    // was followed, or before a sign-in email change) is cancelled rather
+    // than re-addressed: the counselor saw that address in the To line.
+    if (studentRecipientsStillAllowed(row.recipients, row.channel, student?.email).length === 0) {
+      return "The student's address on file has changed since this was scheduled";
+    }
     return { recipients };
   }
 
