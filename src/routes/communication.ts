@@ -21,7 +21,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { inQuietHours, loadSettings, nextSendWindow } from "../lib/accountability.js";
 import { runStructured } from "../lib/anthropic.js";
-import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
+import { badRequest, fromPostgrest, notFound, tooManyRequests, unavailable } from "../lib/errors.js";
 import { beat } from "../lib/heartbeat.js";
 import { toInviteDelivery, type InviteDelivery } from "../lib/inviteDelivery.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -365,6 +365,9 @@ export default async function communicationRoutes(app: FastifyInstance) {
         })
         .select("*")
         .single();
+      // 54000: the database's own daily cap on a counselor's message rows
+      // (20261024000024), which sits above the route's limits.
+      if (error?.code === "54000") throw tooManyRequests("You've sent a lot of family messages today.");
       if (error) throw fromPostgrest(error);
       const row = data as Row;
 

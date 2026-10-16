@@ -33,35 +33,48 @@ const family: FamilyContact[] = [
 ];
 const rec = (r: Partial<Recipient>): Recipient => ({ kind: "student", id: S, name: "x", email: null, phone: null, ...r });
 
-test("allowedRecipients: a student email goes only to the address on file", () => {
+test("allowedRecipients: a student email goes only to the address on file now", () => {
   const row = { student_id: S, audience: "student" as const, channel: "email" as const };
+  const onFile = [{ kind: "student", id: S, name: "Maya Lee", email: "Maya@Example.com", phone: "+1 (555) 010-0000" }];
   const ok = allowedRecipients({ ...row, recipients: [rec({ email: "maya@example.com " })] }, { student, family: [] });
-  assert.deepEqual(ok, [{ kind: "student", id: S, name: "Maya Lee", email: "Maya@Example.com", phone: "+1 (555) 010-0000" }]);
+  assert.deepEqual(ok, onFile);
 
-  const forged = allowedRecipients(
-    { ...row, recipients: [rec({ email: "victim@elsewhere.com" }), rec({ id: "other", email: "maya@example.com" })] },
-    { student, family: [] }
-  );
-  assert.deepEqual(forged, [], "an arbitrary address, or the right address under another id, sends nothing");
+  const changed = allowedRecipients({ ...row, recipients: [rec({ email: "old-address@example.com" })] }, { student, family: [] });
+  assert.deepEqual(changed, onFile, "a student who changed their address since it was scheduled still gets it, at the new one");
+
+  const forged = allowedRecipients({ ...row, recipients: [rec({ email: "victim@elsewhere.com" })] }, { student, family: [] });
+  assert.deepEqual(forged, onFile, "an address the row names is never used: only the one on file");
+
+  const otherId = allowedRecipients({ ...row, recipients: [rec({ id: "other", email: "maya@example.com" })] }, { student, family: [] });
+  assert.deepEqual(otherId, [], "a row that doesn't name this student sends nothing");
+  const guardianKind = allowedRecipients({ ...row, recipients: [rec({ kind: "guardian", email: "maya@example.com" })] }, { student, family: [] });
+  assert.deepEqual(guardianKind, []);
 
   const many = allowedRecipients(
-    { ...row, recipients: [rec({ email: "maya@example.com" }), rec({ email: "victim@elsewhere.com" })] },
+    { ...row, recipients: [rec({ email: "maya@example.com" }), rec({ email: "victim@elsewhere.com" }), rec({ id: "x", email: "y@z.com" })] },
     { student, family: [] }
   );
-  assert.equal(many.length, 1, "extra names on the row are dropped, the student gets one copy");
-  assert.equal(many[0].email, "Maya@Example.com");
+  assert.deepEqual(many, onFile, "extra names on the row are dropped, the student gets one copy");
 
   assert.deepEqual(allowedRecipients({ ...row, recipients: [rec({ email: "maya@example.com" })] }, { student: null, family: [] }), []);
   assert.deepEqual(
-    allowedRecipients({ ...row, recipients: [rec({ email: "maya@example.com" })] }, { student: { ...student, email: null }, family: [] }),
-    []
+    allowedRecipients({ ...row, recipients: [rec({ email: "maya@example.com" })] }, { student: { ...student, email: "  " }, family: [] }),
+    [],
+    "no address on file sends nothing"
+  );
+  assert.deepEqual(
+    allowedRecipients({ ...row, recipients: [rec({})] }, { student: { ...student, id: "someone-else" }, family: [] }),
+    [],
+    "the contact must be this row's student"
   );
 });
 
-test("allowedRecipients: a student text goes only to the phone on file", () => {
+test("allowedRecipients: a student text goes only to the phone on file now", () => {
   const row = { student_id: S, audience: "student" as const, channel: "sms" as const };
-  assert.equal(allowedRecipients({ ...row, recipients: [rec({ phone: "+15550100000" })] }, { student, family: [] }).length, 1);
-  assert.deepEqual(allowedRecipients({ ...row, recipients: [rec({ phone: "+19005550199" })] }, { student, family: [] }), []);
+  const sent = allowedRecipients({ ...row, recipients: [rec({ phone: "+19005550199" })] }, { student, family: [] });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].phone, "+1 (555) 010-0000", "the number on file, never the row's");
+  assert.deepEqual(allowedRecipients({ ...row, recipients: [rec({ phone: "+15550100000" })] }, { student: { ...student, phone: "n/a" }, family: [] }), []);
 });
 
 test("allowedRecipients: parents only while on file, receiving, at the same address", () => {

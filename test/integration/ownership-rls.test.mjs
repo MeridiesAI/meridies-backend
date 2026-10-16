@@ -218,7 +218,8 @@ const attackerStudent = await studentOf(attacker, "own-attacker-student");
   const disp = await cron("/communication/internal/dispatch");
   check("the dispatch cron ran", disp.status === 200, `status ${disp.status}`);
   check("dispatch: nothing went to an address that isn't the student's", (await count(`select count(*) from public.message_deliveries where to_email = 'victim-${tag}@elsewhere.test'`)) === 0);
-  check("dispatch: the forged row was cancelled", (await one(`select status from public.student_messages where id = '${planted}'`)) === "cancelled");
+  const plantedStatus = await one(`select status from public.student_messages where id = '${planted}'`);
+  check("dispatch: the forged row went, if at all, only to the student's own address", plantedStatus !== "scheduled" && (await count(`select count(*) from public.message_deliveries where student_id = '${attackerStudent.id}' and lower(to_email) <> lower('${q(attackerStudent.email)}')`)) === 0, plantedStatus);
 
   // A legitimate scheduled message still goes, to the student's own address.
   const sched = await call(attacker.token, "POST", `/communication/${attackerStudent.id}/messages`, {
@@ -246,4 +247,122 @@ const attackerStudent = await studentOf(attacker, "own-attacker-student");
     audience: "student", channel: "email", subject: "Now", body: "Sent now.", overrideQuietHours: true,
   });
   check("counselor: an immediate send still records its outcome", now.status === 201 && now.body.status !== "queued", `status ${now.status} ${JSON.stringify(now.body).slice(0, 200)}`);
+}
+
+// ---- 7. Follow-up: no oracle, capped volume, the student's current address -------------------------
+{
+  // A direct insert for someone else's student fails the same way whether the
+  // address guessed is right or wrong, for a student, a counselor or a guardian.
+  const g = await one(`with g as (insert into public.guardians (student_id, full_name, email, alerts_enabled)
+    values ('${victimStudent.id}', 'Victim Parent', 'parent-${tag}@victim.test', true) returning id) select id from g`);
+  const probe = (who, row) => rest(who.token, "POST", "/rest/v1/student_messages", {
+    counselor_id: who.id, kind: "message", status: "scheduled", scheduled_for: new Date(Date.now() + 3_600_000).toISOString(),
+    subject: "Hi", body: "Probe", ...row,
+  });
+  const asStudent = (id, email) => ({ student_id: id, audience: "student", channel: "email", recipients: [{ kind: "student", id, name: "x", email, phone: null }] });
+  const shape = (r) => `${r.status}:${r.body?.code}:${r.body?.message}`;
+  const right = await probe(attacker, asStudent(victimStudent.id, victimStudent.email));
+  const wrong = await probe(attacker, asStudent(victimStudent.id, `nobody-${tag}@victim.test`));
+  check("oracle: a right and a wrong guess at another student's email fail alike", shape(right) === shape(wrong) && right.status >= 400, `${shape(right)} | ${shape(wrong)}`);
+  const rightC = await probe(attacker, asStudent(victim.id, victim.email));
+  const wrongC = await probe(attacker, asStudent(victim.id, `nobody2-${tag}@victim.test`));
+  check("oracle: ...and at a counselor's", shape(rightC) === shape(wrongC) && rightC.status >= 400, `${shape(rightC)} | ${shape(wrongC)}`);
+  const asParent = (email) => ({ student_id: victimStudent.id, audience: "parent", channel: "email", recipients: [{ kind: "guardian", id: g, name: "x", email, phone: null }] });
+  const rightG = await probe(attacker, asParent(`parent-${tag}@victim.test`));
+  const wrongG = await probe(attacker, asParent(`other-${tag}@victim.test`));
+  check("oracle: ...and at a guardian's", shape(rightG) === shape(wrongG) && rightG.status >= 400, `${shape(rightG)} | ${shape(wrongG)}`);
+  const stu = await studentOf(attacker, "own-oracle-student");
+  const rightS = await probe(stu, asStudent(victimStudent.id, victimStudent.email));
+  const wrongS = await probe(stu, asStudent(victimStudent.id, `nobody3-${tag}@victim.test`));
+  check("oracle: ...and for a student caller", shape(rightS) === shape(wrongS) && rightS.status >= 400, `${shape(rightS)} | ${shape(wrongS)}`);
+  check("...and none of the probes was written", (await count(`select count(*) from public.student_messages where body = 'Probe'`)) === 0);
+
+  // Volume: a counselor's direct inserts are capped in the database.
+  const vol = await user("own-volume");
+  const volStudent = await studentOf(vol, "own-volume-student");
+  await sql(`insert into public.accountability_settings (counselor_id, timezone, quiet_hours_start, quiet_hours_end) values ('${vol.id}', 'UTC', null, null) on conflict do nothing`);
+  const legitRow = { student_id: volStudent.id, audience: "student", channel: "email", recipients: [{ kind: "student", id: volStudent.id, name: "x", email: volStudent.email, phone: null }] };
+  const first = await probe(vol, { ...legitRow, body: "Direct one" });
+  check("a direct insert to the counselor's own student at the address on file passes the guard", first.status === 201, `status ${first.status} ${JSON.stringify(first.body).slice(0, 160)}`);
+  await sql(`update private.rate_limit_buckets set count = 200 where key = 'student-messages-insert:${vol.id}'`);
+  const over = await probe(vol, { ...legitRow, body: "Direct two hundred and one" });
+  check("volume: the 201st direct insert in a day is refused", over.status >= 400 && (await count(`select count(*) from public.student_messages where body = 'Direct two hundred and one'`)) === 0, `status ${over.status}`);
+  const viaRoute = await call(vol.token, "POST", `/communication/${volStudent.id}/messages`, {
+    audience: "student", channel: "email", subject: "Route", body: "Through the composer.", scheduleFor: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  check("volume: ...and the composer answers that cap as a 429, not a database error", viaRoute.status === 429, `status ${viaRoute.status} ${JSON.stringify(viaRoute.body).slice(0, 160)}`);
+  await sql(`delete from private.rate_limit_buckets where key = 'student-messages-insert:${vol.id}'`);
+
+  // Volume at dispatch: past the counselor's daily cap a due row waits, it isn't sent or dropped.
+  const due = await one(`with m as (insert into public.student_messages (student_id, counselor_id, audience, channel, recipients, subject, body, status, scheduled_for)
+    values ('${volStudent.id}', '${vol.id}', 'student', 'email', '${q(JSON.stringify(legitRow.recipients))}'::jsonb, 'Due', 'Due now', 'scheduled', now() - interval '1 minute') returning id) select id from m`);
+  await sql(`insert into private.rate_limit_buckets (key, window_start, count) values ('communication:dispatch:${vol.id}', now(), 100)
+    on conflict (key) do update set window_start = now(), count = 100`);
+  await cron("/communication/internal/dispatch");
+  const held = await one(`select status || '|' || (scheduled_for > now())::text || '|' || coalesce(hold_reason, '') from public.student_messages where id = '${due}'`);
+  check("dispatch cap: over the day's cap a due message stays scheduled for later", held.startsWith("scheduled|true|Held"), held);
+  check("...and nothing was sent for it", (await count(`select count(*) from public.message_deliveries where student_id = '${volStudent.id}'`)) === 0);
+  await sql(`delete from private.rate_limit_buckets where key = 'communication:dispatch:${vol.id}'`);
+  await sql(`update public.student_messages set scheduled_for = now() - interval '1 minute' where id = '${due}'`);
+  await cron("/communication/internal/dispatch");
+  const after = await one(`select status from public.student_messages where id = '${due}'`);
+  check("dispatch cap: ...and goes once the cap allows", after !== "scheduled" && after !== "cancelled", after);
+
+  // A student who changes their address between scheduling and sending still gets it, at the new one.
+  const moved = await call(vol.token, "POST", `/communication/${volStudent.id}/messages`, {
+    audience: "student", channel: "email", subject: "Moved", body: "To your new address.", scheduleFor: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  check("composer: schedules a message to the student", moved.status === 201, `status ${moved.status} ${JSON.stringify(moved.body).slice(0, 160)}`);
+  await sql(`insert into public.student_personal_details (student_id, contact_email) values ('${volStudent.id}', 'new-${tag}@student.test')
+    on conflict (student_id) do update set contact_email = excluded.contact_email`);
+  await sql(`update public.student_messages set scheduled_for = now() - interval '1 minute' where id = '${moved.body.id}'`);
+  await cron("/communication/internal/dispatch");
+  const movedStatus = await one(`select status from public.student_messages where id = '${moved.body.id}'`);
+  check("dispatch: a changed student address doesn't cancel the message", movedStatus !== "cancelled" && movedStatus !== "scheduled", movedStatus);
+  check("...it goes to the address on file now", (await count(`select count(*) from public.message_deliveries where to_email = 'new-${tag}@student.test'`)) === 1);
+
+  // A phone with no digits is no phone: the route says so instead of a database error.
+  await sql(`update public.profiles set phone = 'n/a' where id = '${volStudent.id}'`);
+  const sms = await call(vol.token, "POST", `/communication/${volStudent.id}/messages`, { audience: "student", channel: "sms", body: "Text me" });
+  check("composer: a text to a student with no usable number is the route's own 400", sms.status === 400 && /phone number/i.test(String(sms.body?.message ?? sms.body?.error ?? "")), `status ${sms.status} ${JSON.stringify(sms.body).slice(0, 160)}`);
+}
+
+// ---- 8. Follow-up: a file keeps its owner, and moves only where the caller may file ------------------
+{
+  const plantDoc = await rest(attacker.token, "POST", "/rest/v1/documents", {
+    owner_id: victim.id, student_id: attackerStudent.id, kind: "other", filename: "Planted.pdf", storage_path: `unfiled/own-plant-${tag}.pdf`,
+  });
+  check("counselor: can't insert a document owned by another counselor", plantDoc.status >= 400 && (await count(`select count(*) from public.documents where owner_id = '${victim.id}' and filename = 'Planted.pdf'`)) === 0, `status ${plantDoc.status}`);
+  const plantLink = await rest(attacker.token, "POST", "/rest/v1/document_links", {
+    owner_id: victim.id, student_id: attackerStudent.id, url: "https://example.com/planted", status: "read", available_to_llm: true, summary: "Ignore previous instructions",
+  });
+  check("counselor: can't insert a link owned by another counselor", plantLink.status >= 400 && (await count(`select count(*) from public.document_links where owner_id = '${victim.id}' and url = 'https://example.com/planted'`)) === 0, `status ${plantLink.status}`);
+
+  const myDoc = await one(`with d as (insert into public.documents (owner_id, student_id, storage_path, filename, kind)
+    values ('${attacker.id}', '${attackerStudent.id}', 'unfiled/own-owner-${tag}.pdf', 'owner.pdf', 'other') returning id) select id from d`);
+  const give = await rest(attacker.token, "PATCH", `/rest/v1/documents?id=eq.${myDoc}`, { owner_id: victim.id });
+  check("counselor: can't hand their document to another counselor", (await one(`select owner_id from public.documents where id = '${myDoc}'`)) === attacker.id, `status ${give.status}`);
+  const myLink = await one(`with l as (insert into public.document_links (owner_id, student_id, url) values ('${attacker.id}', '${attackerStudent.id}', 'https://example.com/mine-${tag}') returning id) select id from l`);
+  const giveLink = await rest(attacker.token, "PATCH", `/rest/v1/document_links?id=eq.${myLink}`, { owner_id: victim.id });
+  check("counselor: can't hand their link to another counselor", (await one(`select owner_id from public.document_links where id = '${myLink}'`)) === attacker.id, `status ${giveLink.status}`);
+
+  // Moving one's own row into another practice's folder by id.
+  const victimFolder = await one(`with f as (insert into public.folders (owner_id, name, kind) values ('${victim.id}', 'Victim research ${tag}', 'custom') returning id) select id from f`);
+  const moveDoc = await rest(attacker.token, "PATCH", `/rest/v1/documents?id=eq.${myDoc}`, { folder_id: victimFolder });
+  check("counselor: can't move their document into another practice's folder", (await one(`select coalesce(folder_id::text, 'none') from public.documents where id = '${myDoc}'`)) !== victimFolder, `status ${moveDoc.status}`);
+  const moveLink = await rest(attacker.token, "PATCH", `/rest/v1/document_links?id=eq.${myLink}`, { folder_id: victimFolder });
+  check("counselor: can't move their link into another practice's folder", (await one(`select coalesce(folder_id::text, 'none') from public.document_links where id = '${myLink}'`)) !== victimFolder, `status ${moveLink.status}`);
+
+  // The legitimate moves.
+  const own = await call(attacker.token, "POST", "/files/folders", { name: `Mine ${tag}` });
+  const ownFolder = own.body.id;
+  const intoOwn = await call(attacker.token, "PATCH", `/files/documents/${myDoc}`, { folderId: ownFolder });
+  check("counselor: moving a document into their own folder still works", intoOwn.status === 200 && intoOwn.body.folderId === ownFolder, `status ${intoOwn.status} ${JSON.stringify(intoOwn.body).slice(0, 160)}`);
+  const linkOwn = await call(attacker.token, "PATCH", `/files/links/${myLink}`, { folderId: ownFolder, title: "Renamed" });
+  check("counselor: moving a link into their own folder still works", linkOwn.status === 200, `status ${linkOwn.status} ${JSON.stringify(linkOwn.body).slice(0, 160)}`);
+  const unfile = await call(attacker.token, "PATCH", `/files/documents/${myDoc}`, { folderId: null });
+  check("counselor: unfiling still works", unfile.status === 200, `status ${unfile.status}`);
+  const studentDoc = await call(attackerStudent.token, "POST", "/files/documents", { storagePath: `${attackerStudent.id}/own-sd-${tag}.pdf`, filename: "sd.pdf" });
+  const counselorRetitle = await call(attacker.token, "PATCH", `/files/documents/${studentDoc.body.id}`, { title: "Student's file" });
+  check("counselor: editing a file the student uploaded still works", counselorRetitle.status === 200, `status ${counselorRetitle.status} ${JSON.stringify(counselorRetitle.body).slice(0, 160)}`);
 }

@@ -14,7 +14,18 @@
 --     have resolved: for audience 'student', the student (id = student_id)
 --     at their contact email (else login email) or their phone on file; for
 --     'parent', guardians of this student with alerts on, at the email on
---     file. It starts 'queued' or 'scheduled', with nothing sent yet.
+--     file. It starts 'queued' or 'scheduled', with nothing sent yet. The
+--     check answers only for the caller's own student (is_counselor_of
+--     first): for anyone else the insert falls through to RLS, so a foreign
+--     insert always fails the same way and the check can't be used to test
+--     guesses at another student's or a guardian's address.
+--   - a counselor's client inserts are capped at 200 a day
+--     (consume_rate_limit, key student-messages-insert:<counselor>). The
+--     route already holds a counselor to 30 an hour and 100 family messages
+--     a day before it inserts, so the cap never touches the composer; it
+--     bounds what a counselor can queue straight through PostgREST, at
+--     addresses they control (they manage their students' guardians). The
+--     dispatch cron caps what it sends per counselor too (code, below).
 --   - a client update moves status only scheduled -> cancelled or queued ->
 --     sent | failed | cancelled (the route recording a send it just made),
 --     and scheduled_for is no longer client-writable (only the dispatch
@@ -24,9 +35,13 @@
 -- file.
 --
 -- Deploy order: either. The route inserts exactly the recipients
--- resolveRecipients built from the same tables, and only moves status the
--- ways allowed here; it never writes scheduled_for after the insert. Not in
--- REQUIRED_SCHEMA.
+-- resolveRecipients built from the same tables, inside its own tighter
+-- limits, and only moves status the ways allowed here; it never writes
+-- scheduled_for after the insert. So the previous build works unchanged
+-- once this is applied. Not in REQUIRED_SCHEMA. Follow-up for a later PR,
+-- once a build that inserts on the service client has shipped: revoke
+-- INSERT on student_messages from authenticated (revoking it here would
+-- break the previous build's composer the moment this applies).
 
 create or replace function private.student_message_recipients_ok(
   p_student uuid, p_audience text, p_channel text, p_recipients jsonb
@@ -42,6 +57,11 @@ declare
   v_email   text;
   v_phone   text;
 begin
+  -- Only the student's own counselor learns anything here. Answering for any
+  -- student would make the check an oracle on other people's addresses.
+  if not private.is_counselor_of(p_student, (select auth.uid())) then
+    return false;
+  end if;
   if p_recipients is null or jsonb_typeof(p_recipients) <> 'array' or jsonb_array_length(p_recipients) = 0 then
     return false;
   end if;
@@ -98,6 +118,24 @@ $$;
 revoke all on function private.student_message_recipients_ok(uuid, text, text, jsonb) from public, anon;
 grant execute on function private.student_message_recipients_ok(uuid, text, text, jsonb) to authenticated;
 
+-- Charges one client insert to the caller's daily cap. SECURITY DEFINER
+-- because consume_rate_limit is EXECUTE to service_role only; it charges
+-- only the caller (auth.uid()), never an id it is handed.
+create or replace function private.student_message_insert_allowed()
+returns boolean
+language plpgsql
+volatile
+security definer
+set search_path = private, public
+as $$
+begin
+  return public.consume_rate_limit('student-messages-insert:' || (select auth.uid())::text, 200, 86400);
+end;
+$$;
+
+revoke all on function private.student_message_insert_allowed() from public, anon;
+grant execute on function private.student_message_insert_allowed() to authenticated;
+
 -- Deliberately NOT security definer: the guard keys off current_user, so the
 -- service-role dispatch and SECURITY DEFINER functions (caseload transfer)
 -- are not affected.
@@ -111,12 +149,20 @@ begin
     return new;
   end if;
   if tg_op = 'INSERT' then
+    -- Not this caller's student: leave the refusal to RLS, before anything
+    -- about the student is read, so every foreign insert fails the same way.
+    if not private.is_counselor_of(new.student_id, (select auth.uid())) then
+      return new;
+    end if;
     if new.status not in ('queued', 'scheduled') or new.sent_at is not null
        or new.attempts is distinct from '[]'::jsonb then
       raise exception 'A message starts unsent' using errcode = '42501';
     end if;
     if not private.student_message_recipients_ok(new.student_id, new.audience, new.channel, new.recipients) then
       raise exception 'A message goes only to the student or guardians on file' using errcode = '42501';
+    end if;
+    if not private.student_message_insert_allowed() then
+      raise exception 'Too many messages today' using errcode = '54000';
     end if;
     return new;
   end if;

@@ -36,6 +36,7 @@ import {
 import { brandedEmail, brandedText, sendEmail, sendSms } from "./email.js";
 import { badRequest, fromPostgrest, unauthorized, unavailable } from "./errors.js";
 import { isCounselorApproved } from "./access.js";
+import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -116,6 +117,15 @@ export async function loadFamily(db: SupabaseClient, studentId: string): Promise
   }));
 }
 
+const normEmail = (v: string | null | undefined): string | null => {
+  const t = (v ?? "").trim().toLowerCase();
+  return t ? t : null;
+};
+const normPhone = (v: string | null | undefined): string | null => {
+  const t = (v ?? "").replace(/[^\d+]/g, "");
+  return t ? t : null;
+};
+
 export type StudentContact = { id: string; name: string; email: string | null; phone: string | null };
 
 export async function loadStudentContact(db: SupabaseClient, studentId: string): Promise<StudentContact | null> {
@@ -168,7 +178,9 @@ export async function resolveRecipients(
   const student = await loadStudentContact(db, studentId);
   if (!student) throw badRequest("That student isn't on your roster");
   if (channel === "email" && !student.email) throw badRequest("No email address on file for the student");
-  if (channel === "sms" && !student.phone) throw badRequest("Add the student's phone number to text them");
+  // The same reading of a number the database guard and dispatch use: "n/a"
+  // is no phone at all.
+  if (channel === "sms" && !normPhone(student.phone)) throw badRequest("Add the student's phone number to text them");
   return [{ kind: "student", id: student.id, name: student.name, email: student.email, phone: student.phone }];
 }
 
@@ -558,6 +570,11 @@ export async function requireCronSecret(request: FastifyRequest): Promise<void> 
   if (!presented || !secretMatches(presented, expected)) throw unauthorized();
 }
 
+/** Scheduled messages the dispatch cron sends for one counselor in 24 hours. */
+export const DISPATCH_DAILY_CAP = 100;
+export const DISPATCH_CAP_HOLD = "Held: the day's sending limit was reached. It goes out within the next day";
+export const dispatchCapKey = (counselorId: string): string => `communication:dispatch:${counselorId}`;
+
 /**
  * Deliver every scheduled message whose time has come. Service-role client:
  * the recipients come from the row (frozen when the counselor wrote it), never
@@ -633,6 +650,21 @@ export async function dispatchDueMessages(
       continue;
     }
 
+    // What a counselor can have sent for them in a day is capped here too,
+    // whoever wrote the row: the route charges its own limits when a message
+    // is written, but a row written straight to the table (on a database
+    // without the insert guard) never passed them. Over the cap, the row
+    // waits an hour and is tried again; nothing is dropped.
+    if (!(await consumeRateLimit(dispatchCapKey(row.counselor_id), DISPATCH_DAILY_CAP, 86_400))) {
+      await svc
+        .from("student_messages")
+        .update({ scheduled_for: new Date(now.getTime() + 3_600_000).toISOString(), hold_reason: DISPATCH_CAP_HOLD })
+        .eq("id", row.id)
+        .eq("status", "scheduled");
+      tally.held += 1;
+      continue;
+    }
+
     const claim = await svc
       .from("student_messages")
       .update({ status: "queued" })
@@ -686,7 +718,7 @@ async function sendBlockedReason(
     // the row says: a row written straight to the table could name anyone.
     const student = await loadStudentContact(svc, row.student_id);
     const recipients = allowedRecipients(row, { student, family: [] });
-    if (recipients.length === 0) return "The student's contact details on file no longer match this message";
+    if (recipients.length === 0) return "No address on file for the student any more";
     return { recipients };
   }
 
@@ -698,21 +730,14 @@ async function sendBlockedReason(
   return { recipients };
 }
 
-const normEmail = (v: string | null | undefined): string | null => {
-  const t = (v ?? "").trim().toLowerCase();
-  return t ? t : null;
-};
-const normPhone = (v: string | null | undefined): string | null => {
-  const t = (v ?? "").replace(/[^\d+]/g, "");
-  return t ? t : null;
-};
-
 /**
  * Which of a stored message's frozen recipients may still receive it, decided
  * against what is on file at send time. Every recipient must be one the
- * composer would have resolved for this student itself: for a message to the
- * student, the student (by id) at their address or phone on file; for one to
- * the parents, a guardian of this student who still receives messages, at
+ * composer would have resolved for this student itself. For a message to the
+ * student: the row must name the student (by id), and it goes to the address
+ * or phone on file now, whatever the row froze, so a student who changes
+ * their address still gets it (and can't cancel it by changing it). For one
+ * to the parents: a guardian of this student who still receives messages, at
  * the same email. Anything else on the row is dropped, and what is returned
  * carries the addresses on file, not the row's. Pure, so it is unit-tested.
  */
@@ -724,13 +749,12 @@ export function allowedRecipients(
   if (row.audience === "student") {
     const st = onFile.student;
     if (!st || st.id !== row.student_id) return [];
-    const ok = frozen.some((r) => {
-      if (!r || r.kind !== "student" || r.id !== row.student_id) return false;
-      if (row.channel === "email") return normEmail(st.email) !== null && normEmail(r.email) === normEmail(st.email);
-      if (row.channel === "sms") return normPhone(st.phone) !== null && normPhone(r.phone) === normPhone(st.phone);
-      return false;
-    });
-    return ok ? [{ kind: "student", id: st.id, name: st.name, email: st.email, phone: st.phone }] : [];
+    const named = frozen.some((r) => r && r.kind === "student" && r.id === row.student_id);
+    if (!named) return [];
+    if (row.channel === "email" && !normEmail(st.email)) return [];
+    if (row.channel === "sms" && !normPhone(st.phone)) return [];
+    if (row.channel !== "email" && row.channel !== "sms") return [];
+    return [{ kind: "student", id: st.id, name: st.name, email: st.email, phone: st.phone }];
   }
   if (row.audience !== "parent" || row.channel !== "email") return [];
   const byId = new Map(onFile.family.filter((g) => g.receivesMessages && normEmail(g.email)).map((g) => [g.id, g]));
