@@ -374,7 +374,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twenty-nine files are merged ahead of production's database on purpose: the code was written to
+These thirty-one files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -416,40 +416,45 @@ set's own section below says what it does and how to check it.
 | 21 | `20261024000041_document_storage_paths.sql` | Security: submission review and reminders |
 | 22 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
 | 23 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
-| 24 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
-| 25 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
-| 26 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data (held data follows only the same student) |
-| 27 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
-| 28 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
-| 29 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
+| 24 | `20261024000044_intake_items_stay_submitted.sql` | Security: submission review and reminders |
+| 25 | `20261024000045_document_path_claims.sql` | Security: submission review and reminders |
+| 26 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
+| 27 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
+| 28 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
+| 29 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
+| 30 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
+| 31 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
 
-(Twenty-nine files: the first thirteen are six feature sets, the other sixteen are seven sets of security
+(Thirty-one files: the first thirteen are six feature sets, the other eighteen are seven sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
-Files 21-23, the security fixes for submission review and student reminders, depend on none of the
+Files 21-25, the security fixes for submission review and student reminders, depend on none of the
 others: `20261024000041_document_storage_paths.sql` (a documents row
 names only the documents bucket and a path the bucket's insert policy could have taken, and never
 moves; client roles only), `20261024000042_counselor_recorded_phone.sql`
 (`profiles.phone_recorded_by_counselor`, trigger-written; reminder texts go only to it, so until it
 is applied no reminder text is sent) and `20261024000043_submit_intake_once.sql` (a repeated New
-student Submit moves and returns nothing). The code already enforces each in the API; check after
+student Submit moves and returns nothing), then `20261024000044_intake_items_stay_submitted.sql` (a
+student can't move a submitted or received New student item, nor send one to review except through
+Submit) and `20261024000045_document_path_claims.sql` (a documents row only under a first segment the
+writer could upload to, and never over another user's object). The code already enforces each in the API; check after
 applying with `test/integration/submission-hardening.test.mjs` and `student-reminders.test.mjs`
 (their database checks run only once the files are in).
 
 Order between the files matters in these places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3; the caseload transfer (file 9) reads step 2's
 `import_items.invite_state` / `invite_claimed_at` (file 5); file 15 clears rows the guard in file 14
-would have refused (run it again if it went in first); file 25 replaces `request_import_commit` and
-`import_claim_invites` from file 7, file 26 replaces `accept_invitation` (last defined in the applied
-`20261017000001`), file 27 extends the campus photos of file 11, and file 29 replaces
+would have refused (run it again if it went in first); file 27 replaces `request_import_commit` and
+`import_claim_invites` from file 7, file 28 replaces `accept_invitation` (last defined in the applied
+`20261017000001`), file 29 extends the campus photos of file 11, and file 31 replaces
 `transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body).
 Applying the files in the order above satisfies all of them. Apart from those replacements
-(`request_import_commit` and `import_claim_invites`, files 7 and 25; `transfer_caseload`, files 9 and
-29), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
+(`request_import_commit` and `import_claim_invites`, files 7 and 27; `transfer_caseload`, files 9 and
+31), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
 (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
 file reading the current list back.
 
-After all twenty-nine:
+After all thirty-one:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25

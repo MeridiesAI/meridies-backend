@@ -203,7 +203,7 @@ College Scorecard columns (`20261023080001`), emailed meeting invites
 (`20261023090001`), the meeting owner guard (`20261024000011`-`12`, a security
 fix that depends only on applied files and can go in ahead of the rest),
 the RLS and ownership fixes (`20261024000021`-`25`, below), the
-submission-review and reminder security fixes (`20261024000041`-`43`),
+submission-review and reminder security fixes (`20261024000041`-`45`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
 the API already refuses students on `/chat`), the per-counselor import
 invitation review and the same-student rule for held data (`20261024000061`-`62`), the campus photo review queue
@@ -577,7 +577,16 @@ the database (`20261010*`):
   drops ids that were already in review or complete before it called the
   function; since `20261024000043` the function moves, returns and stamps
   nothing when nothing is left to move), and one after a send-back covers
-  that item alone. The counselor ticks each item received
+  that item alone. A submitted (`review`) or received (`complete`) item is
+  with the counselor: the student can't move its status, and can't send an
+  item to review except through Submit (409 from `PATCH /tasks/:id`; the
+  guard trigger since `20261024000044`, which tells Submit's own write apart
+  because `submit_intake` runs as its owner, not `authenticated`). Otherwise
+  "back to in progress, Submit again" re-read every file and re-emailed the
+  counselor in a loop. On any database the counselor hears about at most 3
+  Submits a day per student and AxIS reads one item at most 3 times a day
+  (`consumeRateLimit`), and the email subject carries at most 60 characters
+  of the student's display name. The counselor ticks each item received
   (`PATCH /invites/:id { receive }`, which sets the request's `provided`) or
   sends it back with a note (`{ sendBack }`: the task returns to the student,
   the files come off it, `submitted_at` clears), then confirms (`{ confirmed:
@@ -600,17 +609,19 @@ the database (`20261010*`):
   this order: the shared per-document AI rule (`handInAiDecision`:
   `documentAiDecision`'s keep-out, waived recommendation letter, the
   practice's document-reading switch and `ai_access = 'excluded'`, with
-  `other`, `essay` and `common-app` read because handing one in is the
-  request to read it, and every other kind outside the defaults, IEP/504,
-  counselor-only, financial, award letters and unwaived letters, refused
-  unless the counselor set `allowed`), a link, a format it can't open, over
+  `other`, `essay`, `common-app`, `award-letter`, `financial` and an
+  unwaived `recommendation-letter` read because handing one in is the
+  request to read it, and the restricted kinds, IEP/504 and counselor-only,
+  refused unless the counselor set `allowed`), a link, a format it can't open, over
   10 MB. **The file is downloaded on the caller's own client**, never the
   service role, and only when the row names the documents bucket and a path
   of a safe shape (`lib/storagePath.ts`), so Storage RLS decides and a row's
   path can't reach another object. The same file handed in again while the
   task waits on a check changes nothing (200, `review.status: "skipped"`);
-  otherwise hand-ins are capped at 6 a task an hour and 40 a student a day
-  (`enforceRateLimit`, 429), and counselor notices (bell and email) at 3 a
+  otherwise a student's hand-ins are capped at 6 a task an hour and 40 a day
+  (`enforceRateLimit`, 429; a counselor handing in for the student, or AxIS
+  for them, spends their own AI quota and isn't held by the student's
+  count), and counselor notices (bell and email) at 3 a
   task an hour and 20 a student a day, on every path into the review. The
   counselor's email subject carries the student's name, not the task title;
   the client polls `GET /tasks/:id`. AxIS (`submission-review`, Haiku) decides
@@ -652,10 +663,17 @@ the database (`20261010*`):
   trigger when a counselor who can edit the student saves the student's
   phone, never by the student, `20261024000042`) and only when the student's
   reminder number is that same number. Without the migration, or with no
-  number recorded, no reminder text goes out. At most 5 reminders per channel
-  per student per due date, counselor tasks first; a text never carries a
-  title the student wrote (a generic line instead), and a counselor's title
-  only up to 60 characters with no link, address or long number in it. `GET /me/messages` lists what was sent to the student; RLS
+  number recorded, no reminder text goes out; a number is recorded only when
+  a counselor saves it on the card (nothing copies one at acceptance), and a
+  phone saved before the migration must be saved once more. At most 5
+  reminders per channel per student per due date, counselor tasks first;
+  neither a text nor an email carries a title the student wrote (a generic
+  line instead, because `accept_invitation` doesn't match the account email
+  to the invitation and the sign-in address is only as verified as the
+  signup: Supabase's "Confirm email" must stay on, `LAUNCH_CHECKLIST.md`),
+  a text carries a counselor's title only up to 60 characters with no link,
+  address or long number in it, and the greeting uses at most 40 characters
+  of the student's first name. `GET /me/messages` lists what was sent to the student; RLS
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
@@ -1546,11 +1564,20 @@ segment, no `?`, `#`, backslash, control character or encoded dot or slash),
 because storage-js strips leading slashes and the request URL resolves dot
 segments, so `/x` or `a/../x` would be a new row reaching the object `x`.
 The database refuses the same from a client and refuses moving a row
-(`documents_guard_storage_path`, `20261024000041`). Nothing downloads a
-document's object with the service role: read it on the caller's client. `DELETE /files/documents/:id` removes the
-Storage object too, on the caller's own client after the row is gone (best
-effort: Storage's delete policy lets the uploader remove it, so a file a
-student uploaded stays in the bucket when a counselor deletes its row).
+(`documents_guard_storage_path`, `20261024000041`). **A row is a key to its
+object** (Storage reads follow documents rows), so registering one is as
+strict as uploading there (`lib/documentClaim.ts`, and the trigger since
+`20261024000045`): the path's first segment must be somewhere the caller
+could upload (`storage_first_segment_is_fileable`), and an object already at
+that name must be the caller's own, so nobody claims a file that lost its
+row; every refusal reads the same. Nothing downloads a document's object
+with the service role: read it on the caller's client. `DELETE
+/files/documents/:id` removes the Storage object with the row, whoever
+uploaded it (the service client, after the caller's own row delete went
+through, and only for a documents-bucket path of the shape above), so a
+deleted file leaves nothing behind to claim. Objects orphaned before this
+(or by a cascaded row delete) stay in the bucket, and with the migration only
+their uploader can register them again.
 
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document
