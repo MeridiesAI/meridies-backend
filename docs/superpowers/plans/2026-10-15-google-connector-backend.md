@@ -22,6 +22,12 @@
 - Type guess: never calls a model; text for the guess is the first 3 pages / 20,000 characters, used only inside `guessKind`, never stored or logged; `kind_guess` stores `{ kind, basis, matched, textFound, keepOut }`; financial and iep-504 guesses carry `keepOut: true`; a guess whose `basis` isn't `text` (or `textFound: false`) shows "Please check" in the app.
 - **No backfill.** Extraction runs only for confirmations made after this ships (`extraction_requested_at` is set only by them). The migration touches no rows. The opt-in backfill script is documented in AGENTS.md as later work, not built.
 - `confirm-types`: 1–50 items, strict, per-item results, a refused item never stops the others.
+- **Elvin's additions (10/15, after plan approval):**
+  - One shared constant `SENSITIVE_DOCUMENT_KINDS` (financial, iep-504, counselor-only, recommendation-letter, award-letter) used by the context layer (`documentAiDecision`), the tracker and submission review (`documentReadableForTask` / `refusalFor`); a test proves all three refuse each sensitive kind.
+  - "No text" (a scan) stays distinct from "failed" in the API (`empty` vs `failed`) and in the app ("This PDF is a scan" vs "Couldn't read this file" + Try again). `POST /files/documents/extraction-retry` re-queues failed ones.
+  - **Queue lease:** a claim sets `extraction_lease_until = now() + 2 minutes` and increments `extraction_attempts`; recovery (every minute) returns an expired lease to the queue, and after **3 attempts** marks the item `failed` (`parse_error = 'gave-up'`). Every item reaches a final state, so the app's polling always ends.
+  - Until the Railway variables are set, `picker-config` answers 503 `picker_not_configured`, and `/integrations/providers` reports `pickerReady: false` so the app hides the Drive button or says "Google Drive isn't set up yet."
+  - Removing the unused app component `StudentFiles` is later cleanup, not this work.
 - Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. PR bodies end with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 - TypeScript strict, no `any`, `.js` import suffixes, Zod `.strict()` bodies, thin routes, every `err` logged through `serializeErr`.
 - **Deviations from the spec text, decided in this plan (tell Elvin in the PR):**
@@ -53,7 +59,7 @@ The persona harness is `test/integration/harness.mjs` (`user`, `call`, `rest`, `
 
 ## Review Focus
 
-1. **The server restarts (deploy, crash) while confirmed files are queued or mid-extraction.** A counselor expects the progress to finish, not to hang at "Reading 3 of 10…" forever. → Task 8: recovery re-queues `pending` rows with `extraction_requested_at` and resets `parsing` rows older than 2 minutes; test `recovery picks up rows a dead process left behind`.
+1. **The server restarts (deploy, crash) while confirmed files are queued or mid-extraction.** A counselor expects the progress to finish, not to hang at "Reading 3 of 10…" forever. → Task 8: recovery re-queues `pending` rows with `extraction_requested_at`, returns expired 2-minute leases to the queue, and marks an item failed after 3 attempts; tests `a crashed in-progress item is retried after its lease expires`, `after 3 attempts the item is marked failed`.
 2. **The counselor ticks "Keep out of AI" (or changes the type) while that file's extraction is still queued.** They expect no text to be stored for it. → Task 8: the write is conditional on `available_to_llm = true and kind_confirmed = true`; test `a file kept out after it was queued gets no text`.
 3. **A 300-page scanned PDF of 24 MB.** The counselor expects it to be accepted, to read as "no readable text", and the API to stay responsive. → Task 6 (page cap, worker) and Task 8: test `a PDF with no text layer ends skipped/no-text, reported as empty`.
 4. **A firm counselor batch-confirms a list in which one file belongs to a student they can no longer edit** (the student was transferred). They expect the others to be confirmed and that one refused with a reason. → Task 10: test `a refused item doesn't stop the rest`.
@@ -71,7 +77,7 @@ The persona harness is `test/integration/harness.mjs` (`user`, `call`, `rest`, `
 - Modify: `.github/workflows/ci.yml` only if integration tests are listed one by one there (check: `grep -n "test:integration\|\.test\.mjs" .github/workflows/ci.yml`; `npm run test:integration` runs the whole folder, so normally nothing to do)
 
 **Interfaces:**
-- Produces (columns, for PR 1): `documents.kind_confirmed boolean not null default true`, `documents.kind_guess jsonb null` (object or null), `documents.extraction_requested_at timestamptz null`; partial indexes `documents_unconfirmed_idx (student_id) where kind_confirmed = false`, `documents_extraction_requested_idx (extraction_requested_at) where extraction_requested_at is not null`; `private.documents_guard_student_restricted()` refuses a student's write of any of the three.
+- Produces (columns, for PR 1): `documents.kind_confirmed boolean not null default true`, `documents.kind_guess jsonb null` (object or null), `documents.extraction_requested_at timestamptz null`, `documents.extraction_attempts smallint not null default 0` (check 0–10), `documents.extraction_lease_until timestamptz null`; partial indexes `documents_unconfirmed_idx (student_id) where kind_confirmed = false`, `documents_extraction_requested_idx (extraction_requested_at) where extraction_requested_at is not null`; `private.documents_guard_student_restricted()` refuses a student's write of any of the five.
 
 - [ ] **Step 1: Write the failing integration test**
 
@@ -86,8 +92,10 @@ const s = await studentOf(c, "kind-confirm-student");
 
 const cols = await sql(`select string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, ''), ',' order by column_name)
   from information_schema.columns where table_schema = 'public' and table_name = 'documents'
-  and column_name in ('kind_confirmed', 'kind_guess', 'extraction_requested_at')`);
+  and column_name in ('kind_confirmed', 'kind_guess', 'extraction_requested_at', 'extraction_attempts', 'extraction_lease_until')`);
 check("kind_confirmed is boolean, not null, default true", cols.includes("kind_confirmed:boolean:NO:true"), cols);
+check("extraction_attempts is smallint, not null, default 0", cols.includes("extraction_attempts:smallint:NO:0"), cols);
+check("extraction_lease_until is a nullable timestamp", cols.includes("extraction_lease_until:timestamp with time zone:YES:"), cols);
 check("kind_guess is nullable jsonb", cols.includes("kind_guess:jsonb:YES:"), cols);
 check("extraction_requested_at is a nullable timestamp", cols.includes("extraction_requested_at:timestamp with time zone:YES:"), cols);
 
@@ -118,6 +126,11 @@ const patch = await rest(s.token, "PATCH", `/rest/v1/documents?id=eq.${own}`, { 
 check("a student can't request an extraction", patch.status >= 400, `status ${patch.status}`);
 const patch2 = await rest(s.token, "PATCH", `/rest/v1/documents?id=eq.${own}`, { kind_guess: { kind: "transcript" } });
 check("a student can't write a guess", patch2.status >= 400, `status ${patch2.status}`);
+const patch4 = await rest(s.token, "PATCH", `/rest/v1/documents?id=eq.${own}`, { extraction_attempts: 0, extraction_lease_until: null });
+check("a student can't touch the queue lease", patch4.status >= 400, `status ${patch4.status}`);
+let badAttempts = false;
+try { await sql(`update public.documents set extraction_attempts = 11 where id = '${id}'`); } catch { badAttempts = true; }
+check("attempts are bounded", badAttempts);
 const patch3 = await rest(s.token, "PATCH", `/rest/v1/documents?id=eq.${own}`, { title: "renamed" });
 check("a student can still rename their own file", patch3.status < 300, `status ${patch3.status}`);
 ```
@@ -137,11 +150,19 @@ Expected: FAIL at "kind_confirmed is boolean…" (columns don't exist).
 -- kind_guess: { kind, basis, matched, textFound, keepOut }; never document text.
 -- extraction_requested_at: set by a confirmation; the in-process queue (lib/documentExtraction.ts)
 --   reads text from the stored copy and clears it. Old rows stay null: there is no backfill.
+-- extraction_attempts / extraction_lease_until: a claim holds a 2-minute lease; recovery returns an
+--   expired lease to the queue and gives up after 3 attempts (parse_status 'failed').
 
 alter table public.documents
   add column if not exists kind_confirmed boolean not null default true,
   add column if not exists kind_guess jsonb,
-  add column if not exists extraction_requested_at timestamptz;
+  add column if not exists extraction_requested_at timestamptz,
+  add column if not exists extraction_attempts smallint not null default 0,
+  add column if not exists extraction_lease_until timestamptz;
+
+alter table public.documents drop constraint if exists documents_extraction_attempts_range;
+alter table public.documents add constraint documents_extraction_attempts_range
+  check (extraction_attempts between 0 and 10);
 
 alter table public.documents drop constraint if exists documents_kind_guess_object;
 alter table public.documents add constraint documents_kind_guess_object
@@ -152,7 +173,7 @@ create index if not exists documents_unconfirmed_idx
 create index if not exists documents_extraction_requested_idx
   on public.documents (extraction_requested_at) where extraction_requested_at is not null;
 
--- The student guard (20261016000001) gains the three columns: they are the counselor side's.
+-- The student guard (20261016000001) gains the five columns: they are the counselor side's.
 create or replace function private.documents_guard_student_restricted()
 returns trigger
 language plpgsql
@@ -173,7 +194,8 @@ begin
     if new.ai_access is distinct from 'default' or new.ferpa_waived is distinct from false then
       raise exception 'Only your counselor can change those settings' using errcode = '42501';
     end if;
-    if new.kind_confirmed is distinct from true or new.kind_guess is not null or new.extraction_requested_at is not null then
+    if new.kind_confirmed is distinct from true or new.kind_guess is not null or new.extraction_requested_at is not null
+       or new.extraction_attempts is distinct from 0 or new.extraction_lease_until is not null then
       raise exception 'Only your counselor can change those settings' using errcode = '42501';
     end if;
   else
@@ -182,7 +204,9 @@ begin
     end if;
     if new.kind_confirmed is distinct from old.kind_confirmed
        or new.kind_guess is distinct from old.kind_guess
-       or new.extraction_requested_at is distinct from old.extraction_requested_at then
+       or new.extraction_requested_at is distinct from old.extraction_requested_at
+       or new.extraction_attempts is distinct from old.extraction_attempts
+       or new.extraction_lease_until is distinct from old.extraction_lease_until then
       raise exception 'Only your counselor can change those settings' using errcode = '42501';
     end if;
   end if;
@@ -210,7 +234,7 @@ Expected: every line `ok`. Then `supabase db reset` (replays all migrations) and
 
 ```bash
 git add supabase/migrations/20261024000001_documents_kind_confirmation.sql test/integration/documents-kind-confirmation.test.mjs
-git commit -m "Migration: documents.kind_confirmed, kind_guess, extraction_requested_at
+git commit -m "Migration: documents.kind_confirmed, kind_guess, extraction queue columns
 
 Additive and safe for the code that is live: every existing row counts as
 confirmed, nothing reads the new columns yet. The student guard refuses a
@@ -222,7 +246,7 @@ gh pr create --repo MeridiesAI/meridies-backend --base main \
   --title "Migration: document type confirmation columns (Google connector, step 0)" \
   --body "Step 0 of the Google connector (spec PR #55, §9.0): the migration alone, so it is on production before the code PR merges.
 
-- \`documents.kind_confirmed\` (default true: every existing row is confirmed), \`kind_guess\` (jsonb object), \`extraction_requested_at\`; two partial indexes; the student guard refuses a student's write of any of them.
+- \`documents.kind_confirmed\` (default true: every existing row is confirmed), \`kind_guess\` (jsonb object), \`extraction_requested_at\`, \`extraction_attempts\` (0–10), \`extraction_lease_until\`; two partial indexes; the student guard refuses a student's write of any of them.
 - **Safe before and after the code:** nothing live reads these columns. No rows change.
 - After merge: the Apply migrations workflow plans it; an approver applies it. Then verify (plan Task 13) before PR 1 merges.
 
@@ -339,6 +363,8 @@ export function documentAiDecision(doc: AiDoc, practiceReadsDocuments: boolean):
   if (!practiceReadsDocuments) return { allowed: false, reason: "practice-setting" };
   if (doc.ai_access === "excluded") return { allowed: false, reason: "excluded" };
   if (doc.ai_access === "allowed") return { allowed: true, reason: null };
+  // The same sensitive list the tracker and submission review use (one constant, three readers).
+  if ((SENSITIVE_DOCUMENT_KINDS as readonly string[]).includes(doc.kind)) return { allowed: false, reason: "kind-excluded" };
   if ((AI_DEFAULT_DOCUMENT_KINDS as readonly string[]).includes(doc.kind)) return { allowed: true, reason: null };
   if (doc.kind === "other") return { allowed: false, reason: "not-categorized" };
   return { allowed: false, reason: "kind-excluded" };
@@ -411,7 +437,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `src/routes/tasks.ts:975-1050` (tracker) and `:1201-1205` (`liveProblems`)
 - Modify: `src/lib/submissionReview.ts:271-276` (`decide`)
 - Modify: `src/lib/serialize.ts:270-285` (task document DTO gains `externalProvider`; also select `external_provider` wherever the task's documents embed is built: `grep -n "document:documents(" src/routes/tasks.ts`)
-- Test: `test/unit/live-documents.test.ts` (new), `test/unit/submissions.test.ts` (extend)
+- Test: `test/unit/live-documents.test.ts` (new), `test/unit/submissions.test.ts` (extend), `test/unit/sensitive-kinds.test.ts` (new)
 
 **Interfaces:**
 - Consumes: `documentReadableForTask`, `toAiDoc` (Task 2).
@@ -465,9 +491,32 @@ test("submission review refuses an unconfirmed file with a reason the student's 
 });
 ```
 
+And the shared-constant test (Elvin, 10/15: all three readers refuse each sensitive kind):
+
+```ts
+// test/unit/sensitive-kinds.test.ts
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { documentAiDecision, documentReadableForTask, SENSITIVE_DOCUMENT_KINDS, toAiDoc } from "../../src/lib/context/documentAi.js";
+import { refusalFor } from "../../src/lib/submissionReview.js";
+
+test("the sensitive list is the five agreed kinds", () => {
+  assert.deepEqual([...SENSITIVE_DOCUMENT_KINDS].sort(), ["award-letter", "counselor-only", "financial", "iep-504", "recommendation-letter"]);
+});
+
+test("the context layer, the tracker and submission review all refuse every sensitive kind", () => {
+  for (const kind of SENSITIVE_DOCUMENT_KINDS) {
+    const row = { kind, available_to_llm: true, ai_access: "default", ferpa_waived: false, kind_confirmed: true };
+    assert.equal(documentAiDecision(toAiDoc(row), true).allowed, false, `context layer: ${kind}`);
+    assert.equal(documentReadableForTask(toAiDoc(row), true).allowed, false, `tracker: ${kind}`);
+    assert.notEqual(refusalFor(row, true), null, `submission review: ${kind}`);
+  }
+});
+```
+
 - [ ] **Step 2: Run to verify failure**
 
-Run: `node --import tsx --import ./test/env.ts --test test/unit/live-documents.test.ts test/unit/submissions.test.ts`
+Run: `node --import tsx --import ./test/env.ts --test test/unit/live-documents.test.ts test/unit/submissions.test.ts test/unit/sensitive-kinds.test.ts`
 Expected: FAIL (exports missing).
 
 - [ ] **Step 3: Implement**
@@ -814,7 +863,14 @@ In `src/routes/integrations.ts`:
 ```ts
         calendarEnabled: account ? account.scopes.some((s) => /calendar\.events$|calendars\.readwrite$/i.test(s)) : false,
         driveGranted: account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
+        // Until the Railway variables are set the app hides the Drive button (Elvin, 10/15).
+        pickerReady:
+          provider === "google" &&
+          reason === null &&
+          pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null,
 ```
+
+(`pickerConfigProblem` and the two env settings arrive in Task 11; in this task add `pickerReady: false` as a literal with a `// Task 11` comment, and Task 11 replaces it with the expression above.)
 
   (store `scopes: (r.scopes as string[] | null) ?? []` in the `accounts` map).
 - `/authorize`:
@@ -1625,7 +1681,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `requestExtraction(ids: string[], log: Log): void` (in-process, FIFO, concurrency 2; ids already marked in the DB by the caller)
   - `runExtraction(id: string, log: Log): Promise<"done" | "empty" | "failed" | "skipped">`
   - `recoverExtractions(log: Log): Promise<number>`
-  - `startExtractionRecovery(app: FastifyInstance): void` (onReady + every 5 minutes)
+  - `startExtractionRecovery(app: FastifyInstance): void` (onReady + every minute)
+  - `LEASE_MS = 120_000`, `MAX_ATTEMPTS = 3` (exported for tests)
+  - `leaseVerdict(row: { extraction_attempts: number }): "retry" | "give-up"` (pure: attempts ≥ 3 → give up)
 
 - [ ] **Step 1: Write the failing unit test**
 
@@ -1633,7 +1691,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 // test/unit/document-extraction.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { extractionState, extractorFor } from "../../src/lib/documentExtraction.js";
+import { extractionState, extractorFor, LEASE_MS, leaseVerdict, MAX_ATTEMPTS } from "../../src/lib/documentExtraction.js";
 
 test("each stored type has one extractor; images and unknowns have none", () => {
   assert.equal(extractorFor("application/pdf", "a.pdf"), "pdf");
@@ -1656,6 +1714,15 @@ test("the state the app polls, from the row", () => {
   assert.equal(extractionState({ kind_confirmed: true, available_to_llm: true, parse_status: "skipped", parse_error: "no-text" }), "empty");
   assert.equal(extractionState({ kind_confirmed: true, available_to_llm: true, parse_status: "failed" }), "failed");
   assert.equal(extractionState({ kind_confirmed: true, available_to_llm: true, parse_status: "pending" }), "none");
+  assert.equal(extractionState({ kind_confirmed: true, available_to_llm: true, parse_status: "failed", parse_error: "gave-up" }), "failed");
+});
+
+test("an expired lease is retried until the third attempt, then given up", () => {
+  assert.equal(leaseVerdict({ extraction_attempts: 1 }), "retry");
+  assert.equal(leaseVerdict({ extraction_attempts: 2 }), "retry");
+  assert.equal(leaseVerdict({ extraction_attempts: 3 }), "give-up");
+  assert.equal(MAX_ATTEMPTS, 3);
+  assert.equal(LEASE_MS, 120_000);
 });
 ```
 
@@ -1716,25 +1783,40 @@ check("a file kept out after it was queued gets no text", by[keep] === "kept-out
 check("the PDF's text is stored", (await sql(`select parsed_data->>'text' from public.documents where id = '${pdf}'`)).includes("Official Transcript"));
 check("the request marker is cleared", (await sql(`select count(*) from public.documents where id in ('${pdf}','${txt}','${scan}') and extraction_requested_at is not null`)) === "0");
 
-// Review Focus 1: rows a dead process left behind are picked up.
-const orphan = await upload("o.pdf", textPdf(["Score Report"]), "application/pdf");
-await sql(`update public.documents set kind = 'test-report', kind_confirmed = true, available_to_llm = true, parse_status = 'parsing',
-  extraction_requested_at = now() - interval '10 minutes', updated_at = now() - interval '10 minutes' where id = '${orphan}'`);
-const recovered = await call(c.token, "POST", "/internal/documents/extraction-recover", undefined);
-check("recovery is a CRON_SECRET route", recovered.status === 401 || recovered.status === 403 || recovered.status === 503, `status ${recovered.status}`);
-const res = await fetch(`${process.env.API_URL ?? "http://127.0.0.1:4100"}/internal/documents/extraction-recover`, {
+// Review Focus 1: a crashed in-progress item (expired lease) is retried; after 3 attempts it is failed.
+const recover = () => fetch(`${process.env.API_URL ?? "http://127.0.0.1:4100"}/internal/documents/extraction-recover`, {
   method: "POST", headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? "ci-cron-secret-0123456789abcdef0123456789"}` },
 });
+const anon = await call(c.token, "POST", "/internal/documents/extraction-recover", undefined);
+check("recovery is a CRON_SECRET route", anon.status === 401 || anon.status === 403 || anon.status === 503, `status ${anon.status}`);
+
+const orphan = await upload("o.pdf", textPdf(["Score Report"]), "application/pdf");
+await sql(`update public.documents set kind = 'test-report', kind_confirmed = true, available_to_llm = true, parse_status = 'parsing',
+  extraction_requested_at = now() - interval '10 minutes', extraction_attempts = 1, extraction_lease_until = now() - interval '1 minute' where id = '${orphan}'`);
+const res = await recover();
 check("recovery runs with the cron secret", res.status === 202, `status ${res.status}`);
 const after = await until([orphan], (st) => st[0]?.state === "done");
-check("recovery picks up rows a dead process left behind", after[0]?.state === "done", JSON.stringify(after));
+check("a crashed in-progress item is retried after its lease expires", after[0]?.state === "done", JSON.stringify(after));
+check("the retry counted as an attempt", (await sql(`select extraction_attempts::text from public.documents where id = '${orphan}'`)) === "2");
+
+const doomed = await upload("d.pdf", textPdf(["x"]), "application/pdf");
+await sql(`update public.documents set kind = 'transcript', kind_confirmed = true, available_to_llm = true, parse_status = 'parsing',
+  extraction_requested_at = now() - interval '10 minutes', extraction_attempts = 3, extraction_lease_until = now() - interval '1 minute' where id = '${doomed}'`);
+await recover();
+const gaveUp = await until([doomed], (st) => st[0]?.state === "failed", 5_000);
+check("after 3 attempts the item is marked failed", gaveUp[0]?.state === "failed"
+  && (await sql(`select parse_error from public.documents where id = '${doomed}'`)) === "gave-up", JSON.stringify(gaveUp));
+
+const held = await upload("h.pdf", textPdf(["Official Transcript"]), "application/pdf");
+await sql(`update public.documents set kind = 'transcript', kind_confirmed = true, available_to_llm = true, parse_status = 'parsing',
+  extraction_requested_at = now(), extraction_attempts = 1, extraction_lease_until = now() + interval '2 minutes' where id = '${held}'`);
+await recover();
+check("a live lease is left alone", (await sql(`select parse_status from public.documents where id = '${held}'`)) === "parsing");
 
 // No backfill: an old pending PDF with no request marker is never touched.
 const old = await sql(`with d as (insert into public.documents (student_id, owner_id, storage_path, filename, mime_type, kind)
   values ('${s.id}', '${c.id}', 'x/old-${Date.now()}.pdf', 'old.pdf', 'application/pdf', 'transcript') returning id) select id from d`);
-await fetch(`${process.env.API_URL ?? "http://127.0.0.1:4100"}/internal/documents/extraction-recover`, {
-  method: "POST", headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? "ci-cron-secret-0123456789abcdef0123456789"}` },
-});
+await recover();
 check("no backfill: an old document without a request stays as it was",
   (await sql(`select parse_status from public.documents where id = '${old}'`)) === "pending");
 ```
@@ -1752,8 +1834,10 @@ Run: `node --import tsx --import ./test/env.ts --test test/unit/document-extract
  * Text for AI after a counselor confirms a file's type (spec §4.3; Elvin 10/15: queued, two at
  * a time, progress shown). The queue is in-process; the database is the durable part: a
  * confirmation sets `extraction_requested_at` and leaves `parse_status = 'pending'`, a worker
- * claims a row by moving it to `parsing`, and the result clears the marker. Recovery re-queues
- * marked rows on boot and every five minutes, so a restart never strands one. Rows without the
+ * claims a row by moving it to `parsing` under a 2-minute lease (and counts an attempt), and the
+ * result clears the marker. Recovery (on boot and every minute) returns an expired lease to the
+ * queue, and after 3 attempts marks the row failed, so every item reaches a final state and the
+ * app's polling always ends. Rows without the
  * marker (everything that existed before) are never touched: there is no backfill.
  *
  * Runs on the service client, outside the request: every row is re-checked when it runs
@@ -1772,9 +1856,15 @@ type Log = { warn: (obj: object, msg: string) => void; error: (obj: object, msg:
 type Row = Record<string, unknown>;
 
 const CONCURRENCY = 2;
-const STALE_PARSING_MS = 2 * 60_000;
-const RECOVERY_EVERY_MS = 5 * 60_000;
+export const LEASE_MS = 120_000;
+export const MAX_ATTEMPTS = 3;
+const RECOVERY_EVERY_MS = 60_000;
 const RECOVERY_WINDOW_HOURS = 24;
+
+/** What recovery does with an expired lease. */
+export function leaseVerdict(row: { extraction_attempts: number }): "retry" | "give-up" {
+  return row.extraction_attempts >= MAX_ATTEMPTS ? "give-up" : "retry";
+}
 
 export type ExtractionState = "queued" | "reading" | "done" | "empty" | "failed" | "kept-out" | "unconfirmed" | "none";
 
@@ -1844,12 +1934,27 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
   const db = serviceClient();
   if (!db) return "skipped";
 
-  // Claim: only a confirmed, AI-allowed row that a confirmation asked for, and only once.
-  const { data: claimed } = await db
+  // Claim: only a confirmed, AI-allowed row that a confirmation asked for, once, under a lease.
+  // The attempt count is compare-and-set, so two replicas can't both claim the same attempt.
+  const { data: current } = await db
     .from("documents")
-    .update({ parse_status: "parsing" })
+    .select("extraction_attempts")
     .eq("id", id)
     .eq("parse_status", "pending")
+    .not("extraction_requested_at", "is", null)
+    .maybeSingle();
+  if (!current) return "skipped";
+  const attempts = Number(current.extraction_attempts ?? 0);
+  if (attempts >= MAX_ATTEMPTS) {
+    await db.from("documents").update({ parse_status: "failed", parse_error: "gave-up", extraction_requested_at: null, extraction_lease_until: null }).eq("id", id);
+    return "failed";
+  }
+  const { data: claimed } = await db
+    .from("documents")
+    .update({ parse_status: "parsing", extraction_attempts: attempts + 1, extraction_lease_until: new Date(Date.now() + LEASE_MS).toISOString() })
+    .eq("id", id)
+    .eq("parse_status", "pending")
+    .eq("extraction_attempts", attempts)
     .eq("kind_confirmed", true)
     .eq("available_to_llm", true)
     .not("extraction_requested_at", "is", null)
@@ -1859,7 +1964,7 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
   const row = claimed as Row;
 
   const release = async (fields: Row) => {
-    await db.from("documents").update({ ...fields, extraction_requested_at: null }).eq("id", id);
+    await db.from("documents").update({ ...fields, extraction_requested_at: null, extraction_lease_until: null }).eq("id", id);
   };
 
   if (!(await isCounselorApproved(db, String(row.owner_id)).catch(() => false))) {
@@ -1892,7 +1997,7 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
   // Write only if the file is still confirmed and still allowed for AI.
   const { data: written } = await db
     .from("documents")
-    .update({ ...fields, extraction_requested_at: null })
+    .update({ ...fields, extraction_requested_at: null, extraction_lease_until: null })
     .eq("id", id)
     .eq("parse_status", "parsing")
     .eq("kind_confirmed", true)
@@ -1900,7 +2005,8 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
     .select("id")
     .maybeSingle();
   if (!written) {
-    await release({ parse_status: "pending" });
+    // Kept out (or retyped) while it waited: no text, and the queue lets go of it.
+    await db.from("documents").update({ parse_status: "pending", extraction_requested_at: null, extraction_lease_until: null }).eq("id", id).eq("parse_status", "parsing");
     return "skipped";
   }
   return outcome;
@@ -1910,14 +2016,22 @@ export async function recoverExtractions(log: Log): Promise<number> {
   const db = serviceClient();
   if (!db) return 0;
   const since = new Date(Date.now() - RECOVERY_WINDOW_HOURS * 3_600_000).toISOString();
-  const staleBefore = new Date(Date.now() - STALE_PARSING_MS).toISOString();
-  // A row stuck in `parsing` belonged to a process that died.
-  await db
+  const now = new Date().toISOString();
+  // Expired leases belonged to a process that crashed or hung: retry, or give up after 3 attempts.
+  const { data: expired } = await db
     .from("documents")
-    .update({ parse_status: "pending" })
+    .select("id, extraction_attempts")
     .eq("parse_status", "parsing")
-    .gte("extraction_requested_at", since)
-    .lt("updated_at", staleBefore);
+    .not("extraction_requested_at", "is", null)
+    .lt("extraction_lease_until", now)
+    .limit(200);
+  for (const r of expired ?? []) {
+    const verdict = leaseVerdict({ extraction_attempts: Number(r.extraction_attempts ?? 0) });
+    const fields = verdict === "give-up"
+      ? { parse_status: "failed", parse_error: "gave-up", extraction_requested_at: null, extraction_lease_until: null }
+      : { parse_status: "pending", extraction_lease_until: null };
+    await db.from("documents").update(fields).eq("id", String(r.id)).eq("parse_status", "parsing").lt("extraction_lease_until", now);
+  }
   const { data, error } = await db
     .from("documents")
     .select("id")
@@ -1953,7 +2067,7 @@ Check `isCounselorApproved`'s signature first (`grep -n "export async function i
 Add the CRON_SECRET route in `src/routes/internal.ts`, following the existing sweep route in that file (same bearer check helper, 503 without the secret):
 
 ```ts
-  /** Re-queue confirmed documents whose extraction was asked for and never finished (also runs on boot and every 5 min). */
+  /** Re-queue confirmed documents whose extraction was asked for and never finished; expire leases (also runs on boot and every minute). */
   app.post("/documents/extraction-recover", { preHandler: requireCronSecret }, async (request, reply) => {
     const queued = await recoverExtractions(request.log);
     return reply.code(202).send({ queued });
@@ -2137,6 +2251,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces:
   - `POST /files/documents/confirm-types` body `{ items: { documentId: uuid; kind: DocumentKind; keepOut: boolean }[] }` (1–50, strict) → `200 { results: { documentId; status: "confirmed" | "refused"; reason: string | null; document: DocumentDto | null }[] }`
   - `GET /files/documents/extraction-status?ids=<uuid,…≤50>` → `200 { documentId; state: ExtractionState }[]` (RLS-bound; ids the caller can't see are omitted)
+  - `POST /files/documents/extraction-retry` body `{ ids: uuid[] }` (1–50) → `200 { retried: string[] }` (only confirmed, AI-allowed, `failed` rows; resets attempts)
 
 - [ ] **Step 1: Write the failing integration test**
 
@@ -2187,6 +2302,18 @@ check("an unknown kind is refused", badKind.status === 400, `status ${badKind.st
 const student = await call(s.token, "POST", "/files/documents/confirm-types", { items: [{ documentId: mine, kind: "resume", keepOut: false }] });
 check("a student can't confirm types", student.status === 403, `status ${student.status}`);
 
+// "Couldn't read this file, try again": a failed file is re-queued; a scan (no text) is not a failure.
+const failedDoc = await unconfirmed(s.id, c.id, "broken.pdf");
+await sql(`update public.documents set kind = 'transcript', kind_confirmed = true, available_to_llm = true, parse_status = 'failed', parse_error = 'gave-up', extraction_attempts = 3 where id = '${failedDoc}'`);
+const scanDoc = await unconfirmed(s.id, c.id, "scan.pdf");
+await sql(`update public.documents set kind = 'transcript', kind_confirmed = true, available_to_llm = true, parse_status = 'skipped', parse_error = 'no-text' where id = '${scanDoc}'`);
+const before = await call(c.token, "GET", `/files/documents/extraction-status?ids=${failedDoc},${scanDoc}`);
+const states = Object.fromEntries(before.body.map((r) => [r.documentId, r.state]));
+check("a scan and a failure are distinct states", states[failedDoc] === "failed" && states[scanDoc] === "empty", JSON.stringify(before.body));
+const retry = await call(c.token, "POST", "/files/documents/extraction-retry", { ids: [failedDoc, scanDoc] });
+check("retry re-queues only the failed file", retry.status === 200 && JSON.stringify(retry.body.retried) === JSON.stringify([failedDoc]), JSON.stringify(retry.body));
+check("retry resets the attempts", (await sql(`select extraction_attempts::text from public.documents where id = '${failedDoc}'`)) === "0");
+
 const status = await call(c.token, "GET", `/files/documents/extraction-status?ids=${[mine, theirs].join(",")}`);
 check("status omits files the caller can't see", status.status === 200 && status.body.length === 1 && status.body[0].documentId === mine, JSON.stringify(status.body));
 ```
@@ -2236,6 +2363,8 @@ Near the other documents routes (import `requestExtraction, extractionState` fro
               available_to_llm: available,
               parse_status: "pending",
               extraction_requested_at: available ? new Date().toISOString() : null,
+              extraction_attempts: 0,
+              extraction_lease_until: null,
             })
             .eq("id", item.documentId)
             .select("*")
@@ -2249,6 +2378,27 @@ Near the other documents routes (import `requestExtraction, extractionState` fro
       }
       requestExtraction(queue, request.log);
       return { results };
+    }
+  );
+
+  /** "Couldn't read this file, try again": re-queue confirmed, AI-allowed files whose extraction failed. */
+  app.post(
+    "/documents/extraction-retry",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("documents:extraction-retry", 30, 60)] },
+    async (request) => {
+      const { ids } = z.object({ ids: z.array(z.string().uuid()).min(1).max(50) }).strict().parse(request.body);
+      const { data, error } = await request.db
+        .from("documents")
+        .update({ parse_status: "pending", parse_error: null, extraction_requested_at: new Date().toISOString(), extraction_attempts: 0, extraction_lease_until: null })
+        .in("id", ids)
+        .eq("parse_status", "failed")
+        .eq("kind_confirmed", true)
+        .eq("available_to_llm", true)
+        .select("id");
+      if (error) throw fromPostgrest(error);
+      const retried = (data ?? []).map((r) => String(r.id));
+      requestExtraction(retried, request.log);
+      return { retried };
     }
   );
 
@@ -2281,6 +2431,8 @@ Near the other documents routes (import `requestExtraction, extractionState` fro
         const willBeAvailable = b.availableToLlm ?? (existing as Row).available_to_llm !== false;
         update.parse_status = "pending";
         update.extraction_requested_at = willBeAvailable ? new Date().toISOString() : null;
+        update.extraction_attempts = 0;
+        update.extraction_lease_until = null;
       }
 ```
 
@@ -2311,7 +2463,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces:
   - env `GOOGLE_PICKER_API_KEY` (string ≥ 10, optional), `GOOGLE_PROJECT_NUMBER` (digits, optional), `GOOGLE_PICKER_MAX_FILES` (int 1–50, default 10)
   - `pickerConfigProblem(e: { clientId?: string; apiKey?: string; projectNumber?: string }): string | null` (exported from `src/lib/oauth.ts`)
-  - `GET /integrations/google/picker-config` → `{ clientId, apiKey, appId, accountEmail, maxFiles }`; 503 naming the missing setting; 409 `google_disconnected`; 409 `drive_not_granted`.
+  - `GET /integrations/google/picker-config` → `{ clientId, apiKey, appId, accountEmail, maxFiles }`; 503 `picker_not_configured` naming the missing setting; 409 `google_disconnected`; 409 `drive_not_granted`.
+  - `/integrations/providers`'s `pickerReady` becomes the real expression (Task 4 left a literal `false`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2339,7 +2492,9 @@ const pending = await user("picker-pending", "counselor", { approved: false });
 const s = await studentOf(c, "picker-student");
 
 const r = await call(c.token, "GET", "/integrations/google/picker-config");
-check("without settings the API says Drive isn't set up, naming the setting", r.status === 503 && /GOOGLE_/.test(r.body?.message ?? r.body?.error ?? ""), JSON.stringify(r.body));
+check("without settings the API says Drive isn't set up, naming the setting", r.status === 503 && r.body?.code === "picker_not_configured" && /GOOGLE_/.test(r.body?.error ?? ""), JSON.stringify(r.body));
+const prov = await call(c.token, "GET", "/integrations/providers");
+check("providers report the Picker as not ready", prov.status === 200 && prov.body.find((p) => p.provider === "google")?.pickerReady === false, JSON.stringify(prov.body));
 const st = await call(s.token, "GET", "/integrations/google/picker-config");
 check("a student can't read the Picker settings", st.status === 403, `status ${st.status}`);
 const p = await call(pending.token, "GET", "/integrations/google/picker-config");
@@ -2400,7 +2555,7 @@ export function pickerConfigProblem(e: { clientId?: string; apiKey?: string; pro
     },
     async (request) => {
       const problem = pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER });
-      if (problem) throw unavailable(problem);
+      if (problem) throw new HttpError(503, problem, "picker_not_configured");
       const token = await accessTokenFor(request.auth.userId, "google"); // 409 google_disconnected / google_reconnect
       if (!hasScope(token, GOOGLE_SCOPE.driveFile)) {
         throw new HttpError(409, "Meridies needs access to the files you pick. Connect Google again and leave Drive ticked.", "drive_not_granted");
@@ -2466,8 +2621,10 @@ In "Documents and AI context" add:
 **Unconfirmed files.** A Google import that names no kind is `kind_confirmed = false`, `available_to_llm = false`,
 with the server's guess in `kind_guess` (`lib/documentGuess.ts`: printed phrases, filename, Google file type; no
 model). `POST /files/documents/confirm-types` confirms a list at once and queues text extraction for files the AI
-may read (`lib/documentExtraction.ts`: stored copy, two at a time, durable `extraction_requested_at`, recovery on
-boot, every 5 minutes and at `POST /internal/documents/extraction-recover`). PDFs go through `lib/pdfText.ts`
+may read (`lib/documentExtraction.ts`: stored copy, two at a time, durable `extraction_requested_at`, a 2-minute
+lease per claim, recovery on boot, every minute and at `POST /internal/documents/extraction-recover`, failed after
+3 attempts; `POST /files/documents/extraction-retry` re-queues a failed file). A scan is `skipped` / `no-text`
+(state `empty`), never `failed`. PDFs go through `lib/pdfText.ts`
 (unpdf 1.8.1 / PDF.js 6.1.200 pinned, `isEvalSupported: false`, worker thread capped at 256 MB, terminated at 10 s,
 25 MB / 50 pages / 200,000 characters). **Every reader of documents uses `lib/context/documentAi.ts`:**
 `documentAiDecision` for the context layer and AxIS retrieval, `documentReadableForTask` for the tracker and
@@ -2579,12 +2736,12 @@ Not code. Do these in order and tick them in PR 1's description.
 ```sql
 select column_name, data_type, is_nullable, column_default from information_schema.columns
 where table_schema = 'public' and table_name = 'documents'
-  and column_name in ('kind_confirmed', 'kind_guess', 'extraction_requested_at') order by 1;
+  and column_name in ('kind_confirmed', 'kind_guess', 'extraction_requested_at', 'extraction_attempts', 'extraction_lease_until') order by 1;
 select indexname from pg_indexes where tablename = 'documents' and indexname like 'documents_%idx' order by 1;
 select count(*) filter (where kind_confirmed = false) as unconfirmed, count(*) filter (where extraction_requested_at is not null) as requested from public.documents;
 ```
 
-  Expected: three columns as specified; both indexes; `0, 0`.
+  Expected: five columns as specified; both indexes; `0, 0`.
 - [ ] PR 1 merged by Elvin; `/health` on the new deployment reports `schema: true`.
 - [ ] The app PR (`2026-10-15-google-connector-app.md`) is merged by bcha and live.
 - [ ] Elvin sets on Railway: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (the verified rotated secret), new `INTEGRATION_TOKEN_KEY` (`openssl rand -base64 32`, never changed afterwards), `GOOGLE_PICKER_API_KEY`, `GOOGLE_PROJECT_NUMBER` (356256797701).

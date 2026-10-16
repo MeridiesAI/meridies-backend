@@ -4,7 +4,7 @@
 
 **Goal:** Counselors pick files from Google Drive with Google's own Picker (only those files become reachable), confirm every picked file's type in one batch list, watch text extraction progress ("Reading 3 of 10…"), link essays by picking their Doc, and turn Calendar on separately. Connections, meetings and tasks say plainly what Google can and can't do.
 
-**Architecture:** `lib/googlePicker.ts` wraps Google's scripts: it loads them on click, gets a browser token with `drive.file` only (`include_granted_scopes: false`), checks the browser is signed in to the connected account, and opens the Picker with `setAppId`. `lib/googleDrive.ts` holds the pure rules: type-list rows and payload, progress text, Meet gating, the "Google disconnected" count, preview hosts and Doc URLs. These are unit-tested in `e2e/pure.spec.ts`. Two new components, `GoogleDrivePicker` and `TypeList`, call the API from the browser through `lib/api.ts`, never through Server Actions, so Playwright can stub every call. They are mounted where Drive files really come in: the Files page (`FolderBrowser`, student folders) and the Essays panel (through `RemoteFilePicker`).
+**Architecture:** `lib/googlePicker.ts` wraps Google's scripts: it loads them on click, gets a browser token with `drive.file` only (`include_granted_scopes: false`), checks the browser is signed in to the connected account, and opens the Picker with `setAppId`. `lib/googleDrive.ts` holds the pure rules: type-list rows and payload, progress text, Meet gating, the "Google disconnected" count, preview hosts, Drive availability (`driveAvailability`), per-item extraction copy and Doc URLs. These are unit-tested in `e2e/pure.spec.ts`. Two new components, `GoogleDrivePicker` and `TypeList`, call the API from the browser through `lib/api.ts`, never through Server Actions, so Playwright can stub every call. They are mounted where Drive files really come in: the Files page (`FolderBrowser`, student folders) and the Essays panel (through `RemoteFilePicker`).
 
 **Tech Stack:** Next.js 15 (App Router, client components), React 19, TypeScript strict, Tailwind v4, lucide-react, Playwright 1.56 (`public` project for pure checks, `signed-in` project for stubbed UI flows).
 
@@ -13,6 +13,13 @@
 ## Global Constraints
 
 - Repo `meridies-app`. Worktree `/Users/elvinojuan/Meridies AI/meridies-app-gpicker` from `origin/main`, branch `feat/google-drive-picker`. **Open the PR only. Never merge**: Elvin wants PRs, not merges by Claude. **This PR ships after the backend PR is live** (cross-repo rule: backend routes first).
+- **Backend contract changes (product owner, 10/15), all on the backend PR:**
+  - `GET /integrations/providers` items also carry `pickerReady: boolean`: true only when Google Picker is fully configured on the server.
+  - `GET /integrations/google/picker-config` answers `503` with `code: "picker_not_configured"` when the server isn't configured. Its message names the missing setting; the UI never shows that setting name to counselors.
+  - `POST /files/documents/extraction-retry`, body `{ ids: string[] }` (1 to 50), answers `{ retried: string[] }`. It re-queues confirmed, AI-allowed documents whose extraction `failed`.
+  - Extraction states are unchanged (`queued | reading | done | empty | failed | kept-out | unconfirmed | none`). The server now gives each item a lease and marks it `failed` after 3 attempts, so every item always reaches a final state.
+  - Error bodies are `{ error: string, code?: string }`, the API's real shape, never `{ message }`. The existing `apiFetch` already maps `error` to `ApiError.message` and `code` to `ApiError.code`; this plan relies on that and nothing else, and every stubbed error in the specs uses the same shape.
+- **Drive availability.** `driveAvailability(info, hostname)` (Task 1) returns `"preview"` for a host the Picker doesn't run on, `"not-set-up"` when Google's provider info has `pickerReady: false` (or picker-config answers `picker_not_configured`), `"not-connected"` when Google isn't connected, else `"ready"`. Where the Drive button is optional (the Essays "Pick a Google Doc" item and its prompt) it is hidden unless `"ready"`. Where a Drive choice is already shown (the Files page Drive button, the `RemoteFilePicker` Google branch, the Essays upload menu's Google Drive item) the counselor reads "Google Drive isn't set up yet." instead of a broken flow, and no Google script is requested.
 - New Google code calls the API from the browser with the session token (`apiFetch` functions in `lib/api.ts`), never through a Server Action, so `page.route` can stub it. Existing Server Actions elsewhere stay as they are.
 - Google script URLs, exactly: `https://accounts.google.com/gsi/client` and `https://apis.google.com/js/api.js`. They load on the click, never on page load.
 - The picker token request is exactly `{ client_id, scope: "https://www.googleapis.com/auth/drive.file", include_granted_scopes: false, login_hint: accountEmail }`. The token stays in memory, is never sent to our API, and is dropped when the Picker closes.
@@ -25,7 +32,7 @@
   - "Keep out of AI" is pre-ticked when the guess has `keepOut` or the kind is `financial` / `iep-504`.
   - Unknown rows ("Choose a type") are left out of the **Looks right** payload.
   - **Not now** confirms nothing.
-- Progress text, exactly: `Reading ${k} of ${n}…`, where k = finished + 1, capped at n. When everything is finished: `Text ready for ${x} files` (or `1 file`), plus ` · ${y} had no readable text` when y > 0, plus ` · ${z} couldn't be read` when z > 0. Poll every 2 s while the list is open. No client timeout. Closing the list stops polling; the server keeps going.
+- Progress text, exactly: `Reading ${k} of ${n}…`, where k = finished + 1, capped at n. When everything is finished: `Text ready for ${x} files` (or `1 file`), plus ` · ${y} had no readable text` when y > 0, plus ` · ${z} couldn't be read` when z > 0. ` · ${y} had no readable text` counts every `empty` item (scans and other files without text); ` · ${z} couldn't be read` counts `failed` items only, so a scan is never reported as an error, and the per-item lines tell scans apart from other empty files. Poll every 2 s while the list is open **and** any item is `queued` or `reading`; stop as soon as none is, and restart only on **Try again**. No client timeout. Closing the list stops polling; the server keeps going.
 - Copy, exactly:
   - Connections: Google description "Files you pick from Drive, and Calendar if you turn it on"; `drive.file` label "Drive: files you pick".
   - Type list: "AxIS doesn't read these files until you confirm their types. Financial documents, IEP/504 plans, award letters, recommendation letters and counselor-only files stay out of AxIS even then."
@@ -34,6 +41,8 @@
   - Essay sync: "Pick this Doc to keep it in sync".
   - Tasks: "Google disconnected: can't see edits to {N} files".
   - Meetings: "Turn on Google Calendar to add Meet links".
+  - Not set up: "Google Drive isn't set up yet." (never the server's missing-setting name).
+  - Extraction items: an `empty` PDF reads "This PDF is a scan" (no readable text; not an error); any other `empty` file reads "No readable text in this file"; a `failed` file reads "Couldn't read this file" with a **Try again** button.
 - TypeScript strict, no `any`. Match the surrounding component style (DashboardUI `Button`, `Modal`, `Badge`; lucide icons; Tailwind tokens, no raw hex outside existing tint maps).
 - Commit trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. The PR body ends with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
@@ -55,6 +64,8 @@ npm run build                                                   # before the las
 3. **One of several picked files fails** (`409 picked_file_unavailable`, `400` too big). The others still import, each failure shows its own message, and the type list holds only the successes. Task 2 test: "one unavailable file doesn't stop the rest".
 4. **`confirm-types` refuses some rows.** Refused rows stay in the list with the server's reason, confirmed rows leave, and a double click on **Looks right** sends one request. Task 3 test: "a refused row stays with its reason; one request per click".
 5. **The browser is signed in to a different Google account than the connected one.** Stop before the Picker opens, with the same-account message, and import nothing. Task 2 test: "another signed-in account stops before the Picker".
+6. **The server has no Google Picker settings.** Providers say `pickerReady: false` (or picker-config answers `503 picker_not_configured`). The counselor reads "Google Drive isn't set up yet.", never the setting name, and no Google script is requested. Task 2 tests: "Google not set up: the Drive button says so and no Google script is requested" and "picker-config 503 says it isn't set up yet".
+7. **A scan is not a failure, and a failure can be retried.** An `empty` PDF reads "This PDF is a scan"; a `failed` file reads "Couldn't read this file" with **Try again**; polling stops once every item has finished. Task 3 tests: "a failed file says so and Try again retries it and resumes polling" and "no more status requests once every item has finished".
 
 ---
 
@@ -72,15 +83,16 @@ npm run build                                                   # before the las
   - `KindGuess`.
   - `StoredDocument.kindConfirmed: boolean`, `StoredDocument.kindGuess: KindGuess | null`, `StoredDocument.aiAccess`, `StoredDocument.ferpaWaived`.
   - `TaskDocument.externalProvider`.
-  - `IntegrationProviderInfo.calendarEnabled: boolean`, `IntegrationProviderInfo.driveGranted: boolean`.
+  - `IntegrationProviderInfo.calendarEnabled: boolean`, `IntegrationProviderInfo.driveGranted: boolean`, `IntegrationProviderInfo.pickerReady: boolean`.
   - `GooglePickerConfig`, `getGooglePickerConfig(token)`.
   - `ConfirmTypeItem`, `ConfirmTypeResult`, `confirmDocumentTypes(token, items)`.
-  - `ExtractionState`, `getExtractionStatus(token, ids)`.
+  - `ExtractionState`, `getExtractionStatus(token, ids)`, `retryExtraction(token, ids)`.
   - `getIntegrationAuthorizeUrl(token, provider, add?)`.
   - `syncEssayDocs(...)` returns `notPicked: string[]`.
 - Produces, in `lib/googleDrive.ts`:
   - `KIND_LABELS`, `TypeRow`, `typeRows(docs)`, `confirmPayload(rows)`.
-  - `progressText(states)`, `isTerminal(state)`.
+  - `progressText(states)`, `isTerminal(state)`, `hasUnfinished(states)`, `extractionItemCopy(state, filename, mimeType)`.
+  - `driveAvailability(info, hostname)` and `type DriveAvailability`.
   - `canAddMeet(provider, info)`, `driveLinkedCount(task)`, `googleNeedsReconnect(info, grantStatus)`.
   - `isPickerHost(hostname)`, `isGoogleDocUrl(url)`.
 
@@ -93,6 +105,9 @@ import {
   googleNeedsReconnect,
   isGoogleDocUrl,
   isPickerHost,
+  driveAvailability,
+  extractionItemCopy,
+  hasUnfinished,
   progressText,
   typeRows,
   canAddMeet,
@@ -159,12 +174,41 @@ test.describe("extraction progress", () => {
     expect(progressText(["done"])).toBe("Text ready for 1 file");
     expect(progressText([])).toBe("");
   });
+  test("scans and failures are counted separately", () => {
+    expect(progressText(["done", "empty", "empty"])).toBe("Text ready for 1 file · 2 had no readable text");
+    expect(progressText(["done", "failed", "failed"])).toBe("Text ready for 1 file · 2 couldn't be read");
+  });
+  test("keeps polling only while something is queued or reading", () => {
+    expect(hasUnfinished(["done", "reading"])).toBe(true);
+    expect(hasUnfinished(["queued", "failed"])).toBe(true);
+    expect(hasUnfinished(["done", "empty", "failed", "kept-out", "unconfirmed", "none"])).toBe(false);
+    expect(hasUnfinished([])).toBe(false);
+  });
+});
+
+test.describe("extraction item copy", () => {
+  test("an empty PDF is a scan, not an error", () => {
+    expect(extractionItemCopy("empty", "Scan.pdf", "application/pdf")).toEqual({ text: "This PDF is a scan", tone: "note", canRetry: false });
+    expect(extractionItemCopy("empty", "SCAN.PDF", "application/octet-stream")?.text).toBe("This PDF is a scan");
+  });
+  test("any other empty file has no readable text", () => {
+    expect(extractionItemCopy("empty", "notes.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")).toEqual({ text: "No readable text in this file", tone: "note", canRetry: false });
+  });
+  test("a failed file says so and offers Try again", () => {
+    expect(extractionItemCopy("failed", "a.pdf", "application/pdf")).toEqual({ text: "Couldn't read this file", tone: "error", canRetry: true });
+    expect(extractionItemCopy("failed", "a.docx", "application/msword")?.canRetry).toBe(true);
+  });
+  test("finished and waiting items have no line", () => {
+    for (const state of ["queued", "reading", "done", "kept-out", "unconfirmed", "none"] as const) {
+      expect(extractionItemCopy(state, "a.pdf", "application/pdf")).toBeNull();
+    }
+  });
 });
 
 test.describe("Google rules", () => {
   const info = (over: Partial<IntegrationProviderInfo>): IntegrationProviderInfo => ({
     provider: "google", available: true, unavailableReason: null, tokensHeld: true, accountEmail: "c@example.com",
-    connectedAt: null, calendarEnabled: false, driveGranted: true, ...over,
+    connectedAt: null, calendarEnabled: false, driveGranted: true, pickerReady: true, ...over,
   });
   test("a Meet link needs Calendar on; Teams needs Microsoft tokens", () => {
     expect(canAddMeet("google", info({ calendarEnabled: false }))).toBe(false);
@@ -188,6 +232,16 @@ test.describe("Google rules", () => {
     expect(isGoogleDocUrl("https://docs.google.com/document/d/abcDEF12345/edit")).toBe(true);
     expect(isGoogleDocUrl("https://docs.google.com/spreadsheets/d/abc/edit")).toBe(false);
     expect(isGoogleDocUrl("https://example.com")).toBe(false);
+  });
+  test("Drive is ready, not set up, preview or not connected", () => {
+    expect(driveAvailability(info({}), "app.meridiesai.com")).toBe("ready");
+    expect(driveAvailability(info({}), "localhost")).toBe("ready");
+    expect(driveAvailability(info({ pickerReady: false }), "app.meridiesai.com")).toBe("not-set-up");
+    expect(driveAvailability(info({ pickerReady: false, tokensHeld: false }), "app.meridiesai.com")).toBe("not-set-up");
+    expect(driveAvailability(info({}), "meridies-app-git-x.vercel.app")).toBe("preview");
+    expect(driveAvailability(info({ pickerReady: false }), "meridies-app-git-x.vercel.app")).toBe("preview");
+    expect(driveAvailability(info({ tokensHeld: false }), "app.meridiesai.com")).toBe("not-connected");
+    expect(driveAvailability(null, "app.meridiesai.com")).toBe("not-connected");
   });
 });
 ```
@@ -250,6 +304,8 @@ In `IntegrationProviderInfo`, add:
   calendarEnabled: boolean;
   /** Google: `drive.file` is in the grant. */
   driveGranted: boolean;
+  /** Google: true only when Google Picker is fully configured on the server. False: don't offer Drive. */
+  pickerReady: boolean;
 ```
 
 Replace `getIntegrationAuthorizeUrl`:
@@ -277,6 +333,10 @@ export type GooglePickerConfig = {
   maxFiles: number;
 };
 
+/**
+ * Answers `503 { error, code: "picker_not_configured" }` when the server isn't set up. `error`
+ * names the missing setting: test `ApiError.code`, never show that text to a counselor.
+ */
 export function getGooglePickerConfig(token: string): Promise<GooglePickerConfig> {
   return apiFetch<GooglePickerConfig>("/integrations/google/picker-config", { token });
 }
@@ -304,12 +364,20 @@ export function confirmDocumentTypes(
 
 export type ExtractionState = "queued" | "reading" | "done" | "empty" | "failed" | "kept-out" | "unconfirmed" | "none";
 
-/** Where each confirmed file's text extraction is. The server reads two at a time; the rest wait. */
+/**
+ * Where each confirmed file's text extraction is. The server reads two at a time; the rest wait.
+ * Each item holds a lease and is marked `failed` after 3 attempts, so every item reaches a final state.
+ */
 export function getExtractionStatus(
   token: string,
   ids: string[]
 ): Promise<{ documentId: string; state: ExtractionState }[]> {
   return apiFetch(`/files/documents/extraction-status${toQuery({ ids: ids.slice(0, 50).join(",") })}`, { token });
+}
+
+/** Re-queues confirmed, AI-allowed documents whose extraction `failed`. `retried` names the ones it took. */
+export function retryExtraction(token: string, ids: string[]): Promise<{ retried: string[] }> {
+  return apiFetch("/files/documents/extraction-retry", { method: "POST", token, body: { ids: ids.slice(0, 50) } });
 }
 ```
 
@@ -423,6 +491,32 @@ export function isTerminal(state: ExtractionState): boolean {
   return !UNFINISHED.includes(state);
 }
 
+/** True while any item is queued or reading: the only time anything polls. */
+export function hasUnfinished(states: ExtractionState[]): boolean {
+  return states.some((s) => !isTerminal(s));
+}
+
+const isPdf = (filename: string, mimeType: string | null) =>
+  mimeType === "application/pdf" || /\.pdf$/i.test(filename);
+
+export type ExtractionItemCopy = { text: string; tone: "note" | "error"; canRetry: boolean };
+
+/**
+ * The line under a finished item. A scan (an empty PDF) is a note, not an error; a failed file is
+ * an error and can be tried again. Everything else has no line of its own.
+ */
+export function extractionItemCopy(state: ExtractionState, filename: string, mimeType: string | null): ExtractionItemCopy | null {
+  if (state === "empty") {
+    return {
+      text: isPdf(filename, mimeType) ? "This PDF is a scan" : "No readable text in this file",
+      tone: "note",
+      canRetry: false,
+    };
+  }
+  if (state === "failed") return { text: "Couldn't read this file", tone: "error", canRetry: true };
+  return null;
+}
+
 const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
 
 /** "Reading 3 of 10…" while anything waits; a summary once nothing does. */
@@ -469,6 +563,20 @@ export function isPickerHost(hostname: string): boolean {
 export function isGoogleDocUrl(url: string): boolean {
   return /^https:\/\/docs\.google\.com\/document\/(?:u\/\d+\/)?d\/[A-Za-z0-9_-]{5,}/.test(url);
 }
+
+export type DriveAvailability = "ready" | "not-set-up" | "preview" | "not-connected";
+
+/**
+ * Whether a Drive choice can be offered here. A host the Picker doesn't run on is `preview`;
+ * a server without Picker settings (`pickerReady: false`) is `not-set-up`; Google not connected
+ * is `not-connected`. Nothing here loads a Google script.
+ */
+export function driveAvailability(info: IntegrationProviderInfo | null, hostname: string): DriveAvailability {
+  if (!isPickerHost(hostname)) return "preview";
+  if (info && !info.pickerReady) return "not-set-up";
+  if (!info || !info.tokensHeld) return "not-connected";
+  return "ready";
+}
 ```
 
 `googleNeedsReconnect` reads the `integrations` row status from `getIntegrations`. Callers that only hold providers info pass `null`.
@@ -493,19 +601,21 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Create: `lib/googlePicker.ts`
+- Create: `lib/useDriveAvailability.ts`
 - Create: `components/files/GoogleDrivePicker.tsx`
 - Create: `e2e/auth/google-drive.spec.ts` (its stubs are reused by Tasks 3–5)
 - Create: `e2e/googleStubs.ts`
 
 **Interfaces:**
-- Consumes: `getGooglePickerConfig`, `importRemoteFile`, `StoredDocument`, `DocumentKind`, `isPickerHost` (Task 1).
+- Consumes: `getGooglePickerConfig`, `getIntegrationProviders` (already in `lib/api.ts`; `MeetingModal` uses it), `importRemoteFile`, `StoredDocument`, `DocumentKind`, `driveAvailability`, `DriveAvailability` (Task 1).
 - Produces:
   - `loadGoogleScripts(): Promise<void>`
   - `pickerToken(cfg: { clientId: string; accountEmail: string }): Promise<string>`, which rejects with `PickerError("popup" | "denied")`
   - `signedInEmail(token: string): Promise<string | null>`
   - `openPicker(o: { token: string; apiKey: string; appId: string; mode: "files" | "doc"; maxFiles: number }): Promise<PickedFile[]>`
   - `type PickedFile = { id: string; name: string; mimeType: string; url: string }`
-  - `<GoogleDrivePicker token studentId folderId? kind? mode? onImported(docs: StoredDocument[]) onPickedDoc?(file: PickedFile) />`
+  - `useDriveAvailability(token): DriveAvailability | "loading"`, which reads `GET /integrations/providers` once and never loads a Google script.
+  - `<GoogleDrivePicker token studentId folderId? kind? mode? unavailable?("message" | "hide") onImported(docs: StoredDocument[]) onPickedDoc?(file: PickedFile) />`
 
 - [ ] **Step 1: Write the shared stubs** (`e2e/googleStubs.ts`)
 
@@ -595,6 +705,16 @@ export async function stubPickerConfig(page: Page, answer?: (route: Route) => Pr
   );
 }
 
+/** `GET /integrations/providers` with Google connected. Pass `{ pickerReady: false }` for a server without Picker settings. */
+export async function stubProviders(page: Page, over: Record<string, unknown> = {}): Promise<void> {
+  const google = {
+    provider: "google", available: true, unavailableReason: null, tokensHeld: true,
+    accountEmail: "counselor@example.com", connectedAt: new Date().toISOString(),
+    calendarEnabled: false, driveGranted: true, pickerReady: true, ...over,
+  };
+  await page.route("**/integrations/providers", (r) => r.fulfill({ contentType: "application/json", body: JSON.stringify([google]) }));
+}
+
 export function storedDoc(over: Record<string, unknown>) {
   return {
     id: crypto.randomUUID(), studentId: null, folderId: null, filename: "file.pdf", title: null, description: null,
@@ -616,7 +736,7 @@ The picker is reached from the Files page (Task 4 mounts it there). Until Task 4
 ```ts
 import { expect, test, type Page } from "@playwright/test";
 import { DESKTOP, signedInAs } from "../helpers";
-import { PICKER_CONFIG, storedDoc, stubGoogle, stubPickerConfig } from "../googleStubs";
+import { PICKER_CONFIG, storedDoc, stubGoogle, stubPickerConfig, stubProviders } from "../googleStubs";
 
 /**
  * Picking from Google Drive, signed in as a real counselor. Google's scripts,
@@ -640,6 +760,7 @@ test.describe("Google Drive picker", () => {
   test.beforeEach(async ({ page }) => {
     await page.route(IMPORT, (r) => r.abort());
     await page.route("**/files/documents/confirm-types", (r) => r.abort());
+    await stubProviders(page);
     await page.setViewportSize(DESKTOP);
   });
 
@@ -693,7 +814,7 @@ test.describe("Google Drive picker", () => {
     await page.route(IMPORT, async (r) => {
       const body = r.request().postDataJSON() as { fileId: string };
       if (body.fileId === "file-b1234") {
-        return r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "Conflict", code: "picked_file_unavailable", message: "Meridies can't open that file. It may have been picked with a different Google account, or it's no longer available. Pick it again with counselor@example.com." }) });
+        return r.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ code: "picked_file_unavailable", error: "Meridies can't open that file. It may have been picked with a different Google account, or it's no longer available. Pick it again with counselor@example.com." }) });
       }
       return r.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(storedDoc({ filename: body.fileId === "file-a1234" ? "A.pdf" : "C.pdf" })) });
     });
@@ -704,12 +825,29 @@ test.describe("Google Drive picker", () => {
     await expect(page.getByRole("dialog").getByText("C.pdf")).toBeVisible();
   });
 
-  test("Google settings missing on the server says it isn't set up yet", async ({ page }) => {
+  test("picker-config 503 says it isn't set up yet and never shows the setting name", async ({ page }) => {
     await stubGoogle(page, { picks: [] });
-    await stubPickerConfig(page, (r) => r.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "GOOGLE_PICKER_API_KEY is not set" }) }));
+    await stubPickerConfig(page, (r) => r.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "GOOGLE_PICKER_API_KEY is not set", code: "picker_not_configured" }) }));
     test.skip(!(await openStudentFolder(page)), "No student folder for this counselor");
     await page.getByRole("button", { name: "Google Drive" }).click();
-    await expect(page.getByText("Google Drive isn't set up yet")).toBeVisible();
+    await expect(page.getByText("Google Drive isn't set up yet.")).toBeVisible();
+    await expect(page.getByText(/GOOGLE_PICKER_API_KEY/)).toHaveCount(0);
+    await expect(page.locator(".animate-spin")).toHaveCount(0);
+  });
+
+  test("Google not set up: the Drive button says so and no Google script is requested", async ({ page }) => {
+    const googleRequests: string[] = [];
+    page.on("request", (req) => {
+      if (/accounts\.google\.com|apis\.google\.com/.test(req.url())) googleRequests.push(req.url());
+    });
+    await stubProviders(page, { pickerReady: false });
+    let configCalls = 0;
+    await stubPickerConfig(page, (r) => { configCalls++; return r.abort(); });
+    test.skip(!(await openStudentFolder(page)), "No student folder for this counselor");
+    await expect(page.getByText("Google Drive isn't set up yet.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Google Drive" })).toHaveCount(0);
+    expect(googleRequests).toEqual([]);
+    expect(configCalls).toBe(0);
   });
 });
 ```
@@ -884,6 +1022,47 @@ export function openPicker(o: {
 }
 ```
 
+- [ ] **Step 3b: Write `lib/useDriveAvailability.ts`**
+
+```ts
+"use client";
+
+import { useEffect, useState } from "react";
+import { getIntegrationProviders } from "./api";
+import { driveAvailability, isPickerHost, type DriveAvailability } from "./googleDrive";
+
+/**
+ * Whether Drive can be offered here, from the host and Google's provider info
+ * (`pickerReady`). One read of `GET /integrations/providers`; no Google script, no
+ * picker-config call. "loading" until the answer is in.
+ */
+export function useDriveAvailability(token: string | null): DriveAvailability | "loading" {
+  const [state, setState] = useState<DriveAvailability | "loading">("loading");
+
+  useEffect(() => {
+    const host = window.location.hostname;
+    if (!isPickerHost(host)) {
+      setState("preview");
+      return;
+    }
+    if (!token) return;
+    let live = true;
+    void getIntegrationProviders(token)
+      .then((list) => {
+        if (live) setState(driveAvailability(list.find((p) => p.provider === "google") ?? null, host));
+      })
+      .catch(() => {
+        if (live) setState("not-connected");
+      });
+    return () => {
+      live = false;
+    };
+  }, [token]);
+
+  return state;
+}
+```
+
 - [ ] **Step 4: Write `components/files/GoogleDrivePicker.tsx`**
 
 ```tsx
@@ -901,6 +1080,7 @@ export function openPicker(o: {
  */
 
 import { useState } from "react";
+import Link from "next/link";
 import { Loader2, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/dashboard/DashboardUI";
 import {
@@ -910,16 +1090,15 @@ import {
   type DocumentKind,
   type StoredDocument,
 } from "@/lib/api";
-import { isPickerHost } from "@/lib/googleDrive";
+import { useDriveAvailability } from "@/lib/useDriveAvailability";
 import { loadGoogleScripts, openPicker, pickerToken, PickerError, signedInEmail, type PickedFile } from "@/lib/googlePicker";
 
 type FileResult = { name: string; ok: boolean; message: string | null };
 
 function failureMessage(err: unknown): string {
-  if (err instanceof ApiError) {
-    if (err.status === 503) return "Google Drive isn't set up yet";
-    return err.message;
-  }
+  // ApiError.message is the body's `error` (the API's { error, code } shape).
+  // `picker_not_configured` is handled before this, so its setting name never shows.
+  if (err instanceof ApiError) return err.message;
   return "Couldn't import that file. Try again.";
 }
 
@@ -930,6 +1109,7 @@ export default function GoogleDrivePicker({
   kind,
   mode = "files",
   label = "Google Drive",
+  unavailable = "message",
   onImported,
   onPickedDoc,
 }: {
@@ -941,15 +1121,32 @@ export default function GoogleDrivePicker({
   /** "doc": one Google Doc, not imported, handed to `onPickedDoc` (essay links). */
   mode?: "files" | "doc";
   label?: string;
+  /** When Drive can't be used here: say so (default), or render nothing for an optional entry point. */
+  unavailable?: "message" | "hide";
   onImported?: (docs: StoredDocument[]) => void;
   onPickedDoc?: (file: PickedFile) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<FileResult[]>([]);
+  const [notSetUp, setNotSetUp] = useState(false);
+  const availability = useDriveAvailability(token);
 
-  if (typeof window !== "undefined" && !isPickerHost(window.location.hostname)) {
-    return <p className="font-sans text-[12px] text-muted-foreground">Google Drive isn&apos;t available on preview builds.</p>;
+  if (availability === "not-set-up" || notSetUp) {
+    return unavailable === "hide" ? null : <p className="font-sans text-[12px] text-muted-foreground">Google Drive isn&apos;t set up yet.</p>;
+  }
+  if (availability === "preview") {
+    return unavailable === "hide" ? null : <p className="font-sans text-[12px] text-muted-foreground">Google Drive isn&apos;t available on preview builds.</p>;
+  }
+  if (availability === "not-connected") {
+    return unavailable === "hide" ? null : (
+      <p className="font-sans text-[12px] text-muted-foreground">
+        Connect Google to pick from Drive.{" "}
+        <Link href="/dashboard/counselor/data-hub#apps" className="font-medium text-primary hover:text-primary-hover">
+          Connected apps
+        </Link>
+      </p>
+    );
   }
 
   async function start() {
@@ -974,6 +1171,10 @@ export default function GoogleDrivePicker({
       }
       await importAll(token, picked);
     } catch (err) {
+      if (err instanceof ApiError && err.code === "picker_not_configured") {
+        setNotSetUp(true);
+        return;
+      }
       if (err instanceof PickerError) {
         setError(err.reason === "popup" ? "Allow pop-ups for Meridies to pick from Drive" : "Google didn't open the picker. Try again.");
       } else {
@@ -1041,7 +1242,7 @@ Expected: PASS. The UI spec stays failing until Task 4 mounts the button.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add lib/googlePicker.ts components/files/GoogleDrivePicker.tsx e2e/googleStubs.ts e2e/auth/google-drive.spec.ts
+git add lib/googlePicker.ts lib/useDriveAvailability.ts components/files/GoogleDrivePicker.tsx e2e/googleStubs.ts e2e/auth/google-drive.spec.ts
 git commit -m "Google Drive picker: drive.file-only browser token, same-account check, Picker with app id, imports two at a time
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1057,10 +1258,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: `e2e/auth/google-drive.spec.ts` (append the "type list" describe)
 
 **Interfaces:**
-- Consumes: `typeRows`, `confirmPayload`, `progressText`, `isTerminal`, `KIND_LABELS`, `BASIS_LABEL`, `TypeRow` (Task 1); `confirmDocumentTypes`, `getExtractionStatus`, `StoredDocument`, `ExtractionState`.
+- Consumes: `typeRows`, `confirmPayload`, `progressText`, `isTerminal`, `hasUnfinished`, `extractionItemCopy`, `KIND_LABELS`, `BASIS_LABEL`, `TypeRow` (Task 1); `confirmDocumentTypes`, `getExtractionStatus`, `retryExtraction`, `StoredDocument`, `ExtractionState`.
 - Produces:
-  - `<TypeList token docs onConfirmed(docs: StoredDocument[]) onClose() />`, rendered inside a `Modal` by the caller.
-  - `useExtractionProgress(token: string | null, ids: string[]): ExtractionState[]`, which polls every 2 s until every state is terminal or the component unmounts.
+  - `<TypeList token docs onConfirmed(docs: StoredDocument[]) onClose() />`, rendered inside a `Modal` by the caller. A finished `empty` PDF reads "This PDF is a scan", another `empty` file "No readable text in this file", a `failed` file "Couldn't read this file" with **Try again**.
+  - `useExtractionProgress(token: string | null, ids: string[]): { states: ExtractionState[]; retry(ids: string[]): Promise<void> }`. It polls every 2 s only while some state is `queued` or `reading`, stops as soon as none is (or on unmount), and restarts only when `retry` is called.
 
 - [ ] **Step 1: Write the failing UI tests** (append to `e2e/auth/google-drive.spec.ts`)
 
@@ -1069,6 +1270,7 @@ test.describe("type list", () => {
   test.beforeEach(async ({ page }) => {
     await page.route(IMPORT, (r) => r.abort());
     await page.route("**/files/documents/confirm-types", (r) => r.abort());
+    await stubProviders(page);
     await page.setViewportSize(DESKTOP);
   });
 
@@ -1093,7 +1295,7 @@ test.describe("type list", () => {
       requests++;
       sent = r.request().postDataJSON();
       await new Promise((res) => setTimeout(res, 300));
-      return r.fulfill({ contentType: "application/json", body: JSON.stringify({ results: sent!.items.map((i) => ({ documentId: i.documentId, status: "confirmed", reason: null, document: { ...docs.find((d) => d.id === i.documentId), kind: i.kind, kindConfirmed: true } })) }) });
+      return r.fulfill({ contentType: "application/json", body: JSON.stringify({ results: sent!.items.map((i) => ({ documentId: i.documentId, status: "confirmed", reason: null, document: { ...docs.find((d) => d.id === i.documentId), kind: i.kind, kindConfirmed: true, availableToLlm: true } })) }) });
     });
     await page.route("**/files/documents/extraction-status*", (r) => r.fulfill({ contentType: "application/json", body: JSON.stringify([{ documentId: docs[0].id, state: "done" }, { documentId: docs[1].id, state: "empty" }]) }));
     test.skip(!(await openStudentFolder(page)), "No student folder for this counselor");
@@ -1105,6 +1307,7 @@ test.describe("type list", () => {
     await looksRight.click();
     await looksRight.click({ force: true }).catch(() => undefined);
     await expect(list.getByText("Text ready for 1 file · 1 had no readable text")).toBeVisible();
+    await expect(list.getByText("This PDF is a scan")).toBeVisible();
     expect(requests).toBe(1);
     expect(sent!.items.map((i) => i.documentId)).toEqual([docs[0].id, docs[1].id]);
     await expect(list.getByText("Mystery.pdf")).toBeVisible();
@@ -1116,7 +1319,7 @@ test.describe("type list", () => {
     await page.route("**/files/documents/confirm-types", (r) => {
       requests++;
       return r.fulfill({ contentType: "application/json", body: JSON.stringify({ results: [
-        { documentId: docs[0].id, status: "confirmed", reason: null, document: { ...docs[0], kindConfirmed: true } },
+        { documentId: docs[0].id, status: "confirmed", reason: null, document: { ...docs[0], kindConfirmed: true, availableToLlm: true } },
         { documentId: docs[1].id, status: "refused", reason: "You can't edit that student's files.", document: null },
       ] }) });
     });
@@ -1135,7 +1338,7 @@ test.describe("type list", () => {
     const docs = await pickThree(page);
     await page.route("**/files/documents/confirm-types", (r) => {
       const body = r.request().postDataJSON() as { items: { documentId: string }[] };
-      return r.fulfill({ contentType: "application/json", body: JSON.stringify({ results: body.items.map((i) => ({ documentId: i.documentId, status: "confirmed", reason: null, document: { ...docs.find((d) => d.id === i.documentId), kindConfirmed: true } })) }) });
+      return r.fulfill({ contentType: "application/json", body: JSON.stringify({ results: body.items.map((i) => ({ documentId: i.documentId, status: "confirmed", reason: null, document: { ...docs.find((d) => d.id === i.documentId), kindConfirmed: true, availableToLlm: true } })) }) });
     });
     let polls = 0;
     await page.route("**/files/documents/extraction-status*", (r) => {
@@ -1167,6 +1370,61 @@ test.describe("type list", () => {
     expect(requests).toBe(0);
     await expect(page.getByText("Not categorized").first()).toBeVisible();
   });
+
+  /** confirm-types answers every row as confirmed and readable by AxIS. */
+  async function confirmAll(page: Page, docs: ReturnType<typeof storedDoc>[]) {
+    await page.route("**/files/documents/confirm-types", (r) => {
+      const body = r.request().postDataJSON() as { items: { documentId: string; kind: string }[] };
+      return r.fulfill({ contentType: "application/json", body: JSON.stringify({ results: body.items.map((i) => ({ documentId: i.documentId, status: "confirmed", reason: null, document: { ...docs.find((d) => d.id === i.documentId), kind: i.kind, kindConfirmed: true, availableToLlm: true } })) }) });
+    });
+  }
+
+  test("a failed file says so and Try again retries it and resumes polling", async ({ page }) => {
+    const docs = await pickThree(page);
+    await confirmAll(page, docs);
+    let phase: "failed" | "queued" | "done" = "failed";
+    let retried: { ids: string[] } | null = null;
+    await page.route("**/files/documents/extraction-retry", (r) => {
+      retried = r.request().postDataJSON();
+      phase = "queued";
+      return r.fulfill({ contentType: "application/json", body: JSON.stringify({ retried: [docs[0].id] }) });
+    });
+    await page.route("**/files/documents/extraction-status*", (r) => {
+      const state = phase;
+      if (phase === "queued") phase = "done";
+      return r.fulfill({ contentType: "application/json", body: JSON.stringify([{ documentId: docs[0].id, state }, { documentId: docs[1].id, state: "done" }]) });
+    });
+    test.skip(!(await openStudentFolder(page)), "No student folder for this counselor");
+    await page.getByRole("button", { name: "Google Drive" }).click();
+    const list = page.getByRole("dialog", { name: /what are these files/i });
+    await list.getByRole("button", { name: "Looks right" }).click();
+    await expect(list.getByText("Couldn't read this file")).toBeVisible();
+    await expect(list.getByText("Text ready for 1 file · 1 couldn't be read")).toBeVisible();
+    await expect(list.getByText("This PDF is a scan")).toHaveCount(0);
+    await list.getByRole("button", { name: "Try again" }).click();
+    await expect(list.getByText("Text ready for 2 files")).toBeVisible({ timeout: 10_000 });
+    await expect(list.getByText("Couldn't read this file")).toHaveCount(0);
+    expect(retried).toEqual({ ids: [docs[0].id] });
+  });
+
+  test("no more status requests once every item has finished", async ({ page }) => {
+    const docs = await pickThree(page);
+    await confirmAll(page, docs);
+    let polls = 0;
+    await page.route("**/files/documents/extraction-status*", (r) => {
+      polls++;
+      return r.fulfill({ contentType: "application/json", body: JSON.stringify([{ documentId: docs[0].id, state: "done" }, { documentId: docs[1].id, state: "empty" }]) });
+    });
+    test.skip(!(await openStudentFolder(page)), "No student folder for this counselor");
+    await page.getByRole("button", { name: "Google Drive" }).click();
+    const list = page.getByRole("dialog", { name: /what are these files/i });
+    await list.getByRole("button", { name: "Looks right" }).click();
+    await expect(list.getByText("Text ready for 1 file · 1 had no readable text")).toBeVisible();
+    const settled = polls;
+    expect(settled).toBe(1);
+    await page.waitForTimeout(6_000);
+    expect(polls).toBe(settled);
+  });
 });
 ```
 
@@ -1178,25 +1436,32 @@ Expected: FAIL. The list doesn't exist yet.
 ```ts
 "use client";
 
-import { useEffect, useState } from "react";
-import { getExtractionStatus, type ExtractionState } from "./api";
-import { isTerminal } from "./googleDrive";
+import { useCallback, useEffect, useState } from "react";
+import { getExtractionStatus, retryExtraction, type ExtractionState } from "./api";
+import { hasUnfinished } from "./googleDrive";
 
 const POLL_MS = 2000;
 
 /**
  * Where each confirmed file's text extraction is. Polls every 2 s while the
- * caller is mounted and anything is unfinished. There is no timeout: the
- * server reads two at a time and the rest wait their turn. Unmounting stops
- * polling; the server carries on.
+ * caller is mounted AND some item is queued or reading. As soon as none is
+ * (every item is done, empty, failed or otherwise final) the timer is not
+ * set again: nothing polls until `retry` re-queues an item. There is no
+ * timeout: the server reads two at a time, leases each item and marks it
+ * `failed` after 3 attempts, so every item ends. Unmounting stops polling;
+ * the server carries on.
  */
-export function useExtractionProgress(token: string | null, ids: string[]): ExtractionState[] {
-  const [states, setStates] = useState<ExtractionState[]>(() => ids.map(() => "queued"));
+export function useExtractionProgress(
+  token: string | null,
+  ids: string[]
+): { states: ExtractionState[]; retry: (ids: string[]) => Promise<void> } {
+  const [byId, setById] = useState<Record<string, ExtractionState>>({});
+  // Bumped by retry: the polling effect restarts, and only then.
+  const [round, setRound] = useState(0);
   const key = ids.join(",");
 
   useEffect(() => {
     const list = key ? key.split(",") : [];
-    setStates(list.map(() => "queued"));
     if (!token || list.length === 0) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1204,10 +1469,11 @@ export function useExtractionProgress(token: string | null, ids: string[]): Extr
       try {
         const rows = await getExtractionStatus(token, list);
         if (!live) return;
-        const byId = new Map(rows.map((r) => [r.documentId, r.state]));
-        const next = list.map((id) => byId.get(id) ?? "queued");
-        setStates(next);
-        if (next.every(isTerminal)) return;
+        const answered: Record<string, ExtractionState> = {};
+        for (const r of rows) answered[r.documentId] = r.state;
+        setById((prev) => ({ ...prev, ...answered }));
+        // Stop here: nothing is queued or reading. Only retry starts polling again.
+        if (!hasUnfinished(list.map((id) => answered[id] ?? "queued"))) return;
       } catch {
         // A failed poll is not a failed extraction: try again next tick.
       }
@@ -1218,9 +1484,24 @@ export function useExtractionProgress(token: string | null, ids: string[]): Extr
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [token, key]);
+  }, [token, key, round]);
 
-  return states;
+  const retry = useCallback(
+    async (retryIds: string[]) => {
+      if (!token || retryIds.length === 0) return;
+      try {
+        const { retried } = await retryExtraction(token, retryIds);
+        setById((prev) => ({ ...prev, ...Object.fromEntries(retried.map((id) => [id, "queued" as const])) }));
+      } catch {
+        // Nothing was re-queued: the item keeps its "Couldn't read this file" line and its button.
+        return;
+      }
+      setRound((n) => n + 1);
+    },
+    [token]
+  );
+
+  return { states: ids.map((id) => byId[id] ?? "queued"), retry };
 }
 ```
 
@@ -1238,14 +1519,16 @@ export function useExtractionProgress(token: string | null, ids: string[]): Extr
  * request and stay unconfirmed. A guess not read from the text carries Please
  * check. Financial and IEP/504 guesses come kept out of AI. After confirming,
  * the server extracts text for AxIS two files at a time, and this list shows
- * where that is ("Reading 3 of 10…") for as long as it stays open.
+ * where that is ("Reading 3 of 10…") for as long as it stays open and anything
+ * is unfinished. A scan (an empty PDF) is a note, not an error; a failed file
+ * says so and has Try again, which re-queues it and resumes polling.
  */
 
 import { useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge, Button } from "@/components/dashboard/DashboardUI";
 import { confirmDocumentTypes, type DocumentKind, type StoredDocument } from "@/lib/api";
-import { BASIS_LABEL, confirmPayload, KIND_LABELS, progressText, typeRows, type TypeRow } from "@/lib/googleDrive";
+import { BASIS_LABEL, confirmPayload, extractionItemCopy, KIND_LABELS, progressText, typeRows, type TypeRow } from "@/lib/googleDrive";
 import { useExtractionProgress } from "@/lib/useExtractionProgress";
 
 const KINDS = Object.keys(KIND_LABELS) as DocumentKind[];
@@ -1265,8 +1548,9 @@ export default function TypeList({
   const [refused, setRefused] = useState<Record<string, string>>({});
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [reading, setReading] = useState<string[]>([]);
-  const states = useExtractionProgress(token, reading);
+  const [reading, setReading] = useState<StoredDocument[]>([]);
+  const [retrying, setRetrying] = useState<string[]>([]);
+  const { states, retry } = useExtractionProgress(token, reading.map((d) => d.id));
   const progress = useMemo(() => progressText(states), [states]);
 
   const set = (id: string, patch: Partial<TypeRow>) =>
@@ -1283,13 +1567,20 @@ export default function TypeList({
       const nope = Object.fromEntries(results.filter((r) => r.status === "refused").map((r) => [r.documentId, r.reason ?? "Couldn't confirm this one."]));
       setRefused(nope);
       setRows((list) => list.filter((r) => !confirmed.some((d) => d.id === r.documentId)));
-      setReading(confirmed.filter((d) => d.availableToLlm).map((d) => d.id));
+      setReading(confirmed.filter((d) => d.availableToLlm));
       onConfirmed(confirmed);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't confirm these. Try again.");
     } finally {
       setSending(false);
     }
+  }
+
+  async function tryAgain(id: string) {
+    if (retrying.includes(id)) return;
+    setRetrying((list) => [...list, id]);
+    await retry([id]);
+    setRetrying((list) => list.filter((x) => x !== id));
   }
 
   return (
@@ -1337,6 +1628,26 @@ export default function TypeList({
       )}
 
       {progress && <p className="mt-3 font-sans text-[12.5px] text-foreground" aria-live="polite">{progress}</p>}
+      {reading.some((d, i) => extractionItemCopy(states[i], d.filename, d.mimeType)) && (
+        <ul className="mt-2 space-y-1.5">
+          {reading.map((d, i) => {
+            const item = extractionItemCopy(states[i], d.filename, d.mimeType);
+            if (!item) return null;
+            return (
+              <li key={d.id} className="flex flex-wrap items-center gap-2 font-sans text-[12px] leading-snug">
+                <span className="min-w-0 truncate font-medium text-foreground">{d.title ?? d.filename}</span>
+                <span className={item.tone === "error" ? "text-danger" : "text-muted-foreground"}>{item.text}</span>
+                {item.canRetry && (
+                  <Button size="sm" disabled={retrying.includes(d.id)} onClick={() => void tryAgain(d.id)}>
+                    {retrying.includes(d.id) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    Try again
+                  </Button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
       {error && <p className="mt-2 font-sans text-[12px] text-danger">{error}</p>}
 
       <div className="mt-4 flex justify-end gap-2">
@@ -1457,6 +1768,8 @@ In the toolbar's button group (before the **Choose files** `Button`), add:
                 )}
 ```
 
+`GoogleDrivePicker` keeps its default `unavailable="message"` here: on a server without Google Picker settings the toolbar reads "Google Drive isn't set up yet." where the button would be (covered by the Task 2 "Google not set up" test), and no Google script loads.
+
 In each document row's meta line, after `{formatDate(doc.createdAt)}`, add:
 
 ```tsx
@@ -1486,9 +1799,17 @@ Import `Modal` from `@/components/dashboard/DashboardUI` if it isn't already imp
 
 - [ ] **Step 3: `RemoteFilePicker`: the Google branch**
 
-Add the props `kind?: DocumentKind` and `onImportedMany?: (docs: StoredDocument[]) => void`. Then, just before the final `return (` of the connected state, add:
+Add the props `kind?: DocumentKind` and `onImportedMany?: (docs: StoredDocument[]) => void`. Add `const drive = useDriveAvailability(token);` (import it from `@/lib/useDriveAvailability`) beside the component's other hooks, before any early return. Then, just before the final `return (` of the connected state, add the not-set-up message and the Google branch:
 
 ```tsx
+  if (provider === "google" && drive === "not-set-up") {
+    return (
+      <p className="mt-3 rounded-xl border border-border p-3 font-sans text-[12px] text-muted-foreground">
+        Google Drive isn&apos;t set up yet.
+      </p>
+    );
+  }
+
   if (provider === "google") {
     return (
       <div className="mt-3 rounded-xl border border-border p-3">
@@ -1570,15 +1891,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Test: create `e2e/auth/essay-doc.spec.ts`
 
 **Interfaces:**
-- Consumes: `GoogleDrivePicker` in `mode="doc"` (Task 2), `isGoogleDocUrl` (Task 1), `syncEssayDocsAction` returning `notPicked`.
-- Produces: the row menu item "Pick a Google Doc" (counselor viewer). The paste field stays, labelled "Paste a link". A row shows "Pick this Doc to keep it in sync" when its id is in `notPicked` or its pasted URL is a Google Doc that didn't sync.
+- Consumes: `GoogleDrivePicker` in `mode="doc"` and `useDriveAvailability` (Task 2), `isGoogleDocUrl` (Task 1), `syncEssayDocsAction` returning `notPicked`.
+- Produces: the row menu item "Pick a Google Doc" (counselor viewer), shown only when Drive is `"ready"` (hidden when Google isn't set up, as this entry point is optional). The paste field stays, labelled "Paste a link". A row shows "Pick this Doc to keep it in sync" when its id is in `notPicked` or its pasted URL is a Google Doc that didn't sync.
 
 - [ ] **Step 1: Write the failing spec** (`e2e/auth/essay-doc.spec.ts`)
 
 ```ts
 import { expect, test, type Page } from "@playwright/test";
 import { DESKTOP, signedInAs } from "../helpers";
-import { stubGoogle, stubPickerConfig } from "../googleStubs";
+import { stubGoogle, stubPickerConfig, stubProviders } from "../googleStubs";
 
 /** Linking an essay to a Google Doc by picking it. Google and the essay save are stubbed. */
 signedInAs("counselor");
@@ -1598,6 +1919,7 @@ test("Pick a Google Doc saves the picked Doc's link and re-syncs", async ({ page
   const url = "https://docs.google.com/document/d/doc-abc12345/edit";
   await stubGoogle(page, { picks: [{ id: "doc-abc12345", name: "Why us", mimeType: "application/vnd.google-apps.document", url }] });
   await stubPickerConfig(page);
+  await stubProviders(page);
   const id = await findStudent(page);
   test.skip(!id, "No student on this counselor's roster (set E2E_STUDENT_ID)");
   await page.goto(`/dashboard/counselor/students/${id}/application`);
@@ -1609,6 +1931,25 @@ test("Pick a Google Doc saves the picked Doc's link and re-syncs", async ({ page
   const g = await page.evaluate(() => (window as unknown as { __g: { views: string[]; picker: string[] } }).__g);
   expect(g.views).toContain("mime:application/vnd.google-apps.document");
   expect(g.picker).not.toContain("feature:multiselect");
+});
+
+test("Google not set up: no Pick a Google Doc item and no Google script is requested", async ({ page }) => {
+  await page.setViewportSize(DESKTOP);
+  const googleRequests: string[] = [];
+  page.on("request", (req) => {
+    if (/accounts\.google\.com|apis\.google\.com/.test(req.url())) googleRequests.push(req.url());
+  });
+  await stubProviders(page, { pickerReady: false });
+  const id = await findStudent(page);
+  test.skip(!id, "No student on this counselor's roster (set E2E_STUDENT_ID)");
+  await page.goto(`/dashboard/counselor/students/${id}/application`);
+  await page.waitForLoadState("networkidle");
+  const more = page.getByRole("button", { name: /More actions for/ }).first();
+  test.skip((await more.count()) === 0, "No essay rows for this student");
+  await more.click();
+  await expect(page.getByRole("menuitem", { name: "Paste a link" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Pick a Google Doc" })).toHaveCount(0);
+  expect(googleRequests).toEqual([]);
 });
 ```
 
@@ -1624,6 +1965,7 @@ Add state:
 ```tsx
   const [pickingDoc, setPickingDoc] = useState<EssayDoc | null>(null);
   const [notPicked, setNotPicked] = useState<string[]>([]);
+  const drive = useDriveAvailability(token);
 ```
 
 In the sync effect and after the sync inside `edited`, keep the not-picked list:
@@ -1668,7 +2010,7 @@ Add a handler:
 In the row menu's items, replace the single link entry with:
 
 ```tsx
-              ...(!rowMenu.doc.file && !rowMenu.doc.supplementDocId && !self
+              ...(!rowMenu.doc.file && !rowMenu.doc.supplementDocId && !self && drive === "ready"
                 ? [{ key: "pick", label: "Pick a Google Doc", icon: Link2 }]
                 : []),
               ...(!rowMenu.doc.file && !rowMenu.doc.supplementDocId
@@ -1681,7 +2023,7 @@ In the click handler, add `else if (item.key === "pick") setPickingDoc(doc);` be
 Under each row whose id is in `notPicked`, render a one-line prompt. In the list that maps `EssayRow`s, wrap each row:
 
 ```tsx
-                {notPicked.includes(doc.id) && !self && (
+                {notPicked.includes(doc.id) && !self && drive === "ready" && (
                   <li className="px-1 pb-2">
                     <button type="button" onClick={() => setPickingDoc(doc)} className="font-sans text-[12px] font-medium text-primary hover:text-primary-hover">
                       Pick this Doc to keep it in sync
@@ -1700,6 +2042,7 @@ Next to the existing Drive `Modal`, add the Doc picker modal:
             studentId={studentId}
             mode="doc"
             label="Pick a Google Doc"
+            unavailable="hide"
             onPickedDoc={(file) => void linkPicked(pickingDoc, file.url)}
           />
         )}
@@ -1708,7 +2051,9 @@ Next to the existing Drive `Modal`, add the Doc picker modal:
 
 For the existing Drive modal, pass `kind="essay"` to `RemoteFilePicker` (in place of `kindFor={() => "essay"}`), so Essays picks skip the type list (spec §4.4).
 
-Import `GoogleDrivePicker` and `isGoogleDocUrl`.
+Import `GoogleDrivePicker`, `isGoogleDocUrl` and `useDriveAvailability`.
+
+The Essays upload menu's Google Drive item keeps opening the existing Drive modal. Its `RemoteFilePicker` Google branch (Task 4) reads "Google Drive isn't set up yet." when the server has no Picker settings, so that choice never leads to a broken flow.
 
 - [ ] **Step 3: Checks**
 
@@ -1764,7 +2109,7 @@ signedInAs("counselor");
 const provider = (over: Record<string, unknown>) => ({
   provider: "google", available: true, unavailableReason: null, tokensHeld: true,
   accountEmail: "counselor@example.com", connectedAt: new Date().toISOString(),
-  calendarEnabled: false, driveGranted: true, ...over,
+  calendarEnabled: false, driveGranted: true, pickerReady: true, ...over,
 });
 
 test("the Google card says files you pick, no Gmail, and offers Calendar", async ({ page }) => {
@@ -1985,9 +2330,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 In the connected apps section, replace the Google description with:
 
-> **Google is picked files only (drive.file).** Counselors pick files with Google's Picker (`components/files/GoogleDrivePicker.tsx`, `lib/googlePicker.ts`). The browser asks Google for its own token with `drive.file` only and `include_granted_scopes: false`, keeps it in memory, never sends it to the API, and sets `setAppId(appId)` so picked files are granted to our OAuth client. Settings come from `GET /integrations/google/picker-config`; there are no Vercel variables. The Picker runs only on `app.meridiesai.com` and `localhost`; preview builds say so. Calendar is a separate switch (`authorize?add=calendar`), shown On only when `calendarEnabled`. Meet links are offered only then.
+> **Google is picked files only (drive.file).** Counselors pick files with Google's Picker (`components/files/GoogleDrivePicker.tsx`, `lib/googlePicker.ts`). The browser asks Google for its own token with `drive.file` only and `include_granted_scopes: false`, keeps it in memory, never sends it to the API, and sets `setAppId(appId)` so picked files are granted to our OAuth client. Settings come from `GET /integrations/google/picker-config`; there are no Vercel variables. That route answers `503 { error, code: "picker_not_configured" }` when the server lacks them (the message names the setting and is never shown), and `pickerReady` on `GET /integrations/providers` says so up front. `driveAvailability` (`lib/googleDrive.ts`) turns that into "Google Drive isn't set up yet." where a Drive choice is already shown (Files page, `RemoteFilePicker`) and hides optional entries (Essays "Pick a Google Doc"); no Google script loads then. Error bodies are `{ error, code? }`. The Picker runs only on `app.meridiesai.com` and `localhost`; preview builds say so. Calendar is a separate switch (`authorize?add=calendar`), shown On only when `calendarEnabled`. Meet links are offered only then.
 >
-> **Picked files arrive unconfirmed.** The server guesses each type without AI. `components/files/TypeList.tsx` shows one list with the guesses, "Please check" on guesses not read from the text, and Financial / IEP-504 kept out of AI. One **Looks right** sends `POST /files/documents/confirm-types`. After confirming, the server extracts text two files at a time; the list polls `GET /files/documents/extraction-status` every 2 s and shows "Reading k of n…", with no client timeout. Essays picks send `kind: "essay"` and skip the list. Essays link a Google Doc by picking it (**Pick a Google Doc**). The Files page (`FolderBrowser`) is where Drive picking lives for student folders; `StudentFiles`' default export is not mounted.
+> **Picked files arrive unconfirmed.** The server guesses each type without AI. `components/files/TypeList.tsx` shows one list with the guesses, "Please check" on guesses not read from the text, and Financial / IEP-504 kept out of AI. One **Looks right** sends `POST /files/documents/confirm-types`. After confirming, the server extracts text two files at a time; the list polls `GET /files/documents/extraction-status` every 2 s while any file is queued or reading and shows "Reading k of n…", with no client timeout. Polling stops as soon as every file has finished (the server leases each item and marks it `failed` after 3 attempts, so every item ends). A scan reads "This PDF is a scan" (not an error); a failed file reads "Couldn't read this file" with **Try again** (`POST /files/documents/extraction-retry`), which resumes polling. Essays picks send `kind: "essay"` and skip the list. Essays link a Google Doc by picking it (**Pick a Google Doc**). The Files page (`FolderBrowser`) is where Drive picking lives for student folders; `StudentFiles`' default export is not mounted.
 >
 > New Google code calls the API from the browser (`lib/api.ts`), not through Server Actions, so `e2e/auth/google-drive.spec.ts`, `essay-doc.spec.ts` and `google-connections.spec.ts` can stub Google and the API with `page.route` (`e2e/googleStubs.ts`).
 
@@ -2020,7 +2365,7 @@ Counselors pick files with Google's Picker (drive.file only). They confirm every
 
 Spec: meridies-backend `docs/superpowers/specs/2026-10-14-google-connector-design.md` rev 5 (PR #55). Meridies stops asking for access to a counselor's whole Drive.
 
-**Ships after the backend PR is live** (it calls `picker-config`, `confirm-types`, `extraction-status` and the new fields).
+**Ships after the backend PR is live** (it calls `picker-config`, `confirm-types`, `extraction-status`, `extraction-retry` and the new fields, including `pickerReady`).
 
 ## Repos affected
 
@@ -2030,13 +2375,13 @@ Spec: meridies-backend `docs/superpowers/specs/2026-10-14-google-connector-desig
 ## How I tested
 
 - typecheck, lint, build
-- `e2e/pure.spec.ts`: the type-list rules, progress text, Meet gating, disconnected count, preview hosts
+- `e2e/pure.spec.ts`: the type-list rules, progress text, per-item scan / failed copy, Drive availability, Meet gating, disconnected count, preview hosts
 - Signed-in specs with Google and the API stubbed: google-drive, essay-doc, google-connections (results / skips listed below)
 - Manual: Pick a Google Doc word count; an unpicked Doc link asks to be picked
 
 ## Notes
 
-- Drive picking lives on the Files page (`FolderBrowser`, student folders). `StudentFiles`' default export isn't mounted on main.
+- Drive picking lives on the Files page (`FolderBrowser`, student folders). `StudentFiles`' default export isn't mounted on main; removing the unused `StudentFiles` component is a separate later cleanup, not part of this PR.
 - Railway's `GOOGLE_*` variables go on only after this PR is live (spec §9).
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -2058,4 +2403,5 @@ EOF
   - `KindGuess`, `StoredDocument.kindConfirmed`, `ConfirmTypeItem` / `ConfirmTypeResult` and `ExtractionState` are defined in Task 1 and used unchanged in Tasks 2–6.
   - `TypeRow` is defined in `lib/googleDrive.ts` and used by `TypeList`.
   - `PickedFile` is defined in `lib/googlePicker.ts` and used by `GoogleDrivePicker` and `EssaysPanel`.
-- **Review Focus:** each of the five items has its test in Task 2 or 3.
+- **10/15 owner changes:** contract (`pickerReady`, `picker_not_configured`, `extraction-retry`, leases, `{ error, code }` bodies) in Global Constraints and Task 1; Drive availability in Tasks 1, 2, 4, 5; scan vs failed copy and Try again in Tasks 1 and 3; polling stop in Task 3; `StudentFiles` cleanup note in Task 7's PR body.
+- **Review Focus:** each of the seven items has its test in Task 2 or 3.
