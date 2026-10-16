@@ -1,8 +1,9 @@
 # Google connector: picked files only — design
 
-Status: draft for review (revision 3, 2026-10-15: review round applied and
-re-checked against `main` at 5dac8cd, after PR #54). Revision 2 (10/14)
-applied Elvin's answers. Microsoft/OneDrive is a separate design, after a
+Status: draft for review (revision 4, 2026-10-15: Elvin's feedback on the
+type step applied: server-side type guess, one batch confirm). Revision 3
+(same day) applied the review round, re-checked against `main` at 5dac8cd
+after PR #54. Revision 2 (10/14) applied Elvin's answers. Microsoft/OneDrive is a separate design, after a
 permission test (see §8).
 
 ## 1. Goal
@@ -27,6 +28,20 @@ to the rest of their Drive.
 - Drive imports arrive uncategorized, so they stay out of AI until the
   counselor says what they are.
 - Disconnecting is clear everywhere, including the task tracker.
+
+**Added 10/15 (type step):**
+- Saying what each file is must not be file-by-file work. The server
+  guesses each type without AI (filename, Google file type, text patterns
+  from local extraction); the counselor sees one list with the guesses
+  filled in and confirms it with one **Looks right**, editing only wrong or
+  unknown rows.
+- Files picked where the type is implied (Essays) skip the question.
+- The step can be skipped. Unconfirmed files stay out of AI, and what AxIS
+  leaves out says "N files aren't categorized".
+- Sensitive guesses (financial, IEP/504) come pre-filled as kept out of AI;
+  unknown files stay out.
+- Once a type is confirmed, the file's text is extracted for AI use, so an
+  unlocked file actually has text for AxIS.
 
 **What this design assumes (correct me):**
 - The connector must work for real counselors at launch, so it has to pass
@@ -86,6 +101,17 @@ to the rest of their Drive.
   a Doc's text into `parsed_data` whenever its edit time changes and
   `available_to_llm` isn't false. Submission review
   (`lib/submissionReview.ts:274`) also checks only `available_to_llm`.
+- **Text the server can read today:** Google-native files through Drive's
+  text export (`exportGoogleDocText`), and stored .txt, .md and .docx
+  (`lib/documentText.ts`, used for word counts). **There is no PDF text
+  extraction**, so an uploaded or imported PDF never gets `parsed_data`, and
+  the context layer reports it as `empty`. Submission review reads PDFs by
+  attaching them to the model, which is not a text extraction.
+- Document kinds: transcript, resume, essay, test-report, award-letter,
+  financial, common-app, other, recommendation-letter, activity-list,
+  iep-504, counselor-only. The AI reads transcript, resume, test-report
+  and activity-list by default (`AI_DEFAULT_DOCUMENT_KINDS`); every other
+  kind is out unless `ai_access = 'allowed'`.
 - The tracker (`lib/liveDocuments.ts`, `POST /tasks/:id/tracker`) re-reads
   each linked file's edit time; a failed check becomes a caveat on the note
   (`liveProblems`), but a "no activity" verdict can still be saved while
@@ -214,7 +240,9 @@ browser would hold a token that can change the counselor's calendar.
    `POST /integrations/google/files/import`, two at a time, showing each
    file's result. **From `StudentFiles` the request carries no `kind`**
    (no filename guess); only `EssaysPanel` sends `essay`.
-8. After the imports, the app asks the counselor what each file is (§4.4).
+8. After the imports, the app shows the type list with the server's
+   guesses (§4.4); one **Looks right** confirms them. A pick from Essays
+   skips this.
 9. The browser token stays in memory, is never sent to our API, and is
    dropped when the Picker closes. It expires within an hour regardless.
 
@@ -253,23 +281,47 @@ wrong-account case rare.
       path-encoded, opened only with the caller's own grant, and never used
       to build anything but a fixed `googleapis.com` URL (already true; the
       tests pin it).
-    - **Uncategorized on arrival, and kept out of AI by the switch.** When
-      the request names no `kind`, the file is filed as `other` **with
-      `available_to_llm = false`, no text export, and `parse_status`
-      `pending`**. A request that names a kind keeps today's behaviour (the
+    - **Unconfirmed on arrival, kept out of AI, with a guess.** When the
+      request names no `kind`, the file is filed as `other` with
+      **`kind_confirmed = false`, `available_to_llm = false`, no
+      `parsed_data`, `parse_status` `pending`**, and the server's guess in
+      `kind_guess` (§4.3.1). The response carries the guess. A request that
+      names a kind is confirmed at once and keeps today's behaviour (the
       Essays panel sends `essay`).
     - The `picked_file_unavailable` 409 (§4.2).
   - Disconnect is unchanged: it already revokes at Google first.
-- **Choosing a type (`PATCH /files/documents/:id`).** The "What is this
-  file?" step (§4.4) sends `{ kind, availableToLlm }`. When `availableToLlm`
-  turns true on a document with `external_provider = 'google'` that is a
-  Google Doc and has no parsed text, the route exports its text then
-  (`exportDocText`, best effort: on failure it stays `pending` and the next
-  tracker read that sees an edit fills it). Whether a model may then read
-  it is still `documentAiDecision`'s call: financial, IEP/504, award
+- **Confirming types: `POST /files/documents/confirm-types`** (approved
+  counselor, edit access to each document's student, rate-limited like the
+  other writes). Body `{ items: [{ documentId, kind, keepOut }] }`, 1 to 50
+  items, strict. One call confirms the whole list: for each item it sets
+  `kind`, `kind_confirmed = true`, `available_to_llm = !keepOut`, and
+  answers per item (`confirmed`, or `refused` with a reason). Items are
+  independent: a refused one doesn't stop the others. `PATCH
+  /files/documents/:id` with a `kind` also confirms (one file edited from
+  its row).
+- **Text for AI after confirming.** For each confirmed document with
+  `available_to_llm` true, the server extracts its text after the response
+  (like submission review) and writes `parsed_data` and `parse_status`
+  (`parsed`, or `empty` when there is no text: a scan, an image). The
+  extractor by type, all local, no AI:
+  - Google Docs and Slides: Drive's text export (`exportGoogleDocText`);
+    Google Sheets: Drive's CSV export (first sheet);
+  - PDF (including Docs stored as PDF): **a new PDF text extractor**
+    (`unpdf`, the serverless build of Mozilla's pdf.js, pure JavaScript),
+    on the stored copy, capped at 25 MB, 50 pages, 200,000 characters and
+    10 seconds; a failure leaves `parse_status` `failed` and AxIS reports
+    the file as `empty`;
+  - .docx, .txt, .md: `lib/documentText.ts` on the stored copy.
+  A file kept out of AI gets no extraction. Whether a model may read the
+  result is still `documentAiDecision`'s call: financial, IEP/504, award
   letters, recommendation letters and counselor-only stay out by kind.
+  This also gives drag-and-drop PDFs text when their type is set, which
+  they never had.
 - **Every path that puts a document into a prompt applies
-  `documentAiDecision`**, not `available_to_llm` alone:
+  `documentAiDecision`**, not `available_to_llm` alone. The decision gains
+  one first rule: **`kind_confirmed = false` is `not-categorized`**, before
+  keep-out, so an unconfirmed file is refused and reported for the right
+  reason. The paths:
   - the tracker (`routes/tasks.ts:1032`): `readable` keeps only documents
     the decision allows, with the practice's document-reading setting;
   - submission review (`lib/submissionReview.ts:274`): refuses a document
@@ -281,6 +333,12 @@ wrong-account case rare.
   A shared helper (`documentReadable(doc, practiceReadsDocuments)`) keeps
   the three calls identical. AGENTS.md "Documents and AI context" says that
   any new reader must use it.
+- **What AxIS leaves out.** The context layer reports unconfirmed files as
+  one `omitted` entry, `{ reason: "not-categorized", count, message: "N
+  files aren't categorized." }`, instead of one line per file, and
+  `GET /students/:id/ai-context` shows it. The app links that line to the
+  student's type list (§4.4). The tracker's note says the same when a
+  task's attached files are unconfirmed.
 - **Essays linked to a Google Doc (`routes/application.ts`).** The sync at
   `:919-923` is unchanged in shape and now works under `drive.file` for a
   Doc the counselor picked. A Doc URL that was not picked (pasted, or set
@@ -313,7 +371,72 @@ wrong-account case rare.
     Gmail), no restricted scope, no CASA.
   - `DATABASE_MIGRATION_INSTRUCTIONS.md:234`: the reconnect note matches
     the new scopes.
-- No migration.
+- **One migration** (`documents_kind_confirmation`), additive:
+  - `documents.kind_confirmed boolean not null default true`: every
+    existing document counts as confirmed, so nothing that works today
+    changes; only a Google import with no kind writes false;
+  - `documents.kind_guess jsonb null`: `{ kind, basis, matched }` (§4.3.1);
+  - an index on `(student_id) where kind_confirmed = false`, for the list
+    of a student's unconfirmed files;
+  - both columns added to `ai-allowlist.ts` where the documents loader
+    reads them, and `kind_confirmed` to `REQUIRED_SCHEMA`, because the
+    context layer's documents loader selects it on every AxIS read.
+  - Students can't write either column (the existing
+    `documents_guard_student_restricted` trigger is extended), and the
+    column grants follow the existing `documents` pattern.
+  **Deploy order:** apply the migration on production before the backend PR
+  merges (Railway deploys `main` on merge; `REQUIRED_SCHEMA` holds the
+  previous build if it is missed). The previous code ignores the new
+  columns, so applying first is safe.
+
+#### 4.3.1 The type guess (`lib/documentGuess.ts`)
+
+A pure function, `guessKind({ filename, mimeType, text })`, returning
+`{ kind, basis, matched }` or `{ kind: null }` for unknown. **No model is
+ever called**: the module imports nothing from `lib/anthropic.ts` or
+`lib/axis/`, and a unit test fails if it does.
+
+- **Text for the guess** comes from the same local extractors as above, run
+  at import on the bytes being imported, limited to the first 3 pages or
+  20,000 characters. It is used only inside `guessKind`, then dropped:
+  never stored, never logged, never sent anywhere. `matched` holds the
+  keyword from our list that matched ("Form 1040"), never document text.
+- **Signals, strongest first:**
+  1. Text patterns, whole words, ignoring case unless noted:
+     - financial: "Form 1040", "W-2", "1099", "Student Aid Report",
+       "FAFSA", "CSS Profile", "tax return";
+     - iep-504: "Individualized Education Program", "504 Plan",
+       "Section 504", "IEP" (capitals only);
+     - transcript: "Official Transcript", "Unofficial Transcript",
+       "Academic Transcript", "Cumulative GPA";
+     - test-report: "Score Report", "College Board", "SAT" and "ACT"
+       (capitals only, next to "score"), "AP Scores";
+     - award-letter: "Financial Aid Award", "Award Letter", "Offer of
+       Financial Aid";
+     - recommendation-letter: "Letter of Recommendation", "Recommendation
+       for";
+     - resume: "Resume", "Curriculum Vitae";
+     - activity-list: "Activities List", "Extracurricular Activities".
+  2. Filename keywords (`transcript`, `1040`, `w2`, `fafsa`, `iep`, `504`,
+     `score`, `sat`, `act`, `resume`, `cv`, `recommendation`, `rec letter`,
+     `award`, `activities`), split on separators so "act" never matches
+     "contract".
+  3. The Google file type, weakest: a Google Sheet named like a list leans
+     activity-list; nothing else is guessed from type alone.
+- **Ties and conflicts:** a sensitive signal (financial, iep-504) anywhere
+  wins over any other, so a transcript that mentions FAFSA is guessed
+  financial and kept out; otherwise the strongest signal wins, and two
+  different kinds at the same strength give unknown.
+- **Pre-filled "kept out of AI":** a financial or iep-504 guess comes with
+  `keepOut: true`, so confirming it leaves the file out even if the
+  counselor later allows the kind. Unknown files are `other`, unconfirmed,
+  and out. (Award letters, recommendation letters and counselor-only are
+  already out by kind.)
+- `basis` is `text`, `filename` or `type`, shown to the counselor as "from
+  the file's text", "from the file name" or "from the file type".
+- Unit-tested against a table of filenames and short texts, including the
+  false friends ("Contract.pdf", "Pact essay", an essay that mentions its
+  IEP).
 
 Why the Picker settings come from the API rather than Vercel environment
 variables: all Google settings live in one place (Railway), and the app
@@ -327,16 +450,26 @@ needs no new Vercel variables.
   view and the cap, imports the picked files, reports each result
   (imported, too big, can't be imported, unavailable, failed). From
   `StudentFiles` it sends no `kind`.
-- **"What is this file?" step:** after a pick, each imported file is listed
-  with a type menu (transcript, resume, essay, test report, activity list,
-  Common App, award letter, financial, recommendation letter, IEP/504,
-  counselor-only, other), a "Keep out of AI" checkbox, and a "Skip" that
-  leaves it uncategorized. Choosing a type sends
-  `PATCH /files/documents/:id { kind, availableToLlm: !keepOut }`. The copy:
-  "AxIS doesn't read a file until you say what it is. Financial documents,
-  IEP/504 plans, award letters, recommendation letters and counselor-only
-  files stay out of AxIS even then." Skipped files show the same prompt on
-  the file's row later.
+- **The type list (one step for the whole pick):** after a pick, one list
+  shows every imported file with its type pre-filled from the server's
+  guess and where the guess came from ("from the file name"), a "Keep out
+  of AI" checkbox (pre-ticked for financial and IEP/504 guesses), and
+  unknown rows marked "Choose a type". One **Looks right** button sends
+  `POST /files/documents/confirm-types` with every row that has a type;
+  the counselor edits only wrong or unknown rows first. Unknown rows left
+  as they are stay unconfirmed. **Not now** closes the list without
+  confirming anything. Type menu: transcript, resume, essay, test report,
+  activity list, Common App, award letter, financial, recommendation
+  letter, IEP/504, counselor-only, other. The copy: "AxIS doesn't read
+  these files until you confirm their types. Financial documents, IEP/504
+  plans, award letters, recommendation letters and counselor-only files
+  stay out of AxIS even then."
+- **Later:** unconfirmed files carry a "Not categorized" tag on their row,
+  and the student's Files view has one **Categorize N files** button that
+  opens the same list for all of them. The AI context's "N files aren't
+  categorized" line opens it too.
+- **Essays skip it:** a pick from `EssaysPanel` is sent as `essay` and
+  confirmed at import.
 - **Essays (`EssaysPanel`):** linking an essay to a Google Doc is **Pick a
   Google Doc**, which opens the Picker for one Doc (Docs only) and saves
   its link as `external_url`. Picking grants the Doc to Meridies, so word
@@ -403,9 +536,15 @@ needs no new Vercel variables.
   to the **Google Picker API only** and to the HTTP referrer
   `https://app.meridiesai.com/*` (the dev key: `http://localhost:3000/*`).
 - File ids from the browser are untrusted input (§4.3).
-- New Drive files arrive kept out of AI (`available_to_llm = false`, no
-  text), and every reader applies `documentAiDecision`, so a picked tax
-  form or IEP never reaches a model by default, by two independent checks.
+- New Drive files arrive unconfirmed and kept out of AI
+  (`kind_confirmed = false`, `available_to_llm = false`, no stored text),
+  and every reader applies `documentAiDecision`, so a picked tax form or
+  IEP never reaches a model by default, by two independent checks. The
+  text read for the type guess never leaves the guess function.
+- PDFs are untrusted input to the new extractor: it runs with the size,
+  page, character and time caps in §4.3, on the server's stored copy, and
+  its output is treated like any document text (wrapped as untrusted data
+  wherever it enters a prompt).
   Existing switches (keep out of AI, FERPA waiver) are unchanged.
 - Disconnect revokes at Google, then deletes our copy of the token.
 - This matches the public privacy policy, section 4 (meridiesai.com/privacy):
@@ -429,8 +568,10 @@ the rotated production client secret verified with Google.
   `http://localhost:3000/dashboard/counselor/data-hub/callback/google`.
 
 **Left:**
-1. Remove the `https://meridiesai.com/*` referrer from the production
-   Picker key if it is still there; the Picker runs only on `app.`.
+1. Optional tidy-up: the production Picker key's `https://meridiesai.com/*`
+   referrer can go, since the Picker runs only on `app.`. Leaving it is
+   harmless (the key reaches only the Picker API, and the Picker shows
+   nothing without the counselor's own sign-in).
 2. **Railway variables, only after both PRs are live (§9):**
    `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `INTEGRATION_TOKEN_KEY`
    (new, `openssl rand -base64 32`; never change it afterwards),
@@ -460,6 +601,8 @@ the rotated production client secret verified with Google.
 | Server can't open a picked file | The `picked_file_unavailable` message (§4.2) |
 | File over 25 MB, or a type that can't be exported | That file's message; the other files still import |
 | Essay Doc not picked | "Pick this Doc to keep it in sync" |
+| Type list closed with **Not now** | Nothing confirmed; the files show "Not categorized" and AxIS says "N files aren't categorized" |
+| A confirmed file has no readable text (a scan) | AxIS lists it as empty; the file itself is fine |
 | Calendar not turned on | "Turn on Google Calendar to add Meet links" with the switch; the meeting form keeps its contents |
 | Google disconnected or grant broken | "Google disconnected" / "Reconnect Google", on the Connections card and on tracked tasks |
 | Google rate-limits | The existing 429 message |
@@ -481,12 +624,27 @@ the rotated production client secret verified with Google.
   - `picker-config`: 503 per missing setting, 409 without a grant, 409
     `drive_not_granted` without `drive.file`, `maxFiles` from config and
     bounded;
-  - import: a Google import with no kind is `other`, `available_to_llm`
-    false, no `parsed_data`; a named kind is kept; the
-    `picked_file_unavailable` mapping; an unsafe file id is refused before
-    any request;
-  - choosing a type: `PATCH` with `availableToLlm: true` on a Google Doc
-    exports its text once;
+  - import: a Google import with no kind is `other`, `kind_confirmed`
+    false, `available_to_llm` false, no `parsed_data`, with a `kind_guess`;
+    a named kind is confirmed and kept; the `picked_file_unavailable`
+    mapping; an unsafe file id is refused before any request;
+  - **the guesser never calls the AI:** `documentGuess.ts` imports nothing
+    from the Anthropic or AxIS modules (a test walks its imports), and an
+    import runs with the Anthropic client stubbed to throw;
+  - the guess table: each kind from text, from filename and from type;
+    sensitive wins a conflict; false friends stay unknown; the text used
+    for the guess is not stored or logged;
+  - **confirm-all applies every row:** `confirm-types` with ten items sets
+    kind, `kind_confirmed` and `available_to_llm` on all ten; a refused
+    item (no edit access) doesn't stop the rest; `keepOut` leaves a file
+    out; over 50 items or an unknown kind is refused;
+  - **a skipped file is still excluded:** an unconfirmed file is refused by
+    the context layer, the tracker and submission review, and the context
+    layer reports one "N files aren't categorized" entry;
+  - **text after confirming:** confirming a PDF, a Google Doc, a Sheet and a
+    .docx (not kept out) writes `parsed_data` for each; a scanned PDF ends
+    `empty`; a kept-out file gets no extraction; the PDF extractor's caps
+    hold on an oversized file;
   - **readers:** an uncategorized import attached to a task is not in the
     tracker's prompt; the same file categorized as a transcript is;
     categorized as financial it is not; submission review refuses an
@@ -511,10 +669,11 @@ the rotated production client secret verified with Google.
      (`scripts/smoke/google-picker.ts <documentId>`: reads the file's
      metadata with the stored grant). Then confirm it gets 404 on a file
      id that was never picked. This proves `setAppId` is right.
-  4. Each file arrives uncategorized and kept out of AI; choose a type for
-     one; check `GET /students/:id/ai-context` shows only that one, and that
-     the tracker's prompt for a task with all four attached holds only that
-     one.
+  4. Each file arrives unconfirmed with a guess; the list shows the
+     guesses; correct one row, leave one unknown, press **Looks right**.
+     Check `GET /students/:id/ai-context` shows the confirmed files that
+     the AI may read, with text, and "1 file isn't categorized"; check the
+     tracker's prompt for a task with all four attached holds only those.
   5. The tracker shows the Doc's edit time after the student edits it.
   6. Create and read back a supplement Doc. Link an essay with **Pick a
      Google Doc** and see its word count sync.
@@ -543,17 +702,23 @@ the rotated production client secret verified with Google.
 
 ## 9. Delivery
 
-1. **Backend PR:** scopes in two steps with the allowlist and same-account
-   rules, `picker-config`, the Calendar code, the `drive.file` read scope,
-   import changes (uncategorized and kept out, unavailable file), the type
-   `PATCH` export, the shared reader rule (tracker, submission review),
+0. **Migration on production first** (`documents_kind_confirmation`, §4.3):
+   dry-run on the local stack, apply to production one file per
+   transaction, verify, and only then merge the backend PR.
+1. **Backend PR:** the migration file, scopes in two steps with the
+   allowlist and same-account rules, `picker-config`, the Calendar code,
+   the `drive.file` read scope, import changes (unconfirmed, kept out, the
+   guess, unavailable file), `documentGuess.ts`, `confirm-types`, text
+   extraction after confirming with the PDF extractor, the "not
+   categorized" omitted entry, the shared reader rule (tracker, submission
+   review),
    essay `doc_not_picked`, tracker `errorCode` / `liveStatus` and the
    no-verdict rule, env, AGENTS.md, LAUNCH_CHECKLIST.md and
    DATABASE_MIGRATION_INSTRUCTIONS.md, tests. Ships first (cross-repo
    rule). Safe to merge while Railway has no `GOOGLE_*` variables: every
    Google route answers 503 as today.
-2. **App PR:** `GoogleDrivePicker`, the "What is this file?" step, Pick a
-   Google Doc in `EssaysPanel`, the `RemoteFilePicker` change, the
+2. **App PR:** `GoogleDrivePicker`, the type list with **Looks right** and
+   **Categorize N files**, Pick a Google Doc in `EssaysPanel`, the `RemoteFilePicker` change, the
    Connections card (copy, labels, Calendar switch), Meet gating in
    `MeetingModal` and `MeetingBooker`, the tracker's disconnected state,
    `lib/api.ts`.
@@ -580,3 +745,8 @@ the rotated production client secret verified with Google.
 5. Essays link to a Google Doc by picking it; a pasted Doc URL asks to be
    picked to keep syncing.
 6. Every other finding of the review round applied as written above.
+7. The type step is a server-side guess (no AI) confirmed in one batch;
+   Essays skip it; it can be skipped; sensitive guesses pre-fill as kept
+   out; text for AI is extracted once a type is confirmed (§4.3, §4.3.1).
+   **Open:** OK to add `unpdf` as the PDF text extractor (needed for both
+   the text guess and AxIS reading confirmed PDFs)?
