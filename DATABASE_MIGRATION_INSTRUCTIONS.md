@@ -418,7 +418,7 @@ set's own section below says what it does and how to check it.
 | 23 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
 | 24 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
 | 25 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
-| 26 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
+| 26 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data (held data follows only the same student) |
 | 27 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
 | 28 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
 | 29 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
@@ -558,8 +558,8 @@ update public.import_items
 
 Once a counselor's saved imports would send more than 50 invitations in all (and Meridies has
 approved none of their imports yet), the import saves its data but holds the invitations; an email
-goes to `ACCESS_REVIEW_EMAIL`. Approve by hand, which releases this import and every later one of
-that counselor:
+goes to `ACCESS_REVIEW_EMAIL`. Approve by hand, which releases every import of that counselor,
+earlier ones included:
 `update public.roster_imports set invites_approved_at = now() where id = '<import id>';`
 The API applies this rule itself; `20261024000061` (below) makes the database apply it too.
 
@@ -752,21 +752,43 @@ select polname from pg_policy where polname in
 
 ## Import invitation review per counselor: `20261024000061`
 
-Apply after `20261023020003` (it replaces that file's `request_import_commit(uuid, integer)` with
-the same signature and body, except the hold). Either order with the code is safe: the API holds
-invitations by the same rule after each commit request and before every send, writing
-`invites_held_reason` through the service role, and the previous code reads that column as before.
-Not in `REQUIRED_SCHEMA`.
+Apply after `20261023020003` (it replaces that file's `request_import_commit(uuid, integer)` and
+`import_claim_invites(uuid, integer)` with the same signatures and bodies, except the hold). Either
+order with the code is safe: the API holds invitations by the same rule after each commit request
+and before every send (through `import_invite_review` once this is applied, else on the service
+role), writing `invites_held_reason` through the service role, and the previous code reads that
+column as before. Not in `REQUIRED_SCHEMA`.
 
 | # | File | What it does |
 |---|---|---|
-| 1 | `20261024000061_import_invite_review_per_counselor.sql` | `request_import_commit` holds an import's invitations when none of the counselor's imports is approved yet and the invitations their saved imports have sent or still hold, plus this import's, pass 50 (it held only a first import over 50, which a split list or a one-row import saved first skipped) |
+| 1 | `20261024000061_import_invite_review_per_counselor.sql` | `private.import_invite_review_of` counts, over every import of the counselor whatever firm it was made in, the invitations their saved imports have sent or still hold; `public.import_invite_review(import)` answers the API; `request_import_commit` and `import_claim_invites` hold an import's invitations past 50 until any of the counselor's imports is approved, and a claim lifts an earlier hold once one is |
 
 Check:
 
 ```sql
-select prosrc like '%v_prior + v_invites > 50%' from pg_proc
- where oid = to_regprocedure('public.request_import_commit(uuid,integer)');   -- true
+select to_regprocedure('public.import_invite_review(uuid)') is not null;   -- true
+select prosrc like '%import_invite_review_of%' from pg_proc
+ where oid = to_regprocedure('public.import_claim_invites(uuid,integer)');   -- true
+```
+
+---
+
+## Held data follows only the same student: `20261024000062`
+
+`accept_invitation` moved the held import data of every pending or revoked invitation the same
+counselor sent to the same address onto whoever accepted, so a sibling invited at a parent's address
+took the other sibling's imported data. This replaces `accept_invitation(text)` (same signature,
+body otherwise `20261017000001`'s) so another invitation's items move only when both invitations
+name the same student (same non-blank full name, ignoring case and spacing), and adds
+`private.invitation_same_student`. Either order with the code is safe: the API already refuses an
+invitation at an address carrying another student's held data; this also closes a race between two
+routes inviting at once. Apply after `20261017000001`. Not in `REQUIRED_SCHEMA`.
+
+Check:
+
+```sql
+select prosrc like '%invitation_same_student%' from pg_proc
+ where oid = to_regprocedure('public.accept_invitation(text)');   -- true
 ```
 
 ---

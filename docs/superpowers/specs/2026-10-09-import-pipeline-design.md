@@ -852,26 +852,41 @@ What shipped differs from the design above in these places; AGENTS.md
   the key because a retry after a failure sends a new invitation). Only the
   uploader sends them. One invitation per address per import: siblings on a
   parent's email are skipped, and the counselor may invite one of them.
-  **Across imports too:** an address whose pending or revoked invitation (the
-  set `accept_invitation` sweeps) already carries a different student's held
-  data is skipped at staging ("Another import is already inviting this
-  address for a different student"), can't be invited from review, and is
-  refused when sending, so a later sibling can't revoke the earlier one's
-  invitation and land both students' data on one account. The same student
-  again (a re-import) still follows their email. Known limit: a firm admin
-  staging a member's import can't read the member's invitations, so the
-  staging check sees nothing for them; the send check (uploader only) still
-  refuses.
+  **Across imports and routes:** `accept_invitation` moves the held items of
+  every pending or revoked invitation from the same counselor at the same
+  address. An address whose such invitation already carries a different
+  student's held data is skipped at staging ("Another import is already
+  inviting this address for a different student"), can't be invited from
+  review, is refused when sending, and is refused by every other route that
+  invites (409 `address_holds_other_student` from `insertInvitation`: single,
+  New student, resend, Mass invite, pipeline, referrals; the old roster send
+  per row). The same student is the same non-blank full name, ignoring case
+  and spacing; a re-import or a resend still follows their email, a nickname
+  or a missing name is another student. Read through the service role for
+  that counselor's own invitations, so imports made in a firm they left, and
+  a member's invitations when a firm admin stages, still count.
+  `20261024000062` applies the same rule inside `accept_invitation`, which
+  closes a race between two routes inviting at once; one counselor's import
+  sends are serialized by a lease. Known limits: a refused item is marked
+  failed and Retry refuses it again until the other invitation is accepted
+  or its data expires; once `20261024000062` is applied, held data whose
+  invitation is resent under another name, or has no name, stays behind and
+  expires; the old roster flow's own rows still follow the address.
 - **Staff approval** (§5.1) is by hand and per counselor, not per import:
   once the invitations a counselor's saved imports have sent or still hold,
   with this import's, pass 50, the import is saved but its invitations wait
-  until Meridies sets `invites_approved_at` on one of their imports (which
-  releases it and every later one), and one email goes to
+  until Meridies sets `invites_approved_at` on any one of their imports
+  (which releases all of them, earlier ones included), and one email goes to
   `ACCESS_REVIEW_EMAIL`. (Amended after review: holding only a first import
-  over 50 let a split list, or a one-row import saved first, skip it.) The
-  API applies the rule after each commit request and before every send;
-  `20261024000061` makes `request_import_commit` apply it too. Items received
-  through a caseload transfer count toward the receiver's 50.
+  over 50 let a split list, or a one-row import saved first, skip it.)
+  Counted over every import of the counselor whatever firm it was made in,
+  never on the caller's RLS view. The API applies the rule after each commit
+  request and before every send (through `import_invite_review`, else the
+  service role, else it holds); `20261024000061` makes `request_import_commit`
+  and `import_claim_invites` apply it too. Items received through a caseload
+  transfer count toward the receiver's 50. The old roster send refuses a
+  practice that has the Import page; Mass invite and single invites carry no
+  file's data and are limited by the daily invite quota only.
 - **Retention** (§5.10) runs on every sweep, outside
   `IMPORT_HOLD_EXPIRY_ENABLED` (which still holds back the 30-day expiry of
   accepted data and its warnings until the app's Ready to apply page ships).

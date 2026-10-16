@@ -2041,10 +2041,17 @@ step 1's and is never gated.
   counts and shapes, numeric min/max only for small numbers (at most 2,100),
   a date column's year range, sheets numbered not named, sensitive columns
   left out; wrapped as untrusted data. Never a real text cell, and a header
-  only when it reads as a label (`headerIsLabel`): a file with no header row
-  makes its first student's row the headers, so a header shaped like a value
-  or like its column is masked as a cell (`maskHeader`), and a row where
-  several do is masked whole (`headerRowIsData`). Its answer is
+  only when it reads as a label (`headerIsLabel`: label words, a number of
+  at most four digits, and no value inside it). A file with no header row
+  makes its first student's row the headers, so a header that holds a value
+  (`headerHoldsValue`: a run of joined digits with five or more digits or
+  three groups, "Cell 555 123 4567", "DOB 05/14/2008"; or an email), any two
+  to four letter words that aren't a label (`<name>`, whatever the case), or
+  one shaped like its column (compared without letter case) is masked as a
+  cell (`maskHeader`). A row with two such strong signals, or half its
+  headers, is masked whole (`headerRowIsData`); a single word shaped like
+  its column ("Sport" over "Soccer") is masked alone but never masks the
+  row, so a real header row keeps its labels. Its answer is
   filtered to the columns it was asked about and targets on the fixed list;
   a score column's exam comes from the file's header. Two retries, then the
   counselor maps by hand. Spend per import (`onUsage` on `runStructured`,
@@ -2064,14 +2071,29 @@ step 1's and is never gated.
   + birthday or grad year + school: suggested; else invite or skip. Siblings on
   a parent's email are never merged, matched or invited on their own;
   `stage_import` keeps one invitation per address and the review's "invite"
-  refuses a second at the same address. Across imports, `heldAddresses.ts`:
-  an address whose pending or revoked invitation (what `accept_invitation`
-  sweeps) carries a different student's held data is skipped at staging and
-  refused when sending (a read that fails holds the batch), because a new
-  invitation would revoke the old one and acceptance would put both
-  students' data on one account. The same student again still follows their
-  email. A firm admin staging a member's import can't read the member's
-  invitations; the send (uploader only) still checks.
+  refuses a second at the same address. **Across imports and routes**
+  (`heldAddresses.ts`): `accept_invitation` moves the held items of every
+  pending or revoked invitation from the same counselor at the same address,
+  so an address whose such invitation carries a different student's held
+  data is skipped at staging, refused when sending, and refused by
+  `insertInvitation` (409 `address_holds_other_student`), which every route
+  that invites uses (single, New student, resend, Mass invite, pipeline,
+  referrals; the old roster send checks per row). Read through the service
+  role, filtered to that counselor's own invitations, so imports made in a
+  firm they left still count; every read error refuses. The same student is
+  the same non-blank full name ignoring case and spacing (`sameStudentName`):
+  a re-import or a resend (which carry the imported name) follow the email;
+  a nickname ("Sam Lee", "Samuel Lee") or a missing name is someone else.
+  `20261024000062` applies the same rule inside `accept_invitation` (another
+  invitation's items move only when both name the same student), which also
+  closes a race between two routes inviting at the same instant; sends of
+  one counselor's imports are serialized by a lease (`import-invites:<id>`,
+  409 while one runs). Known limits: an item refused this way is marked
+  failed, and Retry refuses it again until the other invitation is accepted
+  or its data expires; held data whose invitation the counselor then resends
+  under a different name, or that has no name, stays behind once
+  `20261024000062` is applied and expires; the old roster flow's own rows
+  still follow the address as before.
 - **Staging defaults** (`stage_import`, `private.import_assess`): old values
   read with `import_current_value`; equal values dropped (3.8 = 3.800); rows
   already on the record dropped and counted, near matches kept back as
@@ -2095,19 +2117,28 @@ step 1's and is never gated.
   and tied to the item before the email goes out (`insertInvitation`, then
   `import_link_invitation`, then `emailInvitation` with the Resend
   idempotency key `import-invite/<item>/<invitation>`); 25 per request; the
-  `invites` quota (100 a day, 50 for an account under 14 days). **Meridies
-  looks once per counselor** (`inviteReview`): when the invitations their
-  saved imports have sent or still hold, with this import's, pass 50 and none
-  of their imports is approved yet, the import is saved but its invitations
-  wait (`invites_held_reason = 'first-import-review'`, written through the
-  service role) until Meridies sets `invites_approved_at` on one of their
-  imports by hand, which releases it and every later one; one email goes to
-  `ACCESS_REVIEW_EMAIL`. Splitting a list or saving a one-row import first no
-  longer skips it. Checked after each commit request and again before every
-  send, so it holds without `20261024000061` (which makes
-  `request_import_commit` apply the same rule; either deploy order, not in
-  `REQUIRED_SCHEMA`). Items a caseload transfer brought count toward the
-  receiver's 50.
+  `invites` quota (100 a day, 50 for an account under 14 days), charged only
+  after the batch's held addresses were read. **Meridies looks once per
+  counselor** (`inviteReview`): when the invitations their saved imports have
+  sent or still hold, with this import's, pass 50 and none of their imports
+  is approved yet, the import is saved but its invitations wait
+  (`invites_held_reason = 'first-import-review'`, written through the
+  service role) until Meridies sets `invites_approved_at` on any one of their
+  imports by hand, which releases all of them, earlier ones included; one
+  email goes to `ACCESS_REVIEW_EMAIL`. Splitting a list or saving a one-row
+  import first doesn't skip it. Counted over every import whose counselor is
+  the uploader, never on the caller's RLS client (which hides imports made in
+  a firm they left, and a member's solo imports from a firm admin): through
+  `public.import_invite_review` when `20261024000061` is applied, else on the
+  service role, and held when it can ask neither. Checked after each commit
+  request and again before every send; `20261024000061` also makes
+  `request_import_commit` and `import_claim_invites` apply it (either deploy
+  order, not in `REQUIRED_SCHEMA`). Items a caseload transfer brought count
+  toward the receiver's 50. The old roster send (`/roster/imports/:id/send`)
+  answers 409 `use_import` for a practice with the Import page, so it is no
+  way around the review. Mass invite and single invites are not import
+  invitations and carry no file's data: the daily `invites` quota (and Mass
+  invite's 10 sends an hour) is their only volume limit.
 - **Retention** (`retention.ts`, `import_retention`), every sweep, not behind
   `IMPORT_HOLD_EXPIRY_ENABLED`: drafts and reviews expire after 7 days with
   their staged values; never-sent invitations' data expires 14 days after the
