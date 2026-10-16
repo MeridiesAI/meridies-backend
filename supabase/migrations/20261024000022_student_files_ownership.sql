@@ -22,8 +22,18 @@
 --     student) under a parent of their own; student folders come from
 --     private.ensure_student_folder (SECURITY DEFINER, so unaffected), and
 --     an update can't point a folder at a student the caller can't edit.
+--   - documents, document_links: a client inserts a row only as its owner
+--     (owner_id = the caller). The permissive policies accept a write when
+--     the caller can edit the student, whoever owner_id names, so without
+--     this a counselor could plant a row "owned" by a counselor in another
+--     practice, which then showed in that counselor's Files and, filed into
+--     their Policy & research folder, in their college-research prompt.
+--   - documents, document_links: a client update never changes owner_id, and
+--     moves a row only into a folder the caller may file into (a trigger,
+--     because a policy can't compare the old row with the new one).
 -- SECURITY DEFINER functions (caseload transfer, the student-folder trigger)
--- run as the table owner and are not subject to these policies.
+-- run as the table owner and are not subject to these policies or the
+-- trigger, which keys off current_user.
 --
 -- Deploy order: either. The API already checks all of this in code
 -- (resolveStudentId(..., "edit") and assertFileableFolder in routes/files.ts
@@ -31,9 +41,13 @@
 -- this file, and every client write the API makes passes these policies.
 -- Not in REQUIRED_SCHEMA.
 --
--- Rows already planted are not deleted. To audit:
+-- Rows already planted are not deleted. To audit (and the same for
+-- public.document_links):
 --   select id, owner_id, student_id from public.documents
 --    where student_id is not null and not private.can_edit_student(student_id, owner_id);
+--   select d.id, d.owner_id, d.folder_id from public.documents d
+--     join public.folders f on f.id = d.folder_id
+--    where not private.can_file_into_folder(d.folder_id, d.owner_id);
 
 -- True when `viewer` may file a document or link into `folder`: their own
 -- folder, or the student folder of a student they can edit.
@@ -77,7 +91,8 @@ drop policy if exists documents_student_editable_insert on public.documents;
 create policy documents_student_editable_insert on public.documents
   as restrictive for insert to authenticated
   with check (
-    (student_id is null or private.can_edit_student(student_id, (select auth.uid())))
+    owner_id = (select auth.uid())
+    and (student_id is null or private.can_edit_student(student_id, (select auth.uid())))
     and (folder_id is null or private.can_file_into_folder(folder_id, (select auth.uid())))
   );
 
@@ -93,7 +108,8 @@ drop policy if exists document_links_student_editable_insert on public.document_
 create policy document_links_student_editable_insert on public.document_links
   as restrictive for insert to authenticated
   with check (
-    (student_id is null or private.can_edit_student(student_id, (select auth.uid())))
+    owner_id = (select auth.uid())
+    and (student_id is null or private.can_edit_student(student_id, (select auth.uid())))
     and (folder_id is null or private.can_file_into_folder(folder_id, (select auth.uid())))
   );
 
@@ -102,6 +118,43 @@ create policy document_links_student_editable_update on public.document_links
   as restrictive for update to authenticated
   using (true)
   with check (student_id is null or private.can_edit_student(student_id, (select auth.uid())));
+
+-- ---- owner and folder on update (both tables) -------------------------------
+
+-- Deliberately NOT security definer: it keys off current_user, so the
+-- SECURITY DEFINER functions that move rows (caseload transfer) and the
+-- service role are not affected.
+create or replace function private.student_files_guard_client()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if current_user not in ('authenticated', 'anon') then
+    return new;
+  end if;
+  if new.owner_id is distinct from old.owner_id then
+    raise exception 'A file keeps its owner' using errcode = '42501';
+  end if;
+  if new.folder_id is distinct from old.folder_id and new.folder_id is not null
+     and not private.can_file_into_folder(new.folder_id, (select auth.uid())) then
+    raise exception 'That folder isn''t one you can file into' using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function private.student_files_guard_client() from public, anon, authenticated;
+
+drop trigger if exists documents_guard_client on public.documents;
+create trigger documents_guard_client
+  before update on public.documents
+  for each row execute function private.student_files_guard_client();
+
+drop trigger if exists document_links_guard_client on public.document_links;
+create trigger document_links_guard_client
+  before update on public.document_links
+  for each row execute function private.student_files_guard_client();
 
 -- ---- folders ----------------------------------------------------------------
 
