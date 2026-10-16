@@ -364,9 +364,12 @@ export default async function chatRoutes(app: FastifyInstance) {
               ...(contextUsage ? { contextUsage } : {}),
               maxTokens: 400,
             });
-            for (const step of plan.steps) {
-              trace.push({ label: String(step).slice(0, 200) });
-              send("reasoning", { step });
+            // Steps are labels: clipped in code (a schema's maxLength is a request), at most five.
+            for (const step of plan.steps.slice(0, 5)) {
+              const label = String(step).replace(/\s+/g, " ").trim().slice(0, 200);
+              if (!label) continue;
+              trace.push({ label });
+              send("reasoning", { step: label });
             }
           } catch {
             // Reasoning is a nicety, never fatal to the answer.
