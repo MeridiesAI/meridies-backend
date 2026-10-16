@@ -460,10 +460,11 @@ Order between the files matters in these places: step 2's staging (file 6) and r
 would have refused (run it again if it went in first); file 27 replaces `request_import_commit` and
 `import_claim_invites` from file 7, file 28 replaces `accept_invitation` (last defined in the applied
 `20261017000001`), file 29 extends the campus photos of file 11, and file 31 replaces
-`transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body).
+`transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body), and
+file 25 replaces `private.documents_guard_storage_path` from file 21 (the same set).
 Applying the files in the order above satisfies all of them. Apart from those replacements
 (`request_import_commit` and `import_claim_invites`, files 7 and 27; `transfer_caseload`, files 9 and
-31), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
+31; `documents_guard_storage_path`, files 21 and 25), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
 (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
 file reading the current list back.
 
