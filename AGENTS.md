@@ -2359,7 +2359,11 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   speed test refuse any `SUPABASE_URL`, `DB_URL` or `API_URL` that isn't
   localhost, and anything naming the production project, with no override
   (`scripts/seed/local-only.mjs`): they create approved accounts with the
-  service-role key. `test/integration/e2e-seed.test.mjs` runs each helper and
+  service-role key. A `DB_URL` may carry only `sslmode`, `connect_timeout`
+  and `application_name` (libpq's `host`, `hostaddr` and `service` keywords
+  beat the URL's host) in the one shape libpq and WHATWG parse alike, and
+  psql runs without `PGHOST`, `PGHOSTADDR` and the service-file variables
+  (`psqlEnv`), so every host it can reach is this machine. `test/integration/e2e-seed.test.mjs` runs each helper and
   reads the result back through the API.
 - `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
   (every action pinned to a commit); typecheck, build, unit tests (including

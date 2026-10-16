@@ -31,7 +31,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { BILLING_FAMILIES, shiftDate } from "./billing-scenario.mjs";
-import { assertLocalStack } from "./local-only.mjs";
+import { assertLocalStack, psqlEnv } from "./local-only.mjs";
 
 const env = (k, fallback) => {
   const v = process.env[k] ?? fallback;
@@ -54,8 +54,11 @@ const log = (...a) => console.error("[seed]", ...a);
 const q = (s) => String(s).replace(/'/g, "''");
 
 export function sql(query) {
+  // psqlEnv drops PGHOSTADDR and the service-file variables, which would
+  // otherwise move the connection off the local host the guard checked.
   return execFileSync(process.env.PSQL ?? "psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-tAc", query], {
     stdio: ["ignore", "pipe", "pipe"],
+    env: psqlEnv(),
   })
     .toString()
     .trim();
