@@ -24,11 +24,12 @@ import { z } from "zod";
 import { runStructured } from "../lib/anthropic.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, normalizeLink } from "../lib/links.js";
-import { logHost } from "../lib/requestLog.js";
+import { logHost, serializeErr } from "../lib/requestLog.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
+import { extractionState, requestExtraction } from "../lib/documentExtraction.js";
 import {
   ensurePracticeFolders,
   findOrCreateChild,
@@ -440,7 +441,7 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("documents")
-        .select("id, student_id, owner_id")
+        .select("id, student_id, owner_id, available_to_llm")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That document isn't on file");
@@ -462,10 +463,20 @@ export default async function fileRoutes(app: FastifyInstance) {
       }
       if (b.title !== undefined) update.title = b.title;
       if (b.description !== undefined) update.description = b.description;
-      if (b.kind !== undefined) update.kind = b.kind;
       if (b.availableToLlm !== undefined) update.available_to_llm = b.availableToLlm;
       if (b.aiAccess !== undefined) update.ai_access = b.aiAccess;
       if (b.ferpaWaived !== undefined) update.ferpa_waived = b.ferpaWaived;
+      // Setting a kind confirms it, and queues text extraction when the AI may read the file.
+      // (A flip to keep-out alone leaves any marker: the worker's conditional write refuses the text.)
+      if (b.kind !== undefined) {
+        update.kind = b.kind;
+        update.kind_confirmed = true;
+        const willBeAvailable = b.availableToLlm ?? (existing as Row).available_to_llm !== false;
+        update.parse_status = "pending";
+        update.extraction_requested_at = willBeAvailable ? new Date().toISOString() : null;
+        update.extraction_attempts = 0;
+        update.extraction_lease_until = null;
+      }
 
       const { data, error } = await request.db
         .from("documents")
@@ -475,7 +486,100 @@ export default async function fileRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
+      if (update.extraction_requested_at) requestExtraction([id], request.log);
       return toDocument(data as Row);
+    }
+  );
+
+  const confirmBody = z
+    .object({
+      items: z
+        .array(z.object({ documentId: z.string().uuid(), kind: documentBody.shape.kind.unwrap(), keepOut: z.boolean() }).strict())
+        .min(1)
+        .max(50),
+    })
+    .strict();
+
+  /**
+   * "Looks right": confirm a whole list of types at once (spec 4.4). Each item is checked and
+   * written on its own, so one the caller can't edit is refused without stopping the rest.
+   * Confirmed files the AI may read are queued for text extraction (two at a time).
+   */
+  app.post(
+    "/documents/confirm-types",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("documents:confirm", 60, 60)] },
+    async (request) => {
+      const b = confirmBody.parse(request.body);
+      const results: { documentId: string; status: "confirmed" | "refused"; reason: string | null; document: ReturnType<typeof toDocument> | null }[] = [];
+      const queue: string[] = [];
+      for (const item of b.items) {
+        try {
+          const { data: existing } = await request.db.from("documents").select("id, student_id").eq("id", item.documentId).maybeSingle();
+          if (!existing?.student_id) throw notFound("That document isn't on file");
+          await resolveStudentId(request, String(existing.student_id), "edit");
+          const available = !item.keepOut;
+          const { data, error } = await request.db
+            .from("documents")
+            .update({
+              kind: item.kind,
+              kind_confirmed: true,
+              available_to_llm: available,
+              parse_status: "pending",
+              extraction_requested_at: available ? new Date().toISOString() : null,
+              extraction_attempts: 0,
+              extraction_lease_until: null,
+            })
+            .eq("id", item.documentId)
+            .select("*")
+            .maybeSingle();
+          if (error || !data) throw error ? fromPostgrest(error) : notFound();
+          if (available) queue.push(item.documentId);
+          results.push({ documentId: item.documentId, status: "confirmed", reason: null, document: toDocument(data as Row) });
+        } catch (err) {
+          request.log.warn({ err: serializeErr(err) }, "confirm-types item refused");
+          results.push({ documentId: item.documentId, status: "refused", reason: publicMessage(err, "Couldn't confirm that file."), document: null });
+        }
+      }
+      requestExtraction(queue, request.log);
+      return { results };
+    }
+  );
+
+  /** "Couldn't read this file, try again": re-queue confirmed, AI-allowed files whose extraction failed. */
+  app.post(
+    "/documents/extraction-retry",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("documents:extraction-retry", 30, 60)] },
+    async (request) => {
+      const { ids } = z.object({ ids: z.array(z.string().uuid()).min(1).max(50) }).strict().parse(request.body);
+      const { data, error } = await request.db
+        .from("documents")
+        .update({ parse_status: "pending", parse_error: null, extraction_requested_at: new Date().toISOString(), extraction_attempts: 0, extraction_lease_until: null })
+        .in("id", ids)
+        .eq("parse_status", "failed")
+        .eq("kind_confirmed", true)
+        .eq("available_to_llm", true)
+        .select("id");
+      if (error) throw fromPostgrest(error);
+      const retried = (data ?? []).map((r) => String(r.id));
+      requestExtraction(retried, request.log);
+      return { retried };
+    }
+  );
+
+  /** Where each file's text extraction is, for the app's "Reading 3 of 10...". RLS decides which ids come back. */
+  app.get(
+    "/documents/extraction-status",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("documents:extraction-status", 240, 60)] },
+    async (request) => {
+      const { ids } = z.object({ ids: z.string().max(2_000) }).strict().parse(request.query);
+      const list = ids.split(",").map((s) => s.trim()).filter(Boolean);
+      const parsed = z.array(z.string().uuid()).min(1).max(50).parse(list);
+      const { data, error } = await request.db
+        .from("documents")
+        .select("id, kind_confirmed, available_to_llm, parse_status, parse_error, extraction_requested_at")
+        .in("id", parsed);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => ({ documentId: String(r.id), state: extractionState(r as Row) }));
     }
   );
 
