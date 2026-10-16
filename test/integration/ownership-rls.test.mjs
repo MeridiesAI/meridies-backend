@@ -308,7 +308,8 @@ const attackerStudent = await studentOf(attacker, "own-attacker-student");
   const after = await one(`select status from public.student_messages where id = '${due}'`);
   check("dispatch cap: ...and goes once the cap allows", after !== "scheduled" && after !== "cancelled", after);
 
-  // A student who changes their address between scheduling and sending still gets it, at the new one.
+  // A student who changes their contact email between scheduling and sending still gets it, at their
+  // sign-in email: the contact email is student-writable, so it neither redirects nor cancels a message.
   const moved = await call(vol.token, "POST", `/communication/${volStudent.id}/messages`, {
     audience: "student", channel: "email", subject: "Moved", body: "To your new address.", scheduleFor: new Date(Date.now() + 3_600_000).toISOString(),
   });
@@ -319,7 +320,8 @@ const attackerStudent = await studentOf(attacker, "own-attacker-student");
   await cron("/communication/internal/dispatch");
   const movedStatus = await one(`select status from public.student_messages where id = '${moved.body.id}'`);
   check("dispatch: a changed student address doesn't cancel the message", movedStatus !== "cancelled" && movedStatus !== "scheduled", movedStatus);
-  check("...it goes to the address on file now", (await count(`select count(*) from public.message_deliveries where to_email = 'new-${tag}@student.test'`)) === 1);
+  check("...it goes to the sign-in email", (await count(`select count(*) from public.message_deliveries where student_id = '${volStudent.id}' and lower(to_email) = lower('${volStudent.email}') and template = 'student-message'`)) >= 1);
+  check("...and nothing goes to the contact email the student typed", (await count(`select count(*) from public.message_deliveries where to_email = 'new-${tag}@student.test'`)) === 0);
 
   // A phone with no digits is no phone: the route says so instead of a database error.
   await sql(`update public.profiles set phone = 'n/a' where id = '${volStudent.id}'`);

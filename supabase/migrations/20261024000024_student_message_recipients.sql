@@ -12,7 +12,10 @@
 -- After this file:
 --   - a client insert must name only recipients the route itself would
 --     have resolved: for audience 'student', the student (id = student_id)
---     at their contact email (else login email) or their phone on file; for
+--     at their sign-in email or their phone on file (the contact email is
+--     accepted too, only so the build before the sign-in-email rule keeps
+--     working while this file applies; dispatch sends a student's email to
+--     the sign-in email alone, lib/studentMessages.ts); for
 --     'parent', guardians of this student with alerts on, at the email on
 --     file. It starts 'queued' or 'scheduled', with nothing sent yet. The
 --     check answers only for the caller's own student (is_counselor_of
@@ -55,6 +58,7 @@ as $$
 declare
   v_r       jsonb;
   v_email   text;
+  v_contact text;
   v_phone   text;
 begin
   -- Only the student's own counselor learns anything here. Answering for any
@@ -67,9 +71,9 @@ begin
   end if;
 
   if p_audience = 'student' then
-    select coalesce(nullif(btrim(d.contact_email), ''), nullif(btrim(p.email), '')),
+    select nullif(btrim(p.email), ''), nullif(btrim(d.contact_email), ''),
            nullif(regexp_replace(coalesce(p.phone, ''), '[^0-9+]', '', 'g'), '')
-      into v_email, v_phone
+      into v_email, v_contact, v_phone
       from public.profiles p
       left join public.student_personal_details d on d.student_id = p.id
      where p.id = p_student;
@@ -84,7 +88,8 @@ begin
         return false;
       end if;
       if p_channel = 'email'
-         and (v_email is null or lower(btrim(coalesce(v_r->>'email', ''))) <> lower(v_email)) then
+         and lower(btrim(coalesce(v_r->>'email', ''))) is distinct from lower(v_email)
+         and lower(btrim(coalesce(v_r->>'email', ''))) is distinct from lower(v_contact) then
         return false;
       end if;
       if p_channel = 'sms'

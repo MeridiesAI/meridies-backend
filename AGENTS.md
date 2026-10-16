@@ -363,12 +363,14 @@ forget it.
   Anything unreadable holds the send; a refusal cancels it with the reason.
   A row is not proof the route wrote it, so dispatch keeps only recipients
   the composer would have resolved itself (`allowedRecipients`): the student
-  by id at their contact email (else login email) or phone on file, or a
-  guardian of this student still receiving messages at the same address;
-  it sends to the addresses on file, never the row's. A message to the
-  student goes to their address or phone on file at send time (a student
-  who changed it since still gets it, and can't cancel it by changing it);
-  a guardian must still have the address the row froze. The cron also
+  by id at their sign-in email or phone on file, or a guardian of this
+  student still receiving messages at the same address; it sends to the
+  addresses on file, never the row's. A text to the student goes to their
+  phone on file at send time. An email goes to their sign-in email, and one
+  frozen with another address (scheduled when the contact email was
+  followed, or before a sign-in email change) is cancelled; changing the
+  contact email neither redirects nor cancels a message. A guardian must
+  still have the address the row froze. The cron also
   sends at most `DISPATCH_DAILY_CAP` (100) messages a day per counselor,
   whoever wrote the rows: over it a row waits an hour and is tried again
   (`hold_reason` says so), nothing is dropped. In the database
