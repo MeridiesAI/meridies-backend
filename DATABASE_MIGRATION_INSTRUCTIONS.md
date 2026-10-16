@@ -435,13 +435,16 @@ student Submit moves and returns nothing). The code already enforces each in the
 applying with `test/integration/submission-hardening.test.mjs` and `student-reminders.test.mjs`
 (their database checks run only once the files are in).
 
-Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
-`private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
-`import_items.invite_state` / `invite_claimed_at` (file 5), and file 28 replaces
-`transfer_caseload` from file 9 (same signature and grants). Applying the files in the order above
-satisfies all three. Apart from `transfer_caseload` (files 9 and 28), no function, policy or trigger is defined in two of these files; the shared CHECK
-constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
-additively, each file reading the current list back.
+Order between the files matters in these places: step 2's staging (file 6) and review (file 7) call
+`private.intake_owns_current` from file 3; the caseload transfer (file 9) reads step 2's
+`import_items.invite_state` / `invite_claimed_at` (file 5); file 15 clears rows the guard in file 14
+would have refused (run it again if it went in first); file 25 replaces `request_import_commit` from
+file 7, file 26 extends the campus photos of file 11, and file 28 replaces `transfer_caseload` from
+file 9 (each with the same signature and grants, built on the round-one body). Applying the files in
+the order above satisfies all of them. Apart from those two replacements (`request_import_commit`,
+files 7 and 25; `transfer_caseload`, files 9 and 28), no function, policy or trigger is defined in two
+of these files; the shared CHECK constraints (`ai_runs_module_check`, the `ingest_runs` and
+`job_heartbeats` labels) are rewritten additively, each file reading the current list back.
 
 After all twenty-eight:
 
