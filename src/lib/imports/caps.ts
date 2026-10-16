@@ -37,6 +37,13 @@ export const MAX_PARSE_OUTPUT_BYTES = 32 * 1024 * 1024;
 /** A header row is the first row with two or more cells, within these rows. */
 export const HEADER_SEARCH_ROWS = 20;
 export const MAX_COLUMNS = 300;
+/**
+ * A header's text is cut to this many characters when the sheet is read. A
+ * real header is a few words; the cap bounds every header check (the
+ * sensitive-category rules, the presets, the mask) on the main thread, after
+ * the parse child's timeout no longer applies.
+ */
+export const MAX_HEADER_CHARS = 500;
 
 export const AI_CAP_CENTS = 200;
 export const DRAFT_DAYS = 7;

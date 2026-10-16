@@ -11,7 +11,7 @@
 import { parse as parseCsv } from "csv-parse/sync";
 import { zipSync } from "fflate";
 import readXlsxFile from "read-excel-file/universal";
-import { HEADER_SEARCH_ROWS, MAX_CELL_CHARS, MAX_COLUMNS, MAX_PARSE_OUTPUT_BYTES, MAX_PARSED_CHARS } from "./caps.js";
+import { HEADER_SEARCH_ROWS, MAX_CELL_CHARS, MAX_COLUMNS, MAX_HEADER_CHARS, MAX_PARSE_OUTPUT_BYTES, MAX_PARSED_CHARS } from "./caps.js";
 import { detectType } from "./magic.js";
 import { inspectXlsx } from "./zipGuard.js";
 
@@ -85,7 +85,8 @@ export function toSheet(
 ): ParsedSheet | "empty" | "too-many-rows" | "too-many-columns" {
   const h = findHeaderRow(raw);
   if (h === -1) return "empty";
-  let headers = raw[h].map((c) => c.trim());
+  // Cut before trimming the end, so a header padded past the cap still trims.
+  let headers = raw[h].map((c) => c.trim().slice(0, MAX_HEADER_CHARS).trim());
   // Trailing blank headers with no data under them are noise.
   while (headers.length > 0 && headers[headers.length - 1] === "") headers = headers.slice(0, -1);
   if (headers.length > MAX_COLUMNS) return "too-many-columns";

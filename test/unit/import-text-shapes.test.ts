@@ -9,12 +9,16 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { MAX_HEADER_CHARS } from "../../src/lib/imports/caps.js";
 import { maskHeader, maskValue } from "../../src/lib/imports/mask.js";
 import { presetTarget } from "../../src/lib/imports/presets.js";
+import { profileFile } from "../../src/lib/imports/profile.js";
+import { HEADER_RULES, sensitiveHeader } from "../../src/lib/imports/sensitive.js";
+import { toSheet } from "../../src/lib/imports/sheet.js";
 import { containsEmailShape, isEmailShape, scoreColumnParts, scoreSuffixStart, splitListCell } from "../../src/lib/imports/textShapes.js";
 import { cleanCell, parseNumber } from "../../src/lib/imports/values.js";
 import { workbookUses1904 } from "../../src/lib/imports/zipGuard.js";
-import { BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
+import { BUDGET_MS, CAP_BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const SCORE_COLUMN = /^(ap|ib)\s+(.+?)(\s+(score|exam score|result))?$/i;
@@ -107,8 +111,14 @@ test("workbookUses1904 reads date1904 as the regular expression read it", () => 
 // ---- Worst cases ---------------------------------------------------------------
 
 const fill = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-/** A large cell: XLSX's own limit is 32,767 characters; a CSV has none. */
-const CELL = 200_000;
+/**
+ * A large cell: XLSX's own limit is 32,767 characters; a CSV has none. The
+ * budget test uses the review's 40,000 (the old expressions took 0.4 to 1.2 s
+ * there); the cap test a 200,000-character cell, under the looser budget, so a
+ * busy test runner can't turn it red.
+ */
+const CELL = 40_000;
+const BIG_CELL = 200_000;
 
 test("masking, checking and cleaning a crafted cell finishes in well under 100 ms", () => {
   const cells = [
@@ -131,6 +141,66 @@ test("masking, checking and cleaning a crafted cell finishes in well under 100 m
       assert.ok(ms < BUDGET_MS, `${name} on ${label}… took ${ms.toFixed(1)} ms`);
     }
   }
+});
+
+test("a 200,000-character crafted cell is masked, checked and cleaned in under a second", () => {
+  for (const unit of ["a.", ".", "1.", "1", ",", "1,", " "]) {
+    const cell = `a@${fill(unit, BIG_CELL)} x`;
+    for (const fn of [() => maskValue(cell), () => cleanCell("text[]", cell), () => cleanCell("sat_total", cell), () => isEmailShape(cell)]) {
+      const ms = elapsed(fn);
+      assert.ok(ms < CAP_BUDGET_MS, `${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
+    }
+  }
+});
+
+// ---- Sensitive-category headers (the follow-up review) ---------------------------
+
+const OLD_ECONOMIC = /\b(free\s*(and|&|\/)?\s*reduced|reduced\s*lunch|lunch\s*status|frl|frpl|fee\s*waiver|low[\s-]*income|pell|title\s*i)\b/i;
+
+test("the economic-status rule names exactly the headers it named", () => {
+  const economic = HEADER_RULES.find(([c]) => c === "economic-status")![1];
+  const rand = seeded(26);
+  const pieces = ["free", "Free", " ", "  ", "\t", "and", "&", "/", "reduced", "lunch", "x", "-", "low", "income", "frl", "title", "i"];
+  for (let i = 0; i < 30000; i++) {
+    const s = randomText(rand, pieces, 1 + Math.floor(rand() * 8));
+    assert.equal(economic.test(s), OLD_ECONOMIC.test(s), JSON.stringify(s));
+  }
+  for (const h of ["Free and Reduced", "free & reduced lunch", "free/reduced", "free   reduced", "FreeReduced", "free_and_reduced"]) {
+    assert.equal(sensitiveHeader(h), "economic-status", h);
+  }
+});
+
+test("every sensitive-header rule reads a 40,000-character run in well under 100 ms", () => {
+  // "free" + 40,000 spaces took 1.6 s with `free\s*(and|&|\/)?\s*reduced`, and
+  // a 160 KB header 43 s; the rules are timed here without the header cap.
+  const prefixes = [
+    "free", "free and", "social", "soc.", "driver's", "licence", "a", "tax", "state", "national", "account", "credit",
+    "card", "net", "counselling", "reduced", "lunch", "fee", "low", "title", "sexual", "gender", "immigration", "pin",
+    "security", "",
+  ];
+  for (const run of [" ", "\t", "-", " -", "and "]) {
+    for (const prefix of prefixes) {
+      const header = `${prefix}${fill(run, 40_000)}x`;
+      for (const [category, re] of HEADER_RULES) {
+        const ms = elapsed(() => re.test(header));
+        assert.ok(ms < BUDGET_MS, `${category} on ${JSON.stringify(prefix)} + ${JSON.stringify(run)}* took ${ms.toFixed(1)} ms`);
+      }
+    }
+  }
+  const header = `free${" ".repeat(40_000)}x`;
+  const ms = elapsed(() => sensitiveHeader(header));
+  assert.ok(ms < BUDGET_MS, `sensitiveHeader took ${ms.toFixed(1)} ms`);
+});
+
+test("a header is cut to MAX_HEADER_CHARS when the sheet is read, and profiled promptly", () => {
+  const long = `free${" ".repeat(160_000)}lunch`;
+  const sheet = toSheet("Sheet1", [["email", long, `  Grad ${"y".repeat(MAX_HEADER_CHARS)}  `], ["a@b.co", "yes", "2027"]], false, 10);
+  assert.ok(typeof sheet === "object");
+  assert.equal(sheet.headers[0], "email");
+  assert.equal(sheet.headers[1], "free", "the cut header's trailing spaces are trimmed");
+  assert.equal(sheet.headers[2]!.length, MAX_HEADER_CHARS);
+  const ms = elapsed(() => profileFile([sheet]));
+  assert.ok(ms < BUDGET_MS, `profileFile took ${ms.toFixed(1)} ms`);
 });
 
 test("a workbook.xml head of unclosed workbookPr tags is read in well under 100 ms", () => {

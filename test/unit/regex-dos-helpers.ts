@@ -22,11 +22,23 @@ export function randomText(rand: () => number, alphabet: readonly string[], coun
   return s;
 }
 
-/** Milliseconds `fn` took. */
+/**
+ * Milliseconds `fn` took: the fastest of up to three runs. One run can be
+ * stretched by a garbage collection or by the other test files running in
+ * parallel (a 200,000-character cell once took 137 ms that way and 8 ms
+ * alone); a super-linear scan is slow every time, so the fastest run still
+ * catches it. A first run well inside the budget is taken as it is. `fn`
+ * must be safe to run again (each one builds its own state).
+ */
 export function elapsed(fn: () => unknown): number {
-  const t = performance.now();
-  fn();
-  return performance.now() - t;
+  let best = Infinity;
+  for (let run = 0; run < 3; run++) {
+    const t = performance.now();
+    fn();
+    best = Math.min(best, performance.now() - t);
+    if (best < BUDGET_MS / 4) break;
+  }
+  return best;
 }
 
 /**
