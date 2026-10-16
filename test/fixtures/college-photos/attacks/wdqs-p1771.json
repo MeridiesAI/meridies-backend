@@ -1,0 +1,124 @@
+{
+ "head": {
+  "vars": [
+   "item",
+   "unitid",
+   "image",
+   "modified"
+  ]
+ },
+ "results": {
+  "bindings": [
+   {
+    "item": {
+     "type": "uri",
+     "value": "http://www.wikidata.org/entity/Q190080"
+    },
+    "unitid": {
+     "type": "literal",
+     "value": "211440"
+    },
+    "image": {
+     "type": "uri",
+     "value": "http://commons.wikimedia.org/wiki/Special:FilePath/CMU%20Hunt%20Library.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T00:00:00Z"
+    }
+   },
+   {
+    "item": {
+     "type": "uri",
+     "value": "http://www.wikidata.org/entity/Q1047060"
+    },
+    "unitid": {
+     "type": "literal",
+     "value": "201645"
+    },
+    "image": {
+     "type": "uri",
+     "value": "http://commons.wikimedia.org/wiki/Special:FilePath/CWRU%20Adelbert%20Hall.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T00:00:00Z"
+    }
+   },
+   {
+    "item": {
+     "type": "uri",
+     "value": "http://www.wikidata.org/entity/Q49210"
+    },
+    "unitid": {
+     "type": "literal",
+     "value": "193900"
+    },
+    "image": {
+     "type": "uri",
+     "value": "http://commons.wikimedia.org/wiki/Special:FilePath/NYU%20Bobst%20Library.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T00:00:00Z"
+    }
+   },
+   {
+    "item": {
+     "type": "uri",
+     "value": "http://www.wikidata.org/entity/Q617433"
+    },
+    "unitid": {
+     "type": "literal",
+     "value": "196413"
+    },
+    "image": {
+     "type": "uri",
+     "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Syracuse%20Hall%20of%20Languages.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T00:00:00Z"
+    }
+   },
+   {
+    "item": {
+     "type": "uri",
+     "value": "http://www.wikidata.org/entity/Q235034"
+    },
+    "unitid": {
+     "type": "literal",
+     "value": "215293"
+    },
+    "image": {
+     "type": "uri",
+     "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Cathedral%20of%20Learning.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T00:00:00Z"
+    }
+   },
+   {
+    "item": {
+     "type": "uri",
+     "value": "http://www.wikidata.org/entity/Q1785467"
+    },
+    "unitid": {
+     "type": "literal",
+     "value": "195003"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T00:00:00Z"
+    }
+   }
+  ]
+ }
+}

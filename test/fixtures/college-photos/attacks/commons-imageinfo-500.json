@@ -1,0 +1,121 @@
+{
+ "batchcomplete": true,
+ "query": {
+  "redirects": [
+   {
+    "from": "File:RIT Sentinel.jpg",
+    "to": "File:RIT vandal target.jpg"
+   }
+  ],
+  "pages": [
+   {
+    "pageid": 3001,
+    "ns": 6,
+    "title": "File:CMU Hunt Library.jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0e/CMU_Hunt_Library.jpg/500px-CMU_Hunt_Library.jpg",
+      "thumbwidth": 500,
+      "thumbheight": 333,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/0e/CMU_Hunt_Library.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ACMU_Hunt_Library.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3001",
+      "sha1": "c03356b3361f796e544c5e8ebd0fed8423a30f9c"
+     }
+    ]
+   },
+   {
+    "pageid": 3002,
+    "ns": 6,
+    "title": "File:CWRU Adelbert Hall.jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "timestamp": "2026-10-15T00:20:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/CWRU_Adelbert_Hall.jpg/500px-CWRU_Adelbert_Hall.jpg",
+      "thumbwidth": 500,
+      "thumbheight": 333,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/6/68/CWRU_Adelbert_Hall.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ACWRU_Adelbert_Hall.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3002",
+      "sha1": "2f030d9c08898648b61611fcf621a75a95589d97"
+     }
+    ]
+   },
+   {
+    "pageid": 3003,
+    "ns": 6,
+    "title": "File:NYU Bobst Library.jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "timestamp": "2026-10-14T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/13/NYU_Bobst_Library.jpg/500px-NYU_Bobst_Library.jpg",
+      "thumbwidth": 500,
+      "thumbheight": 333,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/1/13/NYU_Bobst_Library.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ANYU_Bobst_Library.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3003",
+      "sha1": "763ceabf0c11b0e48a3bac14d61320fa72d34c10"
+     }
+    ]
+   },
+   {
+    "pageid": 3004,
+    "ns": 6,
+    "title": "File:Syracuse Hall of Languages.jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "timestamp": "2026-10-14T23:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/Syracuse_Hall_of_Languages.jpg/500px-Syracuse_Hall_of_Languages.jpg",
+      "thumbwidth": 500,
+      "thumbheight": 333,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/4/4d/Syracuse_Hall_of_Languages.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ASyracuse_Hall_of_Languages.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3004",
+      "sha1": "4c56e0570d896473d58a6e444006e9bf8391de05"
+     }
+    ]
+   },
+   {
+    "pageid": 3005,
+    "ns": 6,
+    "title": "File:Cathedral of Learning.jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Cathedral_of_Learning.jpg/500px-Cathedral_of_Learning.jpg",
+      "thumbwidth": 500,
+      "thumbheight": 333,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/1/1e/Cathedral_of_Learning.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ACathedral_of_Learning.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3005",
+      "sha1": "ac656b477aeab5425d216de2307735e973fc55cc"
+     }
+    ]
+   },
+   {
+    "pageid": 3006,
+    "ns": 6,
+    "title": "File:RIT vandal target.jpg",
+    "imagerepository": "local",
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/RIT_vandal_target.jpg/500px-RIT_vandal_target.jpg",
+      "thumbwidth": 500,
+      "thumbheight": 333,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/7/76/RIT_vandal_target.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ARIT_vandal_target.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3006",
+      "sha1": "6e5bb4672cc57de7e69187c3d8f0b00b9edaafbf"
+     }
+    ]
+   }
+  ]
+ }
+}

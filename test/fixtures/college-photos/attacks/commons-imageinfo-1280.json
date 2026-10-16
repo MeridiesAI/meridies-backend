@@ -1,0 +1,307 @@
+{
+ "batchcomplete": true,
+ "query": {
+  "redirects": [
+   {
+    "from": "File:RIT Sentinel.jpg",
+    "to": "File:RIT vandal target.jpg"
+   }
+  ],
+  "pages": [
+   {
+    "pageid": 3001,
+    "ns": 6,
+    "title": "File:CMU Hunt Library.jpg",
+    "imagerepository": "local",
+    "touched": "2024-03-01T08:00:00Z",
+    "revisions": [
+     {
+      "timestamp": "2024-03-01T08:00:00Z"
+     }
+    ],
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0e/CMU_Hunt_Library.jpg/1280px-CMU_Hunt_Library.jpg",
+      "thumbwidth": 1280,
+      "thumbheight": 853,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/0/0e/CMU_Hunt_Library.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ACMU_Hunt_Library.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3001",
+      "size": 2000000,
+      "width": 4000,
+      "height": 2667,
+      "sha1": "c03356b3361f796e544c5e8ebd0fed8423a30f9c",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Restrictions": {
+        "value": "",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by-sa/4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "Hunt Photographer",
+        "source": "commons-desc-page"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "pageid": 3002,
+    "ns": 6,
+    "title": "File:CWRU Adelbert Hall.jpg",
+    "imagerepository": "local",
+    "touched": "2024-03-01T08:00:00Z",
+    "revisions": [
+     {
+      "timestamp": "2024-03-01T08:00:00Z"
+     }
+    ],
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/CWRU_Adelbert_Hall.jpg/1280px-CWRU_Adelbert_Hall.jpg",
+      "thumbwidth": 1280,
+      "thumbheight": 853,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/6/68/CWRU_Adelbert_Hall.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ACWRU_Adelbert_Hall.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3002",
+      "size": 2000000,
+      "width": 4000,
+      "height": 2667,
+      "sha1": "9c5018d480020ec14ab9984b222d25df7ef934c8",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Restrictions": {
+        "value": "",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by-sa/4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "Adelbert Photographer",
+        "source": "commons-desc-page"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "pageid": 3003,
+    "ns": 6,
+    "title": "File:NYU Bobst Library.jpg",
+    "imagerepository": "local",
+    "touched": "2024-03-01T08:00:00Z",
+    "revisions": [
+     {
+      "timestamp": "2024-03-01T08:00:00Z"
+     }
+    ],
+    "imageinfo": [
+     {
+      "timestamp": "2026-10-14T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/13/NYU_Bobst_Library.jpg/1280px-NYU_Bobst_Library.jpg",
+      "thumbwidth": 1280,
+      "thumbheight": 853,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/1/13/NYU_Bobst_Library.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ANYU_Bobst_Library.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3003",
+      "size": 2000000,
+      "width": 4000,
+      "height": 2667,
+      "sha1": "763ceabf0c11b0e48a3bac14d61320fa72d34c10",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Restrictions": {
+        "value": "",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by-sa/4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "Bobst Photographer",
+        "source": "commons-desc-page"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "pageid": 3004,
+    "ns": 6,
+    "title": "File:Syracuse Hall of Languages.jpg",
+    "imagerepository": "local",
+    "touched": "2024-03-01T08:00:00Z",
+    "revisions": [
+     {
+      "timestamp": "2024-03-01T08:00:00Z"
+     }
+    ],
+    "imageinfo": [
+     {
+      "timestamp": "2026-10-14T23:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/Syracuse_Hall_of_Languages.jpg/1280px-Syracuse_Hall_of_Languages.jpg",
+      "thumbwidth": 1280,
+      "thumbheight": 853,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/4/4d/Syracuse_Hall_of_Languages.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ASyracuse_Hall_of_Languages.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3004",
+      "size": 2000000,
+      "width": 4000,
+      "height": 2667,
+      "sha1": "4c56e0570d896473d58a6e444006e9bf8391de05",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Restrictions": {
+        "value": "",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by-sa/4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "Languages Photographer",
+        "source": "commons-desc-page"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "pageid": 3005,
+    "ns": 6,
+    "title": "File:Cathedral of Learning.jpg",
+    "imagerepository": "local",
+    "touched": "2026-10-14T20:00:00Z",
+    "revisions": [
+     {
+      "timestamp": "2024-03-01T08:00:00Z"
+     }
+    ],
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Cathedral_of_Learning.jpg/1280px-Cathedral_of_Learning.jpg",
+      "thumbwidth": 1280,
+      "thumbheight": 853,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/1/1e/Cathedral_of_Learning.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ACathedral_of_Learning.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3005",
+      "size": 2000000,
+      "width": 4000,
+      "height": 2667,
+      "sha1": "ac656b477aeab5425d216de2307735e973fc55cc",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Restrictions": {
+        "value": "",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by-sa/4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "Vandal Template Credit",
+        "source": "commons-desc-page"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "pageid": 3006,
+    "ns": 6,
+    "title": "File:RIT vandal target.jpg",
+    "imagerepository": "local",
+    "touched": "2024-03-01T08:00:00Z",
+    "revisions": [
+     {
+      "timestamp": "2024-03-01T08:00:00Z"
+     }
+    ],
+    "imageinfo": [
+     {
+      "timestamp": "2020-05-01T12:00:00Z",
+      "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/RIT_vandal_target.jpg/1280px-RIT_vandal_target.jpg",
+      "thumbwidth": 1280,
+      "thumbheight": 853,
+      "url": "https://upload.wikimedia.org/wikipedia/commons/7/76/RIT_vandal_target.jpg",
+      "descriptionurl": "https://commons.wikimedia.org/wiki/File%3ARIT_vandal_target.jpg",
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=3006",
+      "size": 2000000,
+      "width": 4000,
+      "height": 2667,
+      "sha1": "6e5bb4672cc57de7e69187c3d8f0b00b9edaafbf",
+      "mime": "image/jpeg",
+      "extmetadata": {
+       "LicenseShortName": {
+        "value": "CC BY-SA 4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Restrictions": {
+        "value": "",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "LicenseUrl": {
+        "value": "https://creativecommons.org/licenses/by-sa/4.0",
+        "source": "commons-desc-page",
+        "hidden": ""
+       },
+       "Artist": {
+        "value": "Redirect Vandal",
+        "source": "commons-desc-page"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

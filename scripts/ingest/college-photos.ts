@@ -20,10 +20,14 @@
  * `held-new` / `held-replace` are waiting for a week without edits on
  * Wikidata and Commons (the reasons column says which clock is running; see
  * reviewDecision in src/lib/ingest/collegePhotos.ts), or for a later run to
- * see them unchanged. To publish a held photo now, put its title in the picks
- * file; to keep it off, put `none` or a better title. A real run keeps the
- * same list in the college_photo_candidates table and its counts on its
- * ingest_runs row (held-new, held-replace, hold:<reason>).
+ * see them unchanged; `held-text` keeps the photo and holds a changed credit
+ * or license for it. `pick-redirected` and `pick-changed` wait for the team:
+ * update the title, or the pin. To publish a held photo now, put its title in
+ * the picks file, with the version you looked at in the commons_sha1 column
+ * (the file's SHA1 on its Commons page) when it is a new version of the file
+ * already shown; to keep it off, put `none` or a better title. A real run
+ * keeps the same list in the college_photo_candidates table and its counts on
+ * its ingest_runs row (held-new, held-replace, text-held, hold:<reason>).
  *
  * Run it once by hand right after applying 20261023070001_college_photos.sql:
  * /internal/status reads the job overdue until its first clean run.
@@ -32,7 +36,7 @@
  * healthy; a dry run writes no ingest_runs row.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   csvCell,
@@ -119,9 +123,17 @@ if (fixtureDir || dryRun) {
     const read = (name: string) => JSON.parse(readFileSync(join(fixtureDir, name), "utf8")) as unknown;
     const tiny = new Uint8Array(readFileSync(join(fixtureDir, "tiny.jpg")));
     if (!isJpeg(tiny)) throw new Error("tiny.jpg is not a JPEG");
+    // A fixture directory may hold commons-imageinfo-500-recheck.json: the 500 px
+    // answer from the second call on, i.e. what the run sees when it asks again
+    // after downloading (a file changed during the run).
+    const recheck = existsSync(join(fixtureDir, "commons-imageinfo-500-recheck.json"));
+    let thumbCalls = 0;
     deps = {
       sparql: async () => read("wdqs-p1771.json"),
-      imageinfo: async (_titles, width) => read(width === 500 ? "commons-imageinfo-500.json" : "commons-imageinfo-1280.json"),
+      imageinfo: async (_titles, width) => {
+        if (width !== 500) return read("commons-imageinfo-1280.json");
+        return read(recheck && thumbCalls++ > 0 ? "commons-imageinfo-500-recheck.json" : "commons-imageinfo-500.json");
+      },
       download: async (url) => {
         if (!isAllowedDownloadUrl(url)) throw new Error("refused: not an upload.wikimedia.org URL");
         return tiny;

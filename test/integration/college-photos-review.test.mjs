@@ -63,7 +63,9 @@ const queue = (await hasTable())
   ? await sql(`select string_agg(college_id::text || '|' || commons_title || '|' || array_to_string(reasons, ';'), ',' order by commons_title) from college_photo_candidates where college_id in ('${colgate}', '${ithaca}')`)
   : "";
 check("both changes wait in the review queue, with why", queue.includes(`${colgate}|File:Colgate Memorial Chapel.jpg|`) && queue.includes(`${ithaca}|${VANDAL}|`) && /replacement/.test(queue) && /wikidata-recent/.test(queue) && /file-recent/.test(queue), queue);
-const counts = await sql(`select coalesce(counts::text, '') from ingest_runs where source = 'college-photos' order by started_at desc limit 1`).catch(() => "");
+// This run's own row (by the id it printed): other suites write college-photos runs at the same time.
+const runId = /"runId": "([0-9a-f-]{36})"/.exec(day0.out)?.[1] ?? "";
+const counts = runId ? await sql(`select coalesce(counts::text, '') from ingest_runs where id = '${runId}'`).catch(() => "") : "";
 check("the run's ingest_runs row counts what it held", /"held-new": 1/.test(counts) && /"held-replace": 1/.test(counts), counts);
 
 // ---- The dry-run CSV the team opens in a spreadsheet ----------------------------------
@@ -109,25 +111,8 @@ await reset();
 const picked = load({ now: DAY0, picks: "picks-ithaca.csv" });
 check("a team pick of a file uploaded yesterday is published on the same run", picked.ok && (await photoOf(ithaca)).startsWith("File:Ithaca fresh pick.jpg|"), await photoOf(ithaca));
 
-// ---- Without the review migration: replacements wait, the run still works ---------------
-if (await hasTable()) {
-  await reset();
-  const countsColumn = (await sql(`select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'ingest_runs' and column_name = 'counts'`)) === "1";
-  await sql(`alter table public.college_photo_candidates rename to college_photo_candidates_off`);
-  if (countsColumn) await sql(`alter table public.ingest_runs rename column counts to counts_off`);
-  await sql(`notify pgrst, 'reload schema'`);
-  await new Promise((r) => setTimeout(r, 1500));
-  try {
-    const before = await sql(`select count(*) from ingest_runs where source = 'college-photos' and finished_at is not null`);
-    const old = load({ now: at(30) });
-    check("without the review table the run still goes through", old.ok, old.out.slice(-600));
-    check("the run knew it had no review queue", /"reviewTable": false/.test(old.out) && /"hold:no-review-table": 1/.test(old.out), old.out.slice(-800));
-    check("and a replacement is held: nothing remembers having seen it", (await photoOf(colgate)).endsWith(V1), await photoOf(colgate));
-    check("its ingest_runs row is still finished without the counts column", Number(await sql(`select count(*) from ingest_runs where source = 'college-photos' and finished_at is not null`)) === Number(before) + 1);
-  } finally {
-    await sql(`alter table public.college_photo_candidates_off rename to college_photo_candidates`);
-    if (countsColumn) await sql(`alter table public.ingest_runs rename column counts_off to counts`);
-    await sql(`notify pgrst, 'reload schema'`);
-  }
-}
+// Without the review migration (replacements wait, the run still works, the
+// ingest_runs row is finished without its counts) is covered by the unit tests
+// on an injected store (college-photos-run.test.ts), not here: renaming the
+// shared tables would break the other suites running against this database.
 await sql(`delete from college_photos where college_id in ('${colgate}', '${ithaca}')`);

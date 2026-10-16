@@ -5,6 +5,7 @@ import {
   parsePicks,
   runCollegePhotoIngest,
   storagePaths,
+  supabasePhotoStore,
   type PhotoCandidate,
   type PhotoDeps,
   type PhotoRow,
@@ -649,4 +650,35 @@ test("bypass: a candidate reverted and re-applied just before the next run start
   const later = await runCollegePhotoIngest(s.store, reviewDeps().deps, log, { only: [190099], now: day(8) });
   assert.equal(later.counts.confirmed, 1);
   assert.equal((s.rows.get("c-colgate") as PhotoRow).commons_sha1, v2);
+});
+
+test("the real store before 20261024000071: no review queue (null), and the run's row finished without its counts", async () => {
+  // A stand-in for the PostgREST client answering as a database without the migration.
+  const updates: Record<string, unknown>[] = [];
+  const svc = {
+    from(table: string) {
+      const q = {
+        select: () => q,
+        order: () => q,
+        range: async () =>
+          table === "college_photo_candidates"
+            ? { data: null, error: { code: "PGRST205", message: "Could not find the table 'public.college_photo_candidates'" } }
+            : { data: [], error: null },
+        update(row: Record<string, unknown>) {
+          updates.push(row);
+          return {
+            eq: async () =>
+              "counts" in row ? { error: { code: "PGRST204", message: "Could not find the 'counts' column of 'ingest_runs'" } } : { error: null },
+          };
+        },
+      };
+      return q;
+    },
+  };
+  const store = supabasePhotoStore(svc as unknown as Parameters<typeof supabasePhotoStore>[0]);
+  assert.equal(await store.candidates(), null);
+  await store.finishRun("run1", { status: "succeeded", rows_upserted: 1, rows_skipped: 0, errors: [], duration_ms: 5, counts: { added: 1 } });
+  assert.equal(updates.length, 2, "tried with the counts, then without");
+  assert.equal("counts" in updates[1]!, false);
+  assert.equal(updates[1]!.status, "succeeded");
 });
