@@ -66,10 +66,10 @@ async function googleCall(
   ownerId: string,
   url: string,
   init: RequestInit,
-  scope: { name: string; what: string }
+  scope: { name: string; what: string; code?: string }
 ): Promise<Response> {
   let token: LiveToken = await accessTokenFor(ownerId, "google");
-  requireScope(token, "google", scope.name, scope.what);
+  requireScope(token, "google", scope.name, scope.what, scope.code);
   const go = (t: LiveToken) =>
     fetch(url, {
       ...init,
@@ -127,7 +127,7 @@ export async function createSupplementDoc(
       headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
       body,
     },
-    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "creating Docs" }
+    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "creating Docs", code: "drive_not_granted" }
   );
   if (!res.ok) throw failure(res, log, "creating the Doc");
   const created = (await res.json()) as { id?: string; webViewLink?: string };
@@ -147,7 +147,7 @@ export async function createSupplementDoc(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "user", role: "writer", emailAddress: input.shareWith }),
       },
-      { name: GOOGLE_DRIVE_FILE_SCOPE, what: "sharing Docs" }
+      { name: GOOGLE_DRIVE_FILE_SCOPE, what: "sharing Docs", code: "drive_not_granted" }
     ).catch((err: unknown) => {
       log.warn({ err: err instanceof Error ? err.message : "unknown" }, "doc share failed");
       return null;
@@ -170,17 +170,30 @@ export async function exportDocTextResult(
     ownerId,
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/export?mimeType=text%2Fplain`,
     {},
-    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "reading Docs you picked" }
+    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "reading Docs you picked", code: "drive_not_granted" }
   );
-  if (res.status === 404) return { ok: false, reason: "not-picked" };
-  if (!res.ok) {
+  const declaredBytes = Number(res.headers.get("content-length") ?? "0");
+  // The body is read only for an OK answer whose declared size is acceptable.
+  const text = res.ok && declaredBytes <= MAX_EXPORT_BYTES ? await res.text() : null;
+  const outcome = docExportOutcome({ status: res.status, declaredBytes, text });
+  if (!outcome.ok && outcome.reason === "failed" && res.status !== 404 && !res.ok) {
     log.warn({ status: res.status }, "google doc export failed");
+  }
+  return outcome;
+}
+
+/** Pure mapping of a Doc export answer: 404 is not-picked, any other failure or oversize is failed. */
+export function docExportOutcome(a: {
+  status: number;
+  declaredBytes: number;
+  text: string | null;
+}): { ok: true; text: string } | { ok: false; reason: "not-picked" | "failed" } {
+  if (a.status === 404) return { ok: false, reason: "not-picked" };
+  if (a.status < 200 || a.status > 299) return { ok: false, reason: "failed" };
+  if (a.declaredBytes > MAX_EXPORT_BYTES || a.text === null || a.text.length > MAX_EXPORT_BYTES) {
     return { ok: false, reason: "failed" };
   }
-  const declared = Number(res.headers.get("content-length") ?? "0");
-  if (declared > MAX_EXPORT_BYTES) return { ok: false, reason: "failed" };
-  const text = await res.text();
-  return text.length > MAX_EXPORT_BYTES ? { ok: false, reason: "failed" } : { ok: true, text: normalizeText(text) };
+  return { ok: true, text: normalizeText(a.text) };
 }
 
 export async function exportDocText(ownerId: string, fileId: string, log: Log): Promise<string | null> {

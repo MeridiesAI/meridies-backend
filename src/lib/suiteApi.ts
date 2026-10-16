@@ -74,7 +74,7 @@ export function googleFileFailureCode(status: number): string | null {
 }
 
 /** Map a provider failure to something safe to show. Bodies are never echoed. */
-function providerFailure(provider: SuiteProvider, res: Response, log: Log, what: string): HttpError {
+export function providerFailure(provider: SuiteProvider, res: Response, log: Log, what: string): HttpError {
   log.warn({ provider, status: res.status, what }, "provider request failed");
   const label = providerLabel(provider);
   if (res.status === 404) {
