@@ -30,7 +30,7 @@ const idx = await sql(`select string_agg(indexname, ',' order by indexname) from
   and indexname in ('documents_unconfirmed_idx', 'documents_extraction_requested_idx')`);
 check("both partial indexes exist", idx === "documents_extraction_requested_idx,documents_unconfirmed_idx", idx);
 
-// A student can't set any of the three, on insert or update.
+// A student can't set any of the five, on insert or update.
 const insert = await rest(s.token, "POST", "/rest/v1/documents", {
   student_id: s.id, owner_id: s.id, storage_path: `${s.id}/kc-${Date.now()}.pdf`, filename: "mine.pdf", kind: "other", kind_confirmed: false,
 }, { Prefer: "return=representation" });
@@ -46,5 +46,10 @@ check("a student can't touch the queue lease", patch4.status >= 400, `status ${p
 let badAttempts = false;
 try { await sql(`update public.documents set extraction_attempts = 11 where id = '${id}'`); } catch { badAttempts = true; }
 check("attempts are bounded", badAttempts);
+await sql(`update public.documents set kind_confirmed = false where id = '${own}'`);
+const patch5 = await rest(s.token, "PATCH", `/rest/v1/documents?id=eq.${own}`, { kind_confirmed: true });
+check("a student can't confirm their own unconfirmed file", patch5.status >= 400, `status ${patch5.status}`);
+check("the file stays unconfirmed", (await sql(`select kind_confirmed::text from public.documents where id = '${own}'`)) === "false");
+await sql(`update public.documents set kind_confirmed = true where id = '${own}'`);
 const patch3 = await rest(s.token, "PATCH", `/rest/v1/documents?id=eq.${own}`, { title: "renamed" });
 check("a student can still rename their own file", patch3.status < 300, `status ${patch3.status}`);
