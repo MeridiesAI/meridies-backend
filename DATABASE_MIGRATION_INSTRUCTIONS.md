@@ -374,7 +374,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twenty-eight files are merged ahead of production's database on purpose: the code was written to
+These twenty-nine files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -417,12 +417,13 @@ set's own section below says what it does and how to check it.
 | 22 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
 | 23 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
 | 24 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
-| 25 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitation review (after file 7) |
-| 26 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
-| 27 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
-| 28 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
+| 25 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
+| 26 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
+| 27 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
+| 28 | `20261024000081_profile_size_limit.sql` | Security: caseload files and profile size |
+| 29 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload files and profile size (after file 9) |
 
-(Twenty-eight files: the first thirteen are six feature sets, the other fifteen are seven sets of security
+(Twenty-nine files: the first thirteen are six feature sets, the other sixteen are seven sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 21-23, the security fixes for submission review and student reminders, depend on none of the
@@ -438,15 +439,17 @@ applying with `test/integration/submission-hardening.test.mjs` and `student-remi
 Order between the files matters in these places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3; the caseload transfer (file 9) reads step 2's
 `import_items.invite_state` / `invite_claimed_at` (file 5); file 15 clears rows the guard in file 14
-would have refused (run it again if it went in first); file 25 replaces `request_import_commit` from
-file 7, file 26 extends the campus photos of file 11, and file 28 replaces `transfer_caseload` from
-file 9 (each with the same signature and grants, built on the round-one body). Applying the files in
-the order above satisfies all of them. Apart from those two replacements (`request_import_commit`,
-files 7 and 25; `transfer_caseload`, files 9 and 28), no function, policy or trigger is defined in two
-of these files; the shared CHECK constraints (`ai_runs_module_check`, the `ingest_runs` and
-`job_heartbeats` labels) are rewritten additively, each file reading the current list back.
+would have refused (run it again if it went in first); file 25 replaces `request_import_commit` and
+`import_claim_invites` from file 7, file 26 replaces `accept_invitation` (last defined in the applied
+`20261017000001`), file 27 extends the campus photos of file 11, and file 29 replaces
+`transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body).
+Applying the files in the order above satisfies all of them. Apart from those replacements
+(`request_import_commit` and `import_claim_invites`, files 7 and 25; `transfer_caseload`, files 9 and
+29), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
+(`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
+file reading the current list back.
 
-After all twenty-eight:
+After all twenty-nine:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25

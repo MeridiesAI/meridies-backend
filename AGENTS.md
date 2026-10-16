@@ -206,7 +206,7 @@ the RLS and ownership fixes (`20261024000021`-`25`, below), the
 submission-review and reminder security fixes (`20261024000041`-`43`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
 the API already refuses students on `/chat`), the per-counselor import
-invitation review (`20261024000061`), the campus photo review queue
+invitation review and the same-student rule for held data (`20261024000061`-`62`), the campus photo review queue
 (`20261024000071`), the profile size trigger (`20261024000081`) and the
 caseload transfer's file rule (`20261024000082`, which replaces
 `transfer_caseload` from `20261023030002`). They go in later, in filename order
