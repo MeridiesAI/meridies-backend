@@ -102,6 +102,7 @@ export const tasks: OpGroup = {
     op({
       name: "tasks.list",
       kind: "read",
+      outside: (body) => asArray(body).some((t) => t.source !== "counselor"),
       title: "A student's open tasks with ids (include_complete adds finished ones).",
       doc: "{ student_id, include_complete? bool, source?: counselor|student }",
       input: z.object({ student_id: uuid, include_complete: z.boolean().optional(), source: z.enum(["counselor", "student"]).optional() }).strict(),
@@ -123,6 +124,7 @@ export const tasks: OpGroup = {
     op({
       name: "tasks.get",
       kind: "read",
+      outside: (body) => { const t = asRecord(body); return t.source !== "counselor" || asArray(t.documents).length > 0; },
       title: "One task with its steps and attached files, with their ids.",
       doc: "{ task_id }",
       input: z.object({ task_id: uuid }).strict(),
@@ -592,6 +594,7 @@ export const accountability: OpGroup = {
     op({
       name: "accountability.list_red_flags",
       kind: "read",
+      outside: false,
       title: "Open, acknowledged and escalated red flags with ids (one student's, or the whole roster's).",
       doc: "{ student_id? }",
       input: z.object({ student_id: uuid.optional() }).strict(),
@@ -613,6 +616,7 @@ export const accountability: OpGroup = {
     op({
       name: "accountability.list_guardians",
       kind: "read",
+      outside: true,
       title: "A student's guardians with ids, relationship and what they receive (no names or contact details).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -700,8 +704,10 @@ export const accountability: OpGroup = {
     op({
       name: "accountability.set_alert_recipients",
       kind: "write",
-      risk: (i) => (i.copy_parents === true || i.copy_student === true ? "confirm" : "auto"),
-      title: "Turn a student's parents on/off for messages and alerts, or copy the student on alerts.",
+      // Either way: switching the parents off silences the alerts that exist to reach them, so it
+      // asks first too (text a student wrote must never be able to do that without a click).
+      risk: (i) => ("copy_parents" in i || "copy_student" in i ? "confirm" : "auto"),
+      title: "Turn a student's parents on/off for messages and alerts, or copy the student on alerts (asks first).",
       doc: "{ student_id, copy_parents? bool, copy_student? bool, note? ≤1000|null }",
       input: z
         .object({
@@ -836,9 +842,10 @@ export const accountability: OpGroup = {
     op({
       name: "accountability.update_guardian",
       kind: "write",
+      // What a guardian receives asks first either way: switching one off is as consequential as on.
       risk: (i) =>
-        ["email", "phone", "preferred_channel", "is_primary"].some((k) => k in i) || i.alerts_enabled === true || i.receives_reports === true ? "confirm" : "auto",
-      title: "Change a guardian's details or what they get (new contact details or switching on asks first).",
+        ["email", "phone", "preferred_channel", "is_primary", "alerts_enabled", "receives_reports"].some((k) => k in i) ? "confirm" : "auto",
+      title: "Change a guardian's details or what they get (contact details or what they receive asks first).",
       doc: "{ student_id, guardian_id, full_name?, email?|null, phone?|null, relationship?, preferred_channel?: email|sms|both, alerts_enabled?, receives_reports?, is_primary? }",
       input: z
         .object({

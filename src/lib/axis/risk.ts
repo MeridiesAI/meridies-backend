@@ -37,6 +37,8 @@ export type StudentRisk = {
   score: number;
   reasons: string[];
   redFlags: number;
+  /** A reason quotes a deadline's title, which the student may have written: outside content for AxIS. */
+  outside: boolean;
 };
 
 const STATUS_WEIGHT: Record<string, number> = { "not-started": 1, stalled: 1.2, "in-progress": 0.6, review: 0.3 };
@@ -73,11 +75,11 @@ export function rankStudents(
   redFlags: Map<string, number>,
   opts: { today: string; horizonDays: number; stallAfterDays: number }
 ): StudentRisk[] {
-  const byStudent = new Map<string, { u: number; reason: string }[]>();
+  const byStudent = new Map<string, { u: number; reason: string; kind: RiskInput["kind"] }[]>();
   for (const it of items) {
     const { u, reason } = urgency(it, opts.today, opts.horizonDays, opts.stallAfterDays);
     if (u <= 0 || !reason) continue;
-    byStudent.set(it.studentId, [...(byStudent.get(it.studentId) ?? []), { u, reason }]);
+    byStudent.set(it.studentId, [...(byStudent.get(it.studentId) ?? []), { u, reason, kind: it.kind }]);
   }
   return roster
     .map((s) => {
@@ -86,7 +88,9 @@ export function rankStudents(
       const score = (scored[0]?.u ?? 0) + 0.6 * (scored[1]?.u ?? 0) + 0.3 * (scored[2]?.u ?? 0) + flags * 1.5;
       const reasons = scored.slice(0, 3).map((x) => x.reason);
       if (flags) reasons.push(`${flags} open red flag${flags === 1 ? "" : "s"}`);
-      return { studentId: s.id, name: s.name, score: Math.round(score * 100) / 100, reasons, redFlags: flags };
+      // Tasks here are counselor-set only (the query skips the student's own); deadlines may be the student's.
+      const outside = scored.slice(0, 3).some((x) => x.kind === "deadline");
+      return { studentId: s.id, name: s.name, score: Math.round(score * 100) / 100, reasons, redFlags: flags, outside };
     })
     .filter((s) => s.score > 0)
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));

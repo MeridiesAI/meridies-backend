@@ -9,7 +9,9 @@
  *    happens until the counselor clicks Confirm, which runs the same request.
  *
  * An auto write is turned into a confirm one when the turn has read outside
- * content (documents, mail, connected files), so text in a file can't make
+ * content (documents, mail, connected files, and any text a student, a family,
+ * an import or the web wrote: the student's record sections, their tasks and
+ * deadlines, a lookup marked `outside`), so text someone else wrote can't make
  * AxIS change anything without a click, and after five auto writes in one
  * turn, so a runaway loop stops at a card. A turn holds twenty writes at most.
  */
@@ -30,7 +32,7 @@ export const MAX_AUTO_WRITES_PER_TURN = 5;
 export type TurnBudget = {
   /** Changes wait for a click: outside content reached the model this turn, or the turn before. */
   tainted: boolean;
-  /** This turn itself read outside content (documents, mail, connected files, web-derived lookups). Carried to the next turn. */
+  /** This turn itself read outside content (documents, mail, connected files, student-written text, web-derived lookups). Carried to the next turn. */
   sawOutside: boolean;
   writes: number;
   autoWrites: number;
@@ -48,6 +50,14 @@ export const newTurnBudget = (outside = false, inherited = false): TurnBudget =>
 export function markOutside(turn: TurnBudget): void {
   turn.tainted = true;
   turn.sawOutside = true;
+}
+
+/** Whether a read's answer brings outside text into the turn. Undeclared, or a check that throws: yes. */
+export function readsOutside(def: Pick<OpDef, "outside">, body: unknown): boolean {
+  const o = def.outside;
+  if (typeof o === "boolean") return o;
+  if (typeof o === "function") return safelySync(() => o(body)) ?? true;
+  return true;
 }
 
 export type OperationStatus = "pending" | "executed" | "confirmed" | "dismissed" | "failed" | "undone";
@@ -243,6 +253,7 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
   const res = await dispatch(ctx.request, call);
   if (res.status >= 400) return { content: failureMessage(res), isError: true, fresh: false };
   const content = def.reply ? (safelySync(() => def.reply!(res.body, input)) ?? "That lookup's answer couldn't be read.") : "Done.";
+  if (readsOutside(def, res.body)) markOutside(ctx.turn);
   return { content: content || "Nothing found.", fresh: !!content };
 }
 

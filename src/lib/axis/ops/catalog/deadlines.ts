@@ -37,6 +37,7 @@ export const deadlines: OpGroup = {
     op({
       name: "deadlines.list",
       kind: "read",
+      outside: true,
       title: "A student's open deadlines with ids (add include_done for finished ones).",
       doc: "{ student_id, include_done? bool }",
       input: z.object({ student_id: uuid, include_done: z.boolean().optional() }).strict(),

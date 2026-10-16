@@ -63,6 +63,7 @@ export const management: OpGroup = {
     op({
       name: "management.consultants",
       kind: "read",
+      outside: false,
       title: "The practice's consultants with ids (for assigning work, owners, blasts).",
       doc: "{}",
       input: z.object({}).strict(),
@@ -78,6 +79,7 @@ export const management: OpGroup = {
     op({
       name: "management.tasks",
       kind: "read",
+      outside: false,
       title: "Management tasks you can see, with ids and their subtasks (optionally one consultant's).",
       doc: "{ assignee_id?, include_done? bool }",
       input: z.object({ assignee_id: uuid.optional(), include_done: z.boolean().optional() }).strict(),
@@ -98,6 +100,7 @@ export const management: OpGroup = {
     op({
       name: "management.consultant_students",
       kind: "read",
+      outside: false,
       title: "A consultant's caseload (student ids and names), for a task about one of their students.",
       doc: "{ consultant_id }",
       input: z.object({ consultant_id: uuid }).strict(),
@@ -292,6 +295,7 @@ export const firm: OpGroup = {
     op({
       name: "firm.members",
       kind: "read",
+      outside: false,
       title: "The firm's members with profile ids and seat roles.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -306,6 +310,7 @@ export const firm: OpGroup = {
     op({
       name: "firm.invites",
       kind: "read",
+      outside: false,
       title: "The firm's invitations with ids. Pass the invitee's email to find theirs (addresses aren't shown).",
       doc: "{ email?, status?: pending|accepted|revoked }",
       input: z

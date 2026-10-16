@@ -73,6 +73,14 @@ export type OpDef<I = any> = {
   /** What the model is told after it ran. Reads must define it and keep to safe fields. */
   reply?: (body: unknown, input: I) => string;
   /**
+   * Reads: whether the reply carries text someone other than the counselor's practice wrote
+   * (the student, a family, an import, an uploaded file, a web page, a model's draft). A turn
+   * that reads it can't make an auto change: every change after it waits for a click. A
+   * function decides from the route's answer (a list of tasks: only when one is the
+   * student's). Every read op must say; one that doesn't is treated as outside.
+   */
+  outside?: boolean | ((body: unknown) => boolean);
+  /**
    * Writes: read what the write is about to change, before it runs, so `undo`
    * can put it back. Runs as the counselor (a GET through the API); null when
    * it can't be read, and then there is no undo.

@@ -76,6 +76,7 @@ export const colleges: OpGroup = {
     op({
       name: "colleges.find",
       kind: "read",
+      outside: false,
       title: "Find a school in the Meridies college catalog by name or alias (e.g. \"UCLA\"): the college_id every action takes.",
       doc: "{ query ≤120 (the school's name), states? [two-letter codes], limit? 1-100 }",
       input: z
@@ -100,6 +101,7 @@ export const colleges: OpGroup = {
     op({
       name: "colleges.webinar_tips",
       kind: "read",
+      outside: false,
       title: "Supplemental advice from webinars on one college, with ids (yours, your firm's and Meridies').",
       doc: "{ college_id }",
       input: z.object({ college_id: uuid }).strict(),
@@ -354,6 +356,7 @@ export const events: OpGroup = {
     op({
       name: "events.list",
       kind: "read",
+      outside: true,
       title: "Upcoming Events Hub listings with ids (search, kind, one college), or saved_only for the counselor's saves.",
       doc: "{ query? ≤120, kind?: conference|webinar|workshop|college-fair|info-session, college_id?, saved_only? bool }",
       input: z
@@ -617,6 +620,7 @@ export const resources: OpGroup = {
     op({
       name: "resources.list",
       kind: "read",
+      outside: false,
       title: "The resource library with ids: the Meridies library (read-only) and the practice's own resources.",
       doc: "{ category?: testing|research|applications|aid, state? two-letter, audience?: counselor|student|both, query? ≤120 }",
       input: z
@@ -639,6 +643,7 @@ export const resources: OpGroup = {
     op({
       name: "resources.student_pins",
       kind: "read",
+      outside: false,
       title: "Resources pinned to a student, with pin ids.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -649,6 +654,7 @@ export const resources: OpGroup = {
     op({
       name: "resources.college_pins",
       kind: "read",
+      outside: false,
       title: "Resources the practice pinned to a college, with pin ids.",
       doc: "{ college_id }",
       input: z.object({ college_id: uuid }).strict(),

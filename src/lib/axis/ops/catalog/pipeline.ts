@@ -177,6 +177,7 @@ export const pipeline: OpGroup = {
     op({
       name: "pipeline.stages",
       kind: "read",
+      outside: false,
       title: "The Contact Pipeline's stage columns with ids, in board order.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -195,6 +196,7 @@ export const pipeline: OpGroup = {
     op({
       name: "pipeline.contacts",
       kind: "read",
+      outside: false,
       title: "Contact Pipeline cards (families) with ids: stage, owner, days in stage. Filter by stage or name.",
       doc: "{ stage_id?, name? (part of the student's name) }",
       input: z.object({ stage_id: uuid.optional(), name: z.string().trim().min(1).max(200).optional() }).strict(),
@@ -570,6 +572,7 @@ export const payments: OpGroup = {
     op({
       name: "payments.accounts",
       kind: "read",
+      outside: false,
       title: "Payment Tracker accounts by contact id, with invoice and payment ids (names: pipeline.contacts).",
       doc: "{ contact_id? }",
       input: z.object({ contact_id: uuid.optional() }).strict(),

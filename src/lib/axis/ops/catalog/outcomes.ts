@@ -114,6 +114,7 @@ export const outcomes: OpGroup = {
     op({
       name: "outcomes.list",
       kind: "read",
+      outside: true,
       title: "Admission outcomes on file with ids (optionally one student's or one cycle's).",
       doc: "{ student_id?, cycle? YYYY-YYYY }",
       input: z.object({ student_id: uuid.optional(), cycle: cycle.optional() }).strict(),
@@ -129,6 +130,7 @@ export const outcomes: OpGroup = {
     op({
       name: "outcomes.cycles",
       kind: "read",
+      outside: false,
       title: "The current admission cycle, whether it is closed, and how many seniors closing it would make alumni.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -142,6 +144,7 @@ export const outcomes: OpGroup = {
     op({
       name: "alumni.list",
       kind: "read",
+      outside: true,
       title: "The counselor's alumni with ids (each id is the alum's student id) and where they enrolled.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -341,6 +344,7 @@ export const referrals: OpGroup = {
     op({
       name: "referrals.list",
       kind: "read",
+      outside: true,
       title: "Referrals with ids: who referred whom and where each stands (asked, introduced, invited, signed).",
       doc: "{ student_id? (the referring family's student) }",
       input: z.object({ student_id: uuid.optional() }).strict(),
@@ -474,6 +478,7 @@ export const recommendations: OpGroup = {
     op({
       name: "recommendations.list",
       kind: "read",
+      outside: true,
       title: "A student's research suggestions (colleges or activities, from Research) with ids and status.",
       doc: "{ student_id, feature?: college_list|activities }",
       input: z.object({ student_id: uuid, feature: z.enum(["college_list", "activities"]).optional() }).strict(),

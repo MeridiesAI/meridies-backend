@@ -3,7 +3,7 @@ import { forbidden, fromPostgrest, notFound } from "../errors.js";
 import { assertCanViewStudent } from "../guards.js";
 import { loadPracticeSettings } from "../practiceSettings.js";
 import { packSections, type Section } from "./pack.js";
-import { PROFILES, type Feature, type SectionName } from "./profiles.js";
+import { OUTSIDE_SECTIONS, PROFILES, type Feature, type SectionName } from "./profiles.js";
 import { LOADERS } from "./sections.js";
 import type { ContextUsage, StudentContext } from "./types.js";
 
@@ -22,7 +22,7 @@ export async function buildStudentContext(
   request: FastifyRequest,
   studentId: string,
   feature: Feature,
-  opts?: { only?: SectionName[] }
+  opts?: { only?: SectionName[]; trustedOnly?: boolean }
 ): Promise<StudentContext> {
   // Counselors only (spec §4): a student's own session never builds a context, even for themselves.
   if (request.profile.role !== "counselor") throw forbidden("Only counselors can do that");
@@ -33,6 +33,7 @@ export async function buildStudentContext(
     profile.sections.map((name) => LOADERS[name](request.db, studentId, {
       essayBodies: profile.essayBodies,
       practiceReadsDocuments: settings.autoParseDocuments,
+      trustedOnly: opts?.trustedOnly === true,
     }))
   );
   const profileRow = results[profile.sections.indexOf("profile")];
@@ -52,8 +53,13 @@ export async function buildStudentContext(
     facts.identity = { ...facts.identity, email: (who?.email as string | undefined) ?? null };
   }
 
+  // Which sections that made it into the text carry someone else's words.
+  const outsideByName = new Map(profile.sections.map((name, i) => [name as string, results[i]?.outside ?? OUTSIDE_SECTIONS.has(name)]));
+  const outside = packed.used.map((u) => u.section).filter((name) => outsideByName.get(name) === true);
+
   return {
     text: packed.text,
+    outside,
     used: packed.used,
     omitted: [...results.flatMap((r) => r.omitted ?? []), ...packed.omitted],
     studentName: facts.identity.name,

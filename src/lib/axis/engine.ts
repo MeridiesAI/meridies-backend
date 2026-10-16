@@ -57,9 +57,9 @@ import { gatherEvidence } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
 import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
-import { isReadOnly, readsDocuments, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
+import { isReadOnly, readsOutside, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
 import { newTurnBudget, recentActionsText, type OperationEvent } from "./ops/run.js";
-import { PROFILES as CONTEXT_PROFILES } from "../context/profiles.js";
+import { PROFILES as CONTEXT_PROFILES, TRUSTED_SECTIONS } from "../context/profiles.js";
 import { tokens } from "./text.js";
 
 export type Emit = (event: string, data: unknown) => void;
@@ -131,13 +131,15 @@ export function requestBase(system: Anthropic.Beta.BetaTextBlockParam[], tools: 
   };
 }
 
-/** The student's record or the roster view, with what it's built from. */
 /**
- * A change request reads the record without the text of uploaded files: a change never needs a
- * transcript's wording, and text from a file in the prompt would turn every change into a card
- * (lib/axis/ops/run.ts). Questions keep the full record.
+ * A change request reads only what the counselor wrote: the student's name and class, their
+ * meetings, meeting notes, strength profile and the counselor's own tasks (TRUSTED_SECTIONS, built
+ * trustedOnly). Text someone else wrote (a file, the student's activities, essays, intake answers,
+ * a task or deadline the student added) in the prompt would turn every change into a card
+ * (lib/axis/ops/run.ts), and a change finds what else it needs with a lookup, which marks the turn
+ * if it reads such text. Questions keep the full record.
  */
-const RECORD_FOR_CHANGES = CONTEXT_PROFILES.chat.sections.filter((s) => s !== "documents");
+const RECORD_FOR_CHANGES = CONTEXT_PROFILES.chat.sections.filter((s) => TRUSTED_SECTIONS.includes(s));
 
 /** The same test the understanding applies (an action score that outranks the rest), before the roster is loaded. */
 export function looksLikeChange(content: string): boolean {
@@ -147,13 +149,19 @@ export function looksLikeChange(content: string): boolean {
   return scores.action >= 5 && scores.essay < 6;
 }
 
+/** The student's record or the roster view, with what it's built from and whether it carries someone else's words. */
 async function loadContext(request: FastifyRequest, studentId: string | null, forChange = false) {
   if (studentId) {
-    const c = await cachedStudentContext(request, studentId, forChange ? RECORD_FOR_CHANGES : undefined);
-    return { record: c.text, roster: null, name: c.studentName, usage: { used: c.used, omitted: c.omitted } as ContextUsage, labels: c.used.map((u) => SECTION_LABELS[u.section] ?? u.section) };
+    const c = forChange
+      ? await cachedStudentContext(request, studentId, RECORD_FOR_CHANGES, true)
+      : await cachedStudentContext(request, studentId);
+    return {
+      record: c.text, roster: null, name: c.studentName, usage: { used: c.used, omitted: c.omitted } as ContextUsage,
+      labels: c.used.map((u) => SECTION_LABELS[u.section] ?? u.section), outside: readsOutside(c),
+    };
   }
-  const r = await buildRosterContext(request);
-  return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [] };
+  const r = await buildRosterContext(request, { trustedOnly: forChange });
+  return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [], outside: r?.outside === true };
 }
 
 /** Drops the oldest turns until the prompt fits Haiku 5.5's lower rate card. */
@@ -326,11 +334,13 @@ export async function runAxisTurn(opts: {
   const api = opts.api ?? messagesApi();
   const actions: (ProposedAction | OperationEvent)[] = [];
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
-  // So does the text of uploaded files in the student record the system prompt carries (its documents section).
+  // So does whatever in the system prompt someone other than the counselor wrote: the student record's
+  // uploaded files and student-written sections, the roster's high schools, deadlines and student tasks.
   const outside =
     hasFiles ||
     ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail") ||
-    readsDocuments(ctx.usage);
+    ctx.outside ||
+    evidence.outside;
   const toolCtx: ToolContext = {
     request, conversationId: opts.conversationId, studentId, roster, ledger, connected, retrievalReady: retrievalOn, signal,
     memo: new Map(),

@@ -55,9 +55,10 @@ const contextCache = new TtlLru<Promise<StudentContext>>(500, 60_000);
  * keeps matching too. Access is checked by the caller on every turn before
  * this is reached, so a revoked student never comes back from here.
  */
-export function cachedStudentContext(request: FastifyRequest, studentId: string, only?: SectionName[]): Promise<StudentContext> {
-  const key = `${request.auth.userId}:${studentId}:${only ? only.join(",") : "*"}`;
-  return sharedLoad(contextCache, key, () => buildStudentContext(request, studentId, "chat", only ? { only } : undefined));
+/** `trustedOnly`: only what the counselor wrote (lib/context/profiles.ts TRUSTED_SECTIONS), for change turns. */
+export function cachedStudentContext(request: FastifyRequest, studentId: string, only?: SectionName[], trustedOnly = false): Promise<StudentContext> {
+  const key = `${request.auth.userId}:${studentId}:${only ? only.join(",") : "*"}:${trustedOnly ? "trusted" : "all"}`;
+  return sharedLoad(contextCache, key, () => buildStudentContext(request, studentId, "chat", { ...(only ? { only } : {}), ...(trustedOnly ? { trustedOnly } : {}) }));
 }
 
 // ---- One student's facts ------------------------------------------------------------------
@@ -120,6 +121,8 @@ export async function studentFacts(request: FastifyRequest, studentId: string): 
 
 export type UpcomingItem = {
   kind: "deadline" | "task" | "meeting";
+  /** Its title may be the student's words (any deadline, a task the student added): outside content for AxIS. */
+  outside: boolean;
   studentId: string;
   title: string;
   detail: string | null;
@@ -141,7 +144,7 @@ export async function upcomingItems(
   const today = isoDay();
   const { from, to } = opts.window;
   let dq = db.from("deadlines").select("student_id, title, school, type, due_date").eq("done", false).lte("due_date", to);
-  let tq = db.from("deliverables").select("student_id, title, status, due_date").neq("status", "complete").lte("due_date", to);
+  let tq = db.from("deliverables").select("student_id, title, status, due_date, source").neq("status", "complete").lte("due_date", to);
   if (from) {
     dq = dq.gte("due_date", from);
     tq = tq.gte("due_date", from);
@@ -170,6 +173,7 @@ export async function upcomingItems(
   const items: UpcomingItem[] = [
     ...((deadlines.data ?? []) as Row[]).map((d): UpcomingItem => ({
       kind: "deadline",
+      outside: true,
       studentId: String(d.student_id),
       title: str(d.title),
       detail: [str(d.school), str(d.type)].filter(Boolean).join(", ") || null,
@@ -179,6 +183,7 @@ export async function upcomingItems(
     })),
     ...((tasks.data ?? []) as Row[]).map((t): UpcomingItem => ({
       kind: "task",
+      outside: t.source !== "counselor",
       studentId: String(t.student_id),
       title: str(t.title),
       detail: null,
@@ -188,6 +193,7 @@ export async function upcomingItems(
     })),
     ...((meetings.data ?? []) as Row[]).map((m): UpcomingItem => ({
       kind: "meeting",
+      outside: false,
       studentId: String(m.student_id ?? ""),
       title: str(m.title) || "Meeting",
       detail: null,

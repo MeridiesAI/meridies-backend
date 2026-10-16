@@ -94,6 +94,14 @@ const OUTSIDE = new Set(["upload", "drive", "onedrive", "outlook", "gmail"]);
 export const readsDocuments = (usage: Pick<ContextUsage, "used"> | null | undefined): boolean =>
   !!usage?.used.some((u) => u.section === "documents");
 
+/**
+ * A student record that carries text someone other than the counselor wrote (the student's
+ * activities, essays, intake answers, their own tasks, deadlines, uploaded files...): outside
+ * content, so a change made after reading it waits for a click (lib/context/profiles.ts OUTSIDE_SECTIONS).
+ */
+export const readsOutside = (ctx: { outside?: string[]; used?: ContextUsage["used"] } | null | undefined): boolean =>
+  !!ctx && ((ctx.outside?.length ?? 0) > 0 || readsDocuments(ctx.used ? { used: ctx.used } : null));
+
 const SECTIONS = [
   "profile", "academics", "personal", "activities", "awards", "courses", "testScores", "colleges",
   "intake", "meetingNotes", "upcomingMeetings", "deadlines", "polygon", "tasks", "essays", "documents",
@@ -258,8 +266,8 @@ const DEFS: ToolDef[] = [
       if (!target) return { content: "No student given. Use find_student first.", isError: true, fresh: false };
       const id = await resolveStudentId(ctx.request, target, "view");
       const built = await cachedStudentContext(ctx.request, id, ["profile", ...i.sections.filter((s) => s !== "profile")]);
-      // The documents section is the text of uploaded files: from here on a change waits for a click.
-      if (readsDocuments(built)) markOutside(ctx.turn);
+      // The student's own words or a file's text: from here on a change waits for a click.
+      if (readsOutside(built)) markOutside(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return { content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`, fresh: !!built.text };
     },
@@ -284,6 +292,8 @@ const DEFS: ToolDef[] = [
       const student = target ? await resolveStudentId(ctx.request, target, "view") : null;
       const window = { from: null, to: isoDay(new Date(Date.now() + days * 86_400_000)), label: `in the next ${days} days` };
       const items = await upcomingItems(ctx.request, { studentId: student, window, meetings: true, roster: ctx.roster, limit: 80 });
+      // A deadline's title, or a task the student added, is the student's words.
+      if (items.some((it) => it.outside)) markOutside(ctx.turn);
       const lines = items.map(
         (it) =>
           `${it.date}${it.overdue ? " OVERDUE" : ""} ${it.kind}${it.status ? ` [${it.status}]` : ""}${student ? "" : ` ${wrapUntrusted("student", ctx.roster.get(it.studentId)?.name ?? "")}`} ${wrapUntrusted(it.kind, `${it.title}${it.detail ? ` · ${it.detail}` : ""}`)}`
@@ -306,6 +316,7 @@ const DEFS: ToolDef[] = [
       const { limit } = z.object({ limit: z.number().int().min(1).max(20).optional() }).parse(raw ?? {});
       const ranked = (await loadRosterRisk(ctx.request, 14)).slice(0, limit ?? 8);
       if (!ranked.length) return { content: "Nobody has overdue work, a red flag or a deadline at risk in the next 14 days.", fresh: true };
+      if (ranked.some((r) => r.outside)) markOutside(ctx.turn);
       return { content: ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name)} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "))}`).join("\n"), fresh: true };
     },
   },

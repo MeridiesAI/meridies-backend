@@ -154,6 +154,7 @@ export const collegeList: OpGroup = {
     op({
       name: "college_list.list",
       kind: "read",
+      outside: true,
       title: "A student's college list (with student_college_id) and their open Recommended schools.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -526,6 +527,7 @@ export const applicationEssays: OpGroup = {
     op({
       name: "essays.list",
       kind: "read",
+      outside: true,
       title: "A student's essays with ids, the schools on their list, and the catalog's supplement prompts.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -871,6 +873,7 @@ export const applicationSheets: OpGroup = {
     op({
       name: "application.list_sheets",
       kind: "read",
+      outside: true,
       title: "A student's Activities and Awards & Honors sheet rows, with ids.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
