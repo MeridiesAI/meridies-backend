@@ -1,7 +1,8 @@
 # Google connector: picked files only — design
 
-Status: draft for review (revision 4, 2026-10-15: Elvin's feedback on the
-type step applied: server-side type guess, one batch confirm). Revision 3
+Status: **approved** (revision 5, 2026-10-15: Elvin's approval conditions
+applied, §4.3.2 and §10.8). Revision 4 (same day) applied Elvin's feedback
+on the type step: server-side type guess, one batch confirm. Revision 3
 (same day) applied the review round, re-checked against `main` at 5dac8cd
 after PR #54. Revision 2 (10/14) applied Elvin's answers. Microsoft/OneDrive is a separate design, after a
 permission test (see §8).
@@ -306,17 +307,20 @@ wrong-account case rare.
   extractor by type, all local, no AI:
   - Google Docs and Slides: Drive's text export (`exportGoogleDocText`);
     Google Sheets: Drive's CSV export (first sheet);
-  - PDF (including Docs stored as PDF): **a new PDF text extractor**
-    (`unpdf`, the serverless build of Mozilla's pdf.js, pure JavaScript),
-    on the stored copy, capped at 25 MB, 50 pages, 200,000 characters and
-    10 seconds; a failure leaves `parse_status` `failed` and AxIS reports
-    the file as `empty`;
+  - PDF (including Docs stored as PDF): **a new PDF text extractor**, on
+    the stored copy (`lib/pdfText.ts`, §4.3.2); a failure leaves
+    `parse_status` `failed` and AxIS reports the file as `empty`;
   - .docx, .txt, .md: `lib/documentText.ts` on the stored copy.
   A file kept out of AI gets no extraction. Whether a model may read the
   result is still `documentAiDecision`'s call: financial, IEP/504, award
   letters, recommendation letters and counselor-only stay out by kind.
-  This also gives drag-and-drop PDFs text when their type is set, which
-  they never had.
+  This also gives drag-and-drop PDFs text when their type is confirmed or
+  changed from now on.
+- **No backfill.** Extraction runs only on confirmations made after this
+  ships (a `confirm-types` item, or a `PATCH` that sets a kind). Existing
+  documents stay exactly as they are: no job walks old rows, and the
+  migration touches no data. A separate, opt-in backfill script is
+  documented for later (§8) and is not part of this work.
 - **Every path that puts a document into a prompt applies
   `documentAiDecision`**, not `available_to_llm` alone. The decision gains
   one first rule: **`kind_confirmed = false` is `not-categorized`**, before
@@ -433,10 +437,49 @@ ever called**: the module imports nothing from `lib/anthropic.ts` or
   and out. (Award letters, recommendation letters and counselor-only are
   already out by kind.)
 - `basis` is `text`, `filename` or `type`, shown to the counselor as "from
-  the file's text", "from the file name" or "from the file type".
+  the file's text", "from the file name" or "from the file type". **A
+  guess not read from the text (`filename` or `type`, which includes every
+  scanned PDF with no text layer) carries a "Please check" badge** in the
+  list (§4.4); `kind_guess` stores `textFound: false` for those so the
+  badge survives reopening the list.
 - Unit-tested against a table of filenames and short texts, including the
   false friends ("Contract.pdf", "Pact essay", an essay that mentions its
   IEP).
+
+#### 4.3.2 PDF text extraction (`lib/pdfText.ts`)
+
+Used by both the type guess (first 3 pages) and extraction after
+confirming. PDFs are hostile input, so:
+
+- **Library:** `unpdf`, pinned exactly at **1.8.1**, which bundles
+  **PDF.js 6.1.200** (checked 10/15 in the published package:
+  `apiVersion` 6.1.200). That is past 4.2.67, the fix for CVE-2024-4367
+  (arbitrary JavaScript through a crafted font). Its build contains no
+  `eval` or `new Function` at all. A unit test reads the bundled
+  `apiVersion` and fails below 4.2.67, so an upgrade can't regress it.
+  1.9.0 (published 10/15) is not used until it is at least two weeks old.
+- **Always `isEvalSupported: false`** (and `enableScripting` off, PDF.js's
+  default) in every `getDocument` call, set in one place; a test pins the
+  options.
+- **In a worker thread with a memory cap.** Each extraction runs in a
+  `worker_threads` Worker with `resourceLimits` (`maxOldGenerationSizeMb:
+  256`, `maxYoungGenerationSizeMb: 32`). The main thread passes the bytes
+  and gets back text or an error code; nothing else crosses.
+- **10 seconds, enforced by terminating the worker** (`worker.terminate()`
+  when the timer fires), not only by a timer around a promise; a worker
+  that exceeds its memory cap dies the same way. Either way the result is
+  `parse_status` `failed`, and the API process is unaffected.
+- **Limits kept:** 25 MB input (refused before the worker starts), 50
+  pages (pages past 50 are not read), 200,000 characters (text is cut
+  there).
+- At most two extraction workers at once per process; further
+  extractions wait.
+- **Tests:** a PDF with embedded JavaScript (an `/OpenAction` script and a
+  crafted-font case modelled on CVE-2024-4367) is extracted and the script
+  demonstrably doesn't run (it would set a marker the test checks); a PDF
+  that loops is stopped at 10 seconds by termination and the next
+  extraction still works; a PDF over the memory cap fails cleanly; the
+  page and character caps hold.
 
 Why the Picker settings come from the API rather than Vercel environment
 variables: all Google settings live in one place (Railway), and the app
@@ -452,7 +495,9 @@ needs no new Vercel variables.
   `StudentFiles` it sends no `kind`.
 - **The type list (one step for the whole pick):** after a pick, one list
   shows every imported file with its type pre-filled from the server's
-  guess and where the guess came from ("from the file name"), a "Keep out
+  guess and where the guess came from ("from the file name"), a **Please
+  check** badge on any guess not read from the file's text (filename or
+  type only, including scanned PDFs), a "Keep out
   of AI" checkbox (pre-ticked for financial and IEP/504 guesses), and
   unknown rows marked "Choose a type". One **Looks right** button sends
   `POST /files/documents/confirm-types` with every row that has a type;
@@ -542,7 +587,8 @@ needs no new Vercel variables.
   IEP never reaches a model by default, by two independent checks. The
   text read for the type guess never leaves the guess function.
 - PDFs are untrusted input to the new extractor: it runs with the size,
-  page, character and time caps in §4.3, on the server's stored copy, and
+  page, character, memory and time caps in §4.3.2 (a worker thread,
+  terminated at 10 seconds), on the server's stored copy, and
   its output is treated like any document text (wrapped as untrusted data
   wherever it enters a prompt).
   Existing switches (keep out of AI, FERPA waiver) are unchanged.
@@ -697,6 +743,15 @@ the rotated production client secret verified with Google.
   to the files inside a picked folder. Bringing a counselor's existing
   records in is the import pipeline's job; Drive can become one of its
   sources later by picking files.
+- **Backfilling text for existing documents.** Later, a separate opt-in
+  script, `scripts/backfill-document-text.ts`: dry run by default (counts
+  what it would extract), `--apply` to run, scoped by `--practice` or
+  `--student`, only documents that are confirmed, not kept out of AI and
+  without `parsed_data`, through the same `lib/pdfText.ts` worker and
+  limits, a few at a time, logging counts only. It is written up in
+  AGENTS.md as a later step and not built in this work.
+- **OCR for scanned PDFs.** A scan has no text layer, so AxIS lists it as
+  empty.
 - **Reading Gmail or Outlook.** Restricted scopes; would need CASA.
 - **RAG / vector search.**
 
@@ -748,5 +803,12 @@ the rotated production client secret verified with Google.
 7. The type step is a server-side guess (no AI) confirmed in one batch;
    Essays skip it; it can be skipped; sensitive guesses pre-fill as kept
    out; text for AI is extracted once a type is confirmed (§4.3, §4.3.1).
-   **Open:** OK to add `unpdf` as the PDF text extractor (needed for both
-   the text guess and AxIS reading confirmed PDFs)?
+8. **Spec approved (10/15), including `unpdf`**, on these conditions, all
+   in §4.3.2 and §8: bundled PDF.js ≥ 4.2.67 (CVE-2024-4367) and always
+   `isEvalSupported: false`, with an embedded-JavaScript test; extraction
+   in a worker thread with a memory cap, the 10 seconds enforced by
+   terminating the worker, and the 25 MB / 50 pages / 200,000 characters
+   limits; no backfill (extraction only on new confirmations; an opt-in
+   backfill script documented for later); a "Please check" badge on
+   guesses read only from the filename, scanned PDFs included. Migration
+   applied on production before the backend PR merges.
