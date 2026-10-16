@@ -10,7 +10,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
 import {
@@ -385,6 +385,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
         source: old.source,
         intakeRequests: old.intakeRequests,
         requestedAt: old.requestedAt ? new Date().toISOString() : null,
+        resendOf: id,
       });
       // A referral pointing at the old invitation follows it to the new one.
       await request.db
@@ -520,11 +521,12 @@ export default async function inviteRoutes(app: FastifyInstance) {
             invitationId: String(row.id),
           });
         } catch (err) {
-          request.log.error({ err }, "mass invite row failed");
+          const held = err instanceof HttpError && err.code === "address_holds_other_student";
+          if (!held) request.log.error({ err }, "mass invite row failed");
           results.push({
             email: r.email,
             status: "failed",
-            reason: "Could not send an invitation to this address",
+            reason: held ? (err as HttpError).message : "Could not send an invitation to this address",
             invitationId: null,
           });
         }
