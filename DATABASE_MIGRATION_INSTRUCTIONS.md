@@ -799,19 +799,23 @@ select prosrc like '%invitation_same_student%' from pg_proc
 
 ## Profile size bound: `20261024000081`
 
-A `BEFORE INSERT OR UPDATE OF profile` trigger on `public.profiles`
-(`private.profiles_profile_size`) refuses a `profile` over 400,000 characters of jsonb text that is
-larger than the stored one (errcode 23514, "Profile is too large"). The API already bounds the merged
-value at 200,000 characters of JSON (`lib/profileSize.ts`) on `PATCH /auth/me` and
-`PATCH /students/:id`; this adds the same rule for a direct PostgREST write. A trigger, not a CHECK,
-so a row already over the bound still takes every other update (accept_invitation, a transfer, a name
-change) and can shrink. Either order with the code; not in `REQUIRED_SCHEMA`.
+A `BEFORE INSERT OR UPDATE` trigger on `public.profiles` (`profiles_column_bounds`, function
+`private.profiles_column_bounds`) bounds every column a signed-in user can write: `full_name`,
+`hometown`, `high_school` and `title` at 200 characters, `headline` 300, `avatar_url` 2048, `phone`
+40, `timezone` 80, `grad_year` 10, and `profile` at 300,000 bytes of its jsonb text (errcode 23514,
+"Profile is too large"). The API measures the merged profile the same way (`lib/profileSize.ts`) on
+`PATCH /auth/me` and `PATCH /students/:id`; this adds the same rule for a direct PostgREST write. A
+trigger, not a CHECK: on UPDATE it refuses only a value over its bound that is longer than the stored
+one, so a row already over a bound still takes every other update (accept_invitation, a transfer, a
+name change) and can shrink; on INSERT (signup) the short text columns are clipped rather than
+refused. It drops `profiles_profile_size`, the name an earlier draft used. Either order with the
+code; not in `REQUIRED_SCHEMA`.
 
 Check, before applying, how many profiles are already over (they keep working, but can't grow):
 
 ```sql
-select count(*) from public.profiles where length(profile::text) > 400000;
-select tgname from pg_trigger where tgrelid = 'public.profiles'::regclass and tgname = 'profiles_profile_size';  -- one row
+select count(*) from public.profiles where octet_length(profile::text) > 300000;
+select tgname from pg_trigger where tgrelid = 'public.profiles'::regclass and tgname = 'profiles_column_bounds';  -- one row
 ```
 
 ## Caseload transfer, files: `20261024000082`
