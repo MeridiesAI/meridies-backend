@@ -118,8 +118,20 @@ What the repository does about it:
 - The CLI calls are the pinned CLI reading repository files as data: `db push --dry-run` reads the
   migration files and runs none of them.
 
-What it can't do: stop a merged edit to `migrations.yml` itself from using the plan's secrets. Close
-that outside the repository:
+What it can't do:
+
+- Stop a merged edit to `migrations.yml` itself from using the plan's secrets.
+- Keep `plan.mjs` away from the apply's secrets. In the apply job, "Refuse if the list changed" and
+  "Read the database check before" run `plan.mjs` before the push and the checks after it, because
+  the list has to be refused before anything is applied; a merged `plan.mjs` could therefore plant a
+  `$GITHUB_ENV` or `$GITHUB_PATH` entry those later steps pick up. Unsetting the variables for that
+  step doesn't help (the runner's file-command files sit in `$RUNNER_TEMP` where a script can find
+  them). That job runs only after the approval, but the approver reads the plan summary, which
+  `plan.mjs` writes. So an edit to `scripts/migrations/**` is as sensitive as one to the workflow, and
+  item 2 below (code-owner review) is what covers it. (A migration file applied in that job is
+  repository code with the same reach, by design.)
+
+Close these outside the repository:
 
 1. **A read-only credential for the plan.** Give `production-db-plan` its own secrets instead of the
    apply's: ideally a database role with `SELECT` on `supabase_migrations.schema_migrations` and the

@@ -29,7 +29,11 @@
 #     sha256 matches PROBLEMS_SQL_SHA256 below, so changing what runs against
 #     production before approval means changing this file (a unit test keeps the
 #     two in step).
-# Neither stops a merged edit to this workflow itself. The real fix is outside
+# Neither stops a merged edit to this workflow itself. Nor, in the apply job,
+# does the order help: plan.mjs refuses a changed list before the push, so it
+# runs before secret-holding steps there; that job waits for the approval, but
+# the approver reads a summary plan.mjs wrote, so scripts/migrations/** needs
+# the same review as this file. The real fix is outside
 # the repository: give production-db-plan its own read-only credential instead
 # of the apply's, and require an approver's review (CODEOWNERS + branch
 # protection) for .github/workflows/**, scripts/migrations/** and
