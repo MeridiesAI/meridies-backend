@@ -697,7 +697,8 @@ Two layers, and they are not redundant:
 1. `@fastify/rate-limit` — in-process, per authenticated user (falling back to
    IP). Cheap, soaks up floods, **resets on deploy and doesn't span replicas.**
    The IP is the one Railway's edge saw: `trustProxy` trusts exactly
-   `TRUST_PROXY_HOPS` hops (default 1), so the X-Forwarded-For entries a
+   `TRUST_PROXY_HOPS` hops (unset: 1 on Railway and in development, 0
+   elsewhere in production, `lib/proxyTrust.ts`), so the X-Forwarded-For entries a
    client writes to the left of the edge's own are ignored by the limiter and
    the request log. Never set it back to `true`: that takes the leftmost,
    client-written entry, and a fresh header per request was a fresh bucket.
@@ -2526,7 +2527,7 @@ npm run dev               # http://localhost:4000
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
-| `TRUST_PROXY_HOPS` | Proxies in front of the API (default 1, Railway's edge); `request.ip` is the address the outermost one saw. 0 trusts no forwarding header |
+| `TRUST_PROXY_HOPS` | Proxies in front of the API. Unset: 1 on Railway (its edge) and in development, 0 elsewhere in production; Railway behind Cloudflare: 2. `request.ip` is the address the outermost trusted proxy saw. 0 trusts no forwarding header |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
