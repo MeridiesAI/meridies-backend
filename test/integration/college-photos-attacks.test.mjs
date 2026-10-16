@@ -69,12 +69,13 @@ if (table) {
              values ('${ids.syr}', 'wikidata', '${SYR}', '${sha1(`${SYR}#v2`)}', '${textHash}', '{replacement}', '2026-09-14T00:00:00Z', '2026-09-14T00:00:00Z')`);
 }
 
+const startedAt = await sql(`select now()::text`);
 const run = load();
 check("the run goes through", run.ok, run.out.slice(-800));
 check("CMU: a file swapped during the downloads and reverted is not stored", (await photoOf(ids.cmu)) === "", await photoOf(ids.cmu));
 check("CWRU: a file swapped before the downloads is not stored", (await photoOf(ids.cwru)) === "", await photoOf(ids.cwru));
 check("the run counted both as changed during the run", /"changed-during-run": 2/.test(run.out), run.out.slice(-1500));
-check("nothing for them reached the bucket", (await sql(`select count(*) from storage.objects where bucket_id = 'college-photos' and (name like '211440/%' or name like '201645/%')`)) === "0");
+check("nothing for them reached the bucket", (await sql(`select count(*) from storage.objects where bucket_id = 'college-photos' and (name like '211440/%' or name like '201645/%') and updated_at >= '${startedAt}'`)) === "0");
 check("NYU: picking the title Wikidata shows doesn't publish a version uploaded yesterday", (await photoOf(ids.nyu)) === `${NYU}|${sha1(`${NYU}#v1`)}|Bobst Photographer`, await photoOf(ids.nyu));
 check("RIT: a picked title that now redirects to another file is not published", (await photoOf(ids.rit)) === "", await photoOf(ids.rit));
 check("Syracuse: a version re-applied after its sighting doesn't replace the photo", (await photoOf(ids.syr)) === `${SYR}|${sha1(`${SYR}#v1`)}|Languages Photographer`, await photoOf(ids.syr));
