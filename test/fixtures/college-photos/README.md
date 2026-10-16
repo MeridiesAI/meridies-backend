@@ -14,9 +14,11 @@ files follow the documented response shapes instead:
   `modified` as an `xsd:dateTime` literal, every item 2026-08-01 here).
   The Q-ids other than the real universities' are made up.
 - `commons-imageinfo-1280.json` / `-500.json`: `action=query&formatversion=2&redirects=1`
-  answers (`prop=imageinfo|revisions`, `iiurlwidth=1280`,
-  `iiprop=timestamp|url|size|mime|sha1|extmetadata` and `rvprop=timestamp`;
-  and `prop=imageinfo`, `iiurlwidth=500`, `iiprop=url`), including a
+  answers (`prop=imageinfo|revisions|info`, `iiurlwidth=1280`,
+  `iiprop=timestamp|url|size|mime|sha1|extmetadata` and `rvprop=timestamp`, each
+  page with the `touched` time `prop=info` gives; and `prop=imageinfo`,
+  `iiurlwidth=500`, `iiprop=timestamp|url|sha1`, the same version's sha1 and
+  upload time as the 1280 answer, which the run compares after downloading), including a
   `normalized` entry (a decomposed accent Commons rewrites to NFC), a
   `redirects` entry (a moved file) and a `missing` page. The sha1s are
   sha1(title), not the files' own. Every upload time (imageinfo `timestamp`)

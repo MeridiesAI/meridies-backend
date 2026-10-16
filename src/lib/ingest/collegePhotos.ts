@@ -37,17 +37,28 @@
  * Commons are crowd-edited, so a new or changed photo is published only once
  * it has been stable for STABLE_DAYS. Stable means the Wikidata item (its
  * schema:dateModified, from the same SPARQL query), the Commons file version
- * (imageinfo timestamp) and its description page (latest revision) were all
- * last edited at least that long before the run, and the file wasn't reached
- * through a redirect; or a run at least that long ago saw this exact
- * candidate (title, sha1, credit and license) and held it. A replacement of a
- * photo already shown always needs that earlier sighting. A held candidate is
- * written to college_photo_candidates and the stored photo keeps serving. A
- * team pick is published at once, unless it is a new version uploaded over
- * the file the team picked, which is a replacement like any other. A
- * description page edited within the window doesn't refresh a stored photo's
- * credit either. Without the migration nothing is remembered: new photos
- * still pass on their timestamps, replacements are held.
+ * (imageinfo timestamp) and its description page (latest revision, and its
+ * `touched` time, which also moves when a template the page uses is edited)
+ * were all last changed at least that long before the run, and the file
+ * wasn't reached through a redirect; or a run at least that long ago saw this
+ * exact candidate (title, sha1, credit and license), held it, and nothing it
+ * depends on changed since (quietSince: a revert and a re-applied edit don't
+ * keep the old sighting). A replacement of a photo already shown (any new
+ * version under the same title, or another file) always needs that sighting.
+ * A held candidate is written to college_photo_candidates and the stored
+ * photo keeps serving. A team pick is published at once, except a new
+ * version of the file already shown (a replacement like any other) or a
+ * title that now redirects; a pick pinned to a sha1 is published at once
+ * while the file is that version and held while it isn't. A changed credit
+ * or license for the photo already shown waits the same way (textDecision).
+ * Without the migration nothing is remembered: new photos still pass on
+ * their timestamps, replacements are held, and changed text waits for a quiet
+ * description page.
+ *
+ * The bytes are tied to the version judged (sameVersion): upload.wikimedia.org
+ * thumbnail URLs name the file, not the version, so Commons is asked again
+ * after the downloads and the copies are stored only when the file is still
+ * exactly that version (sha1 and upload time). Otherwise nothing is kept.
  */
 
 import { createHash } from "node:crypto";
@@ -216,22 +227,40 @@ export function parseSparql(json: unknown): SparqlResult {
 
 // ---- Picks ---------------------------------------------------------------------------
 
-export type Picks = Map<number, string | "none">;
+/**
+ * A team pick: the file's title, or the title and the exact version the team
+ * looked at (its Commons sha1, the optional commons_sha1 column). A pinned
+ * pick is published only while the file is that version, and at once; an
+ * unpinned one is published at once unless it is a new version of the file
+ * already shown, or its title now redirects (reviewDecision).
+ */
+export type PickEntry = string | { title: string; sha1: string };
+export type Picks = Map<number, PickEntry | "none">;
+export const pickTitle = (p: PickEntry): string => (typeof p === "string" ? p : p.title);
+export const pickSha1 = (p: PickEntry): string | null => (typeof p === "string" ? null : p.sha1);
 
 const pickRow = z
   .object({
     unitid: z.string().trim().regex(/^[0-9]{6}$/, "unitid must be six digits"),
     commons_title: z.string().trim().min(1, "commons_title is empty").max(400),
     note: z.string().max(300).optional().default(""),
+    commons_sha1: z
+      .string()
+      .trim()
+      .regex(/^([0-9a-fA-F]{40})?$/, "commons_sha1 must be 40 hex characters or empty")
+      .optional()
+      .default(""),
   })
   .strict();
 
-/** The team's picks CSV (unitid,commons_title,note). Strict: one bad row fails the whole file. */
+const PICK_HEADERS = ["unitid,commons_title,note", "unitid,commons_title,note,commons_sha1"];
+
+/** The team's picks CSV (unitid,commons_title,note[,commons_sha1]). Strict: one bad row fails the whole file. */
 export function parsePicks(csv: string): Picks {
   const rows = parseCsv(csv);
   const firstLine = csv.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0] ?? "";
   const header = firstLine.split(",").map((h) => h.trim());
-  if (header.join(",") !== "unitid,commons_title,note") throw new Error("picks file: the header must be unitid,commons_title,note");
+  if (!PICK_HEADERS.includes(header.join(","))) throw new Error("picks file: the header must be unitid,commons_title,note (and optionally commons_sha1)");
   const out: Picks = new Map();
   const errors: string[] = [];
   rows.forEach((r, i) => {
@@ -246,7 +275,12 @@ export function parsePicks(csv: string): Picks {
       errors.push(`line ${line}: ${unitid} is listed twice`);
       return;
     }
+    const sha1 = parsed.data.commons_sha1.toLowerCase();
     if (parsed.data.commons_title.toLowerCase() === "none") {
+      if (sha1) {
+        errors.push(`line ${line}: none takes no commons_sha1`);
+        return;
+      }
       out.set(unitid, "none");
       return;
     }
@@ -255,7 +289,7 @@ export function parsePicks(csv: string): Picks {
       errors.push(`line ${line}: commons_title must be a File: title or none`);
       return;
     }
-    out.set(unitid, title);
+    out.set(unitid, sha1 ? { title, sha1 } : title);
   });
   if (errors.length) throw new Error(`picks file: ${errors.slice(0, 10).join(" | ")}`);
   return out;
@@ -273,7 +307,7 @@ export function loadPicks(file: URL | string = PICKS_FILE): Picks {
 
 // ---- Commons -------------------------------------------------------------------------
 
-type Page = Raw & { title?: string; missing?: boolean; invalid?: boolean; imageinfo?: Raw[]; revisions?: unknown };
+type Page = Raw & { title?: string; missing?: boolean; invalid?: boolean; imageinfo?: Raw[]; revisions?: unknown; touched?: unknown };
 
 /**
  * Each requested title's page in an imageinfo answer, following Commons'
@@ -320,6 +354,13 @@ export type ChosenPhoto = {
   uploadedAt: string | null;
   /** When the description page (credit, license) was last edited; null when Commons didn't say. */
   pageEditedAt: string | null;
+  /**
+   * The description page's `touched` time (prop=info): it also moves when a
+   * template the page uses is edited, such as a {{Creator:...}} or a
+   * photographer's own credit template, which change the credit and license
+   * Commons reports without an edit to the page itself. Null when not given.
+   */
+  pageTouchedAt: string | null;
 };
 
 export type RejectReason =
@@ -387,6 +428,7 @@ export function choosePhoto(page: Page | null | undefined, opts: { picked?: bool
       fullUrl,
       uploadedAt: isoTime(info.timestamp),
       pageEditedAt: isoTime((Array.isArray(page.revisions) ? (page.revisions as Raw[])[0] : undefined)?.timestamp),
+      pageTouchedAt: isoTime(page.touched),
     },
   };
 }
@@ -396,6 +438,23 @@ export function thumbUrlOf(page: Page | null | undefined): string | null {
   const info = page?.imageinfo?.[0];
   const u = typeof info?.thumburl === "string" ? info.thumburl : typeof info?.url === "string" ? info.url : null;
   return u && isAllowedDownloadUrl(u) ? u : null;
+}
+
+/**
+ * Whether an imageinfo page still describes exactly the version a photo was
+ * judged on: the same title (not moved or redirected since), the same sha1
+ * and the same upload time. Thumbnail URLs on upload.wikimedia.org name the
+ * file, not the version, so bytes fetched from them are those of whatever
+ * version is current when they are fetched; the run asks again after the
+ * downloads and keeps them only when this still holds. The upload time is
+ * what tells a revert apart: re-uploading the old version brings back its
+ * sha1 but is a new upload, with a new time. Unknown times never match.
+ */
+export function sameVersion(page: Page | null | undefined, photo: Pick<ChosenPhoto, "title" | "sha1" | "uploadedAt">): boolean {
+  const info = page?.imageinfo?.[0];
+  if (!page || !info || page.title !== photo.title || photo.uploadedAt === null) return false;
+  const sha1 = typeof info.sha1 === "string" ? info.sha1.toLowerCase() : "";
+  return sha1 === photo.sha1 && isoTime(info.timestamp) === photo.uploadedAt;
 }
 
 /** Where a college's two copies live in the bucket; content-addressed by the Commons sha1. */
@@ -422,16 +481,24 @@ export type PhotoCandidate = {
 export type HoldReason =
   /** The current version of the file was uploaded within the window (or Commons didn't say when). */
   | "file-recent"
-  /** The description page (credit, license) was edited within the window (or Commons didn't say when). */
+  /** The description page, or a template it uses, changed within the window (or Commons didn't say when). */
   | "page-recent"
   /** The Wikidata item was edited within the window (or the query didn't say when). */
   | "wikidata-recent"
-  /** Wikidata's title reached the file through a redirect, whose age the APIs don't give. */
+  /** Wikidata's title reached the file through a redirect, whose age the APIs don't give. Never confirmed by a sighting. */
   | "redirected"
   /** It would replace a photo already shown: that needs a sighting by an earlier run. */
   | "replacement"
   /** Before 20261024000071: no memory of earlier sightings, so a replacement can't be confirmed. */
-  | "no-review-table";
+  | "no-review-table"
+  /** A team pick whose title now redirects to another file: the team updates the picks file. */
+  | "pick-redirected"
+  /** A team pick pinned to a version (commons_sha1) the file no longer is: the team updates the pin. */
+  | "pick-changed"
+  /** The file changed while the run was downloading it: nothing downloaded is kept. */
+  | "changed-during-run"
+  /** The credit or license Commons reports for the photo already shown changed: the new text waits for a sighting. */
+  | "text-changed";
 
 export type ReviewDecision =
   | { publish: true; via: "pick" | "stable" | "observed" }
@@ -442,6 +509,12 @@ export function candidateTextHash(photo: Pick<ChosenPhoto, "credit" | "license" 
   return createHash("sha1").update(`${photo.license}\n${photo.credit}\n${photo.licenseUrl ?? ""}`).digest("hex");
 }
 
+/** The text hash of what a stored row shows; null when the row's text wasn't read. */
+export function storedTextHash(prev: Pick<StoredPhoto, "credit" | "license" | "license_url">): string | null {
+  if (typeof prev.credit !== "string" || typeof prev.license !== "string") return null;
+  return candidateTextHash({ credit: prev.credit, license: prev.license, licenseUrl: prev.license_url ?? null });
+}
+
 /** Whether an edit at `at` is at least STABLE_MS before `now`. Unknown or future times are never stable. */
 export function stableSince(at: string | null, now: Date): boolean {
   if (at === null) return false;
@@ -449,28 +522,63 @@ export function stableSince(at: string | null, now: Date): boolean {
   return Number.isFinite(t) && now.getTime() - t >= STABLE_MS;
 }
 
+/** The description page and the templates it uses, both quiet for the window. */
+const pageStable = (photo: ChosenPhoto, now: Date): boolean => stableSince(photo.pageEditedAt, now) && stableSince(photo.pageTouchedAt, now);
+
+/**
+ * Whether nothing the candidate depends on changed after `at` (a sighting):
+ * the file version, its description page and the templates it uses, and,
+ * for Wikidata's choice, the item. Unknown times count as changed. Without
+ * this a sighting would only prove the candidate was there at two instants a
+ * week apart: a vandal reverted within hours could re-apply the same edit
+ * just before the next run and be confirmed by the first sighting.
+ * `itemModified` undefined: the item doesn't matter (a pick, or text only).
+ */
+export function quietSince(at: string, photo: ChosenPhoto, itemModified: string | null | undefined): boolean {
+  const limit = Date.parse(at);
+  if (!Number.isFinite(limit)) return false;
+  const notAfter = (t: string | null) => t !== null && Number.isFinite(Date.parse(t)) && Date.parse(t) <= limit;
+  if (!notAfter(photo.uploadedAt) || !notAfter(photo.pageEditedAt) || !notAfter(photo.pageTouchedAt)) return false;
+  return itemModified === undefined || notAfter(itemModified);
+}
+
+const sameCandidate = (c: PhotoCandidate | undefined, source: "wikidata" | "pick", photo: ChosenPhoto): c is PhotoCandidate =>
+  c !== undefined &&
+  c.source === source &&
+  c.commons_title === photo.title &&
+  c.commons_sha1 === photo.sha1 &&
+  c.text_hash === candidateTextHash(photo);
+
 /**
  * Whether a new or changed photo (its Commons sha1 differs from what is
  * stored, or nothing is stored) may be published on this run.
  *
- *   - A team pick is published at once, unless the stored photo is that same
- *     pick and only the file under it changed: a new version uploaded over a
- *     picked file is a replacement like any other.
+ *   - A team pick pinned to a version (commons_sha1) is published at once
+ *     while the file is that version, and held while it isn't.
+ *   - An unpinned team pick is published at once, unless its title now
+ *     reaches another file through a redirect (anyone who can edit the
+ *     redirect page could point it anywhere) or it is a new version of the
+ *     file already shown, under the same title, whichever source showed it:
+ *     a new version uploaded over a picked or shown file is a replacement
+ *     like any other.
  *   - Otherwise it waits for STABLE_DAYS of quiet: the file version, its
- *     description page and (for Wikidata's choice) the item last edited at
- *     least that long ago, and not reached through a redirect.
+ *     description page (revision and `touched`) and, for Wikidata's choice,
+ *     the item last changed at least that long ago, and not reached through a
+ *     redirect.
  *   - A replacement of a photo already shown always waits for a sighting by
  *     an earlier run.
  *   - A sighting counts when a run at least STABLE_DAYS ago held this exact
- *     candidate (same source, title, sha1, credit and license) and it is
- *     unchanged now. It stands in for every reason: unchanged across a week
- *     is what the timestamps would have shown.
+ *     candidate (same source, title, sha1, credit and license), nothing it
+ *     depends on changed since that sighting (quietSince), and it wasn't
+ *     reached through a redirect. Then it stands in for every clock.
  */
 export function reviewDecision(i: {
   source: "wikidata" | "pick";
   photo: ChosenPhoto;
   itemModified: string | null;
   redirected: boolean;
+  /** The version a team pick is pinned to (picks CSV commons_sha1); null or absent when unpinned. */
+  pinnedSha1?: string | null;
   prev: Pick<StoredPhoto, "source" | "commons_title" | "commons_sha1"> | undefined;
   candidate: PhotoCandidate | undefined;
   /** False before migration 20261024000071: there is no memory of sightings. */
@@ -478,12 +586,16 @@ export function reviewDecision(i: {
   now: Date;
 }): ReviewDecision {
   const { source, photo, prev, now } = i;
-  const newVersionOfPick = prev !== undefined && prev.source === "pick" && prev.commons_title === photo.title;
-  if (source === "pick" && !newVersionOfPick) return { publish: true, via: "pick" };
+  if (source === "pick") {
+    if (i.pinnedSha1) return i.pinnedSha1 === photo.sha1 ? { publish: true, via: "pick" } : { publish: false, reasons: ["pick-changed"] };
+    if (i.redirected) return { publish: false, reasons: ["pick-redirected"] };
+    const newVersion = prev !== undefined && prev.commons_title === photo.title;
+    if (!newVersion) return { publish: true, via: "pick" };
+  }
 
   const reasons: HoldReason[] = [];
   if (!stableSince(photo.uploadedAt, now)) reasons.push("file-recent");
-  if (!stableSince(photo.pageEditedAt, now)) reasons.push("page-recent");
+  if (!pageStable(photo, now)) reasons.push("page-recent");
   if (source === "wikidata") {
     if (!stableSince(i.itemModified, now)) reasons.push("wikidata-recent");
     if (i.redirected) reasons.push("redirected");
@@ -494,35 +606,63 @@ export function reviewDecision(i: {
   const c = i.candidate;
   const observed =
     i.candidatesAvailable &&
-    c !== undefined &&
-    c.source === source &&
-    c.commons_title === photo.title &&
-    c.commons_sha1 === photo.sha1 &&
-    c.text_hash === candidateTextHash(photo) &&
-    stableSince(c.first_seen_at, now);
+    !i.redirected &&
+    sameCandidate(c, source, photo) &&
+    stableSince(c.first_seen_at, now) &&
+    quietSince(c.first_seen_at, photo, source === "wikidata" ? i.itemModified : undefined);
   if (observed) return { publish: true, via: "observed" };
   if (!i.candidatesAvailable && prev !== undefined) reasons.push("no-review-table");
   return { publish: false, reasons };
 }
 
-/** The candidate row to write for a held photo: first_seen kept while it is the same candidate. */
+/**
+ * Whether the credit and license Commons now reports for the photo already
+ * shown (same file, same sha1) may replace the text the row shows. The same
+ * text always may. Changed text is crowd-edited text on every college surface
+ * and on the credits page, and it can change without an edit to the file's
+ * page (a transcluded credit template), so it waits like a new photo: with
+ * the review queue, for a sighting of the same text at least STABLE_DAYS old
+ * with nothing changed since (the page's `touched` time covers templates once
+ * MediaWiki's job queue has caught up; the sighting covers the lag); before
+ * the queue's migration, for the description page's revision and `touched`
+ * times to be a week old.
+ */
+export function textDecision(i: {
+  source: "wikidata" | "pick";
+  photo: ChosenPhoto;
+  storedHash: string | null;
+  candidate: PhotoCandidate | undefined;
+  candidatesAvailable: boolean;
+  now: Date;
+}): { apply: true } | { apply: false; reasons: HoldReason[] } {
+  const { photo, now } = i;
+  if (i.storedHash !== null && i.storedHash === candidateTextHash(photo)) return { apply: true };
+  if (!i.candidatesAvailable) return pageStable(photo, now) ? { apply: true } : { apply: false, reasons: ["text-changed", "page-recent"] };
+  const c = i.candidate;
+  if (sameCandidate(c, i.source, photo) && stableSince(c.first_seen_at, now) && quietSince(c.first_seen_at, photo, undefined)) return { apply: true };
+  return { apply: false, reasons: pageStable(photo, now) ? ["text-changed"] : ["text-changed", "page-recent"] };
+}
+
+/**
+ * The candidate row to write for a held photo. first_seen is kept while it is
+ * the same candidate and nothing it depends on changed after that first
+ * sighting (quietSince); otherwise the wait starts again now.
+ */
 export function nextCandidate(
   collegeId: string,
   source: "wikidata" | "pick",
   photo: ChosenPhoto,
   reasons: HoldReason[],
   existing: PhotoCandidate | undefined,
-  now: Date
+  now: Date,
+  itemModified?: string | null
 ): PhotoCandidate {
   const textHash = candidateTextHash(photo);
   const at = now.toISOString();
   const same =
-    existing !== undefined &&
-    existing.source === source &&
-    existing.commons_title === photo.title &&
-    existing.commons_sha1 === photo.sha1 &&
-    existing.text_hash === textHash &&
-    Date.parse(existing.first_seen_at) <= now.getTime();
+    sameCandidate(existing, source, photo) &&
+    Date.parse(existing.first_seen_at) <= now.getTime() &&
+    quietSince(existing.first_seen_at, photo, itemModified);
   return {
     college_id: collegeId,
     source,
@@ -530,7 +670,7 @@ export function nextCandidate(
     commons_sha1: photo.sha1,
     text_hash: textHash,
     reasons,
-    first_seen_at: same ? existing.first_seen_at : at,
+    first_seen_at: same && existing ? existing.first_seen_at : at,
     last_seen_at: at,
   };
 }
@@ -544,6 +684,10 @@ export type StoredPhoto = {
   commons_sha1: string;
   storage_path: string;
   thumb_path: string;
+  /** The text the row shows, read so a changed credit can be held (textDecision). */
+  credit?: string;
+  license?: string;
+  license_url?: string | null;
 };
 
 export type PhotoRow = StoredPhoto & {
@@ -629,7 +773,7 @@ export function supabasePhotoStore(svc: SupabaseClient): PhotoStore {
       for (let from = 0; ; from += 1000) {
         const { data, error } = await svc
           .from("college_photos")
-          .select("college_id, source, commons_title, commons_sha1, storage_path, thumb_path")
+          .select("college_id, source, commons_title, commons_sha1, storage_path, thumb_path, credit, license, license_url")
           .order("college_id")
           .range(from, from + 999);
         fail("read photos", error);
@@ -717,7 +861,8 @@ export type PhotoOutcome = {
 };
 
 export type ReviewItem = {
-  action: "add" | "replace" | "held-new" | "held-replace";
+  /** held-text: the photo stays, a changed credit or license for it waits (textDecision). */
+  action: "add" | "replace" | "held-new" | "held-replace" | "held-text";
   unitid: number;
   name: string;
   title: string;
@@ -729,7 +874,10 @@ export type ReviewItem = {
   reasons: HoldReason[];
 };
 
-type Target = { title: string; source: "wikidata" | "pick"; qid: string | null; itemModified: string | null };
+type Target = { title: string; source: "wikidata" | "pick"; qid: string | null; itemModified: string | null; pinnedSha1: string | null };
+
+/** Photos downloaded, then re-checked against Commons, per round: bounds memory (two copies each, 3 MB at most a copy). */
+export const DOWNLOAD_CHUNK = 20;
 
 async function inPool<T>(items: T[], size: number, fn: (t: T) => Promise<void>): Promise<void> {
   let next = 0;
@@ -831,11 +979,11 @@ export async function runCollegePhotoIngest(
       continue;
     }
     if (pick) {
-      targets.set(c.id, { title: pick, source: "pick", qid: wd?.qid ?? null, itemModified: wd?.modified ?? null });
+      targets.set(c.id, { title: pickTitle(pick), source: "pick", qid: wd?.qid ?? null, itemModified: wd?.modified ?? null, pinnedSha1: pickSha1(pick) });
       continue;
     }
     if (wd && wd.titles.length) {
-      targets.set(c.id, { title: wd.titles[0]!, source: "wikidata", qid: wd.qid, itemModified: wd.modified });
+      targets.set(c.id, { title: wd.titles[0]!, source: "wikidata", qid: wd.qid, itemModified: wd.modified, pinnedSha1: null });
       continue;
     }
     const reason = sparql.ambiguous.has(c.unitid) ? "ambiguous" : wd ? "no-image" : "not-in-wikidata";
@@ -858,10 +1006,11 @@ export async function runCollegePhotoIngest(
     }
   }
 
-  type Plan = { college: (typeof scope)[number]; target: Target; photo: ChosenPhoto; prev: StoredPhoto | undefined };
+  type Plan = { college: (typeof scope)[number]; target: Target; photo: ChosenPhoto; prev: StoredPhoto | undefined; applyText?: boolean };
   const toDownload: Plan[] = [];
   const toTouch: Plan[] = [];
-  const toHold: { plan: Plan; reasons: HoldReason[] }[] = [];
+  /** Held: a new or changed photo, or (text) a changed credit for the photo already shown. itemModified undefined: the item doesn't matter. */
+  const toHold: { plan: Plan; reasons: HoldReason[]; itemModified: string | null | undefined }[] = [];
   // Colleges whose review-queue row stays as it is: held now, or not looked at.
   const keepCandidate = new Set<string>();
   const item = (p: Plan, action: ReviewItem["action"], reasons: HoldReason[] = []): ReviewItem => ({
@@ -875,6 +1024,14 @@ export async function runCollegePhotoIngest(
     current: p.prev?.commons_title ?? null,
     reasons,
   });
+  const holdPhoto = (plan: Plan, reasons: HoldReason[]) => {
+    toHold.push({ plan, reasons, itemModified: plan.target.source === "wikidata" ? plan.target.itemModified : undefined });
+    keepCandidate.add(plan.college.id);
+    skipped++;
+    bump(plan.prev ? "held-replace" : "held-new");
+    for (const r of reasons) bump(`hold:${r}`);
+    review.push(item(plan, plan.prev ? "held-replace" : "held-new", reasons));
+  };
   for (const c of scope) {
     const target = targets.get(c.id);
     if (!target) continue;
@@ -891,9 +1048,31 @@ export async function runCollegePhotoIngest(
       if (prev) deletions.push({ college: c, reason: chosen.reason, suppressed: false });
       continue;
     }
-    const plan = { college: c, target, photo: chosen.photo, prev };
+    const plan: Plan = { college: c, target, photo: chosen.photo, prev };
+    // A pin the file no longer matches holds even an unchanged photo: the team looked at another version.
+    if (target.pinnedSha1 && target.pinnedSha1 !== chosen.photo.sha1) {
+      holdPhoto(plan, ["pick-changed"]);
+      continue;
+    }
     if (prev && prev.commons_sha1 === chosen.photo.sha1) {
+      const text = textDecision({
+        source: target.source,
+        photo: chosen.photo,
+        storedHash: storedTextHash(prev),
+        candidate: candidates?.get(c.id),
+        candidatesAvailable: candidates !== null,
+        now,
+      });
+      plan.applyText = text.apply;
       toTouch.push(plan);
+      if (!text.apply) {
+        // The photo stays and is touched; only its new credit and license wait.
+        toHold.push({ plan, reasons: text.reasons, itemModified: undefined });
+        keepCandidate.add(c.id);
+        bump("text-held");
+        for (const r of text.reasons) bump(`hold:${r}`);
+        review.push(item(plan, "held-text", text.reasons));
+      }
       continue;
     }
     const decision = reviewDecision({
@@ -901,6 +1080,7 @@ export async function runCollegePhotoIngest(
       photo: chosen.photo,
       itemModified: target.itemModified,
       redirected: redirected.has(target.title),
+      pinnedSha1: target.pinnedSha1,
       prev,
       candidate: candidates?.get(c.id),
       candidatesAvailable: candidates !== null,
@@ -911,12 +1091,7 @@ export async function runCollegePhotoIngest(
       toDownload.push(plan);
       continue;
     }
-    toHold.push({ plan, reasons: decision.reasons });
-    keepCandidate.add(c.id);
-    skipped++;
-    bump(prev ? "held-replace" : "held-new");
-    for (const r of decision.reasons) bump(`hold:${r}`);
-    review.push(item(plan, prev ? "held-replace" : "held-new", decision.reasons));
+    holdPhoto(plan, decision.reasons);
   }
   if (toHold.length) log.info({ held: toHold.length }, "college photos: new or changed photos held for review");
 
@@ -961,24 +1136,24 @@ export async function runCollegePhotoIngest(
   // The review queue: what is held now, remembered for the run that confirms it.
   if (candidates !== null && toHold.length) {
     try {
-      await store.saveCandidates(toHold.map((h) => nextCandidate(h.plan.college.id, h.plan.target.source, h.plan.photo, h.reasons, candidates.get(h.plan.college.id), now)));
+      await store.saveCandidates(
+        toHold.map((h) => nextCandidate(h.plan.college.id, h.plan.target.source, h.plan.photo, h.reasons, candidates.get(h.plan.college.id), now, h.itemModified))
+      );
     } catch (err) {
       errors.push(`review queue: ${err instanceof Error ? err.message.slice(0, 200) : "write failed"}`);
     }
   }
 
-  // Unchanged: the same file. Refresh the text Commons may have corrected,
-  // unless the description page was edited within the window: then only
-  // checked_at moves, and the credit shown stays as it was.
+  // Unchanged: the same file. The row follows a move and its other facts are
+  // refreshed; the credit and license only when textDecision allowed it,
+  // otherwise the text shown stays as it was.
   for (const p of toTouch) {
     try {
-      const { college_id: _id, storage_path: _s, thumb_path: _t, commons_sha1: _h, ...fields } = rowOf(p, { full: p.prev!.storage_path, thumb: p.prev!.thumb_path });
-      if (stableSince(p.photo.pageEditedAt, now)) {
-        await store.touch(p.college.id, fields);
-      } else {
-        await store.touch(p.college.id, { checked_at: checkedAt });
-        bump("text-held");
-      }
+      const { college_id: _id, storage_path: _s, thumb_path: _t, commons_sha1: _h, credit, license, license_url, ...fields } = rowOf(p, {
+        full: p.prev!.storage_path,
+        thumb: p.prev!.thumb_path,
+      });
+      await store.touch(p.college.id, p.applyText ? { ...fields, credit, license, license_url } : fields);
       bump("unchanged");
       unchanged++;
     } catch (err) {
@@ -986,40 +1161,87 @@ export async function runCollegePhotoIngest(
     }
   }
 
-  // New or changed: the 500 px URLs, then both copies, then the row, then the old objects.
-  const thumbs = new Map<string, Page | null>();
-  const downloadTitles = [...new Set(toDownload.map((p) => p.photo.title))];
-  for (let i = 0; i < downloadTitles.length; i += BATCH) {
-    const batch = downloadTitles.slice(i, i + BATCH);
+  // New or changed, DOWNLOAD_CHUNK at a time: the 500 px URLs (and the version
+  // they belong to), both copies, then Commons asked again; only bytes whose
+  // version is still the one judged are uploaded, then the row, then the old
+  // objects go. A version that changed at any point is held and nothing
+  // downloaded for it is kept: the thumbnail URLs name the file, not the
+  // version, so this is what ties the stored bytes to the reviewed sha1.
+  const changedDuringRun = (p: Plan) => {
+    bump("changed-during-run");
+    skipped++;
+    keepCandidate.add(p.college.id);
+    review.push(item(p, p.prev ? "held-replace" : "held-new", ["changed-during-run"]));
+    log.warn({ unitid: p.college.unitid }, "college photos: the file changed during the run; nothing kept");
+  };
+  const lookUp = async (titles: string[], what: string): Promise<Map<string, Page | null> | null> => {
     try {
-      for (const [t, p] of resolvePages(await deps.imageinfo(batch, WIDTHS.thumb, false), batch)) thumbs.set(t, p);
+      return resolvePages(await deps.imageinfo(titles, WIDTHS.thumb, false), titles);
     } catch (err) {
-      errors.push(`commons thumbs batch ${i / BATCH + 1}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
+      errors.push(`commons ${what}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
+      return null;
     }
-  }
-  await inPool(toDownload, 2, async (p) => {
-    try {
-      const thumbUrl = thumbUrlOf(thumbs.get(p.photo.title));
-      if (!thumbUrl) throw new Error("no 500 px thumbnail");
-      const paths = storagePaths(p.college.unitid, p.photo.sha1);
-      const full = await deps.download(p.photo.fullUrl);
-      const thumb = await deps.download(thumbUrl);
-      await store.upload(paths.full, full);
-      await store.upload(paths.thumb, thumb);
-      await store.upsert(rowOf(p, paths));
-      written++;
-      bump(p.prev ? "replaced" : "added");
-      if (p.prev && p.prev.storage_path !== paths.full) {
-        await store.removeObjects([p.prev.storage_path, p.prev.thumb_path]).catch(() => {
-          errors.push(`${p.college.unitid}: old objects left in the bucket`);
-        });
-      }
-    } catch (err) {
+  };
+  const failChunk = (chunk: Plan[]) => {
+    for (const p of chunk) {
       bump("download-failed");
       keepCandidate.add(p.college.id);
-      errors.push(`${p.college.unitid}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
     }
-  });
+  };
+  for (let i = 0; i < toDownload.length; i += DOWNLOAD_CHUNK) {
+    const chunk = toDownload.slice(i, i + DOWNLOAD_CHUNK);
+    const titles = [...new Set(chunk.map((p) => p.photo.title))];
+    const before = await lookUp(titles, `thumbs batch ${i / DOWNLOAD_CHUNK + 1}`);
+    if (!before) {
+      failChunk(chunk);
+      continue;
+    }
+    const fetched: { p: Plan; full: Uint8Array; thumb: Uint8Array }[] = [];
+    await inPool(chunk, 2, async (p) => {
+      const page = before.get(p.photo.title);
+      if (!sameVersion(page, p.photo)) return changedDuringRun(p);
+      try {
+        const thumbUrl = thumbUrlOf(page);
+        if (!thumbUrl) throw new Error("no 500 px thumbnail");
+        const full = await deps.download(p.photo.fullUrl);
+        const thumb = await deps.download(thumbUrl);
+        fetched.push({ p, full, thumb });
+      } catch (err) {
+        bump("download-failed");
+        keepCandidate.add(p.college.id);
+        errors.push(`${p.college.unitid}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
+      }
+    });
+    if (!fetched.length) continue;
+    const after = await lookUp([...new Set(fetched.map((f) => f.p.photo.title))], `re-check batch ${i / DOWNLOAD_CHUNK + 1}`);
+    if (!after) {
+      failChunk(fetched.map((f) => f.p));
+      continue;
+    }
+    for (const { p, full, thumb } of fetched) {
+      if (!sameVersion(after.get(p.photo.title), p.photo)) {
+        changedDuringRun(p);
+        continue;
+      }
+      try {
+        const paths = storagePaths(p.college.unitid, p.photo.sha1);
+        await store.upload(paths.full, full);
+        await store.upload(paths.thumb, thumb);
+        await store.upsert(rowOf(p, paths));
+        written++;
+        bump(p.prev ? "replaced" : "added");
+        if (p.prev && p.prev.storage_path !== paths.full) {
+          await store.removeObjects([p.prev.storage_path, p.prev.thumb_path]).catch(() => {
+            errors.push(`${p.college.unitid}: old objects left in the bucket`);
+          });
+        }
+      } catch (err) {
+        bump("download-failed");
+        keepCandidate.add(p.college.id);
+        errors.push(`${p.college.unitid}: ${err instanceof Error ? err.message.slice(0, 200) : "failed"}`);
+      }
+    }
+  }
 
   for (const d of toDelete) {
     const prev = storedBy.get(d.college.id)!;

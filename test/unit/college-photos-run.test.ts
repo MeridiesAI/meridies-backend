@@ -58,6 +58,8 @@ function fakeStore(
     colleges: async () => opts.colleges ?? COLLEGES,
     existing: async () => [...rows.values()].map((r) => ({
       college_id: r.college_id, source: r.source, commons_title: r.commons_title, commons_sha1: r.commons_sha1, storage_path: r.storage_path, thumb_path: r.thumb_path,
+      // The text the row shows, as the real store reads it (absent on the bare StoredPhoto rows some tests make).
+      ...("credit" in r ? { credit: r.credit, license: r.license, license_url: r.license_url } : {}),
     })),
     upsert: async (row) => void rows.set(row.college_id, row),
     touch: async (id, fields) => {
@@ -158,10 +160,12 @@ test("a pick wins over Wikidata, and may be narrower than the size rule", async 
   assert.equal((s.rows.get("c-binghamton") as PhotoRow).width, 800);
 });
 
-test("an unchanged file (same sha1) is not downloaded again; its text is refreshed", async () => {
+const shownText = { credit: "José & Co.", license: "CC BY-SA 4.0", license_url: "https://creativecommons.org/licenses/by-sa/4.0" };
+
+test("an unchanged file (same sha1) is not downloaded again; the same text is rewritten as it is", async () => {
   const title = "File:Great dome of MIT, Feb 2021.jpg";
   const sha1 = await sha1Of(title);
-  const s = fakeStore({ stored: [stored("mit", title, sha1)] });
+  const s = fakeStore({ stored: [{ ...stored("mit", title, sha1), ...shownText }] });
   const { deps, calls } = fakeDeps();
   const out = await runCollegePhotoIngest(s.store, deps, log, { only: [166683] });
   assert.equal(out.status, "succeeded");
@@ -169,7 +173,28 @@ test("an unchanged file (same sha1) is not downloaded again; its text is refresh
   assert.deepEqual(s.touched, ["c-mit"]);
   assert.equal((s.rows.get("c-mit") as PhotoRow).credit, "José & Co.");
   assert.equal(out.counts.unchanged, 1);
+  assert.equal(out.counts["text-held"], undefined);
   assert.equal(calls.imageinfo.filter((c) => c.width === 500).length, 0, "no thumbnail lookup when nothing downloads");
+});
+
+test("a changed credit for an unchanged file waits for a sighting a week old; without the queue, for a quiet page", async () => {
+  const title = "File:Great dome of MIT, Feb 2021.jpg";
+  const row = { ...stored("mit", title, await sha1Of(title)), ...shownText, credit: "Old credit" } as StoredPhoto;
+  const s = fakeStore({ stored: [row] });
+  const first = await runCollegePhotoIngest(s.store, fakeDeps().deps, log, { only: [166683], now: () => new Date("2026-10-15T00:00:00Z") });
+  assert.equal(first.counts["text-held"], 1);
+  assert.equal(first.counts.unchanged, 1, "the photo itself stays and is touched");
+  assert.deepEqual(first.review.map((r) => [r.action, r.credit, r.reasons]), [["held-text", "José & Co.", ["text-changed"]]]);
+  assert.equal((s.rows.get("c-mit") as PhotoRow).credit, "Old credit");
+  assert.equal(s.queue!.get("c-mit")!.commons_sha1, row.commons_sha1, "remembered as a text candidate on the same file");
+  const later = await runCollegePhotoIngest(s.store, fakeDeps().deps, log, { only: [166683], now: () => new Date("2026-10-23T00:00:00Z") });
+  assert.equal(later.counts["text-held"], undefined);
+  assert.equal((s.rows.get("c-mit") as PhotoRow).credit, "José & Co.");
+  assert.equal(s.queue!.has("c-mit"), false);
+
+  const noQueue = fakeStore({ stored: [row], candidates: null });
+  await runCollegePhotoIngest(noQueue.store, fakeDeps().deps, log, { only: [166683], now: () => new Date("2026-10-15T00:00:00Z") });
+  assert.equal((noQueue.rows.get("c-mit") as PhotoRow).credit, "José & Co.", "the page and its templates quiet since June");
 });
 
 test("a file that changed on Commons waits for a later run, then gets new objects, and the old ones go", async () => {
@@ -495,4 +520,133 @@ test("review: a college whose Commons batch failed keeps its queue row; one with
   await runCollegePhotoIngest(s.store, deps, log, { only: [166683, 130794], now: day(1) });
   assert.ok(s.queue!.has("c-mit"), "not looked at: kept");
   assert.equal(s.queue!.has("c-yale"), false, "Yale has no main image any more");
+});
+
+// ---- The reviewer's bypasses ------------------------------------------------------------
+
+/** The 500 px answer with one title's version changed: another sha1, or the same sha1 uploaded again just now (a revert). */
+function versionChanged(title: string, change: { sha1?: string; timestamp?: string }) {
+  const doc = structuredClone(fixture("commons-imageinfo-500.json")) as { query: { pages: { title: string; imageinfo?: Record<string, unknown>[] }[] } };
+  const info = doc.query.pages.find((p) => p.title === title)!.imageinfo![0]!;
+  Object.assign(info, change);
+  return doc;
+}
+const MIT_TITLE = "File:Great dome of MIT, Feb 2021.jpg";
+
+test("bypass: a file swapped after the metadata read and before the downloads is held, nothing stored", async () => {
+  const s = fakeStore();
+  const { deps, calls } = fakeDeps({
+    imageinfo: async (titles, width) => {
+      calls.imageinfo.push({ titles, width });
+      return width === 500 ? versionChanged(MIT_TITLE, { sha1: "e".repeat(40), timestamp: "2026-10-15T00:30:00Z" }) : fixture("commons-imageinfo-1280.json");
+    },
+  });
+  const out = await runCollegePhotoIngest(s.store, deps, log, { only: [166683], now: () => new Date("2026-10-15T01:00:00Z") });
+  assert.equal(s.rows.has("c-mit"), false);
+  assert.equal(calls.downloads.length, 0, "nothing downloaded for a version nobody judged");
+  assert.equal(s.uploads.length, 0);
+  assert.equal(out.counts["changed-during-run"], 1);
+  assert.deepEqual(out.review.map((r) => [r.unitid, r.reasons]), [[166683, ["changed-during-run"]]]);
+});
+
+test("bypass: a file swapped during the downloads and reverted (same sha1, new upload) is held, nothing stored", async () => {
+  const s = fakeStore();
+  let thumbCalls = 0;
+  const { deps, calls } = fakeDeps({
+    imageinfo: async (titles, width) => {
+      calls.imageinfo.push({ titles, width });
+      if (width !== 500) return fixture("commons-imageinfo-1280.json");
+      // The first 500 px answer still shows the judged version; by the re-check the attacker has
+      // uploaded over it (the downloads got those bytes) and uploaded the old version back.
+      return thumbCalls++ === 0 ? fixture("commons-imageinfo-500.json") : versionChanged(MIT_TITLE, { timestamp: "2026-10-15T00:45:00Z" });
+    },
+  });
+  const out = await runCollegePhotoIngest(s.store, deps, log, { only: [166683], now: () => new Date("2026-10-15T01:00:00Z") });
+  assert.equal(calls.downloads.length, 2, "downloaded, then asked again");
+  assert.equal(thumbCalls, 2);
+  assert.equal(s.uploads.length, 0, "the downloaded bytes are thrown away");
+  assert.equal(s.rows.has("c-mit"), false);
+  assert.equal(out.counts["changed-during-run"], 1);
+  assert.equal(out.status, "succeeded", "a hold, not an error");
+
+  // A replacement swapped the same way leaves the old photo serving and its queue row in place.
+  const old = stored("mit", MIT_TITLE, "f".repeat(40));
+  const seenRow: PhotoCandidate = {
+    college_id: "c-mit", source: "wikidata", commons_title: MIT_TITLE, commons_sha1: await sha1Of(MIT_TITLE),
+    text_hash: (await import("../../src/lib/ingest/collegePhotos.js")).candidateTextHash({ credit: "José & Co.", license: "CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0" }),
+    reasons: ["replacement"], first_seen_at: "2026-09-01T00:00:00.000Z", last_seen_at: "2026-09-01T00:00:00.000Z",
+  };
+  const s2 = fakeStore({ stored: [old], candidates: [seenRow] });
+  thumbCalls = 0;
+  const out2 = await runCollegePhotoIngest(s2.store, deps, log, { only: [166683], now: () => new Date("2026-10-15T01:00:00Z") });
+  assert.equal(out2.counts.confirmed, 1, "the sighting confirmed it");
+  assert.equal(out2.counts["changed-during-run"], 1);
+  assert.equal(s2.rows.get("c-mit"), old);
+  assert.ok(s2.queue!.has("c-mit"), "the queue row stays for the next run");
+});
+
+test("bypass: a failed re-check keeps nothing it downloaded", async () => {
+  const s = fakeStore();
+  let thumbCalls = 0;
+  const { deps } = fakeDeps({
+    imageinfo: async (_titles, width) => {
+      if (width !== 500) return fixture("commons-imageinfo-1280.json");
+      if (thumbCalls++ === 0) return fixture("commons-imageinfo-500.json");
+      throw new Error("Commons API returned 503");
+    },
+  });
+  const out = await runCollegePhotoIngest(s.store, deps, log, { only: [166683] });
+  assert.equal(s.uploads.length, 0);
+  assert.equal(s.rows.size, 0);
+  assert.equal(out.status, "failed");
+  assert.ok(out.errors.some((e) => /re-check/.test(e)));
+});
+
+test("bypass: pinning the file Wikidata already shows doesn't let a version uploaded yesterday through", async () => {
+  const v1 = await colgateV1();
+  const s = fakeStore({ colleges: REVIEW_COLLEGES, stored: [v1] });
+  const out = await runCollegePhotoIngest(s.store, reviewDeps(new Map([[190099, "File:Colgate Memorial Chapel.jpg"]])).deps, log, { only: [190099], now: day(0) });
+  assert.deepEqual(out.review.map((r) => [r.action, r.source, r.reasons]), [["held-replace", "pick", ["file-recent", "replacement"]]]);
+  assert.equal(s.rows.get("c-colgate"), v1);
+  // The team can still publish it at once, by pinning the version it looked at.
+  const v2 = await sha1Of("File:Colgate Memorial Chapel.jpg#v2");
+  const pinned = await runCollegePhotoIngest(s.store, reviewDeps(new Map([[190099, { title: "File:Colgate Memorial Chapel.jpg", sha1: v2 }]])).deps, log, { only: [190099], now: day(0) });
+  assert.equal(pinned.counts.replaced, 1);
+  assert.equal((s.rows.get("c-colgate") as PhotoRow).commons_sha1, v2);
+  // A pin the file no longer matches holds, and keeps what is shown.
+  const stale = await runCollegePhotoIngest(s.store, reviewDeps(new Map([[190099, { title: "File:Colgate Memorial Chapel.jpg", sha1: "1".repeat(40) }]])).deps, log, { only: [190099], now: day(0) });
+  assert.deepEqual(stale.review.map((r) => r.reasons), [["pick-changed"]]);
+  assert.equal((s.rows.get("c-colgate") as PhotoRow).commons_sha1, v2);
+});
+
+test("bypass: a picked title that now redirects is held for the team, not published", async () => {
+  const s = fakeStore();
+  const picks: Picks = new Map([[215062, "File:College Hall Penn old name.jpg"]]);
+  const out = await runCollegePhotoIngest(s.store, fakeDeps({ picks }).deps, log, { only: [215062] });
+  assert.equal(s.rows.has("c-penn"), false);
+  assert.deepEqual(out.review.map((r) => [r.source, r.reasons]), [["pick", ["pick-redirected"]]]);
+});
+
+test("bypass: a candidate reverted and re-applied just before the next run starts its wait again", async () => {
+  const v1 = await colgateV1();
+  const v2 = await sha1Of("File:Colgate Memorial Chapel.jpg#v2");
+  const { candidateTextHash } = await import("../../src/lib/ingest/collegePhotos.js");
+  // Seen by a run a month ago; the fixtures' version 2 was uploaded (again) on 2026-10-14.
+  const s = fakeStore({
+    colleges: REVIEW_COLLEGES,
+    stored: [v1],
+    candidates: [{
+      college_id: "c-colgate", source: "wikidata", commons_title: "File:Colgate Memorial Chapel.jpg", commons_sha1: v2,
+      text_hash: candidateTextHash({ credit: "Chapel Photographer", license: "CC BY-SA 4.0", licenseUrl: "https://creativecommons.org/licenses/by-sa/4.0" }),
+      reasons: ["replacement"], first_seen_at: "2026-09-14T00:00:00.000Z", last_seen_at: "2026-09-14T00:00:00.000Z",
+    }],
+  });
+  const out = await runCollegePhotoIngest(s.store, reviewDeps().deps, log, { only: [190099], now: day(0) });
+  assert.equal(out.counts.confirmed, undefined, "the September sighting doesn't count: the file changed after it");
+  assert.equal(s.rows.get("c-colgate"), v1);
+  assert.equal(s.queue!.get("c-colgate")!.first_seen_at, "2026-10-15T00:00:00.000Z", "the wait starts again");
+  // Held right after that upload and unchanged since, the same candidate is confirmed a week on.
+  const later = await runCollegePhotoIngest(s.store, reviewDeps().deps, log, { only: [190099], now: day(8) });
+  assert.equal(later.counts.confirmed, 1);
+  assert.equal((s.rows.get("c-colgate") as PhotoRow).commons_sha1, v2);
 });

@@ -65,8 +65,11 @@ export type WikimediaClient = {
   sparql(): Promise<unknown>;
   /**
    * One batched imageinfo query (at most 50 titles), redirects followed.
-   * `full` adds size, mime, sha1, license metadata, the current version's
-   * upload time and the description page's latest revision time.
+   * Always the current version's URL (thumbnail at `width`), sha1 and upload
+   * time, so a download can be checked against the version that was judged.
+   * `full` adds size, mime, license metadata, the description page's latest
+   * revision time and its `touched` time (prop=info: it moves when a template
+   * the page uses, such as a photographer's credit template, is edited).
    */
   imageinfo(titles: string[], width: number, full: boolean): Promise<unknown>;
   download(url: string): Promise<Uint8Array>;
@@ -131,8 +134,8 @@ export function wikimediaClient(opts: { fetch?: Fetch; sleep?: Sleep; minGapMs?:
         action: "query",
         format: "json",
         formatversion: "2",
-        prop: full ? "imageinfo|revisions" : "imageinfo",
-        iiprop: full ? "timestamp|url|size|mime|sha1|extmetadata" : "url",
+        prop: full ? "imageinfo|revisions|info" : "imageinfo",
+        iiprop: full ? "timestamp|url|size|mime|sha1|extmetadata" : "timestamp|url|sha1",
         iiurlwidth: String(width),
         redirects: "1",
         maxlag: "5",
