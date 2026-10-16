@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { extractionState, extractorFor, LEASE_MS, leaseVerdict, MAX_ATTEMPTS } from "../../src/lib/documentExtraction.js";
+import { claimFailure, extractionState, extractorFor, LEASE_MS, leaseVerdict, MAX_ATTEMPTS } from "../../src/lib/documentExtraction.js";
 
 test("each stored type has one extractor; images and unknowns have none", () => {
   assert.equal(extractorFor("application/pdf", "a.pdf"), "pdf");
@@ -32,4 +32,20 @@ test("an expired lease is retried until the third attempt, then given up", () =>
   assert.equal(leaseVerdict({ extraction_attempts: 3 }), "give-up");
   assert.equal(MAX_ATTEMPTS, 3);
   assert.equal(LEASE_MS, 120_000);
+});
+
+test("csv goes to the sheet reader, not to none", () => {
+  assert.equal(extractorFor("text/csv", "a.csv"), "sheet");
+  assert.equal(extractorFor(null, "list.CSV"), "sheet");
+});
+
+test("a failed claim clears the marker only when the row can no longer be extracted", () => {
+  const at = new Date().toISOString();
+  const base = { parse_status: "pending", extraction_requested_at: at, kind_confirmed: true, available_to_llm: true };
+  assert.equal(claimFailure({ ...base, available_to_llm: false }), "clear");
+  assert.equal(claimFailure({ ...base, kind_confirmed: false }), "clear");
+  assert.equal(claimFailure(base), "leave");
+  assert.equal(claimFailure({ ...base, parse_status: "parsing", available_to_llm: false }), "leave");
+  assert.equal(claimFailure({ ...base, extraction_requested_at: null, available_to_llm: false }), "leave");
+  assert.equal(claimFailure(null), "leave");
 });

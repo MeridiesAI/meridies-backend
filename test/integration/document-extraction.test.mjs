@@ -1,5 +1,5 @@
 // Extraction after confirming: stored copy -> parsed_data, two at a time, restart recovery, keep-out mid-queue.
-import { call, check, rest, sql } from "./harness.mjs";
+import { API, CRON_SECRET, call, check, rest, sql } from "./harness.mjs";
 import { user } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 import { textPdf } from "../fixtures/pdf/build.ts";
@@ -28,32 +28,25 @@ async function until(ids, done, ms = 30_000) {
 const pdf = await upload("t.pdf", textPdf(["Official Transcript", "Cumulative GPA 3.9"]), "application/pdf");
 const txt = await upload("n.txt", new TextEncoder().encode("Notes from our meeting about the essay"), "text/plain");
 const scan = await upload("scan.pdf", textPdf([""]), "application/pdf");
-const keep = await upload("k.pdf", textPdf(["Private"]), "application/pdf");
 
 const confirm = await call(c.token, "POST", "/files/documents/confirm-types", { items: [
   { documentId: pdf, kind: "transcript", keepOut: false },
   { documentId: txt, kind: "other", keepOut: false },
   { documentId: scan, kind: "transcript", keepOut: false },
-  { documentId: keep, kind: "transcript", keepOut: false },
 ] });
 check("confirm answers per item", confirm.status === 200 && confirm.body.results.every((r) => r.status === "confirmed"), JSON.stringify(confirm.body));
 
-// Review Focus 2: kept out while queued -> no text.
-await call(c.token, "PATCH", `/files/documents/${keep}`, { availableToLlm: false });
-
-const final = await until([pdf, txt, scan, keep], (st) => st.every((r) => !["queued", "reading"].includes(r.state)));
+const final = await until([pdf, txt, scan], (st) => st.every((r) => !["queued", "reading"].includes(r.state)));
 const by = Object.fromEntries(final.map((r) => [r.documentId, r.state]));
 check("the PDF's text was extracted", by[pdf] === "done", JSON.stringify(final));
 check("the text file's text was extracted", by[txt] === "done");
 check("a PDF with no text layer ends empty", by[scan] === "empty");
-check("a file kept out after it was queued gets no text", by[keep] === "kept-out"
-  && (await sql(`select coalesce(parsed_data->>'text', '') from public.documents where id = '${keep}'`)) === "");
 check("the PDF's text is stored", (await sql(`select parsed_data->>'text' from public.documents where id = '${pdf}'`)).includes("Official Transcript"));
 check("the request marker is cleared", (await sql(`select count(*) from public.documents where id in ('${pdf}','${txt}','${scan}') and extraction_requested_at is not null`)) === "0");
 
 // Review Focus 1: a crashed in-progress item (expired lease) is retried; after 3 attempts it is failed.
-const recover = () => fetch(`${process.env.API_URL ?? "http://127.0.0.1:4100"}/internal/documents/extraction-recover`, {
-  method: "POST", headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? "ci-cron-secret-0123456789abcdef0123456789"}` },
+const recover = () => fetch(`${API}/internal/documents/extraction-recover`, {
+  method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` },
 });
 const anon = await call(c.token, "POST", "/internal/documents/extraction-recover", undefined);
 check("recovery is a CRON_SECRET route", anon.status === 401 || anon.status === 403 || anon.status === 503, `status ${anon.status}`);
@@ -87,3 +80,13 @@ const old = await sql(`with d as (insert into public.documents (student_id, owne
 await recover();
 check("no backfill: an old document without a request stays as it was",
   (await sql(`select parse_status from public.documents where id = '${old}'`)) === "pending");
+
+// Review Focus 2 (no race): a row already kept out, still carrying a marker, gets no text and loses the marker.
+const keep = await upload("k.pdf", textPdf(["Private"]), "application/pdf");
+await sql(`update public.documents set kind = 'transcript', kind_confirmed = true, available_to_llm = false, parse_status = 'pending',
+  extraction_requested_at = now() where id = '${keep}'`);
+await recover();
+await new Promise((r) => setTimeout(r, 3_000));
+check("a file kept out while queued gets no text and its marker is cleared",
+  (await sql(`select coalesce(parsed_data->>'text', '') from public.documents where id = '${keep}'`)) === ""
+  && (await sql(`select extraction_requested_at is null from public.documents where id = '${keep}'`)) === "t");

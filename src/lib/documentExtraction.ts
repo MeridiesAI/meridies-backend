@@ -40,7 +40,7 @@ export function extractorFor(mimeType: string | null, filename: string): "pdf" |
   const m = (mimeType ?? "").toLowerCase();
   const n = filename.toLowerCase();
   if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
-  if (m.includes("spreadsheetml") || n.endsWith(".xlsx")) return "sheet";
+  if (m.includes("spreadsheetml") || m === "text/csv" || /\.(xlsx|csv)$/.test(n)) return "sheet";
   if (m.includes("wordprocessingml") || m === "text/plain" || /\.(docx|txt|md)$/.test(n)) return "text";
   return "none";
 }
@@ -56,6 +56,28 @@ export function extractionState(row: Row): ExtractionState {
     case "skipped": return row.parse_error === "no-text" ? "empty" : "none";
     case "failed": return "failed";
     default: return "none";
+  }
+}
+
+/** A claim that failed on a row still carrying the marker: clear it when the row can never be extracted as it stands. */
+export function claimFailure(row: Row | null): "clear" | "leave" {
+  if (!row || row.extraction_requested_at == null || row.parse_status !== "pending") return "leave";
+  return row.kind_confirmed !== true || row.available_to_llm !== true ? "clear" : "leave";
+}
+
+/** Whose approval allows the read: the student's counselor, or for a file with no student the uploader. */
+async function approvalFor(db: NonNullable<ReturnType<typeof serviceClient>>, row: Row): Promise<"approved" | "not-approved" | "unknown"> {
+  try {
+    let counselorId: string | null = String(row.owner_id);
+    if (row.student_id) {
+      const { data, error } = await db.from("profiles").select("counselor_id").eq("id", String(row.student_id)).maybeSingle();
+      if (error) return "unknown";
+      counselorId = data?.counselor_id ? String(data.counselor_id) : null;
+    }
+    if (!counselorId) return "not-approved";
+    return (await isCounselorApproved(db, counselorId)) ? "approved" : "not-approved";
+  } catch {
+    return "unknown";
   }
 }
 
@@ -91,7 +113,10 @@ async function textOf(kind: "pdf" | "text" | "sheet", bytes: Uint8Array, filenam
     const r = await extractPdfText(bytes);
     return { text: r.ok ? r.text : null, from: "pdf" };
   }
-  if (kind === "text") return { text: readDocumentText(Buffer.from(bytes), filename, mimeType), from: "text" };
+  if (kind === "text") {
+    const t = readDocumentText(Buffer.from(bytes), filename, mimeType);
+    return { text: t === null ? null : t.slice(0, PDF_LIMITS.maxChars), from: "text" };
+  }
   const parsed = await parseSpreadsheet(bytes, filename, 2_000);
   if (!parsed.ok) return { text: null, from: "sheet" };
   const lines = parsed.sheets.flatMap((s) => [s.headers.join(", "), ...s.rows.map((r) => r.join(", "))]);
@@ -104,20 +129,27 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
 
   // Claim: only a confirmed, AI-allowed row that a confirmation asked for, once, under a lease.
   // The attempt count is compare-and-set, so two replicas can't both claim the same attempt.
-  const { data: current } = await db
+  const { data: current, error: currentErr } = await db
     .from("documents")
     .select("extraction_attempts")
     .eq("id", id)
     .eq("parse_status", "pending")
     .not("extraction_requested_at", "is", null)
     .maybeSingle();
+  if (currentErr) log.error({ err: serializeErr(currentErr) }, "extraction claim read failed");
   if (!current) return "skipped";
   const attempts = Number(current.extraction_attempts ?? 0);
   if (attempts >= MAX_ATTEMPTS) {
-    await db.from("documents").update({ parse_status: "failed", parse_error: "gave-up", extraction_requested_at: null, extraction_lease_until: null }).eq("id", id);
+    const { error } = await db
+      .from("documents")
+      .update({ parse_status: "failed", parse_error: "gave-up", extraction_requested_at: null, extraction_lease_until: null })
+      .eq("id", id)
+      .eq("parse_status", "pending")
+      .eq("extraction_attempts", attempts);
+    if (error) log.error({ err: serializeErr(error) }, "extraction give-up write failed");
     return "failed";
   }
-  const { data: claimed } = await db
+  const { data: claimed, error: claimErr } = await db
     .from("documents")
     .update({ parse_status: "parsing", extraction_attempts: attempts + 1, extraction_lease_until: new Date(Date.now() + LEASE_MS).toISOString() })
     .eq("id", id)
@@ -126,16 +158,51 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
     .eq("kind_confirmed", true)
     .eq("available_to_llm", true)
     .not("extraction_requested_at", "is", null)
-    .select("id, owner_id, bucket, storage_path, filename, mime_type")
+    .select("id, owner_id, student_id, bucket, storage_path, filename, mime_type")
     .maybeSingle();
-  if (!claimed) return "skipped";
+  if (claimErr) {
+    log.error({ err: serializeErr(claimErr) }, "extraction claim failed");
+    return "skipped";
+  }
+  if (!claimed) {
+    // Kept out or retyped between the confirmation and now: the marker must not outlive the request.
+    const { data: now } = await db
+      .from("documents")
+      .select("kind_confirmed, available_to_llm, parse_status, extraction_requested_at")
+      .eq("id", id)
+      .maybeSingle();
+    if (claimFailure(now as Row | null) === "clear") {
+      const { error } = await db
+        .from("documents")
+        .update({ extraction_requested_at: null, extraction_lease_until: null })
+        .eq("id", id)
+        .eq("parse_status", "pending")
+        .not("extraction_requested_at", "is", null);
+      if (error) log.error({ err: serializeErr(error) }, "extraction marker clear failed");
+    }
+    return "skipped";
+  }
   const row = claimed as Row;
 
-  const release = async (fields: Row) => {
-    await db.from("documents").update({ ...fields, extraction_requested_at: null, extraction_lease_until: null }).eq("id", id);
+  // Every write below is conditional on still holding this claim (parsing, at this attempt).
+  const release = async (fields: Row, keepMarker = false) => {
+    const marker = keepMarker ? {} : { extraction_requested_at: null };
+    const { error } = await db
+      .from("documents")
+      .update({ ...fields, ...marker, extraction_lease_until: null })
+      .eq("id", id)
+      .eq("parse_status", "parsing")
+      .eq("extraction_attempts", attempts + 1);
+    if (error) log.error({ err: serializeErr(error) }, "extraction release failed");
   };
 
-  if (!(await isCounselorApproved(db, String(row.owner_id)).catch(() => false))) {
+  const approval = await approvalFor(db, row);
+  if (approval === "unknown") {
+    // An unreadable answer is not a decision: back to the queue with the marker and the attempt uncounted.
+    await release({ parse_status: "pending", extraction_attempts: attempts }, true);
+    return "skipped";
+  }
+  if (approval === "not-approved") {
     await release({ parse_status: "pending" });
     return "skipped";
   }
@@ -163,18 +230,20 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
         : { parse_status: "failed", parse_error: "unreadable" };
 
   // Write only if the file is still confirmed and still allowed for AI.
-  const { data: written } = await db
+  const { data: written, error: writeErr } = await db
     .from("documents")
     .update({ ...fields, extraction_requested_at: null, extraction_lease_until: null })
     .eq("id", id)
     .eq("parse_status", "parsing")
+    .eq("extraction_attempts", attempts + 1)
     .eq("kind_confirmed", true)
     .eq("available_to_llm", true)
     .select("id")
     .maybeSingle();
+  if (writeErr) log.error({ err: serializeErr(writeErr) }, "extraction result write failed");
   if (!written) {
     // Kept out (or retyped) while it waited: no text, and the queue lets go of it.
-    await db.from("documents").update({ parse_status: "pending", extraction_requested_at: null, extraction_lease_until: null }).eq("id", id).eq("parse_status", "parsing");
+    if (!writeErr) await release({ parse_status: "pending" });
     return "skipped";
   }
   return outcome;
@@ -186,13 +255,14 @@ export async function recoverExtractions(log: Log): Promise<number> {
   const since = new Date(Date.now() - RECOVERY_WINDOW_HOURS * 3_600_000).toISOString();
   const now = new Date().toISOString();
   // Expired leases belonged to a process that crashed or hung: retry, or give up after 3 attempts.
-  const { data: expired } = await db
+  const { data: expired, error: expiredErr } = await db
     .from("documents")
     .select("id, extraction_attempts")
     .eq("parse_status", "parsing")
     .not("extraction_requested_at", "is", null)
     .lt("extraction_lease_until", now)
     .limit(200);
+  if (expiredErr) log.warn({ err: serializeErr(expiredErr) }, "extraction lease read failed");
   for (const r of expired ?? []) {
     const verdict = leaseVerdict({ extraction_attempts: Number(r.extraction_attempts ?? 0) });
     const fields = verdict === "give-up"
@@ -200,10 +270,20 @@ export async function recoverExtractions(log: Log): Promise<number> {
       : { parse_status: "pending", extraction_lease_until: null };
     await db.from("documents").update(fields).eq("id", String(r.id)).eq("parse_status", "parsing").lt("extraction_lease_until", now);
   }
+  // A request for a file since kept out or retyped is over: drop its marker so it can't linger as "queued".
+  const { error: strandedErr } = await db
+    .from("documents")
+    .update({ extraction_requested_at: null, extraction_lease_until: null })
+    .eq("parse_status", "pending")
+    .not("extraction_requested_at", "is", null)
+    .or("kind_confirmed.eq.false,available_to_llm.eq.false");
+  if (strandedErr) log.warn({ err: serializeErr(strandedErr) }, "extraction marker cleanup failed");
   const { data, error } = await db
     .from("documents")
     .select("id")
     .eq("parse_status", "pending")
+    .eq("kind_confirmed", true)
+    .eq("available_to_llm", true)
     .gte("extraction_requested_at", since)
     .order("extraction_requested_at")
     .limit(100);
