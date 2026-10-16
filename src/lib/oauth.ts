@@ -35,6 +35,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { env } from "../env.js";
 import { badRequest, HttpError, unavailable } from "./errors.js";
+import { serializeErr } from "./requestLog.js";
 import { serviceClient } from "./supabase.js";
 import { decryptToken, encryptToken, hasTokenKey } from "./tokenCrypto.js";
 
@@ -368,7 +369,7 @@ export async function completeAuthorization(
     const existingId = (existing?.account_id as string | null) ?? null;
     if (extra.length > 0 || accountMismatch(existingId, accountId)) {
       // Leave nothing behind at Google for a grant we won't keep.
-      await postForm("https://oauth2.googleapis.com/revoke", { token: token.access_token }).catch(() => undefined);
+      await postForm("https://oauth2.googleapis.com/revoke", { token: token.access_token }).catch((err) => log.warn({ provider, err: serializeErr(err) }, "unkept grant revoke failed"));
       if (extra.length > 0) {
         log.warn({ provider, extra: extra.length }, "google returned scopes outside the allowlist");
         await revokeAndForget(ownerId, "google", log);
@@ -635,7 +636,7 @@ export async function revokeAndForget(
       // 400 invalid_token means it was already dead — revoked either way.
       revokedAtProvider = res.ok || res.status === 400;
     } catch (err) {
-      log.warn({ provider, err: err instanceof Error ? err.message : "unknown" }, "token revoke failed");
+      log.warn({ provider, err: serializeErr(err) }, "token revoke failed");
     }
   }
 
