@@ -35,6 +35,8 @@ export type LiveFileCheck = {
   /** Whether this edit counts as the student's activity. */
   counts: boolean;
   error: string | null;
+  /** The HttpError.code, else "not_found" for a 404, else "unavailable"; null when the check worked. */
+  errorCode: string | null;
 };
 
 const MAX_LIVE_FILES = 5;
@@ -65,7 +67,7 @@ export async function checkLiveDocuments(
         const changed = Boolean(file.modifiedAt) && file.modifiedAt !== previous;
         if (changed) {
           const update: Row = { external_modified_at: file.modifiedAt };
-          if (doc.available_to_llm !== false) {
+          if (doc.available_to_llm !== false && doc.kind_confirmed !== false) {
             const text = await exportGoogleDocText(String(doc.owner_id), file, request.log);
             if (text) {
               const parsed = {
@@ -89,11 +91,16 @@ export async function checkLiveDocuments(
           editedBy: file.lastModifiedBy,
           counts: Boolean(file.modifiedAt) && file.lastModifiedByOwner !== true,
           error: null,
+          errorCode: null,
         };
       } catch (err) {
         const message =
           err instanceof HttpError ? err.message : "Couldn't reach the provider for this file.";
-        return { ...base, modifiedAt: null, editedBy: null, counts: false, error: message };
+        const errorCode =
+          err instanceof HttpError
+            ? err.code ?? (err.statusCode === 404 ? "not_found" : "unavailable")
+            : "unavailable";
+        return { ...base, modifiedAt: null, editedBy: null, counts: false, error: message, errorCode };
       }
     })
   );
@@ -104,4 +111,18 @@ export async function checkLiveDocuments(
     if (Number.isFinite(t) && t > latest) latest = t;
   }
   return { checks, latestEdit: latest > 0 ? new Date(latest).toISOString() : null };
+}
+
+const isGrantProblem = (code: string | null) => !!code && (code.endsWith("_disconnected") || code.endsWith("_reconnect"));
+
+/** A task whose linked files can't be checked because the grant is gone must not read as "no activity". */
+export function holdsNoActivity(checks: LiveFileCheck[]): boolean {
+  return checks.some((c) => isGrantProblem(c.errorCode));
+}
+
+export function liveStatusOf(checks: LiveFileCheck[]): { status: "ok" | "disconnected" | "reconnect"; files: number } {
+  const affected = checks.filter((c) => isGrantProblem(c.errorCode));
+  if (affected.length === 0) return { status: "ok", files: 0 };
+  const disconnected = affected.some((c) => c.errorCode!.endsWith("_disconnected"));
+  return { status: disconnected ? "disconnected" : "reconnect", files: affected.length };
 }

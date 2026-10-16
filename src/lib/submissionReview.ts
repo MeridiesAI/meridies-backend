@@ -36,6 +36,7 @@ import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
 import { isCounselorApproved } from "./access.js";
+import { documentReadableForTask, toAiDoc } from "./context/documentAi.js";
 
 type Row = Record<string, unknown>;
 type Svc = NonNullable<ReturnType<typeof serviceClient>>;
@@ -268,13 +269,23 @@ export async function startSubmissionReview(
   return { status: "checking" };
 }
 
+/** Why AxIS won't read this file for a hand-in, or null when it may. */
+export function refusalFor(row: Record<string, unknown>, practiceReadsDocuments: boolean): string | null {
+  const verdict = documentReadableForTask(toAiDoc(row), practiceReadsDocuments);
+  if (verdict.allowed) return null;
+  switch (verdict.reason) {
+    case "not-categorized": return "Choose a type for this file first, so AxIS knows what it is.";
+    case "keep-out": return "This file is kept out of AI, so AxIS didn't read it.";
+    case "practice-setting": return "Automatic document reading is off for this practice.";
+    default: return "This kind of file stays out of AI, so AxIS didn't read it.";
+  }
+}
+
 async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, studentId: string): Promise<Prepared> {
   // The practice's and the file's own switches first: they are the reason a
   // counselor can act on.
-  if (doc.available_to_llm === false) return { status: "skipped", reason: "This file is kept out of AI, so AxIS didn't read it." };
-  if (!(await documentReadingAllowed(svc, studentId))) {
-    return { status: "skipped", reason: "Automatic document reading is off for this practice." };
-  }
+  const refusal = refusalFor(doc, await documentReadingAllowed(svc, studentId));
+  if (refusal) return { status: "skipped", reason: refusal };
   if (!hasAnthropic) return { status: "skipped", reason: "AxIS isn't set up on this server yet." };
   if (!doc.storage_path) return { status: "skipped", reason: "AxIS reads uploaded files; this one is a link." };
 

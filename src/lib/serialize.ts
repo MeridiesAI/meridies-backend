@@ -278,6 +278,8 @@ export const toTaskDocument = (r: Row) => {
     availableToLlm: doc ? Boolean(doc.available_to_llm) : null,
     aiAccess: doc ? (String(doc.ai_access ?? "default") as "default" | "allowed" | "excluded") : null,
     ferpaWaived: doc ? Boolean(doc.ferpa_waived) : null,
+    /** Drive / OneDrive file this came from; the app shows "Google disconnected" against it. */
+    externalProvider: doc ? (nstr(doc.external_provider) as "google" | "microsoft" | null) : null,
     /** Where the file is, so whoever can see it can open it (Storage RLS decides). */
     bucket: doc ? nstr(doc.bucket) : null,
     storagePath: doc ? nstr(doc.storage_path) : null,

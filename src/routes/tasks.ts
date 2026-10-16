@@ -42,10 +42,12 @@ import {
   taskAssignmentSms,
   type TaskNotification,
 } from "../lib/email.js";
-import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
-import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
+import { checkLiveDocuments, holdsNoActivity, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
+import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 
@@ -190,7 +192,7 @@ export async function hydrate(
       .from("deliverable_documents")
       .select(
         "deliverable_id, document_id, role, note, created_at, " +
-          "document:documents(id, filename, title, mime_type, size_bytes, kind, available_to_llm, ai_access, ferpa_waived, bucket, storage_path)"
+          "document:documents(id, filename, title, mime_type, size_bytes, kind, available_to_llm, ai_access, ferpa_waived, external_provider, bucket, storage_path)"
       )
       .in("deliverable_id", ids),
     request.db.from("deliverable_tracker_latest").select("*").in("deliverable_id", ids),
@@ -984,6 +986,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       await resolveStudentId(request, studentId, "edit");
 
       const settings = await settingsFor(request, studentId);
+      const { settings: practice } = await loadPracticeSettings(request);
 
       const [{ data: events }, { data: attached }, { data: stages }] = await Promise.all([
         request.db
@@ -996,8 +999,8 @@ export default async function taskRoutes(app: FastifyInstance) {
           .from("deliverable_documents")
           .select(
             "role, document:documents(id, owner_id, filename, title, description, parsed_data, " +
-              "parse_status, available_to_llm, updated_at, external_provider, external_file_id, " +
-              "external_drive_id, external_modified_at)"
+              "parse_status, available_to_llm, kind, ai_access, ferpa_waived, kind_confirmed, updated_at, " +
+              "external_provider, external_file_id, external_drive_id, external_modified_at)"
           )
           .eq("deliverable_id", id),
         request.db
@@ -1028,8 +1031,11 @@ export default async function taskRoutes(app: FastifyInstance) {
       const liveEditInWindow = live.latestEdit !== null && !isStalled(live.latestEdit, settings);
       const liveCaveat = liveProblems(live.checks);
 
-      // Only documents the counselor left available to AI context are read.
-      const readable = attachedDocs.filter((row) => row.doc && row.doc.available_to_llm !== false);
+      // The task rule (unconfirmed, keep-out, waived, practice switch, sensitive kinds): lib/context/documentAi.ts.
+      const readable = attachedDocs.filter(
+        (row) => row.doc && documentReadableForTask(toAiDoc(row.doc), practice.autoParseDocuments).allowed
+      );
+      const status = liveStatusOf(live.checks);
 
       const submissions = readable.filter((r) => documentText(r.doc!).length > 0);
 
@@ -1037,6 +1043,15 @@ export default async function taskRoutes(app: FastifyInstance) {
       const hasWork = submissions.length > 0 || essayBody.length > 0;
 
       if (stale && !hasWork) {
+        if (holdsNoActivity(live.checks)) {
+          const held = live.checks.filter((c) => c.errorCode && /_(disconnected|reconnect)$/.test(c.errorCode));
+          const label = held[0]!.provider === "google" ? "Google" : "Microsoft";
+          throw new HttpError(
+            409,
+            `${label} is disconnected, so Meridies can't see edits to ${quoteNames(held)}. Reconnect ${label} to check this task.`,
+            `${held[0]!.provider}_disconnected`
+          );
+        }
         const days = daysSince(lastActivity);
         const watched = live.checks.filter((c) => !c.error);
         const base = lastActivity
@@ -1059,7 +1074,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           source: "system",
           checkedBy: request.auth.userId,
         });
-        return reply.code(201).send(saved);
+        return reply.code(201).send({ ...saved, liveStatus: status });
       }
 
       // Live edits but nothing readable to compare (a Word file, or a document
@@ -1084,7 +1099,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           source: "system",
           checkedBy: request.auth.userId,
         });
-        return reply.code(201).send(saved);
+        return reply.code(201).send({ ...saved, liveStatus: status });
       }
 
       const instructions = String(task.instructions ?? "").trim();
@@ -1178,7 +1193,7 @@ export default async function taskRoutes(app: FastifyInstance) {
         checkedBy: request.auth.userId,
       });
 
-      return reply.code(201).send(saved);
+      return reply.code(201).send({ ...saved, liveStatus: status });
     }
   );
 }
