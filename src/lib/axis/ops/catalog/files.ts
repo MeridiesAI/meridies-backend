@@ -112,6 +112,7 @@ export const files: OpGroup = {
     op({
       name: "files.list_folders",
       kind: "read",
+      outside: true,
       title: "The counselor's folders with ids (or one student's), including student and practice folders.",
       doc: "{ student_id? }",
       input: z.object({ student_id: uuid.optional() }).strict(),
@@ -130,6 +131,7 @@ export const files: OpGroup = {
     op({
       name: "files.list_documents",
       kind: "read",
+      outside: true,
       title: "Documents with ids: one student's (pass student_id), a folder's, or unfiled. Names and settings, never contents.",
       doc: "{ student_id?, folder_id?, unfiled? bool }",
       input: z.object({ student_id: uuid.optional(), folder_id: uuid.optional(), unfiled: z.boolean().optional() }).strict(),
@@ -155,6 +157,7 @@ export const files: OpGroup = {
     op({
       name: "files.list_links",
       kind: "read",
+      outside: true,
       title: "Saved links with ids, by student or folder.",
       doc: "{ student_id?, folder_id? }",
       input: z.object({ student_id: uuid.optional(), folder_id: uuid.optional() }).strict(),

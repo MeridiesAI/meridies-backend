@@ -1,7 +1,7 @@
 // Spreadsheet fixtures for the import tests, built in memory with fflate so
 // no binary files are checked in. Cells: string (inline), number, boolean,
 // { date: serial } (date-formatted), { formula, cached? }.
-import { strToU8, zipSync } from "fflate";
+import { strToU8, unzipSync, zipSync } from "fflate";
 
 export type Cell = string | number | boolean | null | { date: number } | { formula: string; cached?: number | string };
 
@@ -61,6 +61,35 @@ export function xlsx(o: XlsxOptions): Uint8Array {
 }
 
 export const csv = (text: string) => new TextEncoder().encode(text);
+
+/**
+ * A workbook whose every data cell points at one shared string (t="s", index
+ * 0): small on disk and inside every zip-guard cap, but a parser hands back
+ * the same string object for each cell, so a naive answer carries a copy per
+ * cell. Built in memory; the sheet XML stays under the 50 MiB entry cap.
+ */
+export function sharedStringBomb(rows: number, cols: number, text: string): Uint8Array {
+  const base = xlsx({ sheets: [{ name: "Roster", rows: [] }] });
+  const files = unzipSync(base);
+  const header = `<row r="1">${Array.from({ length: cols }, (_, j) => `<c r="${col(j)}1" t="inlineStr"><is><t>H${j}</t></is></c>`).join("")}</row>`;
+  const body: string[] = [header];
+  for (let i = 2; i <= rows + 1; i++) {
+    let r = `<row r="${i}">`;
+    for (let j = 0; j < cols; j++) r += `<c r="${col(j)}${i}" t="s"><v>0</v></c>`;
+    body.push(r + "</row>");
+  }
+  files["xl/worksheets/sheet1.xml"] = strToU8(
+    `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${body.join("")}</sheetData></worksheet>`
+  );
+  files["xl/sharedStrings.xml"] = strToU8(
+    `<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><t>${esc(text)}</t></si></sst>`
+  );
+  const ct = new TextDecoder().decode(files["[Content_Types].xml"]);
+  files["[Content_Types].xml"] = strToU8(ct.replace("</Types>", `<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>`));
+  const rels = new TextDecoder().decode(files["xl/_rels/workbook.xml.rels"]);
+  files["xl/_rels/workbook.xml.rels"] = strToU8(rels.replace("</Relationships>", `<Relationship Id="rIdSS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>`));
+  return zipSync(files);
+}
 
 /** import_fields as 20261014000001 seeds it, plus the questionnaire's rows (20261023010001). */
 export const FIELDS = [

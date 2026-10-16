@@ -221,6 +221,10 @@ export type TransferResult = {
     groupMeetings: { id: string; title: string; startsAt: string }[];
     supplementDocs: { id: string; collegeName: string; title: string; studentId: string; toId: string }[];
     driveLinkedDocuments: number;
+    /** Files about someone else that were filed in a moved student's folders: left with their owner, unfiled (20261024000082). */
+    keptFiles: number;
+    /** Moved files that are now unfiled (filed in another student's folders, or in the old counselor's own folders): the receiver finds them under "unfiled" (20261024000082). */
+    unfiledFiles: number;
     cancelledMessages: number;
     cancelledAlerts: number;
   };
@@ -265,6 +269,8 @@ export function toTransferResult(raw: unknown): TransferResult {
         toId: str(d.toId),
       })),
       driveLinkedDocuments: num(a.driveLinkedDocuments),
+      keptFiles: num(a.keptFiles),
+      unfiledFiles: num(a.unfiledFiles),
       cancelledMessages: num(a.cancelledMessages),
       cancelledAlerts: num(a.cancelledAlerts),
     },

@@ -18,11 +18,12 @@
 import type { FastifyRequest } from "fastify";
 import { badRequest, conflict, HttpError } from "../errors.js";
 import { serializeErr } from "../requestLog.js";
-import { MAX_ROWS } from "./caps.js";
+import { MAX_PARSED_CHARS, MAX_ROWS } from "./caps.js";
 import { withWorkerTransaction } from "./db.js";
 import { fromImportRpc } from "./errors.js";
 import { loadFields } from "./fields.js";
 import { loadImportRow } from "./files.js";
+import { heldAtAddresses, skipHeldElsewhere } from "./heldAddresses.js";
 import { profiledFiles } from "./mapping.js";
 import { matchRecords, TooManyChangesError, toPayload, type RosterStudent } from "./match.js";
 import { parseFailureMessage, parseInWorker } from "./parse.js";
@@ -38,7 +39,7 @@ const rpcError = (err: unknown) => fromImportRpc(err as { code?: string; message
 
 export async function stageImport(request: FastifyRequest, importId: string): Promise<Record<string, unknown>> {
   const actor = request.auth.userId;
-  const imp = await loadImportRow(request, importId, "id, status, plan");
+  const imp = await loadImportRow(request, importId, "id, status, plan, counselor_id");
   if (imp.status !== "mapping") throw conflict(imp.status === "staging" ? "This import is being matched. Try again in a moment." : "Map the columns first");
   const planParsed = parsePlanSchema.safeParse(imp.plan);
   if (!planParsed.success) throw badRequest("Map the columns first");
@@ -61,12 +62,22 @@ export async function stageImport(request: FastifyRequest, importId: string): Pr
     if (error) throw new Error("files unreadable");
     const used = new Set(check.plan.sheets.map((s) => s.fileId));
     const parsed: ParsedFile[] = [];
+    // Every file's cells are held here at once, so the files share one
+    // character budget: each parse gets what the earlier ones left.
+    let chars = 0;
     for (const f of (paths ?? []) as Row[]) {
       if (!used.has(String(f.id))) continue;
       const { data: blob, error: dlErr } = await request.db.storage.from("imports").download(String(f.storage_path));
       if (dlErr || !blob) throw new HttpError(409, `${String(f.filename)} is no longer available. Start a new import.`);
-      const out = await parseInWorker(new Uint8Array(await blob.arrayBuffer()), String(f.filename), { maxRows: MAX_ROWS });
-      if (!out.ok) throw new HttpError(400, parseFailureMessage(out.reason, String(f.filename)));
+      const out = await parseInWorker(new Uint8Array(await blob.arrayBuffer()), String(f.filename), {
+        maxRows: MAX_ROWS,
+        maxChars: MAX_PARSED_CHARS - chars,
+      });
+      if (!out.ok) {
+        const reason = out.reason === "too-large-unpacked" && chars > 0 ? "import-too-large" : out.reason;
+        throw new HttpError(400, parseFailureMessage(reason, String(f.filename)));
+      }
+      chars += out.chars;
       parsed.push({ fileId: String(f.id), filename: String(f.filename), sheets: out.sheets });
     }
 
@@ -80,13 +91,17 @@ export async function stageImport(request: FastifyRequest, importId: string): Pr
       return rows[0].out as RosterStudent[];
     });
     const items = matchRecords(applied.records, roster);
+    // An address already carrying another student's held data from an
+    // earlier import is not invited for this one (heldAddresses.ts).
+    const inviting = items.filter((it) => it.matchStatus === "new_invite" && it.matchKey.email).map((it) => String(it.matchKey.email));
+    const heldElsewhere = inviting.length > 0 ? skipHeldElsewhere(items, await heldAtAddresses(request, String(imp.counselor_id), inviting)) : 0;
     const payload = toPayload(items, { rows: applied.rows, blocked: applied.blocked });
     const stats = await withWorkerTransaction(async (c) => {
       const { rows } = await c.query("select public.stage_import($1, $2, $3) as out", [importId, actor, payload]);
       return rows[0].out as Record<string, unknown>;
     });
     request.log.info(
-      { importId, rows: applied.rows, items: items.length, changes: payload.changes.length, blocked: applied.blocked },
+      { importId, rows: applied.rows, items: items.length, changes: payload.changes.length, blocked: applied.blocked, heldElsewhere },
       "import staged"
     );
     return stats;

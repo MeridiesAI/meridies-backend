@@ -47,11 +47,12 @@ import { documentReadableForTask, toAiDoc, unconfirmedAttachedNote } from "../li
 import { essayBodyReadable } from "../lib/context/sections.js";
 import { composeTrackerNote } from "../lib/trackerNote.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
-import { limit } from "../lib/limits.js";
+import { enforceRateLimit, limit } from "../lib/limits.js";
 import { checkLiveDocuments, holdsNoActivity, isGrantProblem, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { loadPracticeSettings } from "../lib/practiceSettings.js";
-import { startSubmissionReview } from "../lib/submissionReview.js";
+import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
+import { researchTaskIds } from "../lib/research/origin.js";
 
 type Row = Record<string, unknown>;
 
@@ -184,7 +185,10 @@ export async function hydrate(
   if (tasks.length === 0) return [];
   const ids = tasks.map((t) => t.id as string);
 
-  const [stages, docs, tracker] = await Promise.all([
+  // Which counselor tasks were accepted from Research (lib/research/origin.ts): AxIS reads their
+  // titles as outside content. Counselors only (a student can't read recommendations).
+  const counselorTasks = request.profile.role === "counselor" ? tasks.filter((t) => t.source !== "student").map((t) => t.id as string) : [];
+  const [stages, docs, tracker, research] = await Promise.all([
     request.db
       .from("deliverable_stages")
       .select("*")
@@ -198,6 +202,7 @@ export async function hydrate(
       )
       .in("deliverable_id", ids),
     request.db.from("deliverable_tracker_latest").select("*").in("deliverable_id", ids),
+    counselorTasks.length ? researchTaskIds(request.db, { taskIds: counselorTasks }) : Promise.resolve(new Set<string>()),
   ]);
 
   const stageBy = new Map<string, Row[]>();
@@ -222,6 +227,8 @@ export async function hydrate(
       stages: stageBy.get(t.id as string) ?? [],
       documents: docBy.get(t.id as string) ?? [],
       tracker: trackerBy.get(t.id as string) ?? null,
+      // Unreadable: every counselor task may be one (AxIS then treats them as outside content).
+      ...(request.profile.role === "counselor" ? { fromResearch: t.source !== "student" && (research === null || research.has(t.id as string)) } : {}),
     })
   );
 }
@@ -537,12 +544,27 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("deliverables")
-        .select("student_id, source, visible_to_student, intake_request_id")
+        .select("student_id, source, status, visible_to_student, intake_request_id")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That task isn't on file");
       const studentId = existing.student_id as string;
       await resolveStudentId(request, studentId, "edit");
+
+      // A request from New student moves only with the student's Submit: once
+      // it is with the counselor (review) or received (complete) the student
+      // can't take it back, and they never send it themselves by setting its
+      // status. Otherwise a student loops "back to in progress, Submit again"
+      // and every round re-reads the files and re-emails the counselor. The
+      // database says the same (20261024000044).
+      if (request.profile.role === "student" && existing.intake_request_id && b.status !== undefined) {
+        const current = String(existing.status ?? "");
+        if (current === "review" || current === "complete") {
+          if (b.status !== current) throw conflict("This is with your counselor now.");
+        } else if (b.status === "review" || b.status === "complete") {
+          throw conflict("Use Submit to send this to your counselor.");
+        }
+      }
 
       if (b.visibleToStudent !== undefined) {
         if (request.profile.role !== "counselor") {
@@ -798,6 +820,26 @@ export default async function taskRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (existing && existing.role !== "submission") {
         throw conflict("That file is already on this task as reference material");
+      }
+      // The same file again while it waits on a check: nothing new for AxIS
+      // to read or for the counselor to hear about.
+      if (existing && task.status === "review") {
+        return reply.code(200).send({
+          task: await freshTask(request, id),
+          review: { status: "skipped", reason: "This file is already handed in and waiting on a check." },
+        });
+      }
+      // A hand-in runs an AxIS read (charged to the caller's AI quota) and
+      // tells the counselor: per task and per student caps, DB-backed, so a
+      // loop of hand-ins can't flood the counselor's inbox or spend AI.
+      // A New student request is only attached here; its Submit is capped on
+      // its own route.
+      // Only a student's own hand-ins count: a counselor (or AxIS for them)
+      // handing in for the student spends their own AI quota, tells nobody,
+      // and must not be locked out by what the student did.
+      if (request.profile.role === "student" && !task.intake_request_id) {
+        await enforceRateLimit(`hand-in:task:${id}`, HAND_INS_PER_TASK_HOUR, 3600, "That's a lot of hand-ins for one task. Try again in an hour.");
+        await enforceRateLimit(`hand-in:student:${studentId}`, HAND_INS_PER_STUDENT_DAY, 86_400, "That's a lot of hand-ins for one day. Try again tomorrow.");
       }
       if (!existing) {
         const { error } = await request.db.from("deliverable_documents").insert({

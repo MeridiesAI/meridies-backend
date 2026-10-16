@@ -195,3 +195,25 @@ test("an abort while the body is unread does not crash, and a reader sees it", a
     slow.close();
   }
 });
+
+test("a 2 MB page of unclosed tags is read without holding the event loop (the review's attack)", async () => {
+  // A student pastes a link to a page that is "<a" (or "<script", or "<!--")
+  // repeated to the 2 MB cap with no closing token. The old regular
+  // expressions took minutes on this; the page must be read in well under a
+  // second, and other work must keep running while it is.
+  const restoreResolver = linkTesting.useResolver(async () => [PUBLIC]);
+  for (const unit of ["<a", "<script", "<!--", "<style", "<title"]) {
+    const body = unit.repeat(Math.ceil(2_000_000 / unit.length)).slice(0, 2_000_000);
+    const restoreOpener = linkTesting.useOpener(async () => fakeResponse(200, { "content-type": "text/html" }, body));
+    try {
+      const started = performance.now();
+      const page = await fetchReadablePage("https://attacker.example/x");
+      const ms = performance.now() - started;
+      assert.ok(ms < 1000, `${unit} page took ${ms.toFixed(0)} ms`);
+      assert.equal(page.domain, "attacker.example");
+    } finally {
+      restoreOpener();
+    }
+  }
+  restoreResolver();
+});

@@ -43,6 +43,7 @@ export const workQueue: OpGroup = {
     op({
       name: "work_queue.list",
       kind: "read",
+      outside: false,
       title: "The counselor's own queue items with ids (optionally one student's, or include done ones).",
       doc: "{ student_id?, include_done? bool }",
       input: z.object({ student_id: uuid.optional(), include_done: z.boolean().optional() }).strict(),

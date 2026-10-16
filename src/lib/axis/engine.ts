@@ -26,6 +26,7 @@ import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { enforceNoProse, NO_PROSE_SYSTEM } from "../anthropic.js";
+import { ProseGate } from "../proseGuard.js";
 import { buildRosterContext, signerLine } from "../chat.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../context/pack.js";
 import type { ContextUsage } from "../context/types.js";
@@ -56,9 +57,9 @@ import { gatherEvidence } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
 import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
-import { isReadOnly, readsDocuments, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
+import { isReadOnly, readsOutside, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
 import { newTurnBudget, recentActionsText, type OperationEvent } from "./ops/run.js";
-import { PROFILES as CONTEXT_PROFILES } from "../context/profiles.js";
+import { PROFILES as CONTEXT_PROFILES, TRUSTED_SECTIONS } from "../context/profiles.js";
 import { tokens } from "./text.js";
 
 export type Emit = (event: string, data: unknown) => void;
@@ -130,13 +131,15 @@ export function requestBase(system: Anthropic.Beta.BetaTextBlockParam[], tools: 
   };
 }
 
-/** The student's record or the roster view, with what it's built from. */
 /**
- * A change request reads the record without the text of uploaded files: a change never needs a
- * transcript's wording, and text from a file in the prompt would turn every change into a card
- * (lib/axis/ops/run.ts). Questions keep the full record.
+ * A change request reads only what the counselor wrote: the student's name and class, their
+ * meetings, meeting notes, strength profile and the counselor's own tasks (TRUSTED_SECTIONS, built
+ * trustedOnly). Text someone else wrote (a file, the student's activities, essays, intake answers,
+ * a task or deadline the student added) in the prompt would turn every change into a card
+ * (lib/axis/ops/run.ts), and a change finds what else it needs with a lookup, which marks the turn
+ * if it reads such text. Questions keep the full record.
  */
-const RECORD_FOR_CHANGES = CONTEXT_PROFILES.chat.sections.filter((s) => s !== "documents");
+const RECORD_FOR_CHANGES = CONTEXT_PROFILES.chat.sections.filter((s) => TRUSTED_SECTIONS.includes(s));
 
 /** The same test the understanding applies (an action score that outranks the rest), before the roster is loaded. */
 export function looksLikeChange(content: string): boolean {
@@ -146,13 +149,19 @@ export function looksLikeChange(content: string): boolean {
   return scores.action >= 5 && scores.essay < 6;
 }
 
+/** The student's record or the roster view, with what it's built from and whether it carries someone else's words. */
 async function loadContext(request: FastifyRequest, studentId: string | null, forChange = false) {
   if (studentId) {
-    const c = await cachedStudentContext(request, studentId, forChange ? RECORD_FOR_CHANGES : undefined);
-    return { record: c.text, roster: null, name: c.studentName, usage: { used: c.used, omitted: c.omitted } as ContextUsage, labels: c.used.map((u) => SECTION_LABELS[u.section] ?? u.section) };
+    const c = forChange
+      ? await cachedStudentContext(request, studentId, RECORD_FOR_CHANGES, true)
+      : await cachedStudentContext(request, studentId);
+    return {
+      record: c.text, roster: null, name: c.studentName, usage: { used: c.used, omitted: c.omitted } as ContextUsage,
+      labels: c.used.map((u) => SECTION_LABELS[u.section] ?? u.section), outside: readsOutside(c),
+    };
   }
-  const r = await buildRosterContext(request);
-  return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [] };
+  const r = await buildRosterContext(request, { trustedOnly: forChange });
+  return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [], outside: r?.outside === true };
 }
 
 /** Drops the oldest turns until the prompt fits Haiku 5.5's lower rate card. */
@@ -254,7 +263,8 @@ export async function runAxisTurn(opts: {
   // ---- 2. Understanding ----
   const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state });
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
-  // A direct or essay answer runs no model over outside content: whatever the last turn read stays in force.
+  // A direct or essay answer runs no tools: whatever the last turn read stays in force, and an answer that
+  // quotes text someone else wrote (below) taints the next turn the way reading it would have.
   const state = { ...nextState(u, history.state, chatStudent), ...(history.state?.outside ? { outside: true } : {}) };
   const ledger = new SourceLedger();
   const trace: { label: string }[] = [];
@@ -281,7 +291,8 @@ export async function runAxisTurn(opts: {
       if (citations.length) emit("citations", { citations });
       request.log.info({ axis: { path: "direct", frame: direct.frame, ms: Date.now() - startedAt } }, "axis turn");
       return {
-        path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u, state,
+        path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u,
+        state: direct.outside ? { ...state, outside: true } : state,
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
       };
     }
@@ -294,7 +305,10 @@ export async function runAxisTurn(opts: {
     const text = await essayAdvice(request, studentId, content, ctx.record, { signal, precharged: takePrepaid() });
     emit("delta", { text });
     return {
-      path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u, state,
+      // The bullets were written over the student's record (their essays, activities): saved to the
+      // chat, they are outside content for the next turn.
+      path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u,
+      state: ctx.outside ? { ...state, outside: true } : state,
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
     };
   }
@@ -325,11 +339,13 @@ export async function runAxisTurn(opts: {
   const api = opts.api ?? messagesApi();
   const actions: (ProposedAction | OperationEvent)[] = [];
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
-  // So does the text of uploaded files in the student record the system prompt carries (its documents section).
+  // So does whatever in the system prompt someone other than the counselor wrote: the student record's
+  // uploaded files and student-written sections, the roster's high schools, deadlines and student tasks.
   const outside =
     hasFiles ||
     ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail") ||
-    readsDocuments(ctx.usage);
+    ctx.outside ||
+    evidence.outside;
   const toolCtx: ToolContext = {
     request, conversationId: opts.conversationId, studentId, roster, ledger, connected, retrievalReady: retrievalOn, signal,
     memo: new Map(),
@@ -411,14 +427,19 @@ export async function runAxisTurn(opts: {
     ];
 
     const grounder = new LiveGrounder(index, ledger, (c) => emit("grounding", c));
+    // The essay guardrail in code for the free-text path: past the first-person cap nothing more
+    // of the answer reaches the counselor (lib/proseGuard.ts), whatever the router decided.
+    const gate = new ProseGate();
+    const show = (d: string) => {
+      if (!d) return;
+      emit("delta", { text: d });
+      if (!opaqueFiles) grounder.push(d);
+    };
     emit("status", { phase: "answering" });
     const res = await runLoop({
       api, base: requestBase(system, tools, turnEffort), messages, effort: turnEffort, maxCalls: turnProfile.maxCalls,
       deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, beforeCall,
-      onText: (d) => {
-        emit("delta", { text: d });
-        if (!opaqueFiles) grounder.push(d);
-      },
+      onText: (d) => show(gate.push(d)),
       onToolStart: (c) => {
         const label = toolLabel(c.name, c.input);
         step(label);
@@ -429,21 +450,26 @@ export async function runAxisTurn(opts: {
       onToolEnd: (c, out) => emit("tool", { id: c.id, name: c.name, status: out.isError ? "failed" : "done" }),
     });
     add(res.usage);
+    show(gate.finish());
+    if (gate.blocked) request.log.warn({ axis: { essayGuard: "withheld" } }, "axis answer cut by the essay guard");
     const checks = grounder.finish();
 
-    const { citations, invalid } = resolveCitations(res.text, ledger);
-    const text = dropInvalidCitations(res.text, invalid);
+    // A cut answer is saved as the counselor saw it, never the model's full text.
+    const answer = gate.blocked ? gate.text : res.text;
+    const { citations, invalid } = resolveCitations(answer, ledger);
+    const text = dropInvalidCitations(answer, invalid);
     if (citations.length) emit("citations", { citations });
     await closeRun(run, res.stop === "refusal" ? "blocked" : "succeeded", total, {
       stop: res.stop, refusal: res.refusalCategory, calls: res.calls, tools: res.tools, passages: ledger.size, cited: citations.length,
       invalidCitations: invalid.length, sentencesChecked: checks.length, unverified: checks.filter((c) => c.status === "unverified").length,
       ms: Date.now() - startedAt, writes: toolCtx.turn.writes, autoWrites: toolCtx.turn.autoWrites, tainted: toolCtx.turn.tainted,
+      essayGuard: gate.blocked,
     });
     await chargeOutput(request, total.output);
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: { ...state, outside: toolCtx.turn.sawOutside },
-      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
+      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
     };
   } catch (err) {

@@ -17,7 +17,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { readDocumentText } from "../lib/documentText.js";
+import { canReadDocumentText, maxReadBytes, readDocumentText } from "../lib/documentText.js";
+import { downloadCapped } from "../lib/storageDownload.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
@@ -835,12 +836,20 @@ export default async function applicationRoutes(app: FastifyInstance) {
         const file = await getRemoteFile(request.auth.userId, "google", String(doc.external_file_id), null, request.log).catch(() => null);
         text = file ? await exportGoogleDocText(request.auth.userId, file, request.log).catch(() => null) : null;
       }
-      if (text === null && doc.storage_path) {
-        const dl = await request.db.storage.from(String(doc.bucket ?? "student-documents")).download(String(doc.storage_path));
-        if (!dl.error && dl.data) {
-          const bytes = Buffer.from(await dl.data.arrayBuffer());
-          text = readDocumentText(bytes, String(doc.filename ?? ""), (doc.mime_type as string | null) ?? null);
-        }
+      const filename = String(doc.filename ?? "");
+      const mimeType = (doc.mime_type as string | null) ?? null;
+      // A format it can't read stays unreadable without a download. The size
+      // the client registered (documents.size_bytes) only skips an obvious
+      // over-cap file: the download itself stops reading past the cap, so a
+      // row that claims 0 bytes can't make the server buffer a 50 MB object.
+      if (text === null && doc.storage_path && canReadDocumentText(filename, mimeType, doc.size_bytes)) {
+        const dl = await downloadCapped(
+          request.db,
+          String(doc.bucket ?? "student-documents"),
+          String(doc.storage_path),
+          maxReadBytes(filename, mimeType)
+        );
+        if (dl.status === "ok") text = readDocumentText(dl.bytes, filename, mimeType);
       }
 
       const defaults = await essayDefaults(request, studentId, {

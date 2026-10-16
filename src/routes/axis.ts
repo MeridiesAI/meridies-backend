@@ -355,7 +355,11 @@ export default async function axisRoutes(app: FastifyInstance) {
  * status, and whether Undo is available.
  */
 function publicAction(r: Record<string, unknown>) {
-  if (r.type !== "operation") return r;
+  if (r.type !== "operation") {
+    // A draft's or queue item's own fields; the server-side `outside` mark stays here.
+    const { outside: _mark, ...rest } = (r.payload ?? {}) as Record<string, unknown>;
+    return { ...r, payload: rest };
+  }
   const p = (r.payload ?? {}) as Record<string, unknown>;
   const res = (r.result ?? {}) as Record<string, unknown>;
   const status = String(r.status) as OperationStatus;

@@ -25,19 +25,30 @@
  * verdict, the task's completion and the counselor's notification are not
  * the student's to write (the tracker table refuses them since
  * 20261012000001). Every id here was checked by the route first.
+ *
+ * Reads do not: the file itself is downloaded on the caller's own client, so
+ * Storage RLS decides whether they may read it, and only from the documents
+ * bucket at a path of the shape lib/storagePath.ts allows. A documents row is
+ * the client's word for where a file is; the service role never follows it.
+ * Before anything is downloaded, the file passes the task rule
+ * (documentReadableForTask: an unconfirmed type, keep-out, a waived letter, the
+ * practice switch, `ai_access = 'excluded'`, and the sensitive kinds unless the
+ * counselor allowed the file).
  */
 
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env, hasAnthropic } from "../env.js";
 import { enforceNoProse, runStructured, type AiAttachment } from "./anthropic.js";
-import { readDocumentText } from "./documentText.js";
+import { maxReadBytes, readDocumentText } from "./documentText.js";
+import { downloadCapped } from "./storageDownload.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
 import { isCounselorApproved } from "./access.js";
 import { documentReadableForTask, toAiDoc } from "./context/documentAi.js";
-import { DOCUMENT_BUCKET } from "./documentExtraction.js";
+import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePathShape } from "./storagePath.js";
+import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
 type Svc = NonNullable<ReturnType<typeof serviceClient>>;
@@ -195,6 +206,19 @@ async function documentReadingAllowed(svc: Svc, studentId: string): Promise<bool
   return toPrivacySettings(data as Row | null).autoParseDocuments;
 }
 
+/** What the counselor and student read when the per-document rule keeps a file away from AxIS. */
+/**
+ * At most this many counselor notices (bell and email) per task an hour, and
+ * per student a day, however often a file is handed in. The route throttles
+ * hand-ins too; this holds for every path into the review (New student's
+ * Submit included).
+ */
+export const NOTICES_PER_TASK_HOUR = 3;
+/** Hand-ins (each one an AxIS read and a notice) per task an hour and per student a day, at the route. */
+export const HAND_INS_PER_TASK_HOUR = 6;
+export const HAND_INS_PER_STUDENT_DAY = 40;
+export const NOTICES_PER_STUDENT_DAY = 20;
+
 type Outcome =
   | { status: "reviewed"; result: ReviewResult }
   | { status: "skipped"; reason: string };
@@ -287,7 +311,6 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
   // counselor can act on.
   const refusal = refusalFor(doc, await documentReadingAllowed(svc, studentId));
   if (refusal) return { status: "skipped", reason: refusal };
-  if (!hasAnthropic) return { status: "skipped", reason: "AxIS isn't set up on this server yet." };
   if (!doc.storage_path) return { status: "skipped", reason: "AxIS reads uploaded files; this one is a link." };
 
   const filename = String(doc.filename ?? "file");
@@ -297,19 +320,31 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
     return { status: "skipped", reason: "This file is too large for AxIS to read." };
   }
 
-  // The service role reads every bucket: only the documents bucket is ever downloaded for a review.
-  if ((doc.bucket ?? DOCUMENT_BUCKET) !== DOCUMENT_BUCKET) return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
-  const dl = await svc.storage.from(DOCUMENT_BUCKET).download(String(doc.storage_path));
-  if (dl.error || !dl.data) return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
-  const bytes = Buffer.from(await dl.data.arrayBuffer());
+  // Only the documents bucket, only a path the row and Storage agree on
+  // (storage-js strips a leading "/" and the URL resolves "..", so either
+  // would name another object), and only on the caller's own client: Storage
+  // RLS then refuses an object the caller can't read, whatever the row says.
+  if (!isDocumentsBucket(doc.bucket) || !isSafeStoragePathShape(doc.storage_path)) {
+    request.log.warn({ documentId: String(doc.id) }, "submission review: document row names an unsafe storage path");
+    return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
+  }
+  // size_bytes is the client's word, so the download itself stops past the
+  // cap rather than buffering the whole object first.
+  const dl = await downloadCapped(request.db, DOCUMENTS_BUCKET, String(doc.storage_path), MAX_REVIEW_BYTES);
+  if (dl.status === "error") return { status: "skipped", reason: "AxIS couldn't open the uploaded file." };
+  if (dl.status === "too-large") return { status: "skipped", reason: "This file is too large for AxIS to read." };
+  if (!hasAnthropic) return { status: "skipped", reason: "AxIS isn't set up on this server yet." };
+  const bytes = dl.bytes;
   if (bytes.length === 0) return { status: "skipped", reason: "The uploaded file is empty." };
-  if (bytes.length > MAX_REVIEW_BYTES) return { status: "skipped", reason: "This file is too large for AxIS to read." };
 
   let attachments: AiAttachment[] | undefined;
   let text = "";
   if (mode.kind === "attachment") {
     attachments = [{ mediaType: mode.mediaType, data: bytes.toString("base64"), title: filename }];
   } else {
+    if (bytes.length > maxReadBytes(filename, (doc.mime_type as string | null) ?? null)) {
+      return { status: "skipped", reason: "This file is too large for AxIS to read." };
+    }
     text = readDocumentText(bytes, filename, (doc.mime_type as string | null) ?? null) ?? "";
     if (!text.trim()) return { status: "skipped", reason: "AxIS couldn't read any text in this file." };
   }
@@ -420,7 +455,7 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
   // counselor sends an item back.
   const advisory = isIntakeRequest(task);
 
-  if (counselorId && request.profile.role === "student" && !advisory) {
+  if (counselorId && request.profile.role === "student" && !advisory && (await counselorNoticeAllowed(request, task))) {
     const heading = reviewed
       ? reviewed.verdict === "accepted"
         ? `${name} handed in ${title}: AxIS accepted it`
@@ -450,7 +485,9 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
       };
       emails.push({
         to,
-        subject: oneLine(heading, 150),
+        // The task title and the name are the student's to write: the subject
+        // carries the name only, the title stays in the body.
+        subject: `${oneLine(name, 60)} handed in a file`,
         html: brandedEmail(template),
         text: brandedText(template),
         template: "submission-review-counselor",
@@ -507,4 +544,21 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
   for (const email of emails) {
     await sendEmail(email).catch((err) => request.log.error({ err }, "submission email failed"));
   }
+}
+
+/**
+ * Whether the counselor may hear about this hand-in: at most
+ * NOTICES_PER_TASK_HOUR per task and NOTICES_PER_STUDENT_DAY per student
+ * (DB-backed limiter). A student re-handing files in a loop otherwise sends
+ * the counselor one email per call from Meridies' sending domain.
+ */
+async function counselorNoticeAllowed(request: FastifyRequest, task: Row): Promise<boolean> {
+  const perTask = await consumeRateLimit(`submission-notice:task:${String(task.id)}`, NOTICES_PER_TASK_HOUR, 3600, request.log);
+  const perStudent =
+    perTask && (await consumeRateLimit(`submission-notice:student:${String(task.student_id)}`, NOTICES_PER_STUDENT_DAY, 86_400, request.log));
+  if (!perTask || !perStudent) {
+    request.log.info({ taskId: String(task.id) }, "submission review: counselor notice throttled");
+    return false;
+  }
+  return true;
 }

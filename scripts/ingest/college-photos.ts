@@ -6,8 +6,8 @@
  *   npx tsx --env-file=.env scripts/ingest/college-photos.ts                 # every college, under the job's lease
  *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --limit 50      # a trial run
  *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --only 166683,243744
- *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --dry-run       # writes nothing; prints a CSV of what it would attach
- *   npx tsx scripts/ingest/college-photos.ts --fixture-dir test/fixtures/college-photos [--picks <csv>]
+ *   npx tsx --env-file=.env scripts/ingest/college-photos.ts --dry-run       # writes nothing; prints a CSV of what it would attach and what it holds
+ *   npx tsx scripts/ingest/college-photos.ts --fixture-dir test/fixtures/college-photos [--picks <csv>] [--now <ISO time>]
  *                                                                           # recorded answers, no network (tests, offline dev)
  *
  * Look the new photos over: run with --dry-run, open each title's Commons
@@ -16,6 +16,19 @@
  * scripts/ingest/data/college-photo-picks.csv, either as a better
  * `File:...` title or as `none` to suppress the college. The next run applies it.
  *
+ * The CSV's action column: `add` / `replace` go live on the next run;
+ * `held-new` / `held-replace` are waiting for a week without edits on
+ * Wikidata and Commons (the reasons column says which clock is running; see
+ * reviewDecision in src/lib/ingest/collegePhotos.ts), or for a later run to
+ * see them unchanged; `held-text` keeps the photo and holds a changed credit
+ * or license for it. `pick-redirected` and `pick-changed` wait for the team:
+ * update the title, or the pin. To publish a held photo now, put its title in
+ * the picks file, with the version you looked at in the commons_sha1 column
+ * (the file's SHA1 on its Commons page) when it is a new version of the file
+ * already shown; to keep it off, put `none` or a better title. A real run
+ * keeps the same list in the college_photo_candidates table and its counts on
+ * its ingest_runs row (held-new, held-replace, text-held, hold:<reason>).
+ *
  * Run it once by hand right after applying 20261023070001_college_photos.sql:
  * /internal/status reads the job overdue until its first clean run.
  *
@@ -23,9 +36,10 @@
  * healthy; a dry run writes no ingest_runs row.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  csvCell,
   loadPicks,
   runCollegePhotoIngest,
   supabasePhotoStore,
@@ -59,6 +73,12 @@ const onlyIds = only?.map(Number);
 const dryRun = flag("dry-run");
 const fixtureDir = arg("fixture-dir");
 const picksFile = arg("picks");
+const nowArg = arg("now");
+if (nowArg !== undefined && (!fixtureDir || !Number.isFinite(Date.parse(nowArg)))) {
+  console.error("--now takes an ISO time, and only with --fixture-dir (the fixtures' timestamps are read against it)");
+  process.exit(1);
+}
+const now = nowArg !== undefined ? () => new Date(Date.parse(nowArg)) : undefined;
 if (picksFile && !fixtureDir && !dryRun) {
   console.error("--picks is for --fixture-dir and --dry-run; a real run reads scripts/ingest/data/college-photo-picks.csv");
   process.exit(1);
@@ -71,11 +91,6 @@ const log = {
 };
 const NO_SCHEMA = "Apply supabase/migrations/20261023070001_college_photos.sql first.";
 
-const csvCell = (v: string | number) => {
-  const s = String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
-
 function report(outcome: PhotoOutcome | null): never {
   if (!outcome) {
     console.error("The run crashed; see the log above.");
@@ -86,10 +101,12 @@ function report(outcome: PhotoOutcome | null): never {
     process.exit(1);
   }
   if (outcome.dryRun) {
-    console.log("\nunitid,name,title,license,credit,source");
-    for (const a of outcome.attach) console.log([a.unitid, a.name, a.title, a.license, a.credit, a.source].map(csvCell).join(","));
+    console.log("\naction,unitid,name,title,license,credit,source,current_title,reasons");
+    for (const a of [...outcome.attach, ...outcome.review]) {
+      console.log([a.action, a.unitid, a.name, a.title, a.license, a.credit, a.source, a.current ?? "", a.reasons.join(";")].map(csvCell).join(","));
+    }
   }
-  const { attach: _attach, ...summary } = outcome;
+  const { attach: _attach, review: _review, ...summary } = outcome;
   console.log(JSON.stringify(summary, null, 2));
   process.exit(outcome.status === "failed" ? 1 : 0);
 }
@@ -106,9 +123,17 @@ if (fixtureDir || dryRun) {
     const read = (name: string) => JSON.parse(readFileSync(join(fixtureDir, name), "utf8")) as unknown;
     const tiny = new Uint8Array(readFileSync(join(fixtureDir, "tiny.jpg")));
     if (!isJpeg(tiny)) throw new Error("tiny.jpg is not a JPEG");
+    // A fixture directory may hold commons-imageinfo-500-recheck.json: the 500 px
+    // answer from the second call on, i.e. what the run sees when it asks again
+    // after downloading (a file changed during the run).
+    const recheck = existsSync(join(fixtureDir, "commons-imageinfo-500-recheck.json"));
+    let thumbCalls = 0;
     deps = {
       sparql: async () => read("wdqs-p1771.json"),
-      imageinfo: async (_titles, width) => read(width === 500 ? "commons-imageinfo-500.json" : "commons-imageinfo-1280.json"),
+      imageinfo: async (_titles, width) => {
+        if (width !== 500) return read("commons-imageinfo-1280.json");
+        return read(recheck && thumbCalls++ > 0 ? "commons-imageinfo-500-recheck.json" : "commons-imageinfo-500.json");
+      },
       download: async (url) => {
         if (!isAllowedDownloadUrl(url)) throw new Error("refused: not an upload.wikimedia.org URL");
         return tiny;
@@ -119,7 +144,7 @@ if (fixtureDir || dryRun) {
     const wm = wikimediaClient();
     deps = { sparql: wm.sparql, imageinfo: wm.imageinfo, download: wm.download, picks };
   }
-  report(await runCollegePhotoIngest(supabasePhotoStore(svc), deps, log, { trigger: "script", limit, only: onlyIds, dryRun }));
+  report(await runCollegePhotoIngest(supabasePhotoStore(svc), deps, log, { trigger: "script", limit, only: onlyIds, dryRun, now }));
 }
 
 const r = await startCollegePhotoIngest(log, "script", { limit, only: onlyIds });

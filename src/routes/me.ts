@@ -16,6 +16,8 @@
  *   PATCH /me/intake/:taskId           a typed answer instead of a file
  *   POST  /me/intake/submit            send every answered item to the counselor
  *   GET   /me/setup                    "Getting started": what is left once confirmed
+ *   GET   /me/invitations              pending invitations to my email (no tokens)
+ *   POST  /me/invitations/:id/accept   accept one, as the student
  *
  * Everything else the student view shows is an existing route the student
  * may already call for themselves: tasks (/tasks), files (/files/*), the
@@ -45,6 +47,8 @@ import {
 } from "../lib/studentView.js";
 import { loadMyIntake, saveMyAnswer, submitMyIntake } from "../lib/newStudentIntake.js";
 import { STUDENT_STEPS, openSteps, setupFacts } from "../lib/studentSetup.js";
+import { acceptMyInvitation, listMyInvitations } from "../lib/myInvitations.js";
+import { toMeridiesUser } from "../lib/serialize.js";
 import { hydrate } from "./tasks.js";
 
 const settingsPatch = z
@@ -260,15 +264,44 @@ export default async function meRoutes(app: FastifyInstance) {
     }
   );
 
-  // "Getting started": only once the counselor confirmed this student.
+  // "Getting started": only once the counselor confirmed this student, except
+  // "Fill out your profile", which a student who skipped step 2 sees at once.
   app.get(
     "/setup",
     { preHandler: [...student, limit("me:setup", 240, 60)] },
     async (request) => {
       const intake = await loadMyIntake(request);
-      if (!intake?.confirmedAt) return { steps: [] };
+      const steps = intake?.confirmedAt ? STUDENT_STEPS : STUDENT_STEPS.filter((s) => s.key === "profile");
       const facts = (await setupFacts(request, [request.auth.userId])).get(request.auth.userId);
-      return { steps: facts ? openSteps(STUDENT_STEPS, facts) : [] };
+      return { steps: facts ? openSteps(steps, facts) : [] };
+    }
+  );
+
+  // The Connect step: invitations sent to this account's confirmed address.
+  app.get(
+    "/invitations",
+    { preHandler: [...student, limit("me:invitations", 60, 60)] },
+    async (request) => ({ invitations: await listMyInvitations(request) })
+  );
+
+  app.post(
+    "/invitations/:id/accept",
+    { preHandler: [...student, limit("me:invitations-accept", 15, 3600, "Too many attempts. Try again in an hour.")] },
+    async (request) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      await acceptMyInvitation(request, id);
+      const { data: profile, error } = await request.db
+        .from("profiles")
+        .select("*")
+        .eq("id", request.auth.userId)
+        .single();
+      if (error) throw fromPostgrest(error);
+      let counselorName: string | null = null;
+      if (profile.counselor_id) {
+        const { data } = await request.db.from("profiles").select("full_name").eq("id", profile.counselor_id).maybeSingle();
+        counselorName = data?.full_name ?? null;
+      }
+      return toMeridiesUser(profile as never, { counselorName });
     }
   );
 }

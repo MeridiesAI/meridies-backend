@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { strToU8, zipSync } from "fflate";
 import { detectType } from "../../src/lib/imports/magic.js";
-import { MAX_CONCURRENT_PARSES, parseFailureMessage, parseInWorker, parsesRunning } from "../../src/lib/imports/parse.js";
-import { findHeaderRow, parseSpreadsheet, sniffDelimiter } from "../../src/lib/imports/sheet.js";
+import { MAX_CELL_CHARS, MAX_PARSE_OUTPUT_BYTES } from "../../src/lib/imports/caps.js";
+import { checkOutcome, MAX_CONCURRENT_PARSES, parseFailureMessage, parseInWorker, parsesRunning } from "../../src/lib/imports/parse.js";
+import { answerJson, findHeaderRow, parseSpreadsheet, sniffDelimiter, type ParseOutcome } from "../../src/lib/imports/sheet.js";
 import { containsMarker, inspectXlsx } from "../../src/lib/imports/zipGuard.js";
-import { csv, xlsx } from "./import-fixtures.js";
+import { csv, sharedStringBomb, xlsx } from "./import-fixtures.js";
 
 // --- magic bytes -----------------------------------------------------------
 
@@ -163,6 +164,76 @@ test("no more than a few parse processes run at once; the rest wait", async () =
   assert.ok(outs.every((o) => o.ok));
   assert.ok(peak <= MAX_CONCURRENT_PARSES && peak > 0, `peak ${peak}`);
   assert.equal(parsesRunning(), 0);
+});
+
+// --- what a parse may hand back (the shared-string fan-out) ------------------------
+
+test("a workbook whose cells all share one string is refused in the child; this process stays small", async () => {
+  // 3.8 MB on disk, inside every zip-guard cap: 5,000 rows x 300 columns,
+  // every cell the same 1,000-character shared string. Over advanced IPC the
+  // answer was 1.5 billion characters, one copy per cell, and it took the
+  // API process down (heap OOM inside the deserializer).
+  const bomb = sharedStringBomb(5000, 300, "A".repeat(1000));
+  assert.ok(bomb.length < 5 * 1024 * 1024, `the file is small (${bomb.length} bytes)`);
+  assert.equal(inspectXlsx(bomb).ok, true, "the zip guard lets it through");
+  global.gc?.();
+  const before = process.memoryUsage();
+  const out = await parseInWorker(bomb, "roster.xlsx", { maxRows: 5000, timeoutMs: 60_000 });
+  const after = process.memoryUsage();
+  assert.deepEqual(out, { ok: false, detectedType: "xlsx", reason: "too-large-unpacked" });
+  assert.equal(parseFailureMessage(out.ok ? "" : out.reason, "roster.xlsx"), "roster.xlsx couldn't be read (too large when unpacked)");
+  assert.ok(after.rss - before.rss < 200 * 1024 * 1024, `rss grew ${Math.round((after.rss - before.rss) / 1e6)} MB`);
+  assert.ok(after.heapUsed - before.heapUsed < 100 * 1024 * 1024, `heap grew ${Math.round((after.heapUsed - before.heapUsed) / 1e6)} MB`);
+  // Healthy afterwards: the next file parses as usual.
+  const next = await parseInWorker(csv("Name,Email\nJane Doe,jane@x.org\n"), "a.csv", { maxRows: 5000 });
+  assert.ok(next.ok);
+  // The same shape with a short string is an ordinary file.
+  const fine = await parseInWorker(sharedStringBomb(3, 3, "hello"), "fine.xlsx", { maxRows: 5000 });
+  assert.ok(fine.ok && fine.sheets[0].rows[0][0] === "hello" && fine.chars === 3 * 2 + 9 * 5);
+});
+
+test("a cell longer than Excel's own limit, or a file over the character budget, is refused by name", async () => {
+  const long = await parseSpreadsheet(csv(`Name,Notes\nJane,${"x".repeat(MAX_CELL_CHARS + 1)}\n`), "n.csv", 5000);
+  assert.deepEqual(long, { ok: false, detectedType: "csv", reason: "cell-too-long" });
+  assert.equal(parseFailureMessage("cell-too-long", "n.csv"), "n.csv has a cell longer than 32,767 characters");
+  const fits = await parseSpreadsheet(csv("Name,Email\nJane Doe,jane@x.org\n"), "a.csv", 5000);
+  assert.ok(fits.ok && fits.chars === "Name".length + "Email".length + "Jane Doe".length + "jane@x.org".length);
+  const over = await parseSpreadsheet(csv("Name,Email\nJane Doe,jane@x.org\n"), "a.csv", 5000, 20);
+  assert.deepEqual(over, { ok: false, detectedType: "csv", reason: "too-large-unpacked" });
+  const xOver = await parseSpreadsheet(xlsx({ sheets: [{ name: "S", rows: [["Name", "Email"], ["Jane Doe", "jane@x.org"]] }] }), "a.xlsx", 5000, 20);
+  assert.deepEqual(xOver, { ok: false, detectedType: "xlsx", reason: "too-large-unpacked" });
+});
+
+test("the parent stops reading and kills the child once the answer passes its byte budget", async () => {
+  const out = await parseInWorker(csv("Name,Email\nJane Doe,jane@x.org\n"), "a.csv", { maxRows: 5000, maxOutputBytes: 40 });
+  assert.deepEqual(out, { ok: false, detectedType: "unknown", reason: "too-large-unpacked" });
+  assert.equal(parsesRunning(), 0);
+});
+
+test("the child's answer is used only with the outcome's shape, inside its limits", () => {
+  const sheet = { name: "S", headerRow: 1, headers: ["Name", "Email"], rows: [["Jane", "j@x.org"]], rowNumbers: [2], date1904: false };
+  const good = { ok: true, detectedType: "csv", sheets: [sheet], chars: 4 + 5 + 4 + 7 };
+  assert.deepEqual(checkOutcome(good, 5000, 1000), good);
+  assert.equal(checkOutcome({ ...good, extra: 1 }, 5000, 1000), null);
+  assert.equal(checkOutcome({ ...good, chars: 1 }, 5000, 1000), null, "the claimed count must be the real one");
+  assert.equal(checkOutcome({ ...good, sheets: [{ ...sheet, rows: [["Jane", "j@x.org", "extra"]] }] }, 5000, 1000), null);
+  assert.equal(checkOutcome({ ...good, sheets: [{ ...sheet, rowNumbers: [] }] }, 5000, 1000), null);
+  assert.equal(checkOutcome({ ...good, sheets: [{ ...sheet, rows: [["Jane", 7]] }] }, 5000, 1000), null);
+  assert.equal(checkOutcome(good, 0, 1000), null, "more rows than asked for");
+  assert.equal(checkOutcome({ ...good, sheets: [{ ...sheet, headers: ["Name", "x".repeat(MAX_CELL_CHARS + 1)] }] }, 5000, 1e9), null);
+  assert.deepEqual(checkOutcome(good, 5000, 10), { ok: false, detectedType: "csv", reason: "too-large-unpacked" });
+  assert.deepEqual(checkOutcome({ ok: false, detectedType: "xlsx", reason: "macro" }, 5000, 10), { ok: false, detectedType: "xlsx", reason: "macro" });
+  assert.equal(checkOutcome({ ok: false, detectedType: "xlsx", reason: "anything" }, 5000, 10), null);
+  assert.equal(checkOutcome("not an object", 5000, 10), null);
+});
+
+test("an answer that would pass the byte budget as JSON is replaced by a refusal", () => {
+  // Control characters escape to six bytes each, so characters alone don't bound the bytes.
+  const cells = "\u0001".repeat(Math.ceil(MAX_PARSE_OUTPUT_BYTES / 6) + 10);
+  const out: ParseOutcome = { ok: true, detectedType: "csv", sheets: [{ name: "S", headerRow: 1, headers: ["a", "b"], rows: [[cells, ""]], rowNumbers: [2], date1904: false }], chars: cells.length + 2 };
+  assert.deepEqual(JSON.parse(answerJson(out)), { ok: false, detectedType: "csv", reason: "too-large-unpacked" });
+  const small: ParseOutcome = { ok: false, detectedType: "csv", reason: "empty" };
+  assert.equal(answerJson(small), JSON.stringify(small));
 });
 
 test("failure messages name the file and never echo anything else", () => {

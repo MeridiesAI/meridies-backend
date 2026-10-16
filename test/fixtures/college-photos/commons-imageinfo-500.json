@@ -22,12 +22,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2021-01-10T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/Great_dome_of_MIT%2C_Feb_2021.jpg/500px-Great_dome_of_MIT%2C_Feb_2021.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/b/bc/Great_dome_of_MIT%2C_Feb_2021.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Great_dome_of_MIT%2C_Feb_2021.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1001"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1001",
+      "sha1": "293aa38ddef76be2e699c8decf6fda45491f9559"
      }
     ]
    },
@@ -38,12 +40,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2022-02-11T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a6/Stanford_Memorial_Church_%282025%29-L1007381.jpg/500px-Stanford_Memorial_Church_%282025%29-L1007381.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/a/a6/Stanford_Memorial_Church_%282025%29-L1007381.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Stanford_Memorial_Church_%282025%29-L1007381.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1002"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1002",
+      "sha1": "371cfed818d4c18506f45cb28faa5611e8261df5"
      }
     ]
    },
@@ -54,12 +58,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2023-03-12T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Stanford_Oval_May_2011_panorama.jpg/500px-Stanford_Oval_May_2011_panorama.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/c/cd/Stanford_Oval_May_2011_panorama.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Stanford_Oval_May_2011_panorama.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1003"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1003",
+      "sha1": "060f083176f7c6df351ef615aa101585aa5eafaf"
      }
     ]
    },
@@ -70,12 +76,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2024-04-13T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/Sather_Tower_%C3%A9t%C3%A9.jpg/500px-Sather_Tower_%C3%A9t%C3%A9.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/c/cd/Sather_Tower_%C3%A9t%C3%A9.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Sather_Tower_%C3%A9t%C3%A9.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1004"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1004",
+      "sha1": "540d85cbcc406410c4ce38cdf76def30875c4cf2"
      }
     ]
    },
@@ -86,12 +94,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2025-05-14T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dc/Aerial_view_of_Brown_University.jpg/500px-Aerial_view_of_Brown_University.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/d/dc/Aerial_view_of_Brown_University.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Aerial_view_of_Brown_University.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1005"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1005",
+      "sha1": "b690b09d76d4059d26faff1a6ba321d5ee92bc7f"
      }
     ]
    },
@@ -102,12 +112,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2021-06-15T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Richardsonian_Romanesque_Brown.jpg/500px-Richardsonian_Romanesque_Brown.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/1/1f/Richardsonian_Romanesque_Brown.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Richardsonian_Romanesque_Brown.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1006"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1006",
+      "sha1": "c81ec69789f0644cf6be1577953dab295ddbc56f"
      }
     ]
    },
@@ -118,12 +130,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2022-07-16T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c6/Columbia_University_seal.png/500px-Columbia_University_seal.png",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Columbia_University_seal.png",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Columbia_University_seal.png",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1007"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1007",
+      "sha1": "5662d624ca4a3625e34cabcef5ced41d828ba413"
      }
     ]
    },
@@ -134,12 +148,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2023-08-17T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/08/Baker_Library_tower_portrait.jpg/500px-Baker_Library_tower_portrait.jpg",
       "thumbwidth": 500,
       "thumbheight": 750,
       "url": "https://upload.wikimedia.org/wikipedia/commons/0/08/Baker_Library_tower_portrait.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Baker_Library_tower_portrait.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1008"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1008",
+      "sha1": "4dd33af05b31e7bb820c11c80486dcfe0fe71727"
      }
     ]
    },
@@ -150,12 +166,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2024-09-18T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1c/Packer_Chapel_NC.jpg/500px-Packer_Chapel_NC.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/1/1c/Packer_Chapel_NC.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Packer_Chapel_NC.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1009"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1009",
+      "sha1": "f8fcf98a6a441976313538eca58dcbb7d386469f"
      }
     ]
    },
@@ -166,12 +184,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2025-01-19T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/4d/Ballou_Hall_with_students.jpg/500px-Ballou_Hall_with_students.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/4/4d/Ballou_Hall_with_students.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Ballou_Hall_with_students.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1010"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1010",
+      "sha1": "6c1d2a4c798724e65d988836b86997fcbf82ee90"
      }
     ]
    },
@@ -182,12 +202,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2021-02-10T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/ee/Vassar_nonfree.jpg/500px-Vassar_nonfree.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/e/ee/Vassar_nonfree.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Vassar_nonfree.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1011"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1011",
+      "sha1": "25398571c6baed0b362fc6ce706806e8c13de621"
      }
     ]
    },
@@ -198,12 +220,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2022-03-11T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/69/Bucknell_no_credit.jpg/500px-Bucknell_no_credit.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/6/69/Bucknell_no_credit.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Bucknell_no_credit.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1012"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1012",
+      "sha1": "0ede2387eceb6a888f219187f77012e942867d8e"
      }
     ]
    },
@@ -214,12 +238,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2024-05-13T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/df/College_Hall%2C_University_of_Pennsylvania.jpg/500px-College_Hall%2C_University_of_Pennsylvania.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/d/df/College_Hall%2C_University_of_Pennsylvania.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:College_Hall%2C_University_of_Pennsylvania.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1013"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1013",
+      "sha1": "29f8007c637fd1f05078da3348da7c018a175690"
      }
     ]
    },
@@ -230,12 +256,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2025-06-14T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1a/Rush_Rhees_PD.jpg/500px-Rush_Rhees_PD.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/1/1a/Rush_Rhees_PD.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Rush_Rhees_PD.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1014"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1014",
+      "sha1": "df1497e94b70fe19da1945f1ddfd984bcb575451"
      }
     ]
    },
@@ -246,12 +274,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2021-07-15T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Swarthmore_Parrish_Hall.jpg/500px-Swarthmore_Parrish_Hall.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/3/3f/Swarthmore_Parrish_Hall.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Swarthmore_Parrish_Hall.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1015"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1015",
+      "sha1": "fd2e296bdeac8712f1577cb3c4fee2f832786fc2"
      }
     ]
    },
@@ -262,12 +292,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2022-08-16T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cb/Hamilton_long_credit.jpg/500px-Hamilton_long_credit.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/c/cb/Hamilton_long_credit.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Hamilton_long_credit.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1016"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1016",
+      "sha1": "601dc5b0f82dc37d4db892829c055ddcd893f1c4"
      }
     ]
    },
@@ -278,12 +310,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2023-09-17T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5b/Binghamton_University_Downtown_Campus.jpg/500px-Binghamton_University_Downtown_Campus.jpg",
       "thumbwidth": 500,
       "thumbheight": 562,
       "url": "https://upload.wikimedia.org/wikipedia/commons/5/5b/Binghamton_University_Downtown_Campus.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Binghamton_University_Downtown_Campus.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1017"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1017",
+      "sha1": "59038e6c8403e548aff594103fa6e09be183c4ab"
      }
     ]
    },
@@ -294,12 +328,14 @@
     "imagerepository": "local",
     "imageinfo": [
      {
+      "timestamp": "2024-01-18T12:00:00Z",
       "thumburl": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/96/Binghamton_campus_wide.jpg/500px-Binghamton_campus_wide.jpg",
       "thumbwidth": 500,
       "thumbheight": 333,
       "url": "https://upload.wikimedia.org/wikipedia/commons/9/96/Binghamton_campus_wide.jpg",
       "descriptionurl": "https://commons.wikimedia.org/wiki/File:Binghamton_campus_wide.jpg",
-      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1018"
+      "descriptionshorturl": "https://commons.wikimedia.org/w/index.php?curid=1018",
+      "sha1": "e328f279f2cee6b55fedba823d0028521b1669bb"
      }
     ]
    }

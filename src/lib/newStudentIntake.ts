@@ -19,6 +19,7 @@ import { badRequest, conflict, fromPostgrest, notFound } from "./errors.js";
 import { serviceClient } from "./supabase.js";
 import { startSubmissionReview } from "./submissionReview.js";
 import { isCounselorApproved } from "./access.js";
+import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
 
@@ -172,26 +173,65 @@ export async function saveMyAnswer(request: FastifyRequest, taskId: string, answ
  * and the counselor gets one notification and one email.
  */
 export async function submitMyIntake(request: FastifyRequest): Promise<string[]> {
+  // What is already with the counselor before this Submit: only items that
+  // move to review now get an AxIS read and a mention to the counselor, so a
+  // repeated Submit re-reads nothing and emails nobody. submit_intake returns
+  // only the items it moved since 20261024000043; this keeps the rule on a
+  // database without it.
+  const { data: before, error: beforeError } = await request.db
+    .from("deliverables")
+    .select("id, status")
+    .eq("student_id", request.auth.userId)
+    .not("intake_request_id", "is", null);
+  if (beforeError) throw fromPostgrest(beforeError);
+  const alreadyWithCounselor = new Set(
+    ((before ?? []) as Row[]).filter((t) => t.status === "review" || t.status === "complete").map((t) => String(t.id))
+  );
+
   const { data, error } = await request.db.rpc("submit_intake");
   if (error) {
     if (error.code === "23514" || error.code === "P0002") throw badRequest(error.message);
     throw fromPostgrest(error);
   }
-  const taskIds = ((data ?? []) as string[]).map(String);
+  const taskIds = ((data ?? []) as string[]).map(String).filter((id) => !alreadyWithCounselor.has(id));
+  if (!taskIds.length) return [];
 
-  if (taskIds.length) {
-    const { data: docs } = await request.db
-      .from("deliverable_documents")
-      .select("deliverable_id, document_id")
-      .in("deliverable_id", taskIds)
-      .eq("role", "submission");
-    for (const d of (docs ?? []) as Row[]) {
-      await startSubmissionReview(request, { taskId: String(d.deliverable_id), documentId: String(d.document_id) });
-    }
+  const { data: docs } = await request.db
+    .from("deliverable_documents")
+    .select("deliverable_id, document_id")
+    .in("deliverable_id", taskIds)
+    .eq("role", "submission");
+  for (const d of (docs ?? []) as Row[]) {
+    // An item moves to review again only after the counselor sends it back
+    // (the student can't take it back themselves since 20261024000044), so a
+    // few reads a day per item is every honest round. On a database without
+    // that migration this is what stops a loop of reads.
+    const taskId = String(d.deliverable_id);
+    if (!(await consumeRateLimit(`intake-read:${taskId}`, INTAKE_READS_PER_ITEM_DAY, 86_400, request.log))) continue;
+    await startSubmissionReview(request, { taskId, documentId: String(d.document_id) });
   }
 
-  await tellCounselor(request, taskIds).catch((err) => request.log.error({ err }, "intake submit notify failed"));
+  // One notice and one email per Submit, at most INTAKE_NOTICES_PER_DAY a day
+  // per student: an honest student submits once, and again after each item
+  // the counselor sends back. The Building profile card shows every submit
+  // whether or not the counselor was emailed about it.
+  if (await consumeRateLimit(`intake-submit-notice:${request.auth.userId}`, INTAKE_NOTICES_PER_DAY, 86_400, request.log)) {
+    await tellCounselor(request, taskIds).catch((err) => request.log.error({ err }, "intake submit notify failed"));
+  }
   return taskIds;
+}
+
+/** Counselor notices (bell and email) about a student's Submit, per day. */
+export const INTAKE_NOTICES_PER_DAY = 3;
+/** AxIS reads of one New student item, per day. */
+export const INTAKE_READS_PER_ITEM_DAY = 3;
+/** How much of the student's own display name an email subject carries. */
+export const SUBJECT_NAME_MAX = 60;
+
+/** "<name> sent what you asked for", with the student's display name (which they write) cut short. */
+export function intakeSubmittedHeading(fullName: unknown): string {
+  const name = oneLine(String(fullName ?? ""), SUBJECT_NAME_MAX) || "Your new student";
+  return `${name} sent what you asked for`;
 }
 
 async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
@@ -199,10 +239,9 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
   const counselorId = request.profile.counselor_id;
   if (!svc || !counselorId) return;
   if (!(await isCounselorApproved(svc, counselorId))) return;
-  const name = String(request.profile.full_name ?? "").trim() || "Your new student";
   const { data: tasks } = await request.db.from("deliverables").select("title").in("id", taskIds);
   const items = ((tasks ?? []) as Row[]).map((t) => String(t.title));
-  const heading = oneLine(`${name} sent what you asked for`, 200);
+  const heading = intakeSubmittedHeading(request.profile.full_name);
   const href = "/dashboard/counselor#student-profiles";
 
   const { error } = await svc.from("notifications").insert({
@@ -238,6 +277,30 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
     recipient_kind: "counselor",
     logger: request.log,
   });
+}
+
+/**
+ * Whether the profile an invitation names as having accepted it is really a
+ * student on the caller's roster. Only accept_invitation should write the
+ * accepted state, but a database without 20261024000023 still lets a
+ * counselor write it on their own invitation, so the API never acts on an
+ * acceptance (emails, notifications, task changes) that the roster doesn't
+ * bear out. Read on the caller's client: RLS shows a counselor only their own
+ * students. An errored read throws (fail closed).
+ */
+export async function acceptedStudentOnRoster(request: FastifyRequest, studentId: string): Promise<boolean> {
+  const { data, error } = await request.db
+    .from("profiles")
+    .select("id, role, counselor_id")
+    .eq("id", studentId)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  return isRosterStudent(data as Row | null, request.auth.userId);
+}
+
+/** The pure half of acceptedStudentOnRoster. */
+export function isRosterStudent(profile: Row | null, counselorId: string): boolean {
+  return !!profile && profile.role === "student" && profile.counselor_id === counselorId;
 }
 
 /**

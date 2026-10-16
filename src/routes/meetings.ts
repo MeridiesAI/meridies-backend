@@ -27,7 +27,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
@@ -42,6 +42,12 @@ import {
   startInviteDelivery,
   type InviteRoundSummary,
 } from "../lib/meetingInvites.js";
+import {
+  calendarAccess,
+  NOT_OWNER_CONFERENCE,
+  NOT_OWNER_SKIP,
+  ownsMeeting,
+} from "../lib/meetingCalendar.js";
 import type { SuiteProvider } from "../lib/oauth.js";
 import { toMeeting } from "../lib/serialize.js";
 import {
@@ -497,16 +503,23 @@ type MeetingPatch = z.infer<typeof meetingPatch>;
  * Remove the calendar event behind a meeting. Best effort: a counselor must be
  * able to cancel or delete a meeting in Meridies even after disconnecting
  * Google, so a failure is logged rather than blocking the change.
+ *
+ * Only the meeting's owner's event is ever deleted, with the caller's own
+ * token (lib/meetingCalendar.ts). On someone else's meeting the event is left
+ * alone and false comes back, so the pointer is kept for its owner.
  */
 async function dropCalendarEvent(request: FastifyRequest, meeting: Row): Promise<boolean> {
-  const provider = meeting.calendar_provider as SuiteProvider | null;
-  const eventId = meeting.calendar_event_id as string | null;
-  if (!provider || !eventId) return false;
+  const access = calendarAccess(meeting, request.auth.userId);
+  if (access.kind === "none") return false;
+  if (access.kind === "not-owner") {
+    request.log.warn({ provider: access.provider }, NOT_OWNER_SKIP);
+    return false;
+  }
   try {
-    await deleteCalendarEvent(String(meeting.counselor_id), provider, eventId, request.log);
+    await deleteCalendarEvent(access.ownerId, access.provider, access.eventId, request.log);
   } catch (err) {
     request.log.warn(
-      { provider, err: err instanceof Error ? err.message : "unknown" },
+      { provider: access.provider, err: err instanceof Error ? err.message : "unknown" },
       "calendar event delete failed; meeting changed in Meridies only"
     );
   }
@@ -524,26 +537,45 @@ async function syncCalendar(
   patch: MeetingPatch,
   values: Record<string, unknown>
 ): Promise<void> {
-  const provider = existing.calendar_provider as SuiteProvider | null;
-  const eventId = existing.calendar_event_id as string | null;
   const nextMode = patch.mode ?? String(existing.mode);
-
   const cancelling = patch.status === "cancelled";
-  const leavingConference = Boolean(provider) && patch.mode !== undefined && patch.mode !== existing.mode;
-  if (provider && eventId && (cancelling || leavingConference)) {
+  const access = calendarAccess(existing, request.auth.userId);
+
+  // Booking a calendar event puts it on the caller's calendar, so only the
+  // meeting's owner may: anyone else's event would never be theirs to move.
+  if (patch.createConference && !cancelling && !ownsMeeting(existing, request.auth.userId)) {
+    throw forbidden(NOT_OWNER_CONFERENCE);
+  }
+
+  // Someone else's meeting: change it in Meridies, never their calendar, and
+  // keep the pointer (only its owner may clear it).
+  if (access.kind === "not-owner") {
+    const touchesEvent =
+      cancelling ||
+      (patch.mode !== undefined && patch.mode !== existing.mode) ||
+      patch.title !== undefined ||
+      patch.startsAt !== undefined ||
+      patch.endsAt !== undefined ||
+      patch.agenda !== undefined;
+    if (touchesEvent) request.log.warn({ provider: access.provider }, NOT_OWNER_SKIP);
+    return;
+  }
+
+  const leavingConference = access.kind === "owner" && patch.mode !== undefined && patch.mode !== existing.mode;
+  if (access.kind === "owner" && (cancelling || leavingConference)) {
     await dropCalendarEvent(request, existing);
     values.calendar_provider = null;
     values.calendar_event_id = null;
     if (leavingConference && patch.joinUrl === undefined) values.join_url = null;
     if (!patch.createConference) return;
-  } else if (provider && eventId) {
+  } else if (access.kind === "owner") {
     const change: Partial<CalendarEventInput> = {};
     if (patch.title !== undefined) change.title = patch.title;
     if (patch.startsAt !== undefined) change.startsAt = patch.startsAt;
     if (patch.endsAt) change.endsAt = patch.endsAt;
     if (patch.agenda !== undefined) change.description = patch.agenda;
     if (Object.keys(change).length > 0) {
-      await updateCalendarEvent(String(existing.counselor_id), provider, eventId, change, request.log);
+      await updateCalendarEvent(access.ownerId, access.provider, access.eventId, change, request.log);
     }
     return;
   }

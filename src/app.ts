@@ -3,7 +3,8 @@ import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
-import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio } from "./env.js";
+import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio, trustProxy } from "./env.js";
+import { proxyMismatch } from "./lib/proxyTrust.js";
 import { HttpError } from "./lib/errors.js";
 import { loggedUrl, serializeErr } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
@@ -91,15 +92,35 @@ export function buildApp() {
         },
       },
     },
-    // Railway sits behind a proxy; without this every request looks like it
-    // came from the same address and the per-IP limiter is useless.
-    trustProxy: true,
+    // Railway sits behind one proxy, which appends the address it saw to
+    // X-Forwarded-For. Trusting exactly that many hops (lib/proxyTrust.ts)
+    // gives the per-IP limiter and the request log the edge's view; trusting
+    // every hop (`true`) took the leftmost entry, which the client writes, so a
+    // fresh header each request got a fresh rate-limit bucket.
+    trustProxy: trustProxy.hops,
     bodyLimit: 1_048_576,
     // A client whose base URL ends in "/" sends "//auth/me". Fastify treats
     // that as a distinct, unrouted path and 404s, which reads like the endpoint
     // is missing rather than like a config typo. Collapse them instead.
     ignoreDuplicateSlashes: true,
     ignoreTrailingSlash: true,
+  });
+
+  // The hop count is a deployment fact the process can't verify; say what was decided, and
+  // complain once if requests show more proxies than are trusted.
+  if (trustProxy.source === "default") {
+    app.log.error("TRUST_PROXY_HOPS is unset outside Railway: trusting no proxy. Behind a proxy every caller shares its address; set TRUST_PROXY_HOPS to the number of proxies.");
+  } else {
+    app.log.info({ trustProxyHops: trustProxy.hops, source: trustProxy.source }, "proxy hops trusted for the client address");
+  }
+  let proxyWarned = false;
+  app.addHook("onRequest", async (request) => {
+    if (proxyWarned) return;
+    const why = proxyMismatch(request.headers, trustProxy.hops);
+    if (why) {
+      proxyWarned = true;
+      request.log.error(why);
+    }
   });
 
   // Paged lists (GET /colleges/search) carry their total and next cursor in headers.

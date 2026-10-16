@@ -17,7 +17,9 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { sendInviteEmail } from "../lib/email.js";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { step2UsableFor } from "../lib/imports/availability.js";
+import { assertAddressFreeFor } from "../lib/imports/heldAddresses.js";
 import { requireRole } from "../lib/guards.js";
 import { appJoinUrl, newInviteToken } from "../lib/invites.js";
 import { enforceQuota, limit } from "../lib/limits.js";
@@ -35,6 +37,8 @@ export const ROSTER_FIELDS = [
   "ignore", "fullName", "email", "phone", "gradeLevel", "gradYear", "highSchool",
   "gpaWeighted", "gpaUnweighted", "satTotal", "actComposite", "intendedMajor",
 ] as const;
+
+const USE_IMPORT = "Rosters for your practice go through Import now. Upload this file there.";
 
 const importRow = z
   .object({
@@ -191,6 +195,10 @@ export default async function rosterRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       await loadImport(request, id);
+      // A practice with the Import page sends rosters through it, where
+      // Meridies' per-counselor invitation review applies (lib/imports/
+      // invitations.ts). This old path would be a way around it.
+      if (await step2UsableFor(request)) throw new HttpError(409, USE_IMPORT, "use_import");
 
       const { data: pending, error: pendingError } = await request.db
         .from("roster_import_rows")
@@ -227,6 +235,9 @@ export default async function rosterRoutes(app: FastifyInstance) {
       for (const row of rows) {
         const email = String(row.email);
         try {
+          // Never at an address whose invitation carries another student's
+          // held import data (lib/imports/heldAddresses.ts).
+          await assertAddressFreeFor(request, email, (row.full_name as string | null) ?? null);
           // Same rule as a single invite: the newest link is the one that works.
           await request.db
             .from("invitations")
@@ -258,10 +269,11 @@ export default async function rosterRoutes(app: FastifyInstance) {
           invited += 1;
         } catch (err) {
           // One bad row must not take the import down with it.
-          request.log.error({ err, importId: id }, "roster row failed to invite");
+          const held = err instanceof HttpError && err.code === "address_holds_other_student";
+          if (!held) request.log.error({ err, importId: id }, "roster row failed to invite");
           await request.db
             .from("roster_import_rows")
-            .update({ status: "failed", error: "Could not send an invitation to this address" })
+            .update({ status: "failed", error: held ? (err as HttpError).message : "Could not send an invitation to this address" })
             .eq("id", row.id as string);
           failed += 1;
         }

@@ -36,6 +36,7 @@ import {
 import { brandedEmail, brandedText, sendEmail, sendSms } from "./email.js";
 import { badRequest, fromPostgrest, unauthorized, unavailable } from "./errors.js";
 import { isCounselorApproved } from "./access.js";
+import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -116,23 +117,52 @@ export async function loadFamily(db: SupabaseClient, studentId: string): Promise
   }));
 }
 
+const normEmail = (v: string | null | undefined): string | null => {
+  const t = (v ?? "").trim().toLowerCase();
+  return t ? t : null;
+};
+const normPhone = (v: string | null | undefined): string | null => {
+  const t = (v ?? "").replace(/[^\d+]/g, "");
+  return t ? t : null;
+};
+
 export type StudentContact = { id: string; name: string; email: string | null; phone: string | null };
 
+/**
+ * The student as a composer recipient. Email goes to their sign-in address
+ * (`profiles.email`, which no client can write), never
+ * `student_personal_details.contact_email`: the student can write that row
+ * through PostgREST, so following it would let them send every message their
+ * counselor writes them, scheduled ones included, to any address from
+ * Meridies' domain. The same rule as meeting invites and the due-tomorrow
+ * reminders; the info card's email stays a recorded detail.
+ */
 export async function loadStudentContact(db: SupabaseClient, studentId: string): Promise<StudentContact | null> {
-  const [profile, details] = await Promise.all([
-    db.from("profiles").select("id, full_name, email, phone").eq("id", studentId).maybeSingle(),
-    db.from("student_personal_details").select("contact_email").eq("student_id", studentId).maybeSingle(),
-  ]);
+  const profile = await db.from("profiles").select("id, full_name, email, phone").eq("id", studentId).maybeSingle();
   if (profile.error) throw fromPostgrest(profile.error);
-  if (details.error) throw fromPostgrest(details.error);
   if (!profile.data) return null;
-  const p = profile.data as Row;
+  return studentContactFrom(profile.data as Row);
+}
+
+/** Pure: a profiles row as the composer's student recipient. */
+export function studentContactFrom(p: Row): StudentContact {
   return {
     id: String(p.id),
     name: String(p.full_name ?? ""),
-    email: s((details.data as Row | null)?.contact_email) ?? s(p.email),
+    email: s(p.email),
     phone: s(p.phone),
   };
+}
+
+/**
+ * A scheduled message to the student leaves only for the address still on
+ * file: an email recipient frozen before this rule (when the contact email
+ * was followed) or before a sign-in email change is dropped.
+ */
+export function studentRecipientsStillAllowed(recipients: Recipient[], channel: unknown, loginEmail: unknown): Recipient[] {
+  if (channel !== "email") return recipients;
+  const login = typeof loginEmail === "string" ? loginEmail.trim().toLowerCase() : "";
+  return recipients.filter((r) => r.kind === "student" && !!login && (r.email ?? "").trim().toLowerCase() === login);
 }
 
 /**
@@ -168,7 +198,9 @@ export async function resolveRecipients(
   const student = await loadStudentContact(db, studentId);
   if (!student) throw badRequest("That student isn't on your roster");
   if (channel === "email" && !student.email) throw badRequest("No email address on file for the student");
-  if (channel === "sms" && !student.phone) throw badRequest("Add the student's phone number to text them");
+  // The same reading of a number the database guard and dispatch use: "n/a"
+  // is no phone at all.
+  if (channel === "sms" && !normPhone(student.phone)) throw badRequest("Add the student's phone number to text them");
   return [{ kind: "student", id: student.id, name: student.name, email: student.email, phone: student.phone }];
 }
 
@@ -558,10 +590,17 @@ export async function requireCronSecret(request: FastifyRequest): Promise<void> 
   if (!presented || !secretMatches(presented, expected)) throw unauthorized();
 }
 
+/** Scheduled messages the dispatch cron sends for one counselor in 24 hours. */
+export const DISPATCH_DAILY_CAP = 100;
+export const DISPATCH_CAP_HOLD = "Held: the day's sending limit was reached. It goes out within the next day";
+export const dispatchCapKey = (counselorId: string): string => `communication:dispatch:${counselorId}`;
+
 /**
  * Deliver every scheduled message whose time has come. Service-role client:
  * the recipients come from the row (frozen when the counselor wrote it), never
- * from a caller. Each row is claimed with a conditional scheduled -> queued
+ * from a caller, and each one is checked again against the student and the
+ * guardians on file before anything goes out (`allowedRecipients`), because a
+ * row is not proof the composer route wrote it. Each row is claimed with a conditional scheduled -> queued
  * update first, so two runs cannot send it twice. A row that falls inside its
  * counselor's quiet hours waits for the next window.
  */
@@ -609,9 +648,10 @@ export async function dispatchDueMessages(
 
     // The recipients were frozen when the counselor wrote the message, but
     // who may receive it is re-decided now, failing closed: the student must
-    // still be this counselor's, the parents still switched on, each guardian
-    // still on file with alerts on and the same address, and an alert still
-    // clear of the throttle. Anything unreadable holds the send.
+    // still be this counselor's, a message to the student goes only to their
+    // address or phone on file, the parents must still be switched on, each
+    // guardian still on file with alerts on and the same address, and an
+    // alert still clear of the throttle. Anything unreadable holds the send.
     let recipients: Recipient[];
     try {
       const blocked = await sendBlockedReason(svc, row, settings);
@@ -626,6 +666,21 @@ export async function dispatchDueMessages(
       }
       recipients = blocked.recipients;
     } catch {
+      tally.held += 1;
+      continue;
+    }
+
+    // What a counselor can have sent for them in a day is capped here too,
+    // whoever wrote the row: the route charges its own limits when a message
+    // is written, but a row written straight to the table (on a database
+    // without the insert guard) never passed them. Over the cap, the row
+    // waits an hour and is tried again; nothing is dropped.
+    if (!(await consumeRateLimit(dispatchCapKey(row.counselor_id), DISPATCH_DAILY_CAP, 86_400))) {
+      await svc
+        .from("student_messages")
+        .update({ scheduled_for: new Date(now.getTime() + 3_600_000).toISOString(), hold_reason: DISPATCH_CAP_HOLD })
+        .eq("id", row.id)
+        .eq("status", "scheduled");
       tally.held += 1;
       continue;
     }
@@ -667,7 +722,7 @@ async function sendBlockedReason(
   }
   const { data: student, error } = await svc
     .from("profiles")
-    .select("counselor_id, archived_at")
+    .select("counselor_id, archived_at, email")
     .eq("id", row.student_id)
     .maybeSingle();
   if (error) throw fromPostgrest(error);
@@ -679,20 +734,64 @@ async function sendBlockedReason(
     if (throttled) return throttled;
   }
   if (row.audience !== "parent") {
-    return { recipients: row.recipients };
+    // The student's own address or phone as it is on file now, never what
+    // the row says: a row written straight to the table could name anyone.
+    const student = await loadStudentContact(svc, row.student_id);
+    const recipients = allowedRecipients(row, { student, family: [] });
+    if (recipients.length === 0) return "No address on file for the student any more";
+    // An email frozen with another address (written when the contact email
+    // was followed, or before a sign-in email change) is cancelled rather
+    // than re-addressed: the counselor saw that address in the To line.
+    if (studentRecipientsStillAllowed(row.recipients, row.channel, student?.email).length === 0) {
+      return "The student's address on file has changed since this was scheduled";
+    }
+    return { recipients };
   }
 
   const prefs = await loadAlertPrefs({ db: svc }, row.student_id);
   if (!prefs.copy_parents) return "Messages to the parents were switched off before this went out";
   const family = await loadFamily(svc, row.student_id);
-  const allowed = new Map(
-    family
-      .filter((g) => g.receivesMessages && g.email)
-      .map((g) => [g.id, (g.email as string).trim().toLowerCase()])
-  );
-  const recipients = row.recipients.filter(
-    (r) => r.kind === "guardian" && r.email && allowed.get(r.id) === r.email.trim().toLowerCase()
-  );
+  const recipients = allowedRecipients(row, { student: null, family });
   if (recipients.length === 0) return "No parent on file still receives messages";
   return { recipients };
+}
+
+/**
+ * Which of a stored message's frozen recipients may still receive it, decided
+ * against what is on file at send time. Every recipient must be one the
+ * composer would have resolved for this student itself. For a message to the
+ * student: the row must name the student (by id), and it goes to the address
+ * or phone on file now, whatever the row froze, so a student who changes
+ * their address still gets it (and can't cancel it by changing it). For one
+ * to the parents: a guardian of this student who still receives messages, at
+ * the same email. Anything else on the row is dropped, and what is returned
+ * carries the addresses on file, not the row's. Pure, so it is unit-tested.
+ */
+export function allowedRecipients(
+  row: Pick<MessageRow, "student_id" | "audience" | "channel" | "recipients">,
+  onFile: { student: StudentContact | null; family: FamilyContact[] }
+): Recipient[] {
+  const frozen = Array.isArray(row.recipients) ? row.recipients : [];
+  if (row.audience === "student") {
+    const st = onFile.student;
+    if (!st || st.id !== row.student_id) return [];
+    const named = frozen.some((r) => r && r.kind === "student" && r.id === row.student_id);
+    if (!named) return [];
+    if (row.channel === "email" && !normEmail(st.email)) return [];
+    if (row.channel === "sms" && !normPhone(st.phone)) return [];
+    if (row.channel !== "email" && row.channel !== "sms") return [];
+    return [{ kind: "student", id: st.id, name: st.name, email: st.email, phone: st.phone }];
+  }
+  if (row.audience !== "parent" || row.channel !== "email") return [];
+  const byId = new Map(onFile.family.filter((g) => g.receivesMessages && normEmail(g.email)).map((g) => [g.id, g]));
+  const out: Recipient[] = [];
+  const seen = new Set<string>();
+  for (const r of frozen) {
+    if (!r || r.kind !== "guardian" || seen.has(r.id)) continue;
+    const g = byId.get(r.id);
+    if (!g || normEmail(g.email) !== normEmail(r.email)) continue;
+    seen.add(g.id);
+    out.push({ kind: "guardian", id: g.id, name: g.name, email: g.email, phone: g.phone });
+  }
+  return out;
 }

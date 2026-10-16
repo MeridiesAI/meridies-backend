@@ -221,6 +221,7 @@ export const students: OpGroup = {
     op({
       name: "students.archived",
       kind: "read",
+      outside: false,
       title: "Students removed (archived) from your roster, with ids, to restore one with students.unarchive.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -430,6 +431,7 @@ export const strengthProfile: OpGroup = {
     op({
       name: "strength_profile.list",
       kind: "read",
+      outside: false,
       title: "A student's strength profile axes with ids, scores, and which are hidden.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -571,6 +573,7 @@ export const pins: OpGroup = {
     op({
       name: "pins.list",
       kind: "read",
+      outside: false,
       title: "The students you have pinned on Overview.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -615,6 +618,7 @@ export const preferenceCards: OpGroup = {
     op({
       name: "students.preference_cards",
       kind: "read",
+      outside: true,
       title: "The preference card deck with card ids (the card sort a student rates).",
       doc: "{}",
       input: z.object({}).strict(),

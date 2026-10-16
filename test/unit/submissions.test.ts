@@ -105,3 +105,11 @@ test("submission review refuses an unconfirmed file with a reason the student's 
   assert.equal(refusalFor({ kind: "financial", kind_confirmed: true }, true), "This kind of file stays out of AI, so AxIS didn't read it.");
   assert.equal(refusalFor({ kind: "essay", kind_confirmed: true }, false), "Automatic document reading is off for this practice.");
 });
+
+test("the counselor's Submit email carries at most 60 characters of the student's display name", async () => {
+  const { intakeSubmittedHeading, SUBJECT_NAME_MAX } = await import("../../src/lib/newStudentIntake.js");
+  assert.equal(intakeSubmittedHeading("Ana Lopez"), "Ana Lopez sent what you asked for");
+  assert.equal(intakeSubmittedHeading("   "), "Your new student sent what you asked for");
+  const long = intakeSubmittedHeading(`Click https://evil.example now ${"x".repeat(200)}`);
+  assert.ok(long.length <= SUBJECT_NAME_MAX + " sent what you asked for".length, String(long.length));
+});

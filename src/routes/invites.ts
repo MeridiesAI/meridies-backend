@@ -9,10 +9,11 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { hasAnswers } from "../lib/studentSetup.js";
 import { z } from "zod";
-import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
+import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
   addressStatuses,
@@ -106,6 +107,8 @@ async function onboardingStep(
   const row = data as unknown as Record<string, unknown>;
   const inv = toInvitationDetail(row);
   if (inv.status !== "accepted" || !inv.acceptedBy) throw conflict("They haven't joined yet.");
+  // The accepted state is only trusted when the roster bears it out.
+  if (!(await acceptedStudentOnRoster(request, inv.acceptedBy))) throw conflict("They haven't joined yet.");
   if (inv.confirmedAt) throw conflict("This student is already confirmed.");
 
   const step = body.receive ?? body.sendBack;
@@ -117,6 +120,7 @@ async function onboardingStep(
       .select("id, status, title")
       .eq("intake_invitation_id", id)
       .eq("intake_request_id", step.requestId)
+      .eq("student_id", inv.acceptedBy)
       .maybeSingle();
     if (taskError) throw fromPostgrest(taskError);
 
@@ -178,14 +182,50 @@ const bulkSchema = z
           .object({
             email: z.string().trim().toLowerCase().email().max(320),
             name: z.string().trim().max(200).nullable().optional(),
+            // New student, several at once: each row's own basics.
+            gradeLevel: basicsShape.gradeLevel,
+            gradYear: basicsShape.gradYear,
+            timezone: basicsShape.timezone,
           })
           .strict()
       )
       .min(1)
       .max(100),
     note: z.string().trim().max(1000).nullable().optional(),
+    /** The "Information required" list, the same for every recipient. */
+    intakeRequests: basicsShape.intakeRequests,
+    /** The open requests go out with each invitation, as "Send to student" does. */
+    sendRequests: z.boolean().optional(),
   })
   .strict();
+
+/**
+ * Where each student stands on the wizard's Profile step: answered, skipped, or
+ * not yet. Read on the counselor's client; a student it can't read is null.
+ */
+async function profileStatuses(
+  request: FastifyRequest,
+  studentIds: string[]
+): Promise<Map<string, "not-started" | "skipped" | "completed">> {
+  const out = new Map<string, "not-started" | "skipped" | "completed">();
+  if (studentIds.length === 0) return out;
+  const { data, error } = await request.db
+    .from("profiles")
+    .select("id, skipped:profile->profileSkipped, answers:profile->intakeAnswers")
+    .in("id", studentIds);
+  if (error) {
+    request.log.warn({ code: error.code }, "profile status unreadable");
+    return out;
+  }
+  for (const p of data ?? []) {
+    const row = p as Record<string, unknown>;
+    out.set(
+      String(row.id),
+      hasAnswers(row.answers) ? "completed" : row.skipped === true ? "skipped" : "not-started"
+    );
+  }
+  return out;
+}
 
 const ALREADY_JOINED = "That student has already joined your practice.";
 const QUOTA_MESSAGE = "You've sent a lot of invitations today. Try again tomorrow.";
@@ -296,12 +336,18 @@ export default async function inviteRoutes(app: FastifyInstance) {
         invitationDeliveries(request, rows.map((r) => String(r.id))),
       ]);
 
+      const profileStatus = await profileStatuses(
+        request,
+        rows.map((r) => (r.accepted_by ? String(r.accepted_by) : "")).filter(Boolean)
+      );
+
       return rows.map((r) => {
         const detail = toInvitationDetail(r);
         const byRequest = items.get(detail.id);
         return {
           ...detail,
           studentId: r.accepted_by ? String(r.accepted_by) : null,
+          profileStatus: r.accepted_by ? profileStatus.get(String(r.accepted_by)) ?? null : null,
           delivery: deliveries.get(detail.id) ?? null,
           intakeItems: detail.intakeRequests.map((q) => {
             const item = byRequest?.get(q.id) ?? null;
@@ -382,6 +428,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
         source: old.source,
         intakeRequests: old.intakeRequests,
         requestedAt: old.requestedAt ? new Date().toISOString() : null,
+        resendOf: id,
       });
       // A referral pointing at the old invitation follows it to the new one.
       await request.db
@@ -478,7 +525,9 @@ export default async function inviteRoutes(app: FastifyInstance) {
     "/bulk",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:bulk", 10, 3600)] },
     async (request) => {
-      const { recipients, note } = bulkSchema.parse(request.body);
+      const { recipients, note, intakeRequests, sendRequests } = bulkSchema.parse(request.body);
+      const requests = intakeRequests ?? [];
+      const bulkNote = note ?? (sendRequests ? requestNote(requests) : null);
       const unique = [...new Map(recipients.map((r) => [r.email, r])).values()];
       const statuses = await addressStatuses(request, unique.map((r) => r.email));
       const toSend = unique.filter((r) => !statuses.has(r.email));
@@ -506,8 +555,13 @@ export default async function inviteRoutes(app: FastifyInstance) {
           const { row, emailSent } = await createInvitation(request, {
             email: r.email,
             fullName: r.name ?? null,
-            note: note ?? null,
+            gradeLevel: r.gradeLevel ?? null,
+            gradYear: r.gradYear ?? null,
+            timezone: r.timezone ?? null,
+            note: bulkNote,
             source: "mass",
+            intakeRequests: requests,
+            requestedAt: sendRequests ? new Date().toISOString() : null,
           });
           results.push({
             email: r.email,
@@ -517,11 +571,12 @@ export default async function inviteRoutes(app: FastifyInstance) {
             invitationId: String(row.id),
           });
         } catch (err) {
-          request.log.error({ err }, "mass invite row failed");
+          const held = err instanceof HttpError && err.code === "address_holds_other_student";
+          if (!held) request.log.error({ err }, "mass invite row failed");
           results.push({
             email: r.email,
             status: "failed",
-            reason: "Could not send an invitation to this address",
+            reason: held ? (err as HttpError).message : "Could not send an invitation to this address",
             invitationId: null,
           });
         }

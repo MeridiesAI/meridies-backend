@@ -13,8 +13,10 @@ workflow runs.
    run summary: each pending file in order, the first line of its header comment, and flags for
    statements an approver must read (dropped tables or columns, deleted or updated rows, a changed
    column type, dynamic SQL in a DO block, a new table without RLS or the approval gate). It also runs
-   the RLS and approval-gate check read-only (`scripts/migrations/problems.sql`) and reports what it
-   finds as warnings.
+   the RLS and approval-gate check (`scripts/migrations/problems.sql`, only when its sha256 matches
+   `PROBLEMS_SQL_SHA256` in the workflow) and reports what it finds as warnings. The plan holds
+   write-capable production credentials before anyone approves anything; see "What the plan job can
+   reach" below.
 3. **An approver reads the plan.** The list is everything production hasn't applied, which can be more
    than this PR's files. For any flagged file, confirm a recent backup exists (Supabase > Database >
    Backups) and read the file. Then:
@@ -95,6 +97,51 @@ A rejected migration's code still reaches production with the next deploy of `ma
    and that the database check reads the Management API's answer. The check may warn about tables made
    outside migrations (the stray `public.test`, LAUNCH_CHECKLIST); deal with those before the first
    apply so its warnings mean something.
+
+### What the plan job can reach (the trade-off, and how to close it)
+
+The plan job has no reviewers, and as set up above its environment holds the same
+`SUPABASE_ACCESS_TOKEN` and `SUPABASE_DB_PASSWORD` as the apply. The token can run any SQL through the
+Management API. So the approval (reviewers, or the typed confirm and `MIGRATION_APPROVERS`) gates
+`supabase db push`, not everything the workflow does with production credentials: whoever can merge
+to `main` (or start a manual run on it) controls the workflow file, and with it the plan job.
+
+What the repository does about it:
+
+- In the plan job every step that holds a secret runs before any of our own code
+  (`scripts/migrations/plan.mjs`), so an edit to that script can't plant a `$GITHUB_ENV` or
+  `$GITHUB_PATH` entry that a secret-holding step would pick up.
+- `scripts/migrations/problems.sql` runs against production (plan and apply) only when its sha256
+  matches `PROBLEMS_SQL_SHA256` in `migrations.yml`. Changing the SQL that runs before approval means
+  changing the workflow file too, and `npm test` (`migrations-workflow.test.ts`) fails until both
+  agree. When you change the check, update the hash in the same PR and say so in its description.
+- The CLI calls are the pinned CLI reading repository files as data: `db push --dry-run` reads the
+  migration files and runs none of them.
+
+What it can't do:
+
+- Stop a merged edit to `migrations.yml` itself from using the plan's secrets.
+- Keep `plan.mjs` away from the apply's secrets. In the apply job, "Refuse if the list changed" and
+  "Read the database check before" run `plan.mjs` before the push and the checks after it, because
+  the list has to be refused before anything is applied; a merged `plan.mjs` could therefore plant a
+  `$GITHUB_ENV` or `$GITHUB_PATH` entry those later steps pick up. Unsetting the variables for that
+  step doesn't help (the runner's file-command files sit in `$RUNNER_TEMP` where a script can find
+  them). That job runs only after the approval, but the approver reads the plan summary, which
+  `plan.mjs` writes. So an edit to `scripts/migrations/**` is as sensitive as one to the workflow, and
+  item 2 below (code-owner review) is what covers it. (A migration file applied in that job is
+  repository code with the same reach, by design.)
+
+Close these outside the repository:
+
+1. **A read-only credential for the plan.** Give `production-db-plan` its own secrets instead of the
+   apply's: ideally a database role with `SELECT` on `supabase_migrations.schema_migrations` and the
+   catalogs, logging in through the session pooler, and a workflow change to use it with `--db-url`
+   for the plan's dry run and check (the unit test's ban on `--db-url` moves to the apply job then).
+   Until that exists, the plan's credentials are as powerful as the apply's.
+2. **Review by an approver.** A `CODEOWNERS` entry naming the `MIGRATION_APPROVERS` for
+   `.github/workflows/**`, `scripts/migrations/**` and `supabase/migrations/**`, with branch protection
+   on `main` requiring code-owner review, so nothing that runs with production credentials merges
+   without one of them.
 
 **GitHub plan.** The repository is private. Required reviewers on a private repository's environment
 need GitHub Enterprise; Team has environments, environment secrets and branch rules but no reviewers.
@@ -340,7 +387,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These thirteen files are merged ahead of production's database on purpose: the code was written to
+These thirty-five files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -372,17 +419,60 @@ set's own section below says what it does and how to check it.
 | 11 | `20261023070001_college_photos.sql` | Campus photos |
 | 12 | `20261023080001_college_stats_scorecard_more.sql` | College Scorecard figures |
 | 13 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
+| 14 | `20261024000011_meeting_calendar_owner_guard.sql` | Security: meeting owner and calendar pointer guard |
+| 15 | `20261024000012_meeting_calendar_forged_rows.sql` | Security: meeting owner and calendar pointer guard |
+| 16 | `20261024000021_firm_membership_writes.sql` | Security: RLS and ownership |
+| 17 | `20261024000022_student_files_ownership.sql` | Security: RLS and ownership |
+| 18 | `20261024000023_invitation_accept_state.sql` | Security: RLS and ownership |
+| 19 | `20261024000024_student_message_recipients.sql` | Security: RLS and ownership |
+| 20 | `20261024000025_profile_archive_counselor_only.sql` | Security: RLS and ownership |
+| 21 | `20261024000041_document_storage_paths.sql` | Security: submission review and reminders |
+| 22 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
+| 23 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
+| 24 | `20261024000044_intake_items_stay_submitted.sql` | Security: submission review and reminders |
+| 25 | `20261024000045_document_path_claims.sql` | Security: submission review and reminders |
+| 26 | `20261024000051_chat_counselor_only.sql` | Security: AI guardrails |
+| 27 | `20261024000052_profile_identity_text.sql` | Security: AI guardrails |
+| 28 | `20261024000053_student_practice_ai_settings.sql` | Security: AI guardrails |
+| 29 | `20261024000054_link_keep_out_clears_digest.sql` | Security: AI guardrails |
+| 30 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitations and held data (after file 7) |
+| 31 | `20261024000062_accept_invitation_same_student.sql` | Security: import invitations and held data |
+| 32 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
+| 33 | `20261024000081_profile_size_limit.sql` | Security: profile bounds and files by student |
+| 34 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: profile bounds and files by student (after file 9) |
+| 35 | `20261024000083_files_one_student_tree.sql` | Security: profile bounds and files by student |
 
-(Thirteen files in six sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
+(Thirty-five files: the first thirteen are six feature sets, the other twenty-two are seven sets of security
+fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
-Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
-`private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
-`import_items.invite_state` / `invite_claimed_at` (file 5). Applying the files in the order above
-satisfies both. No function, policy or trigger is defined in two of these files; the shared CHECK
-constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
-additively, each file reading the current list back.
+Files 21-25, the security fixes for submission review and student reminders, depend on none of the
+others: `20261024000041_document_storage_paths.sql` (a documents row
+names only the documents bucket and a path the bucket's insert policy could have taken, and never
+moves; client roles only), `20261024000042_counselor_recorded_phone.sql`
+(`profiles.phone_recorded_by_counselor`, trigger-written; reminder texts go only to it, so until it
+is applied no reminder text is sent) and `20261024000043_submit_intake_once.sql` (a repeated New
+student Submit moves and returns nothing), then `20261024000044_intake_items_stay_submitted.sql` (a
+student can't move a submitted or received New student item, nor send one to review except through
+Submit) and `20261024000045_document_path_claims.sql` (a documents row only under a first segment the
+writer could upload to, and never over another user's object). The code already enforces each in the API; check after
+applying with `test/integration/submission-hardening.test.mjs` and `student-reminders.test.mjs`
+(their database checks run only once the files are in).
 
-After all thirteen:
+Order between the files matters in these places: step 2's staging (file 6) and review (file 7) call
+`private.intake_owns_current` from file 3; the caseload transfer (file 9) reads step 2's
+`import_items.invite_state` / `invite_claimed_at` (file 5); file 15 clears rows the guard in file 14
+would have refused (run it again if it went in first); file 30 replaces `request_import_commit` and
+`import_claim_invites` from file 7, file 31 replaces `accept_invitation` (last defined in the applied
+`20261017000001`), file 32 extends the campus photos of file 11, and file 34 replaces
+`transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body), and
+file 25 replaces `private.documents_guard_storage_path` from file 21 (the same set).
+Applying the files in the order above satisfies all of them. Apart from those replacements
+(`request_import_commit` and `import_claim_invites`, files 7 and 30; `transfer_caseload`, files 9 and
+34; `documents_guard_storage_path`, files 21 and 25), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
+(`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
+file reading the current list back.
+
+After all thirty-five:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -391,6 +481,35 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 and `node --test test/integration/approval-db.test.mjs` against a staging copy finds the approval gate
 on every new table.
+
+---
+
+## RLS and ownership: `20261024000021`-`25`
+
+Closes table-level paths a signed-in user could take straight through PostgREST (AGENTS.md:
+"Only `accept_invitation()` marks an invitation accepted", the composer, "Firm teams", "Documents
+and AI context", "A student can't archive or restore themselves"). Each file is independent of the
+others and of the sets above, and safe for the build that is serving: the API never made any of the
+writes these files refuse (one edge: a build from before the follow-up fixes, texting a student whose
+phone on file has no digits, gets a 403 where it used to record a failed send; the current build answers
+that with its own 400). `20261024000024` caps a counselor's direct message inserts at 200 a day, above
+the composer's own limits. Nothing is deleted; rows planted before them stay, and each file's header
+has a read-only audit query. They change grants, policies, triggers and one function body
+(`private.deliverables_sync_intake_request`, now also requiring the task's student to be the one who
+accepted the invitation).
+
+Check:
+
+```sql
+select count(*) from information_schema.role_table_grants
+ where table_schema = 'public' and table_name = 'firm_members' and grantee = 'authenticated'
+   and privilege_type in ('INSERT','UPDATE','DELETE');                                 -- 0
+select count(*) from pg_trigger where tgname in ('invitations_guard_client', 'deliverables_guard_intake_link',
+  'student_messages_guard_client', 'profiles_guard_self_archive',
+  'documents_guard_client', 'document_links_guard_client');                            -- 6
+```
+
+and `node --test test/integration/ownership-rls.test.mjs` against a staging copy.
 
 ---
 
@@ -464,9 +583,12 @@ update public.import_items
  where match_status = 'awaiting_counselor';
 ```
 
-A counselor's first import that would send more than 50 invitations saves its data but holds the
-invitations; an email goes to `ACCESS_REVIEW_EMAIL`. Approve by hand:
+Once a counselor's saved imports would send more than 50 invitations in all (and Meridies has
+approved none of their imports yet), the import saves its data but holds the invitations; an email
+goes to `ACCESS_REVIEW_EMAIL`. Approve by hand, which releases every import of that counselor,
+earlier ones included:
 `update public.roster_imports set invites_approved_at = now() where id = '<import id>';`
+The API applies this rule itself; `20261024000061` (below) makes the database apply it too.
 
 ---
 
@@ -505,7 +627,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 ---
 
-## Campus photos: `20261023070001`
+## Campus photos: `20261023070001`, `20261024000071`
 
 Apply after every earlier file. It adds a table and the project's first
 **public** bucket, and deletes nothing. Either order is safe: until it is
@@ -516,6 +638,7 @@ naming this file.
 | # | File | What it does |
 |---|---|---|
 | 1 | `20261023070001_college_photos.sql` | `college_photos` (one freely licensed Commons photo per college with its credit, license, deed and file page; any signed-in user reads, only service_role writes; the approval gate) and the public **`college-photos`** Storage bucket (3 MB, JPEG only, no `storage.objects` policy: only the loader writes). Adds `college-photos` to the `ingest_runs` and `job_heartbeats` labels by reading the current CHECKs back, and a `job_heartbeats` row (31 days) |
+| 2 | `20261024000071_college_photo_review.sql` | `college_photo_candidates`, the review queue: a new or changed photo (or a changed credit for one already shown) the loader held until Wikidata and Commons have been quiet about it for a week, with why and when a run first and last saw it (service_role only, no policies, the approval gate). Adds the nullable `ingest_runs.counts` (each run's counts by outcome). Either order: without it new photos still pass on their timestamps, replacements are held, and the run's row is finished without counts |
 
 Check:
 
@@ -523,6 +646,7 @@ Check:
 select to_regclass('public.college_photos');                                          -- non-null
 select id, public from storage.buckets where id = 'college-photos';                    -- 1 row, public = true
 select count(*) from job_heartbeats where job = 'college-photos';                      -- 1
+select to_regclass('public.college_photo_candidates');                                -- non-null
 select count(*) from pg_tables where schemaname = 'public' and rowsecurity = false;   -- expect 0
 ```
 
@@ -587,3 +711,212 @@ select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tg
 
 Invites reach families only once `INVITE_FROM_EMAIL` is on a verified Resend
 domain (`LAUNCH_CHECKLIST.md`).
+
+## Meetings: the owner and the calendar pointer: `20261024000011`, `20261024000012`
+
+A security fix. A meeting's `calendar_provider` / `calendar_event_id` name an
+event on the calendar of `meetings.counselor_id`, and the API acts on it with
+that counselor's stored tokens; before this file any approved counselor could
+write a meeting naming another counselor as its owner, and read-only
+collaborators could write meetings. It depends only on files already in
+production, so it can be applied on its own, ahead of the rest of this list.
+Either order with the code is safe (the code already calls a provider only for
+the caller's own meeting, and emails invites or spends a counselor's invite
+throttle only for a meeting whose student is on that counselor's caseload). The
+first file adds a trigger and replaces policies; the second clears the
+calendar pointer on rows already in the table whose owner has no hold on the
+student (forged before the guard). Neither deletes anything. Apply them
+together, 11 then 12; if 12 went in first, run it again after 11 (it is
+idempotent).
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261024000011_meeting_calendar_owner_guard.sql` | Trigger `meetings_owner_guard` (a user session books only as itself, never changes `counselor_id`, and changes the calendar pointer only on its own meeting; `transfer_caseload` and the service role pass), `meetings_write` replaced by insert/update/delete policies on `private.counselor_can_edit_student`, and `meeting_attendees_write` narrowed to students the caller can edit |
+| 2 | `20261024000012_meeting_calendar_forged_rows.sql` | Clears `calendar_provider` / `calendar_event_id` on every meeting whose `counselor_id` is neither the student's counselor nor a collaborator on the student (any access; approval not asked), and raises a notice with the count. `counselor_id` and the provider's own event are left as they are |
+
+Before applying, list what the second file will clear (read-only):
+
+```sql
+select m.id, m.counselor_id, m.student_id, s.counselor_id as students_counselor, m.calendar_provider, m.created_at
+  from public.meetings m join public.profiles s on s.id = m.student_id
+ where (m.calendar_provider is not null or m.calendar_event_id is not null)
+   and s.counselor_id is distinct from m.counselor_id
+   and not exists (select 1 from public.student_collaborators c
+                    where c.student_id = m.student_id and c.counselor_id = m.counselor_id);
+```
+
+A row there whose owner never worked with the student was forged; tell that
+counselor, since the event it named is on their calendar. A row left by a
+collaborator since removed is harmless either way. After applying, the same
+query returns no rows.
+
+Check:
+
+```sql
+select tgname from pg_trigger where tgrelid = 'public.meetings'::regclass and tgname = 'meetings_owner_guard';  -- 1 row
+select policyname from pg_policies where schemaname = 'public' and tablename = 'meetings' order by 1;
+-- approval_gate, meetings_delete, meetings_insert, meetings_select, meetings_select_attendee, meetings_update
+```
+
+and `node --test test/integration/meeting-calendar-owner.test.mjs` against a staging copy.
+
+## Security: AxIS chats are the counselor's: `20261024000051`
+
+Restrictive INSERT policies: only an approved counselor creates an `ai_conversations`,
+`ai_messages` or `ai_attachments` row or uploads into the `axis-attachments` bucket. Reads,
+renames and deletes keep their owner policies. Either order is safe: the API already answers
+403 to a student on every `/chat` route but deleting their own chat (AGENTS.md, "The essay
+restriction"). Not in `REQUIRED_SCHEMA`.
+
+Check:
+
+```sql
+select polname from pg_policy where polname in
+  ('ai_conversations_insert_counselor', 'ai_messages_insert_counselor', 'ai_attachments_insert_counselor', 'axis_attachments_insert_counselor');  -- 4 rows
+```
+
+---
+
+## Security: a name and class year are labels: `20261024000052`
+
+A trigger on `profiles` (`profiles_guard_identity_text`): an update that sets `grad_year` to
+anything but four digits or empty, or `full_name` past 200 characters, is refused (23514); an
+insert is normalised instead (name cut to 200, a malformed year dropped), so a sign-up never
+fails. A row that already holds an odd value keeps saving its other columns. Either order is
+safe: the routes already refuse a malformed class year and AxIS shows only the shape of a name
+and a year. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select tgname from pg_trigger where tgname = 'profiles_guard_identity_text';  -- 1 row
+select count(*) from public.profiles where grad_year !~ '^[0-9]{4}$' and btrim(grad_year) <> '';  -- odd values left as they are
+```
+
+## Security: a student's practice AI switches: `20261024000053`
+
+`public.my_practice_ai_settings()`, SECURITY DEFINER, no argument: for a student of an approved
+counselor, their practice's `ai_summaries` and `auto_parse_documents` (defaults without a row);
+null for anyone else. The API asks it only without a service-role key; before it is applied a
+student's gated AI there is refused as before. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select proname from pg_proc where proname = 'my_practice_ai_settings';  -- 1 row
+```
+
+## Security: a link kept out of AI holds no digest: `20261024000054`
+
+A trigger on `document_links` (`document_links_keep_out_clears_digest`): a row that is, or
+becomes, `available_to_llm = false` has its summary, key points, page size and extraction notes
+cleared and a `read`/`reading`/`queued` status set to `skipped` (existing rows too, when it is applied). Relevance is left alone. Either
+order is safe. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select tgname from pg_trigger where tgname = 'document_links_keep_out_clears_digest';  -- 1 row
+select count(*) from public.document_links where available_to_llm = false and summary is not null;  -- 0
+```
+
+---
+
+## Import invitation review per counselor: `20261024000061`
+
+Apply after `20261023020003` (it replaces that file's `request_import_commit(uuid, integer)` and
+`import_claim_invites(uuid, integer)` with the same signatures and bodies, except the hold). Either
+order with the code is safe: the API holds invitations by the same rule after each commit request
+and before every send (through `import_invite_review` once this is applied, else on the service
+role), writing `invites_held_reason` through the service role, and the previous code reads that
+column as before. Not in `REQUIRED_SCHEMA`.
+
+| # | File | What it does |
+|---|---|---|
+| 1 | `20261024000061_import_invite_review_per_counselor.sql` | `private.import_invite_review_of` counts, over every import of the counselor whatever firm it was made in, the invitations their saved imports have sent or still hold; `public.import_invite_review(import)` answers the API; `request_import_commit` and `import_claim_invites` hold an import's invitations past 50 until any of the counselor's imports is approved, and a claim lifts an earlier hold once one is |
+
+Check:
+
+```sql
+select to_regprocedure('public.import_invite_review(uuid)') is not null;   -- true
+select prosrc like '%import_invite_review_of%' from pg_proc
+ where oid = to_regprocedure('public.import_claim_invites(uuid,integer)');   -- true
+```
+
+---
+
+## Held data follows only the same student: `20261024000062`
+
+`accept_invitation` moved the held import data of every pending or revoked invitation the same
+counselor sent to the same address onto whoever accepted, so a sibling invited at a parent's address
+took the other sibling's imported data. This replaces `accept_invitation(text)` (same signature,
+body otherwise `20261017000001`'s) so another invitation's items move only when both invitations
+name the same student (same non-blank full name, ignoring case and spacing), and adds
+`private.invitation_same_student`. Either order with the code is safe: the API already refuses an
+invitation at an address carrying another student's held data; this also closes a race between two
+routes inviting at once. Apply after `20261017000001`. Not in `REQUIRED_SCHEMA`.
+
+Check:
+
+```sql
+select prosrc like '%invitation_same_student%' from pg_proc
+ where oid = to_regprocedure('public.accept_invitation(text)');   -- true
+```
+
+---
+
+## Profile column bounds: `20261024000081`
+
+A `BEFORE INSERT OR UPDATE` trigger on `public.profiles` (`private.profiles_column_bounds`) bounds
+every column the authenticated UPDATE grant lets a user write: `full_name`, `hometown`,
+`high_school`, `title` 200 characters, `headline` 300, `avatar_url` 2048, `phone` 40, `timezone` 80,
+`grad_year` 10, and `profile` 300,000 bytes (`octet_length(profile::text)`, the UTF-8 bytes of the
+jsonb text, which `lib/profileSize.ts` computes the same way for `PATCH /auth/me` and
+`PATCH /students/:id`). On update a value over its bound is refused (23514) only when it is longer
+than the stored one, so a row already over a bound still takes every other update (accept_invitation,
+a transfer, a name change) and can shrink. On insert (signup copies `full_name` and `avatar_url` from
+the user's own metadata) the short columns are clipped and an overlong avatar link is dropped, so a
+signup never fails. Either order with the code; not in `REQUIRED_SCHEMA`.
+
+Check, before applying, how many profiles are already over (they keep working, but can't grow):
+
+```sql
+select count(*) filter (where octet_length(profile::text) > 300000) as profile,
+       count(*) filter (where length(full_name) > 200 or length(headline) > 300 or length(avatar_url) > 2048
+                          or length(hometown) > 200 or length(high_school) > 200 or length(title) > 200
+                          or length(phone) > 40 or length(timezone) > 80 or length(grad_year) > 10) as other
+  from public.profiles;
+select tgname from pg_trigger where tgrelid = 'public.profiles'::regclass and tgname = 'profiles_column_bounds';  -- one row
+```
+
+## Caseload transfer, files: `20261024000082`
+
+Replaces `public.transfer_caseload` (file 9 above) with the same signature, grants and body except
+the step that moves documents and links: a file moves only when it is about a moved student (to that
+student's receiver) or has no student and is filed in the moved folder tree (with the tree). A file
+about anyone else filed in that tree is taken out of it before any folder moves: one about a student
+who stays keeps its owner (`attention.keptFiles`), one about another moved student goes to that
+student's receiver unfiled. A moved file whose folder isn't the receiver's afterwards is unfiled too;
+both kinds are counted as `attention.unfiledFiles`. Apply after `20261023030002` (filename order does
+it). Either order with the code: the API reads both numbers as 0 when the function doesn't send them.
+Not in `REQUIRED_SCHEMA`.
+
+```sql
+select prosrc like '%unfiledFiles%' from pg_proc where proname = 'transfer_caseload';  -- true
+```
+
+## Files stay in their student's tree: `20261024000083`
+
+Triggers on `documents` and `document_links` (insert, and any change of `folder_id` or `student_id`)
+refuse a file about one student whose folder sits under another student's folder
+(`private.folder_tree_student` walks `parent_id` to the nearest `kind = 'student'` folder), and a
+trigger on `folders` (any change of `parent_id`, `kind` or `student_id`) refuses putting a folder that
+holds another student's files under a student folder. Errcode 23514. The walk locks the folders it
+reads, so a folder move and a file save can't race past each other. The routes already refuse the same
+(`routes/files.ts`, `routes/integrations.ts`); this covers PostgREST and that race. Rows misfiled
+before it stay as they are (the transfer above unfiles them; it runs its unfiling before it moves
+folders, so it never trips these triggers). Apply after `20261024000082` (filename order). Either
+order with the code. Not in `REQUIRED_SCHEMA`.
+
+```sql
+-- Rows already misfiled (they keep working; a transfer unfiles them):
+select count(*) from public.documents d
+ where d.student_id is not null and d.folder_id is not null
+   and private.folder_tree_student(d.folder_id) is distinct from d.student_id
+   and private.folder_tree_student(d.folder_id) is not null;
+select count(*) from pg_trigger where tgname like '%one_student_tree%';  -- 5
+```

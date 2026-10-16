@@ -89,7 +89,10 @@ const QUESTION_LEAD =
  * deadline?").
  */
 export function splitClauses(text: string): string[] {
-  const lead = new RegExp(`,?\\s+(?:and|also|plus|then)\\s+(?=(?:${QUESTION_LEAD})\\b)`, "i");
+  // The lookbehind lets a match start only where a whitespace run (or the
+  // comma before it) starts, which is where the leftmost match always starts
+  // anyway; without it every space of a long run rescanned the rest of the run.
+  const lead = new RegExp(`(?:,|(?<![\\s,]))\\s+(?:and|also|plus|then)\\s+(?=(?:${QUESTION_LEAD})\\b)`, "i");
   return text
     .split(/(?<=[?!])\s+|(?<=[a-z)\]"”]\.)\s+(?=[A-Z])|\n+|;\s+/)
     .flatMap((p) => p.split(lead))
@@ -101,14 +104,6 @@ const ABBREVIATIONS = new Set([
   "e.g", "i.e", "etc", "vs", "dr", "mr", "mrs", "ms", "st", "u.s", "jr", "sr", "no", "approx", "est", "dept", "univ", "inc", "mt", "ft",
 ]);
 
-function endsWithAbbreviation(before: string): boolean {
-  const m = /([A-Za-z][A-Za-z.]*)$/.exec(before);
-  if (!m) return false;
-  const w = m[1]!.toLowerCase();
-  // A single capital is an initial ("J. Smith").
-  return ABBREVIATIONS.has(w) || /^[a-z]$/i.test(w);
-}
-
 /**
  * Cuts a stream of text into sentences as it arrives. A sentence ends at a line
  * break, or at . ! ? followed by space; decimals ("3.87"), abbreviations
@@ -118,6 +113,19 @@ function endsWithAbbreviation(before: string): boolean {
  */
 export class SentenceStream {
   private buf = "";
+  // The scan below resumes where the last one stopped instead of starting
+  // again at the top of the buffer: every terminator before `from` was decided
+  // on text that can't change. Rescanning (and testing the whole text before
+  // each full stop against a regular expression, as the abbreviation check
+  // did) made a long reply with no sentence end cost the square of its length
+  // on the event loop.
+  private from = 0;
+  /** Where the `[A-Za-z.]` run that ends just before `from` starts, and its first letter (-1: none). */
+  private runStart = 0;
+  private runLetter = -1;
+  /** For a scan that stopped at `from` waiting for text: how far the terminators and the spaces after them were read. */
+  private jResume = -1;
+  private kResume = -1;
 
   push(delta: string): string[] {
     this.buf += delta;
@@ -135,38 +143,93 @@ export class SentenceStream {
       if (cut < 0) break;
       const s = this.buf.slice(0, cut).trim();
       this.buf = this.buf.slice(cut);
+      this.from = 0;
+      this.runStart = 0;
+      this.runLetter = -1;
+      this.jResume = this.kResume = -1;
       if (s) out.push(s);
     }
     if (final) {
       const rest = this.buf.trim();
       if (rest) out.push(rest);
       this.buf = "";
+      this.from = 0;
+      this.runStart = 0;
+      this.runLetter = -1;
+      this.jResume = this.kResume = -1;
     }
     return out;
   }
 
+  /** Adds `b[i]` to the `[A-Za-z.]` run the abbreviation check reads. */
+  private track(b: string, i: number): void {
+    const c = b[i]!;
+    const letter = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+    if (letter || c === ".") {
+      if (letter && this.runLetter === -1) this.runLetter = i;
+    } else {
+      this.runStart = i + 1;
+      this.runLetter = -1;
+    }
+  }
+
+  /**
+   * Whether the text before `i` ends in an abbreviation or an initial: the
+   * `[A-Za-z.]` run before it, from its first letter, as
+   * `/([A-Za-z][A-Za-z.]*)$/` read it. Every abbreviation is six characters
+   * or fewer, so a longer word is answered without reading it.
+   */
+  private endsWithAbbreviation(b: string, i: number): boolean {
+    if (this.runLetter === -1 || i - this.runLetter > 6) return false;
+    const w = b.slice(this.runLetter, i).toLowerCase();
+    // A single letter is an initial ("J. Smith").
+    return ABBREVIATIONS.has(w) || /^[a-z]$/.test(w);
+  }
+
   private boundary(final: boolean): number {
     const b = this.buf;
-    for (let i = 0; i < b.length; i++) {
+    // The end of the terminator run last measured, so the terminators inside
+    // one run ("...", "?!") don't each measure it again.
+    let lastI = -1;
+    let lastJ = -1;
+    for (let i = this.from; i < b.length; this.track(b, i), i++) {
       const ch = b[i]!;
       if (ch === "\n") return i + 1;
       if (ch !== "." && ch !== "!" && ch !== "?") continue;
-      let j = i + 1;
-      while (j < b.length && /[.!?)"'”’]/.test(b[j]!)) j++;
-      if (j >= b.length) return final ? b.length : -1;
+      let j: number;
+      if (i > lastI && i < lastJ) j = lastJ;
+      else {
+        j = i === this.from && this.jResume > i ? this.jResume : i + 1;
+        while (j < b.length && /[.!?)"'”’]/.test(b[j]!)) j++;
+        lastI = i;
+        lastJ = j;
+      }
+      if (j >= b.length) return this.wait(i, j, -1, final);
       if (!/\s/.test(b[j]!)) continue;
-      if (ch === "." && endsWithAbbreviation(b.slice(0, i))) continue;
-      let k = j;
+      if (ch === "." && this.endsWithAbbreviation(b, i)) continue;
+      let k = i === this.from && this.kResume > j ? this.kResume : j;
       while (k < b.length && (b[k] === " " || b[k] === "\t")) k++;
-      if (k >= b.length) return final ? b.length : -1;
+      if (k >= b.length) return this.wait(i, j, k, final);
       if (b[k] === "[") {
-        const rest = b.slice(k);
-        const m = /^(?:\[S\d{1,3}\][ \t]*)+/.exec(rest);
+        const cites = /(?:\[S\d{1,3}\][ \t]*)+/y;
+        cites.lastIndex = k;
+        const m = cites.exec(b);
         if (m) return k + m[0].length;
-        if (!final && /^\[(?:S\d{0,3})?$/.test(rest)) return -1;
+        if (!final && b.length - k <= 5 && /^\[(?:S\d{0,3})?$/.test(b.slice(k))) return this.wait(i, j, k, final);
       }
       return j;
     }
+    this.from = b.length;
+    this.jResume = this.kResume = -1;
+    return -1;
+  }
+
+  /** Text that may still change decides this cut: a final flush takes it all, otherwise the scan waits here. */
+  private wait(i: number, j: number, k: number, final: boolean): number {
+    if (final) return this.buf.length;
+    this.from = i;
+    this.jResume = j;
+    this.kResume = k;
     return -1;
   }
 }

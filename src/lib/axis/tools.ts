@@ -33,7 +33,7 @@ import { getConnectors, getRetrieval, type ConnectedProvider, type RetrievedChun
 import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
-import { markOutside, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { markOutside, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
 
 export type ProposedAction = {
   id: string;
@@ -93,6 +93,14 @@ const OUTSIDE = new Set(["upload", "drive", "onedrive", "outlook", "gmail"]);
 /** A student record built with the text of uploaded files (its documents section): outside content too. */
 export const readsDocuments = (usage: Pick<ContextUsage, "used"> | null | undefined): boolean =>
   !!usage?.used.some((u) => u.section === "documents");
+
+/**
+ * A student record that carries text someone other than the counselor wrote (the student's
+ * activities, essays, intake answers, their own tasks, deadlines, uploaded files...): outside
+ * content, so a change made after reading it waits for a click (lib/context/profiles.ts OUTSIDE_SECTIONS).
+ */
+export const readsOutside = (ctx: { outside?: string[]; used?: ContextUsage["used"] } | null | undefined): boolean =>
+  !!ctx && ((ctx.outside?.length ?? 0) > 0 || readsDocuments(ctx.used ? { used: ctx.used } : null));
 
 const SECTIONS = [
   "profile", "academics", "personal", "activities", "awards", "courses", "testScores", "colleges",
@@ -258,8 +266,8 @@ const DEFS: ToolDef[] = [
       if (!target) return { content: "No student given. Use find_student first.", isError: true, fresh: false };
       const id = await resolveStudentId(ctx.request, target, "view");
       const built = await cachedStudentContext(ctx.request, id, ["profile", ...i.sections.filter((s) => s !== "profile")]);
-      // The documents section is the text of uploaded files: from here on a change waits for a click.
-      if (readsDocuments(built)) markOutside(ctx.turn);
+      // The student's own words or a file's text: from here on a change waits for a click.
+      if (readsOutside(built)) markOutside(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return { content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`, fresh: !!built.text };
     },
@@ -284,6 +292,8 @@ const DEFS: ToolDef[] = [
       const student = target ? await resolveStudentId(ctx.request, target, "view") : null;
       const window = { from: null, to: isoDay(new Date(Date.now() + days * 86_400_000)), label: `in the next ${days} days` };
       const items = await upcomingItems(ctx.request, { studentId: student, window, meetings: true, roster: ctx.roster, limit: 80 });
+      // A deadline's title, or a task the student added, is the student's words.
+      if (items.some((it) => it.outside)) markOutside(ctx.turn);
       const lines = items.map(
         (it) =>
           `${it.date}${it.overdue ? " OVERDUE" : ""} ${it.kind}${it.status ? ` [${it.status}]` : ""}${student ? "" : ` ${wrapUntrusted("student", ctx.roster.get(it.studentId)?.name ?? "")}`} ${wrapUntrusted(it.kind, `${it.title}${it.detail ? ` · ${it.detail}` : ""}`)}`
@@ -306,6 +316,7 @@ const DEFS: ToolDef[] = [
       const { limit } = z.object({ limit: z.number().int().min(1).max(20).optional() }).parse(raw ?? {});
       const ranked = (await loadRosterRisk(ctx.request, 14)).slice(0, limit ?? 8);
       if (!ranked.length) return { content: "Nobody has overdue work, a red flag or a deadline at risk in the next 14 days.", fresh: true };
+      if (ranked.some((r) => r.outside)) markOutside(ctx.turn);
       return { content: ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name)} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "))}`).join("\n"), fresh: true };
     },
   },
@@ -387,20 +398,26 @@ const DEFS: ToolDef[] = [
           to: z.enum(["parents", "student"]).optional(),
         })
         .parse(raw);
+      // The draft's body lands whole on a card and in the composer: the essay guardrail applies to it.
+      const prose = proseRefusal(ctx.turn, { title: i.title, detail: i.detail ?? "" });
+      if (prose) return { content: `Not drafted: ${prose}`, isError: true, fresh: false };
       const target = i.student_id ?? ctx.studentId;
       const studentId = target ? await resolveStudentId(ctx.request, target, "view") : null;
       if (i.type === "email_draft" && !studentId) return { content: "An email draft needs a student.", isError: true, fresh: false };
+      // `outside`: written in a turn that read someone else's words, so later turns recall it by kind only.
+      const outside = ctx.turn.tainted || ctx.turn.sawOutside;
       const payload =
         i.type === "work_item"
-          ? { title: i.title, detail: i.detail ?? null, dueDate: i.due_date ?? null }
-          : { to: i.to ?? "parents", subject: i.title, body: i.detail ?? "" };
+          ? { title: i.title, detail: i.detail ?? null, dueDate: i.due_date ?? null, outside }
+          : { to: i.to ?? "parents", subject: i.title, body: i.detail ?? "", outside };
       const { data, error } = await ctx.request.db
         .from("axis_actions")
         .insert({ owner_id: ctx.request.auth.userId, conversation_id: ctx.conversationId, student_id: studentId, type: i.type, payload })
         .select("id")
         .single();
       if (error) throw fromPostgrest(error);
-      const action: ProposedAction = { id: String(data.id), type: i.type, studentId, payload };
+      const { outside: _stored, ...shown } = payload;
+      const action: ProposedAction = { id: String(data.id), type: i.type, studentId, payload: shown };
       ctx.onAction(action);
       return { content: `Proposed (id ${action.id}). The counselor sees a card to confirm or dismiss it; tell them it's waiting, don't say it's done.`, fresh: true };
     },

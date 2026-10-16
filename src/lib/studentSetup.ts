@@ -12,7 +12,13 @@
 import type { FastifyRequest } from "fastify";
 import { fromPostgrest } from "./errors.js";
 
-export type SetupLink = "overview" | "college-list" | "application" | "calendar" | "profile-updates";
+export type SetupLink =
+  | "overview"
+  | "college-list"
+  | "application"
+  | "calendar"
+  | "profile-updates"
+  | "profile-questions";
 
 export type SetupStep = { key: string; title: string; link: SetupLink };
 
@@ -26,6 +32,8 @@ export const COUNSELOR_STEPS: SetupStep[] = [
 ];
 
 export const STUDENT_STEPS: SetupStep[] = [
+  // Only open for a student who pressed "Skip for now" on the wizard's Profile step.
+  { key: "profile", title: "Fill out your profile", link: "profile-questions" },
   { key: "activities", title: "Add your activities & honors", link: "profile-updates" },
   { key: "colleges", title: "Add colleges you're interested in", link: "college-list" },
   { key: "guardian", title: "Add a parent or guardian", link: "overview" },
@@ -42,7 +50,14 @@ export type SetupFacts = {
   meeting: boolean;
   colleges: boolean;
   details: boolean;
+  /** True when there is nothing to do: answered, or never skipped. */
+  profile: boolean;
 };
+
+/** Whether `profile.intakeAnswers` holds any answer. */
+export function hasAnswers(answers: unknown): boolean {
+  return typeof answers === "object" && answers !== null && Object.keys(answers).length > 0;
+}
 
 /** The steps still open, in order. Pure, so it is tested without a database. */
 export function openSteps(steps: SetupStep[], facts: SetupFacts): SetupStep[] {
@@ -97,11 +112,20 @@ export async function setupFacts(request: FastifyRequest, studentIds: string[]):
       has("meetings"),
       has("student_colleges"),
       has("student_personal_details", (q) => q.neq("intended_majors", "{}")),
-      request.db.from("profiles").select("id, high_school").in("id", ids),
+      request.db
+        .from("profiles")
+        .select("id, high_school, skipped:profile->profileSkipped, answers:profile->intakeAnswers")
+        .in("id", ids),
     ]);
   if (profiles.error) throw fromPostgrest(profiles.error);
   const school = new Set(
     (profiles.data ?? []).filter((p) => String(p.high_school ?? "").trim()).map((p) => String(p.id))
+  );
+
+  const skippedProfile = new Set(
+    (profiles.data ?? [])
+      .filter((p) => (p as Record<string, unknown>).skipped === true && !hasAnswers((p as Record<string, unknown>).answers))
+      .map((p) => String(p.id))
   );
 
   for (const id of ids) {
@@ -114,6 +138,7 @@ export async function setupFacts(request: FastifyRequest, studentIds: string[]):
       meeting: meetings.has(id),
       colleges: colleges.has(id),
       details: school.has(id) && personal.has(id),
+      profile: !skippedProfile.has(id),
     });
   }
   return out;

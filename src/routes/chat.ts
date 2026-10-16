@@ -6,6 +6,9 @@
  *
  * The tool a message runs under selects a server-side system prompt (see
  * lib/chat.ts) — the client only ever sends the tool's key, never a prompt.
+ *
+ * Counselors only (the v1 path behind AxIS v2), and the streamed answer passes
+ * the essay guard (lib/proseGuard.ts) before any of it reaches the client.
  */
 
 import { PassThrough } from "node:stream";
@@ -36,8 +39,9 @@ import {
 import { buildStudentContext } from "../lib/context/index.js";
 import type { ContextUsage } from "../lib/context/types.js";
 import { forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
-import { resolveStudentId } from "../lib/guards.js";
+import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { ProseGate } from "../lib/proseGuard.js";
 
 /** How the AxIS trace names a context section; two sections can share a label. */
 const SOURCE_LABELS: Record<string, string> = {
@@ -127,14 +131,19 @@ function paramId(request: FastifyRequest): string {
 }
 
 export default async function chatRoutes(app: FastifyInstance) {
+  // AxIS is the counselor's (the app gives students none; the student's AI is Profile Update).
+  // Every route but deleting your own chat is counselor-only: a student's free-form chat was a
+  // DEEP_MODEL essay ghostwriter guarded by nothing but its prompt. RLS says the same for new
+  // rows (20261024000051).
+  const counselorOnly = requireRole("counselor");
   const aiLimit = (name: string) =>
     limit(`ai:${name}`, 30, 60, "You're sending messages very fast. Give it a moment.");
 
   // The tool catalog (labels/descriptions only — prompts stay server-side).
-  app.get("/tools", { preHandler: [app.authenticate] }, async () => chatToolCatalog());
+  app.get("/tools", { preHandler: [app.authenticate, counselorOnly] }, async () => chatToolCatalog());
 
   // List the caller's conversations, newest first; optional student filter.
-  app.get("/conversations", { preHandler: [app.authenticate, limit("chat:conversations", 120, 60)] }, async (request) => {
+  app.get("/conversations", { preHandler: [app.authenticate, counselorOnly, limit("chat:conversations", 120, 60)] }, async (request) => {
     const q = z.object({ studentId: z.string().uuid().optional() }).parse(request.query ?? {});
     let query = request.db
       .from("ai_conversations")
@@ -150,7 +159,7 @@ export default async function chatRoutes(app: FastifyInstance) {
   // Create a conversation.
   app.post(
     "/conversations",
-    { preHandler: [app.authenticate, aiLimit("chat")] },
+    { preHandler: [app.authenticate, counselorOnly, aiLimit("chat")] },
     async (request, reply) => {
       const body = createConvSchema.parse(request.body ?? {});
       let studentId: string | null = null;
@@ -172,7 +181,7 @@ export default async function chatRoutes(app: FastifyInstance) {
   );
 
   // One conversation with its messages.
-  app.get("/conversations/:id", { preHandler: [app.authenticate] }, async (request) => {
+  app.get("/conversations/:id", { preHandler: [app.authenticate, counselorOnly] }, async (request) => {
     const id = paramId(request);
     const { data: conv, error } = await request.db
       .from("ai_conversations")
@@ -201,7 +210,7 @@ export default async function chatRoutes(app: FastifyInstance) {
   });
 
   // Rename.
-  app.patch("/conversations/:id", { preHandler: [app.authenticate] }, async (request) => {
+  app.patch("/conversations/:id", { preHandler: [app.authenticate, counselorOnly] }, async (request) => {
     const id = paramId(request);
     const { title } = renameSchema.parse(request.body);
     const { data, error } = await request.db
@@ -227,7 +236,7 @@ export default async function chatRoutes(app: FastifyInstance) {
   // Attach a file: records it and returns a signed upload URL. The app uploads, then names it when it sends.
   app.post(
     "/conversations/:id/attachments",
-    { preHandler: [app.authenticate, limit("chat:attachments", 30, 60, "That's a lot of files at once. Give it a moment.")] },
+    { preHandler: [app.authenticate, counselorOnly, limit("chat:attachments", 30, 60, "That's a lot of files at once. Give it a moment.")] },
     async (request, reply) => {
       const id = paramId(request);
       const body = attachmentSchema.parse(request.body);
@@ -236,14 +245,14 @@ export default async function chatRoutes(app: FastifyInstance) {
   );
 
   // A short-lived link to open a file from the chat.
-  app.get("/attachments/:id/url", { preHandler: [app.authenticate, limit("chat:attachment-url", 120, 60)] }, async (request) =>
+  app.get("/attachments/:id/url", { preHandler: [app.authenticate, counselorOnly, limit("chat:attachment-url", 120, 60)] }, async (request) =>
     attachmentUrl(request, paramId(request))
   );
 
   // Send a message → SSE stream: reasoning steps, then the streamed answer.
   app.post(
     "/conversations/:id/messages",
-    { preHandler: [app.authenticate, aiLimit("chat")] },
+    { preHandler: [app.authenticate, counselorOnly, aiLimit("chat")] },
     async (request, reply) => {
       const id = paramId(request);
       const body = messageSchema.parse(request.body);
@@ -355,9 +364,12 @@ export default async function chatRoutes(app: FastifyInstance) {
               ...(contextUsage ? { contextUsage } : {}),
               maxTokens: 400,
             });
-            for (const step of plan.steps) {
-              trace.push({ label: String(step).slice(0, 200) });
-              send("reasoning", { step });
+            // Steps are labels: clipped in code (a schema's maxLength is a request), at most five.
+            for (const step of plan.steps.slice(0, 5)) {
+              const label = String(step).replace(/\s+/g, " ").trim().slice(0, 200);
+              if (!label) continue;
+              trace.push({ label });
+              send("reasoning", { step: label });
             }
           } catch {
             // Reasoning is a nicety, never fatal to the answer.
@@ -365,16 +377,24 @@ export default async function chatRoutes(app: FastifyInstance) {
 
           // 2) The answer, streamed token by token.
           send("status", { phase: "answering" });
-          const { text } = await streamChat({
+          // The essay guardrail in code: past the first-person cap nothing more reaches the client.
+          const gate = new ProseGate();
+          const show = (t: string) => {
+            if (t) send("delta", { text: t });
+          };
+          const streamed = await streamChat({
             request,
             studentId,
             system,
             messages: turns,
             model: tool.model,
             maxTokens: 1400,
-            onDelta: (t) => send("delta", { text: t }),
+            onDelta: (t) => show(gate.push(t)),
             contextUsage,
           });
+          show(gate.finish());
+          if (gate.blocked) request.log.warn({ conversationId: id }, "chat answer cut by the essay guard");
+          const text = gate.blocked ? gate.text : streamed.text;
 
           const { data: saved } = await request.db
             .from("ai_messages")

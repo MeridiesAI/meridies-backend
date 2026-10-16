@@ -408,7 +408,7 @@ for (const [answers, want] of [
   check("…and onboarding is complete", (await sql(`select onboarding_complete from public.profiles where id = '${s.id}'`)) === "t");
   const r2 = await call(s.token, "PATCH", "/auth/me", { profile: { intakeAnswers: "not an object" } });
   check("answers that aren't an object still save", r2.status === 200);
-  const big = await call(s.token, "PATCH", "/auth/me", { profile: { intakeAnswers: { note: "x".repeat(210_000) } } });
+  const big = await call(s.token, "PATCH", "/auth/me", { profile: { intakeAnswers: { note: "x".repeat(310_000) } } });
   check("an oversized profile is refused with 400", big.status === 400, `status ${big.status}`);
   // The onboarding page asks for the time zone back, so it sends one only when none is on file.
   const before = await call(s.token, "GET", "/auth/me");

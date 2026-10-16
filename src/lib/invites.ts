@@ -11,6 +11,7 @@ import type { FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { sendInviteEmail } from "./email.js";
 import { fromPostgrest } from "./errors.js";
+import { assertAddressFreeFor } from "./imports/heldAddresses.js";
 
 /** Unguessable capability. base64url of 24 random bytes ≈ 192 bits. */
 export function newInviteToken(): string {
@@ -43,6 +44,10 @@ export type CreateInvitationInput = {
   source?: InvitationSource;
   intakeRequests?: IntakeRequest[];
   requestedAt?: string | null;
+  /** The import item this invitation is for (lib/imports/invitations.ts): it never blocks itself. */
+  importItemId?: string;
+  /** The invitation this one sends again (POST /invites/:id/resend): its own held data never blocks it. */
+  resendOf?: string;
 };
 
 export const INVITATION_COLUMNS =
@@ -68,12 +73,18 @@ export async function createInvitation(
  * The first half of createInvitation: supersede and insert, no email. For a
  * caller that must record the invitation somewhere before it is sent (an
  * import ties its held data to the invitation first, lib/imports/invitations.ts).
+ *
+ * Refused (409 `address_holds_other_student`) when one of the caller's
+ * invitations to the address carries another student's held import data:
+ * accepting this one would hand that data to whoever accepts
+ * (lib/imports/heldAddresses.ts). Every route that invites comes through here.
  */
 export async function insertInvitation(
   request: FastifyRequest,
   input: CreateInvitationInput
 ): Promise<{ row: Row; token: string }> {
   const email = input.email.trim().toLowerCase();
+  await assertAddressFreeFor(request, email, input.fullName, { item: input.importItemId, resendOf: input.resendOf });
 
   const { error: supersedeError } = await request.db
     .from("invitations")

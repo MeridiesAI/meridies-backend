@@ -46,6 +46,8 @@ src/
 │   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
 │   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
+│   ├── proseGuard.ts      # the essay gate on streamed answers and AxIS cards: narrative and first-person caps
+│   ├── proxyTrust.ts      # how many proxy hops request.ip trusts (TRUST_PROXY_HOPS, else by deployment)
 │   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
@@ -63,12 +65,15 @@ src/
 │   ├── studentPage.ts     # info card, derived polygon scores, recorded-growth scrubber
 │   ├── studentApplication.ts # College list board + Application DTOs and rules
 │   ├── supplementDocs.ts  # supplement Google Docs under drive.file
-│   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts
+│   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts (bounded work, linear scans)
+│   ├── storageDownload.ts # a Storage object read up to a byte cap while streaming; never trusts size_bytes
+│   ├── linearText.ts      # tag/block stripping and line trims in linear time, for text a user supplied
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── inviteDelivery.ts  # an invitation's (or a composer attempt's) delivery status, as the webhooks left it
 │   ├── deliveryInsert.ts  # the delivery row insert, degrading while invitation_id or meeting_id is missing
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
+│   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
@@ -89,7 +94,7 @@ src/
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
 │   ├── gpa.ts             # GPA scale: fourPointGpa, null for non-4/5-point scales
-│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule;
+│   ├── imports/           # import pipeline: worker pool + role check, job runner, name rule, textShapes (linear cell checks);
 │   │                      #   step 2: parse (capped child process), profile + masking, plan + presets + AI mapping,
 │   │                      #   rows + matching, staging, review, invitations, retention, rollout flag
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
@@ -177,7 +182,12 @@ writes the pending files, their header lines and any destructive statements
 approver in `vars.MIGRATION_APPROVERS` runs it by hand with apply on and confirm
 set to the newest version. It re-checks the list (refusing if it changed),
 pushes, and fails on any table it left without RLS or the approval gate
-(`scripts/migrations/problems.sql`). Without `SUPABASE_ACCESS_TOKEN` /
+(`scripts/migrations/problems.sql`, run only when its sha256 matches
+`PROBLEMS_SQL_SHA256` in the workflow: change both together). The plan holds
+the same write-capable credentials as the apply with no approval, so in the
+plan every secret-holding step runs before any of our code; the runbook says
+what is left and how to close it (a read-only credential for
+`production-db-plan`, CODEOWNERS). Without `SUPABASE_ACCESS_TOKEN` /
 `SUPABASE_DB_PASSWORD` it skips green with a notice. The code and its migration
 land minutes apart in no guaranteed order (with Railway's "Wait for CI" the
 migration's own commit deploys after it, a later merge that touches no
@@ -194,8 +204,20 @@ match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 `20261022000001`: the questionnaire sync (`20261023010001`-`04`), import
 pipeline step 2 (`20261023020001`-`03`), caseload transfer
 (`20261023030001`-`03`), campus photos (`20261023070001`), the extended
-College Scorecard columns (`20261023080001`) and emailed meeting invites
-(`20261023090001`). They go in later, in filename order
+College Scorecard columns (`20261023080001`), emailed meeting invites
+(`20261023090001`), the meeting owner guard (`20261024000011`-`12`, a security
+fix that depends only on applied files and can go in ahead of the rest),
+the RLS and ownership fixes (`20261024000021`-`25`, below), the
+submission-review and reminder security fixes (`20261024000041`-`45`),
+the security review's chat lock (`20261024000051`, restrictive inserts only;
+the API already refuses students on `/chat`) and its other AI guardrails
+(`20261024000052`-`54`: identity text, a student's practice AI switches,
+kept-out links hold no digest), the per-counselor import
+invitation review and the same-student rule for held data (`20261024000061`-`62`), the campus photo review queue
+(`20261024000071`), the profile column bounds (`20261024000081`), the
+caseload transfer's file rule (`20261024000082`, which replaces
+`transfer_caseload` from `20261023030002`) and the one-student folder tree
+triggers (`20261024000083`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -241,6 +263,20 @@ Two things the database enforces that the API must not be trusted to:
   grant was dropped and re-issued per column. Role changes go through
   `confirm_user_role()`, which succeeds exactly once. Same for `counselor_id`,
   which only `accept_invitation()` writes.
+- **Only `accept_invitation()` marks an invitation accepted**
+  (`20261024000023`). The client UPDATE grant on `invitations` covers what
+  the app edits (status, the New student card's fields, intake requests,
+  `dismissed_at`, `confirmed_at`, `submitted_at`), and
+  `private.invitations_guard_client` lets a client move status only
+  pending -> revoked, set `confirmed_at` only once accepted and
+  `submitted_at` only back to null, and insert only a pending row. The API
+  doesn't trust an accepted state either: `PATCH /invites/:id` acts on an
+  acceptance (receive, send back, confirm) only when the accepted profile is
+  a student on the caller's roster (`acceptedStudentOnRoster`), so it holds
+  on a database without the migration. A task's
+  `intake_invitation_id` / `intake_request_id` are written only by
+  `sync_intake_tasks`, and the sync back touches only an invitation the
+  task's own student accepted.
 - **Invitation tokens can't be enumerated.** Counselors invite students by email
   (`routes/invites.ts` → Resend via `lib/email.ts`); the emailed link carries an
   unguessable token. There is no SELECT policy that exposes a pending invite to
@@ -326,8 +362,40 @@ forget it.
   receive it is re-decided at dispatch (`sendBlockedReason` in
   `lib/studentMessages.ts`): the student still on this counselor's roster and
   not archived, parents still switched on, each guardian still on file with
-  alerts on and the same address, an alert still clear of the throttle.
+  alerts on and the same address, an email to the student still addressed to
+  their sign-in email, an alert still clear of the throttle. The student is
+  written to at their sign-in email (`profiles.email`), never the
+  student-writable `student_personal_details.contact_email` (the info card's
+  email is a recorded detail, not a destination), the same rule as meeting
+  invites and the due-tomorrow reminders.
   Anything unreadable holds the send; a refusal cancels it with the reason.
+  A row is not proof the route wrote it, so dispatch keeps only recipients
+  the composer would have resolved itself (`allowedRecipients`): the student
+  by id at their sign-in email or phone on file, or a guardian of this
+  student still receiving messages at the same address; it sends to the
+  addresses on file, never the row's. A text to the student goes to their
+  phone on file at send time. An email goes to their sign-in email, and one
+  frozen with another address (scheduled when the contact email was
+  followed, or before a sign-in email change) is cancelled; changing the
+  contact email neither redirects nor cancels a message. A guardian must
+  still have the address the row froze. The cron also
+  sends at most `DISPATCH_DAILY_CAP` (100) messages a day per counselor,
+  whoever wrote the rows: over it a row waits an hour and is tried again
+  (`hold_reason` says so), nothing is dropped. In the database
+  (`20261024000024`) a client insert must name exactly such recipients and
+  start `queued` or `scheduled`, and a counselor's client inserts are
+  capped at 200 a day (`consume_rate_limit`, errcode 54000, which the route
+  answers as 429); the check answers only for the caller's own student, so
+  a foreign insert always fails at RLS the same way and the guard can't be
+  used to test guesses at someone's address. A client update moves status
+  only scheduled -> cancelled or queued -> sent | failed | cancelled, and
+  `scheduled_for` is the dispatch cron's alone. Addresses on file are
+  counselor-writable (guardians, contact email, phone), so what bounds a
+  counselor's sending is the volume: the route's 30 an hour and 100 a day,
+  and the two caps above for rows written any other way. Follow-up, in a
+  later PR once this build is live: insert on the service client and
+  revoke INSERT from `authenticated` (doing it now would break the serving
+  build's composer the moment the migration applies).
   A composer alert counts toward the parent-alert throttle, so the sweep can't
   send a second alert right behind a hand-written one.
 - **`student_private_notes` is counselor-only both ways**, the same reasoning
@@ -362,10 +430,32 @@ forget it.
   admin or the row is their own. The staff blast is owner/admin only.
 - **`meeting_attendees`.** `meetings.student_id` stays the primary attendee so
   every per-student read keeps working; a trigger writes the primary here too.
-  Only the meeting's counselor adds or removes attendees, and only their own
-  students; an invited student may read the meeting (`meetings_select_attendee`)
+  Only the meeting's counselor adds or removes attendees, and only students
+  they can edit; an invited student may read the meeting (`meetings_select_attendee`)
   but not move it. The helpers are SECURITY DEFINER to avoid policy recursion
   between the two tables.
+- **A meeting's calendar event is its owner's** (`20261024000011`,
+  `lib/meetingCalendar.ts`). `calendar_provider` / `calendar_event_id` name an
+  event on the calendar of `meetings.counselor_id`, and the API moves or
+  deletes it with stored OAuth tokens, so a forged owner would hand one
+  counselor another's calendar. In code: a provider is called only when the
+  caller owns the meeting, always with `request.auth.userId` (never the stored
+  `counselor_id` read on its own); a write collaborator's change to someone
+  else's meeting is saved in Meridies only, the sync skipped with a logged
+  reason and the pointer kept for its owner, and `createConference` on it is
+  403. In the database: `meetings_owner_guard` (keyed off `current_user`, like
+  `admission_outcomes_lock_guard`, so `transfer_caseload` and the service role
+  pass) makes a user session book only as itself, never change
+  `counselor_id`, and set, change or clear the pointer only on its own
+  meeting; insert, update and delete need `private.counselor_can_edit_student`
+  (read-only collaborators read meetings, never write them); `20261024000012`
+  clears the pointer on rows forged before the guard (owner neither the
+  student's counselor nor a collaborator). A forged owner also can't be made
+  to pay: an invite round is resolved before `meeting-invites:<owner>` is
+  charged, and a meeting whose own student isn't on its owner's caseload
+  sends nothing and charges nothing. A new route that calls a provider about
+  a stored row, or charges a limit keyed by a stored owner, checks ownership
+  the same way.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the
@@ -419,7 +509,16 @@ the database (`20261010*`):
   essay prose.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
-  /auth/me`, the profile bounded at 200,000 characters), and a trigger on
+  /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
+  on that route and the counselor's `PATCH /students/:id`
+  (`lib/profileSize.ts`; a profile already over may shrink, never grow), and
+  in the database for PostgREST writes too, in the same measure (the UTF-8
+  bytes of the jsonb text, which `profileBytes` reproduces, so the two agree
+  on what fits): `profiles_column_bounds` (`20261024000081`) also bounds
+  every other client-writable profiles column (name, school, hometown and
+  title 200, headline 300, avatar link 2048, phone 40, time zone 80, class
+  year 10; clipped at signup, refused past the bound on update unless the
+  value shrinks). `GET /students` reads named columns, not `*`), and a trigger on
   that column (`private.sync_intake_answers`) copies every answer that has a
   real field into it, through the import pipeline's own functions
   (`import_value_ok`, `import_current_value`, the compare-and-set
@@ -481,7 +580,21 @@ the database (`20261010*`):
   `submit_intake()` (SECURITY DEFINER: every outstanding item needs a file or
   an answer), moves them all to `review`, has AxIS read the files **as advice
   only** (`nextTaskStatus(..., advisory)` returns null; no student email) and
-  tells the counselor once. The counselor ticks each item received
+  tells the counselor once. Only items that move on this Submit are read and
+  named: a repeated Submit reads nothing again and tells nobody (the API
+  drops ids that were already in review or complete before it called the
+  function; since `20261024000043` the function moves, returns and stamps
+  nothing when nothing is left to move), and one after a send-back covers
+  that item alone. A submitted (`review`) or received (`complete`) item is
+  with the counselor: the student can't move its status, and can't send an
+  item to review except through Submit (409 from `PATCH /tasks/:id`; the
+  guard trigger since `20261024000044`, which tells Submit's own write apart
+  because `submit_intake` runs as its owner, not `authenticated`). Otherwise
+  "back to in progress, Submit again" re-read every file and re-emailed the
+  counselor in a loop. On any database the counselor hears about at most 3
+  Submits a day per student and AxIS reads one item at most 3 times a day
+  (`consumeRateLimit`), and the email subject carries at most 60 characters
+  of the student's display name. The counselor ticks each item received
   (`PATCH /invites/:id { receive }`, which sets the request's `provided`) or
   sends it back with a note (`{ sendBack }`: the task returns to the student,
   the files come off it, `submitted_at` clears), then confirms (`{ confirmed:
@@ -499,9 +612,26 @@ the database (`20261010*`):
   (`{ documentId }`, a file already in the student's documents) adds a
   `submission` row, the only `deliverable_documents` row a student may write,
   and moves the task to `review`. `lib/submissionReview.ts` then answers the
-  quick refusals at once (AI document reading off for the student's practice,
-  kept out of AI, a format it can't open, over 10 MB) and reads the file
-  after the response (PDFs and images as attachments, .docx/.txt as text);
+  quick refusals at once and reads the file after the response (PDFs and
+  images as attachments, .docx/.txt as text). The refusals come first, in
+  this order: the task rule (`refusalFor`, through `documentReadableForTask`:
+  an unconfirmed type, keep-out, a waived recommendation letter, the
+  practice's document-reading switch and `ai_access = 'excluded'`; `other`,
+  `essay`, `common-app` and the like are read, and the sensitive kinds
+  (`SENSITIVE_DOCUMENT_KINDS`: financial, award letter, recommendation
+  letter, IEP/504, counselor-only) are refused unless the counselor set the
+  file to `allowed`, a product decision of 2026-10-16), a link, a format it
+  can't open, over 10 MB. **The file is downloaded on the caller's own client**, never the
+  service role, and only when the row names the documents bucket and a path
+  of a safe shape (`lib/storagePath.ts`), so Storage RLS decides and a row's
+  path can't reach another object. The same file handed in again while the
+  task waits on a check changes nothing (200, `review.status: "skipped"`);
+  otherwise a student's hand-ins are capped at 6 a task an hour and 40 a day
+  (`enforceRateLimit`, 429; a counselor handing in for the student, or AxIS
+  for them, spends their own AI quota and isn't held by the student's
+  count), and counselor notices (bell and email) at 3 a
+  task an hour and 20 a student a day, on every path into the review. The
+  counselor's email subject carries the student's name, not the task title;
   the client polls `GET /tasks/:id`. AxIS (`submission-review`, Haiku) decides
   only whether this is what was asked for and usable, never grades or
   rewrites it, and copies printed facts (a GPA) into the findings without
@@ -513,6 +643,11 @@ the database (`20261010*`):
   `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (counselor).
   Tracker verdicts are counselor and service-role writes only; a student
   could write one through PostgREST before this migration.
+- **A student can't archive or restore themselves.** Archiving takes a
+  student out of the escalation sweep, scheduled parent messages and
+  reminders, so `archived` on `PATCH /students/:id` is a counselor's, about
+  someone else (`canArchive`), and `private.profiles_guard_self_archive`
+  refuses a client write of one's own `archived_at` (`20261024000025`).
 - **Preferences are the student's, alerts are not.** `student_preferences`
   (banner, theme, the student's own text/email reminder channels) is
   student-written and counselor-readable; `student_alert_prefs` stays
@@ -522,13 +657,31 @@ the database (`20261010*`):
 - **Settings is the display name and the theme** (`PATCH /me/settings`). The
   theme defaults to `light` (`20261013000001`); "Device" (`system`) is a
   choice, never the default.
-- **The student's reminder channels send.** With texts or email on in
-  `student_preferences`, each open task due tomorrow (counselor's time zone,
-  outside quiet hours) gets one reminder per channel, sent by
-  `lib/studentReminders.ts` on the existing dispatch cron
+- **The student's reminder channels send, to the student only.** With texts
+  or email on in `student_preferences`, each open task due tomorrow
+  (counselor's time zone, outside quiet hours) gets one reminder per channel,
+  sent by `lib/studentReminders.ts` on the existing dispatch cron
   (`/communication/internal/dispatch`) under the `student-reminders` lease.
   The `message_deliveries` row (template `task-due-reminder:<date>`) is the
-  dedupe record. `GET /me/messages` lists what was sent to the student; RLS
+  dedupe record. The student writes `student_preferences`, so neither
+  address there is a destination on its own: **email goes only to the
+  sign-in address** (`profiles.email`, which no client writes; the address
+  typed in Settings is not followed), and **a text goes only to the number
+  the counselor recorded** (`profiles.phone_recorded_by_counselor`, set by a
+  trigger when a counselor who can edit the student saves the student's
+  phone, never by the student, `20261024000042`) and only when the student's
+  reminder number is that same number. Without the migration, or with no
+  number recorded, no reminder text goes out; a number is recorded only when
+  a counselor saves it on the card (nothing copies one at acceptance), and a
+  phone saved before the migration must be saved once more. At most 5
+  reminders per channel per student per due date, counselor tasks first;
+  neither a text nor an email carries a title the student wrote (a generic
+  line instead, because `accept_invitation` doesn't match the account email
+  to the invitation and the sign-in address is only as verified as the
+  signup: Supabase's "Confirm email" must stay on, `LAUNCH_CHECKLIST.md`),
+  a text carries a counselor's title only up to 60 characters with no link,
+  address or long number in it, and the greeting uses at most 40 characters
+  of the student's first name. `GET /me/messages` lists what was sent to the student; RLS
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
@@ -548,6 +701,16 @@ Two layers, and they are not redundant:
 
 1. `@fastify/rate-limit` — in-process, per authenticated user (falling back to
    IP). Cheap, soaks up floods, **resets on deploy and doesn't span replicas.**
+   The IP is the one the outermost trusted proxy saw: `trustProxy` trusts
+   exactly `TRUST_PROXY_HOPS` hops (`lib/proxyTrust.ts`; unset, 1 on Railway,
+   detected by its `RAILWAY_*` variables, and in development, 0 elsewhere in
+   production with an error at boot), so the X-Forwarded-For entries a client
+   writes to the left of the edge's own are ignored by the limiter and the
+   request log. Never set it back to `true`: that takes the leftmost,
+   client-written entry, and a fresh header per request was a fresh bucket.
+   Behind Cloudflare and Railway set 2 (a request carrying Cloudflare headers
+   while one hop is trusted logs that once): too few hops puts every caller in
+   the proxy's one bucket.
    Its hook runs before `authenticate`, so the key comes from verifying the
    bearer token on the spot (`clientKey` in `plugins/rateLimit.ts`,
    `lib/bearer.ts`), not from `request.auth`. A limited request answers 429.
@@ -775,6 +938,87 @@ there).
   suppresses a college and removes its photo. **No search fallback**: a
   college with no usable free image has no row, and the app shows its plain
   ground.
+- **Nothing goes live the moment a wiki says so** (`reviewDecision`,
+  `20261024000071`). Wikidata and Commons are crowd-edited: anyone can point
+  a college's P18 at another free image, or upload a new version over its
+  file, minutes before a run, and the photo is shown to students and
+  families. So a new or changed photo (its Commons sha1 differs from the
+  stored one) is published only when it has been quiet for `STABLE_DAYS` (7):
+  the Wikidata item (`schema:dateModified`, in the same SPARQL query), the
+  Commons file version (imageinfo `timestamp`) and its description page
+  (latest revision, and the page's `touched` time from `prop=info`, which
+  also moves when a template the page uses is edited, such as a
+  `{{Creator:}}` or a photographer's own credit template) all last changed
+  at least that long before the run, and the file not reached through a
+  redirect (whose age no API gives); or a run at least that long ago held
+  this exact candidate (source, title, sha1, credit and license) and
+  **nothing it depends on changed after that sighting** (`quietSince`: the
+  file version, the page revision and `touched`, and for Wikidata the item,
+  all at or before it; otherwise the wait starts again, so reverting an edit
+  and re-applying it just before the next run doesn't ride on the old
+  sighting). A busy Wikidata item (edited every week) therefore waits for a
+  quiet week or a pick. A redirect is never confirmed by a sighting. A
+  **replacement** of a photo already shown (another file, or a new version
+  under the same title, whichever source showed it) always needs that
+  sighting, so with the monthly cron it goes live a run later; until then
+  the old photo keeps serving. Unknown or future times are never stable.
+- **A team pick wins, within limits.** An unpinned pick is published at once
+  (the team looked at it), except a new version of the file already shown
+  (same title, whatever showed it: picking the title Wikidata shows doesn't
+  wave through a version uploaded yesterday) and a title that now redirects
+  (`pick-redirected`: whoever edits the redirect page chooses the file; the
+  team updates the title). The picks CSV takes an optional fourth column,
+  `commons_sha1` (header `unitid,commons_title,note,commons_sha1`): a pinned
+  pick is published at once while the file is that version, whatever else
+  changed, and held as `pick-changed` while it isn't (only the team moves a
+  pin, never a sighting). Pinning is how the team publishes a held new
+  version now.
+- **The bytes are the version judged** (`sameVersion`). Thumbnail URLs on
+  upload.wikimedia.org name the file, not the version, so a swap between the
+  metadata read and the downloads would store the swapped bytes under the
+  reviewed sha1, and reverting the swap (same sha1) would keep them there
+  for good. Downloads go `DOWNLOAD_CHUNK` (20) at a time: the 500 px lookup
+  (now `iiprop=timestamp|url|sha1`) must still show the judged sha1 and
+  upload time, both copies are fetched, then Commons is asked again and the
+  copies are uploaded only if title, sha1 and upload time are unchanged (a
+  revert is a new upload with a new time). Otherwise nothing downloaded is
+  kept: `changed-during-run`, the stored photo and its queue row stay. A
+  failed re-check keeps nothing either. The bytes themselves aren't hashed
+  (the sha1 is of the original, often over the 3 MB cap, and the copies are
+  thumbnails), so this leans on Wikimedia purging a file's thumbnails on
+  every upload: a stale cached thumbnail of a swapped version served after
+  the purge failed is the residual case.
+- **Credits and licenses wait too** (`textDecision`). The credit is shown
+  on every surface and on `/colleges/photo-credits`. For an unchanged file,
+  new text (compared by hash with what the row shows) replaces it only after
+  a sighting at least a week old with nothing changed since; before the
+  migration, only once the page's revision and `touched` times are a week
+  old. Until then the row keeps its text (its other facts, the title after a
+  move, still refresh): `held-text`, `text-held`, with `text-changed` and,
+  when recent, `page-recent`. The sighting covers MediaWiki's job-queue lag
+  in moving `touched` after a template edit.
+- **The review queue.** Held candidates are `college_photo_candidates` rows
+  (service_role only; why, first and last seen; one row per college, for a
+  held photo or held text), the team's review queue: read it in the SQL
+  editor or in the `--dry-run` CSV (action `held-new` / `held-replace` /
+  `held-text`, the reasons, the title shown today). To publish a held photo
+  now, pick it (pinned to its sha1 if it is a new version of the file
+  shown); to keep it off, pick `none` or a better file. Each run's counts
+  (`added`, `replaced`, `held-new`, `held-replace`, `hold:<reason>`,
+  `confirmed`, `text-held`, `changed-during-run`, ...) are on its
+  `ingest_runs.counts`. Holding is not an error: the run and its heartbeat
+  stay clean. Deletions are not held by this gate (a removal is the safe
+  direction; the mass-deletion guard below still applies). Without the
+  migration nothing is remembered: a new photo still passes on its
+  timestamps, a replacement is held with `no-review-table` (every new
+  version of a shown file waits until the migration or a pinned pick),
+  changed text waits for a quiet page, and the run's row is finished without
+  counts. Known limits: an edit that survives a week of Wikidata and Commons
+  patrol, with nothing else changing, is published; an unpinned pick shows
+  whatever version its file has when the team's pick first runs; a template
+  edit whose `touched` update lags past the run is caught only with the
+  queue; and Wikidata's item time is the item's, so an unrelated bot edit
+  also restarts the wait.
 - **What a file must be**: a JPEG on Commons (normalised titles and moved
   files followed), at least 1000 px wide and 1.2:1 landscape unless picked,
   CC0, public domain, CC BY or CC BY-SA (never NC or ND; the CHECK refuses
@@ -791,23 +1035,40 @@ there).
   lease `college-photos`, 3 hours; `ingest_runs` + `job_heartbeats`), or
   `npx tsx --env-file=.env scripts/ingest/college-photos.ts [--limit N]
   [--only <unitids>] [--dry-run]`. It re-checks every stored file and
-  downloads only changed ones (same sha1: text refreshed, nothing
-  downloaded); a deleted or relicensed file loses its row and objects. A
+  downloads only changed ones (same sha1: nothing downloaded, the text
+  refreshed under the rule above); a deleted or relicensed file loses its row and objects. A
   Wikidata or picks failure ends the run before anything changes, and
   deletions the picks didn't ask for are **held** when they would remove more
   than a tenth of the stored photos (and more than five), so a truncated
   answer can't wipe the catalog's photos. `--dry-run` writes nothing (no
-  ingest_runs row, no heartbeat) and prints a CSV to review. Wikimedia
+  ingest_runs row, no heartbeat, no review queue) and prints a CSV to review
+  (`action,unitid,name,title,license,credit,source,current_title,reasons`);
+  every cell a spreadsheet would read as a formula (one starting with `=`,
+  `+`, `-`, `@`, a tab or a carriage return) is prefixed with an apostrophe
+  (`csvCell`), because the credit and title are Commons text anyone can
+  write. `--now <ISO time>` pins the clock, for `--fixture-dir` runs only. Wikimedia
   etiquette: a User-Agent with the team inbox, serial API calls half a second
   apart, `maxlag=5`, Retry-After honoured, two downloads at a time; the three
   hosts are pinned and redirects refused.
 - **Deploy order**: either. Every read degrades to `photo: null` while the
   table is missing (remembered five minutes, like `lib/deliveryInsert.ts`);
   not in `REQUIRED_SCHEMA`. After applying it, run the script once by hand,
-  or `/internal/status` reads the job overdue.
-- **Tests**: `college-photos*.test.ts` (rules, client, run, serving) and
-  `test/integration/college-photos.test.mjs` (RLS, the bucket, a fixture load
-  through the real store, every surface). Nothing reaches Wikimedia: the
+  or `/internal/status` reads the job overdue. `20261024000071` (the review
+  queue and `ingest_runs.counts`) goes in after it, either order with the
+  code; not in `REQUIRED_SCHEMA` either.
+- **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
+  review gate, the version check, text holds, pins, the store without the
+  migration, and `csvCell`), `test/integration/college-photos.test.mjs`
+  (RLS, the bucket, a fixture load through the real store, every surface),
+  `college-photos-review.test.mjs` (a vandal's P18 and a new version over a
+  file held while the old photo keeps serving, published a week on, a pick
+  at once, the dry-run CSV) and `college-photos-attacks.test.mjs` (a swap
+  during the downloads with and without a revert, a pick of the title shown,
+  a pick that now redirects, a revert re-applied around its sighting, a
+  credit changed through a template; fixtures in `attacks/`, whose
+  `commons-imageinfo-500-recheck.json` is what a fixture run serves on the
+  re-check). No suite renames shared tables: the no-migration path is unit
+  tested on an injected store. Nothing reaches Wikimedia: the
   fixtures in `test/fixtures/college-photos/` are hand-written in the
   documented shapes (see its README), and the cron route is only tested for
   401 and 409.
@@ -1016,8 +1277,46 @@ anyone copying it.
   (`POST /axis/actions/:id/undo`) runs only a reversal that names a real write
   op with valid input, as the counselor.
 - **Guards in code, not in the prompt.** A turn that read outside content
-  (documents, mail, connected files) turns every auto change into a card, so
-  text in a file can't change anything without a click. After five auto changes
+  turns every auto change into a card, so text someone else wrote can't change
+  anything without a click. Outside content is documents, mail, connected
+  files, chat attachments, **and any text a student, a family, an import or
+  the web wrote**: the record sections on `OUTSIDE_SECTIONS`
+  (`lib/context/profiles.ts`: profile fields beyond the name and class,
+  academics, majors, activities, awards, courses, scores, the college list,
+  intake answers, deadlines, essays, documents, and tasks when one is the
+  student's own), the roster's high schools, deadlines and student-added
+  tasks, the planner's evidence (another student's record, what is due, the
+  caseload ranking when it quotes a deadline), `get_student_record`,
+  `list_upcoming`, `rank_caseload`, and every `lookup` whose op says
+  `outside` (each read op must declare it, true, false or a check on the
+  route's answer; `axis-ops.test.ts` fails on one that doesn't, and an
+  undeclared one counts as outside). So a change request's system prompt
+  carries only what the counselor wrote (`TRUSTED_SECTIONS`, built
+  `trustedOnly`: the name and class year, meetings, meeting notes, the
+  strength profile and the counselor's own tasks; in a roster chat names,
+  class years, meetings and counselor tasks), and the change finds anything
+  else with a lookup, which marks the turn if it reads such text. The marked
+  turn's next turn inherits it, and so does the turn after a direct answer or
+  essay advice that quoted such text (`DirectAnswer.outside`: a deadline's or
+  a student-added task's title, the high school, majors, rank). A student's
+  name and class year are the student's own fields, so AxIS shows them only
+  in the shape of a name and a year (`lib/context/identity.ts`: name
+  characters, at most six words and 60 characters; four digits) in the
+  trusted record, the trusted roster and the roster index every card and
+  lookup names students from; `20261024000052` refuses a new class year that
+  isn't four digits and a name past 200 characters. A task accepted from
+  Research (`source = 'counselor'`, but the title is the research model's,
+  from a web page) is not the counselor's words: trusted builds leave it out
+  and counselor task reads carry `fromResearch` (`lib/research/origin.ts`,
+  from `recommendations.accepted_as`; an unreadable answer vouches for no
+  task). Earlier changes are recalled each turn (`recentActionsText`) by
+  their summary only when it was filed in a clean turn and not labelled from
+  a read of its target (`payload.outside === false`); otherwise by the
+  operation's catalog title. Known limits: a short run of plain words is a
+  valid name shape; earlier answers in the verbatim history and the memory
+  summary can quote text from more than one turn back. Switching parents or a guardian off (`set_alert_recipients` with
+  either copy flag, `update_guardian` with `alerts_enabled` or
+  `receives_reports`) asks first whichever way it goes. After five auto changes
   in one turn the rest wait for Confirm; twenty changes is the limit per turn.
   Specialists can't write. `dispatch.ts` refuses `/axis`, `/chat`, `/auth`,
   `/ai`, `/me`, `/account`, `/internal`, `/webhooks`, `/imports`, OAuth and the
@@ -1087,6 +1386,31 @@ two sentences or 240 characters *after* the model responds. Keep both. A system
 prompt is a request, not an enforcement mechanism — if you add another
 essay-adjacent route, it needs the code-level filter too.
 
+Free-text answers that stream (AxIS v2's agent and synthesis paths, the v1
+`/chat` stream) go through `ProseGate` (`lib/proseGuard.ts`) before any of
+them reaches the client. It counts first-person-singular sentences two ways:
+narrative words (sentences that address nobody, no "you"/"your": an essay is
+told, an email is addressed), at most `NARRATIVE_WORD_CAP` (200), and every
+first-person word, at most `FIRST_PERSON_WORD_CAP` (450, so "as you know" in
+every sentence doesn't get a statement through). Past either the rest is
+withheld and the answer ends "I don't write essay text…"; what is saved is
+what was shown. Text streams live while it can't cross a cap, so ordinary
+answers and long family emails in the counselor's voice are unchanged. The
+free text AxIS files on a card (an `email_draft`, a queue item's notes, a
+message body, any string input of a write) passes `proseRefusal`
+(`lib/axis/ops/run.ts`): `essayShaped` per card and `TURN_NARRATIVE_CAP`
+(400) narrative words per turn, so a statement can't arrive as three drafts.
+AxIS's essay router also catches requests by word count, prompt or voice
+("650 first-person words for her prompt", "write it in her voice"), but not a
+question about a limit or a prompt. `/chat` is counselor-only (it clips its
+planning steps in code): a student's free-form chat was a DEEP_MODEL
+ghostwriter guarded only by its prompt, and the app gives students no AxIS.
+`/ai/award-appeal` and `/ai/parent-alert` are counselor-only too (no student
+screen calls them; a student could steer either into an essay) and refuse a
+draft `essayShaped` judges an essay; `/ai/draft-quality`'s findings pass
+`enforceNoProse`. Known limit: the gate is a shape test, so a short
+supplement asked for in pieces, or in the third person, is not caught by it.
+
 `/ai/essay-review` is the one route that may change a draft, and the rule is
 narrow: **mechanics only.** `enforceMechanicalEdit()` accepts a replacement only
 on the `grammar` dimension, only when it is short, and only when it doesn't add
@@ -1128,7 +1452,11 @@ false`), so a name that answers a public address to the check and 127.0.0.1 to
 the connection (DNS rebinding) never reaches the second answer; the hostname
 still goes out as the Host header and TLS server name.
 If another feature ever needs to fetch a user-supplied URL, route it through
-there rather than calling `fetch` directly.
+there rather than calling `fetch` directly. What it reads (up to 2 MB) is
+turned into text by `extractText` with the linear scanners in
+`lib/linearText.ts`, never with a regular expression: a page of "<a" or
+"<script" with no closing token made the old patterns run for minutes on the
+event loop every tenant shares (see "Text a user supplied" below).
 
 ### Connected apps (Google / Microsoft OAuth)
 
@@ -1203,7 +1531,11 @@ meeting's own invites are Meridies' (`lib/meetingInvites.ts`, `lib/ics.ts`,
 calendar can add.
 
 - **Who.** Each invited student (primary and `meeting_attendees`) at their
-  contact email, else their login email. Their guardians only when the
+  sign-in email (`profiles.email`, which no client writes), never
+  `student_personal_details.contact_email`: the student writes that row, so
+  following it would let them send the counselor's invite, and every update
+  and cancellation after it, to any address (the rule the student's
+  due-tomorrow reminders follow too). Their guardians only when the
   meeting has `guardians_invited`, the student's `copy_parents` is on
   (`loadAlertPrefs`, fail closed) and the guardian's own `alerts_enabled`
   is on, at most four per student. The meeting's owner (`meetings.counselor_id`,
@@ -1237,7 +1569,8 @@ calendar can add.
 - **Transactional.** Quiet hours don't hold an invite and the student's own
   reminder channels don't gate it, like a task assignment. A round that sends
   an invite or update costs one of 60 an hour per meeting owner
-  (`consumeRateLimit`, `meeting-invites:<owner>`); a round of cancellations is
+  (`consumeRateLimit`, `meeting-invites:<owner>`), charged only after the
+  round is resolved to someone who will receive it; a round of cancellations is
   never held back, and a throttled mixed round still sends its cancellations.
 - **Delivery.** The response carries `invites` (`{ status: "sending",
   recipients, skipped, note? } | { status: "none" } | { status: "skipped" |
@@ -1276,18 +1609,67 @@ Files live in the private `student-documents` Storage bucket
 (`20261011000001`). An object is readable by its uploader or by anyone who can
 see the `documents` row pointing at it, so Storage is never more generous than
 the file list; uploads go under a student the caller can edit, a folder they
-can see, their own id, or `unfiled`. `DELETE /files/documents/:id` removes the
-Storage object too, on the caller's own client after the row is gone (best
-effort: Storage's delete policy lets the uploader remove it, so a file a
-student uploaded stays in the bucket when a counselor deletes its row).
+can see, their own id, or `unfiled`. A row's `bucket` and `storage_path` are
+the client's word for where it uploaded: `POST /files/documents` accepts only
+the documents bucket and a path of the shape `lib/storagePath.ts` allows (a
+uuid or `unfiled` first, no leading or trailing `/`, no empty, `.` or `..`
+segment, no `?`, `#`, backslash, control character or encoded dot or slash),
+because storage-js strips leading slashes and the request URL resolves dot
+segments, so `/x` or `a/../x` would be a new row reaching the object `x`.
+The database refuses the same from a client and refuses moving a row
+(`documents_guard_storage_path`, `20261024000041`). **A row is a key to its
+object** (Storage reads follow documents rows), so registering one is as
+strict as uploading there (`lib/documentClaim.ts`, and the trigger since
+`20261024000045`): the path's first segment must be somewhere the caller
+could upload (`storage_first_segment_is_fileable`), and an object already at
+that name must be the caller's own, so nobody claims a file that lost its
+row; every refusal reads the same. Nothing downloads a document's object
+with the service role: read it on the caller's client. `DELETE
+/files/documents/:id` removes the Storage object with the row, whoever
+uploaded it (the service client, after the caller's own row delete went
+through, and only for a documents-bucket path of the shape above), so a
+deleted file leaves nothing behind to claim. Objects orphaned before this
+(or by a cascaded row delete) stay in the bucket, and with the migration only
+their uploader can register them again.
 
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document
 into a prompt must filter on them (see `routes/tasks.ts`, and the context
-layer below). Students don't see waived recommendation letters, IEP/504 or
+layer below). A link kept out of AI is saved `skipped` and never fetched or
+digested (`readLink` in `routes/files.ts`), and holds no digest however it got
+there: the digest write is conditional on `available_to_llm` still being true
+and the switches are checked again after the model, `PATCH /files/links/:id {
+availableToLlm: false }` clears the digest, and `20261024000054` empties one
+in the database. A link digest runs only when the practice's "AI summaries"
+switch is on (refused: the link is saved `skipped` with the reason): the
+counselor's own practice, or for a student their counselor's
+(`studentPracticeSettings` in `lib/practiceSettings.ts`: the service client
+keyed by the caller's own profile, else `my_practice_ai_settings()` on the
+student's token, `20261024000053`; failing closed without an answer;
+`assertAiAllowed` applies it to every gated module a student reaches,
+submission review included). Students don't see waived recommendation letters, IEP/504 or
 counselor-only documents they didn't upload (`documents_student_restricted_select`),
 nor the task-document links of those files (`deliverable_documents_student_restricted_select`),
 nor their names in the activity log (the upload's `progress_events` row omits the filename).
+A document or link names no student or one the caller can edit
+(`private.can_edit_student`), and a new one lands unfiled, in one of the
+caller's folders, or in the student folder of a student they can edit; a
+client creates only plain folders under a parent of their own, and can't
+point a folder at a student they can't edit (restrictive policies,
+`20261024000022`; the routes check the same in code). A client inserts a
+document or link only as its owner (`owner_id` = the caller), never changes
+`owner_id`, and moves a row only into a folder it may file into
+(`private.can_file_into_folder`; the `*_guard_client` triggers, keyed on
+`current_user` so caseload transfer still moves rows). Before that, an
+editor of any student could plant a row "owned" by a counselor in another
+practice, which showed in that counselor's Files and, filed into their
+Policy & research folder, reached their college-research prompt; that
+prompt also drops a filed link about a student the counselor can't see
+(`readableResearch` in `routes/collegeAi.ts`), so a row planted earlier
+never reaches it. Owning the row was
+enough before, so any approved counselor could plant a "transcript" with
+their own parsed text on another practice's student, where its counselor's
+Files and the AI context layer read it.
 Only a counselor sets `aiAccess` and `ferpaWaived`, on create and on patch: the
 route answers 403 to anyone else, and the `documents_guard_student_restricted`
 trigger refuses a student's write of either, also through PostgREST. The same
@@ -1340,9 +1722,11 @@ migration is safe to apply first; the previous code ignores the new columns.
 
 - **Counselors only.** `buildStudentContext` refuses a caller whose role isn't
   `counselor` (403) before any read, the six `/ai/*` routes that call it have
-  `requireRole("counselor")`, and chat answers 403 before it saves the message
-  or opens the stream when a student id comes with a non-counselor caller (chat
-  without a student id is unchanged). A student's own session never builds a context.
+  `requireRole("counselor")`, and every `/chat` route but deleting your own
+  chat is `requireRole("counselor")` (RLS refuses a non-counselor's new chat
+  rows too, `20261024000051`). A student's own session never builds a context.
+  `buildStudentContext` also returns `outside` (the used sections someone other
+  than the counselor wrote, for AxIS) and takes `trustedOnly`.
 - **One entry point.** `buildStudentContext(request, studentId, feature, { only }?)`
   runs on `request.db`, so it never returns more than the counselor can see. A
   feature is `chat`, `student-ai`, `narrative-coherence`, `college-list` or
@@ -1806,11 +2190,32 @@ step 1's and is never gated.
   that passed, rezipped uncompressed, so it never re-reads the original
   archive and never starts fflate's helper threads. Formulas give cached
   values only. `scripts/smoke/parse-worker.mjs` checks the built child (CI).
+  **What comes back is capped too** (`caps.ts`): the heap flag protects the
+  child, not the API, and a small XLSX whose cells all point at one shared
+  string answers with a copy per cell. So the child counts characters before
+  it answers (`MAX_CELL_CHARS` 32,767 a cell; `MAX_PARSED_CHARS` 8 million
+  for all of an import's files, each profile keeping its count, registration
+  and staging each handing a parse what the earlier files left) and refuses
+  by name (`too-large-unpacked`, `cell-too-long`, `import-too-large`); the
+  answer never goes back over IPC but as JSON on fd 3, whose bytes the parent
+  counts, killing the child past `MAX_PARSE_OUTPUT_BYTES` (32 MiB); and
+  `checkOutcome` (zod) checks its shape and recounts before anyone uses it.
 - **What the model sees** (`profile.ts`, `mask.ts`, `aiPlan.ts`, module
   `import-mapping`, Haiku through `runStructured`): masked headers, column
   counts and shapes, numeric min/max only for small numbers (at most 2,100),
   a date column's year range, sheets numbered not named, sensitive columns
-  left out; wrapped as untrusted data. Never a real text cell. Its answer is
+  left out; wrapped as untrusted data. Never a real text cell, and a header
+  only when it reads as a label (`headerIsLabel`: label words, a number of
+  at most four digits, and no value inside it). A file with no header row
+  makes its first student's row the headers, so a header that holds a value
+  (`headerHoldsValue`: a run of joined digits with five or more digits or
+  three groups, "Cell 555 123 4567", "DOB 05/14/2008"; or an email), any two
+  to four letter words that aren't a label (`<name>`, whatever the case), or
+  one shaped like its column (compared without letter case) is masked as a
+  cell (`maskHeader`). A row with two such strong signals, or half its
+  headers, is masked whole (`headerRowIsData`); a single word shaped like
+  its column ("Sport" over "Soccer") is masked alone but never masks the
+  row, so a real header row keeps its labels. Its answer is
   filtered to the columns it was asked about and targets on the fixed list;
   a score column's exam comes from the file's header. Two retries, then the
   counselor maps by hand. Spend per import (`onUsage` on `runStructured`,
@@ -1830,7 +2235,29 @@ step 1's and is never gated.
   + birthday or grad year + school: suggested; else invite or skip. Siblings on
   a parent's email are never merged, matched or invited on their own;
   `stage_import` keeps one invitation per address and the review's "invite"
-  refuses a second at the same address.
+  refuses a second at the same address. **Across imports and routes**
+  (`heldAddresses.ts`): `accept_invitation` moves the held items of every
+  pending or revoked invitation from the same counselor at the same address,
+  so an address whose such invitation carries a different student's held
+  data is skipped at staging, refused when sending, and refused by
+  `insertInvitation` (409 `address_holds_other_student`), which every route
+  that invites uses (single, New student, resend, Mass invite, pipeline,
+  referrals; the old roster send checks per row). Read through the service
+  role, filtered to that counselor's own invitations, so imports made in a
+  firm they left still count; every read error refuses. The same student is
+  the same non-blank full name ignoring case and spacing (`sameStudentName`):
+  a re-import or a resend (which carry the imported name) follow the email;
+  a nickname ("Sam Lee", "Samuel Lee") or a missing name is someone else.
+  `20261024000062` applies the same rule inside `accept_invitation` (another
+  invitation's items move only when both name the same student), which also
+  closes a race between two routes inviting at the same instant; sends of
+  one counselor's imports are serialized by a lease (`import-invites:<id>`,
+  409 while one runs). Known limits: an item refused this way is marked
+  failed, and Retry refuses it again until the other invitation is accepted
+  or its data expires; held data whose invitation the counselor then resends
+  under a different name, or that has no name, stays behind once
+  `20261024000062` is applied and expires; the old roster flow's own rows
+  still follow the address as before.
 - **Staging defaults** (`stage_import`, `private.import_assess`): old values
   read with `import_current_value`; equal values dropped (3.8 = 3.800); rows
   already on the record dropped and counted, near matches kept back as
@@ -1854,10 +2281,28 @@ step 1's and is never gated.
   and tied to the item before the email goes out (`insertInvitation`, then
   `import_link_invitation`, then `emailInvitation` with the Resend
   idempotency key `import-invite/<item>/<invitation>`); 25 per request; the
-  `invites` quota (100 a day, 50 for an account under 14 days). A counselor's
-  first import over 50 invitations is saved but its invitations wait
-  (`invites_held_reason`) until Meridies sets `invites_approved_at` by hand;
-  one email goes to `ACCESS_REVIEW_EMAIL`.
+  `invites` quota (100 a day, 50 for an account under 14 days), charged only
+  after the batch's held addresses were read. **Meridies looks once per
+  counselor** (`inviteReview`): when the invitations their saved imports have
+  sent or still hold, with this import's, pass 50 and none of their imports
+  is approved yet, the import is saved but its invitations wait
+  (`invites_held_reason = 'first-import-review'`, written through the
+  service role) until Meridies sets `invites_approved_at` on any one of their
+  imports by hand, which releases all of them, earlier ones included; one
+  email goes to `ACCESS_REVIEW_EMAIL`. Splitting a list or saving a one-row
+  import first doesn't skip it. Counted over every import whose counselor is
+  the uploader, never on the caller's RLS client (which hides imports made in
+  a firm they left, and a member's solo imports from a firm admin): through
+  `public.import_invite_review` when `20261024000061` is applied, else on the
+  service role, and held when it can ask neither. Checked after each commit
+  request and again before every send; `20261024000061` also makes
+  `request_import_commit` and `import_claim_invites` apply it (either deploy
+  order, not in `REQUIRED_SCHEMA`). Items a caseload transfer brought count
+  toward the receiver's 50. The old roster send (`/roster/imports/:id/send`)
+  answers 409 `use_import` for a practice with the Import page, so it is no
+  way around the review. Mass invite and single invites are not import
+  invitations and carry no file's data: the daily `invites` quota (and Mass
+  invite's 10 sends an hour) is their only volume limit.
 - **Retention** (`retention.ts`, `import_retention`), every sweep, not behind
   `IMPORT_HOLD_EXPIRY_ENABLED`: drafts and reviews expire after 7 days with
   their staged values; never-sent invitations' data expires 14 days after the
@@ -1894,6 +2339,34 @@ step 1's and is never gated.
   values; use it on any free text you log outside `err`, and log a
   user-supplied URL as `logHost(url)`. Never log a body, a prompt or essay text.
 - Never commit `.env` — keep `.env.example` current
+- **Text a user supplied is scanned in linear time.** Node serves every
+  tenant from one thread, so a regular expression that rescans the rest of
+  its input from every position (a quantified run followed by something that
+  may be missing: `/<[^>]+>/`, `/<a[\s\S]*?<\/a>/`, `/[ \t]+\n/`,
+  `/\s*@\s*/`, `/[^\s@]+@[^\s@]+\.[^\s@]+/`, `,(?![^(]*\))`, `/x[^>]*y/`,
+  `/[chars]+$/` unanchored, nested `(a+)+`) is a denial of service when the
+  text is a pasted link's page, an uploaded document, a Mass invite paste, an
+  import cell or header, an AxIS message or a model's streamed reply. Use the
+  scanners in `lib/linearText.ts` and `lib/imports/textShapes.ts` (each names
+  the expression it replaces and is checked against it on random input), cap
+  the input before matching (a window for log redaction, `MAX_HEADER_CHARS`
+  (500) on an import header, cut when the sheet is read), or anchor and bound
+  the pattern so each position does a bounded amount of work; two `\s*` around
+  an optional group (`free\s*(and|&)?\s*reduced`) is the same quadratic shape.
+  Linear is not enough when the input is amplified: bound the work on what is
+  parsed, not only on what was uploaded. Document text (`lib/documentText.ts`)
+  inflates `word/document.xml` to `MAX_XML_BYTES` (2 MB) at most, reads a .txt
+  up to `MAX_TEXT_FILE_BYTES` (1 MB), and treats text past `MAX_TEXT_CHARS`
+  (200,000) as unreadable, because a 37 KB archive used to expand to 19 MB and
+  cost over a second of parsing per request. `documents.size_bytes` is the
+  client's word: read a Storage object with `downloadCapped`
+  (`lib/storageDownload.ts`), which streams and stops past the cap, never with
+  `download()`, which buffers the whole object (up to the bucket's 50 MB)
+  before anything can look at its length. A new scan of such text gets a unit test that feeds
+  the worst case and asserts it finishes in well under 100 ms
+  (`test/unit/regex-dos-helpers.ts`); `test/integration/regex-dos.test.mjs`
+  runs the review's attacks against the API and checks `/health` still
+  answers while each one is in flight.
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
 
@@ -1921,7 +2394,19 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   a moved student that the old counselor owns and that would cascade with
   their account moves (meetings, notes, reports, messages, research runs,
   outcomes, the student folder with its subtree, documents and links,
-  supplement Doc rows, accepted invitations); open work moves; scheduled sends
+  supplement Doc rows, accepted invitations); open work moves. A document or
+  link moves only when it is about a moved student (to that student's
+  receiver) or has no student and is filed in the moved folder tree (with
+  the tree); one about anybody else filed in that tree stays with its owner,
+  unfiled, and is counted as `attention.keptFiles` (`20261024000082`); one
+  about another moved student goes to that student's receiver unfiled, as
+  does a moved file whose folder isn't the receiver's afterwards, both
+  counted as `attention.unfiledFiles`. All of that unfiling runs before any
+  folder moves. Nothing files a document or link about one student anywhere
+  in another student's folder tree, or moves a folder that holds one there:
+  the files routes and the Drive/OneDrive import refuse it
+  (`assertSameStudentTree` in `routes/files.ts`), and so does the database
+  for PostgREST writes and races (`20261024000083`, 23514); scheduled sends
   and queued parent alerts are cancelled; a group meeting moves only when
   every attendee goes to the same receiver; held import data moves into a
   carrier import owned by the student's receiver (no import function
@@ -1954,6 +2439,14 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `?releaseStudents=true`). Routes: `/firms`, `/firms/mine/{members,invites}`,
   `/firms/mine/caseload-policy`, `/firms/join`. Invitation tokens are stored
   as sha256 only; the app page for the link is `/join-firm/<token>`.
+  `firm_members` is read-only to clients (no insert, update or delete grant,
+  no write policy), and a client updates only a firm's branding columns
+  (`name`, `website`, `logo_url`, `logo_updated_at`, `banner_url`, the
+  accent): `owner_id`, `seats` and `plan` change only inside those functions,
+  and a client inserts no firm row (`create_firm` makes it;
+  `20261024000021`). A firm_members row is what makes someone a member to
+  `firm_consultant_students`, `can_assign_work` and the staff blast, so it
+  must never be writable by an admin directly.
 - **Guardians.** A student may add a guardian, but one they add starts with
   `alerts_enabled = false`, and only the counselor side changes or removes a
   guardian (`private.can_manage_guardians`). Otherwise a student could redirect
@@ -2022,7 +2515,16 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   child process, profile and masking, sensitive values, the plan and presets,
   the AI mapping with its spend, rows and matching, values, rollout),
   meeting invites (`ics`, `meeting-invites`, `email-attachments`,
-  `delivery-insert`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  `delivery-insert`), the meeting calendar owner rule (`meeting-calendar`),
+  the ownership checks in code (`ownership-guards`:
+  who archives, which acceptance is trusted, which frozen recipients a
+  scheduled message may still reach), linear-time text scanning (`linear-text`, `mass-invite`,
+  `import-text-shapes`, `regex-dos`: each scanner against the expression it
+  replaced on random input, and the worst cases under 100 ms), document storage
+  paths (`storage-path`), the hand-in AI rule (`submissions`), reminder
+  destinations (`studentReminders`), the streamed-answer essay gate
+  (`prose-guard`), the name and class-year shapes and proxy hops
+  (`identity-proxy`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
@@ -2031,15 +2533,32 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `research-repeats` (the same suggestion across runs),
   `intake-sync` and `intake-held-backfill` (the questionnaire, every field
   and rule, against held imports, and the backfill),
-  `meeting-invites` (emailed calendar invites), `college-photos`,
+  `meeting-invites` (emailed calendar invites), `meeting-calendar-owner`
+  (forged owners and calendar pointers, read-only collaborators),
+  `submission-hardening` (a hand-in can't read another object, skip the AI
+  rule, flood the counselor or re-run Submit), `student-reminders`
+  (reminders reach the student only), `college-photos`,
+  `ownership-rls` (each table-level path a signed-in user could take
+  straight through PostgREST, tried as the attacker, beside the path that
+  still works),
   `college-official` (the federal figures on extras and Compare, on the rows
   the fixture load writes, and a failing Scorecard heartbeat), the
   approval gate (`approval-db`, `approval-api`, `approval-review`,
   `approval-jobs`), the import pipeline (`imports-*`; step 2's
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
-  `-retention`, `-guard`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`)
-  and `caseload-transfer` (every persona, every table that follows a student,
-  removal, the firm setting). `npm run test:imports-load` (pre-release) commits
+  `-retention`, `-guard`, `-security`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`),
+  `caseload-transfer` (every persona, every table that follows a student,
+  removal, the firm setting), `regex-dos` (the regular-expression attacks:
+  a student's document, a Mass invite paste, an import file and its header
+  row, a .docx that inflates to 19 MB and a 10 MB .txt registered with no
+  size, each read six times at once; `/health` keeps answering while each
+  runs), `security-guardrails` (a spoofed
+  X-Forwarded-For, `/chat` refused to students in the API and in RLS, link
+  digests and keep-out-of-AI) and `security-guardrails-followup` (a class
+  year or name written through PostgREST, the counselor drafts refused to
+  students, a late digest on a kept-out link, the student's practice switches
+  function, `fromResearch`). AxIS's outside-content rule needs a model, so
+  it is covered by `axis-engine` and `axis-ops` against a scripted one. `npm run test:imports-load` (pre-release) commits
   and undoes 5,000 rows and stages 5,000 more through the API; `npm run
   test:caseload-load` checks 500 students in one call. The harness's `user()`
   approves the counselors it makes;
@@ -2079,7 +2598,14 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   speed test refuse any `SUPABASE_URL`, `DB_URL` or `API_URL` that isn't
   localhost, and anything naming the production project, with no override
   (`scripts/seed/local-only.mjs`): they create approved accounts with the
-  service-role key. `test/integration/e2e-seed.test.mjs` runs each helper and
+  service-role key. A `DB_URL` may carry only `sslmode`, `connect_timeout`
+  and `application_name` (libpq's `host`, `hostaddr` and `service` keywords
+  beat the URL's host) in the one shape libpq and WHATWG parse alike, and
+  psql runs with `-X` (no `~/.psqlrc` or system startup file, which could
+  `\connect` elsewhere; `psqlArgs`), without `PSQLRC` or any `PG*` variable
+  but `PGPASSWORD`, `PGPASSFILE`, `PGSSLMODE`, `PGCONNECT_TIMEOUT` and
+  `PGAPPNAME` (`psqlEnv`), and only as `psql` (`PSQL` must name a psql;
+  `psqlBinary`), so every host it can reach is this machine. `test/integration/e2e-seed.test.mjs` runs each helper and
   reads the result back through the API.
 - `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
   (every action pinned to a commit); typecheck, build, unit tests (including
@@ -2113,6 +2639,7 @@ npm run dev               # http://localhost:4000
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
+| `TRUST_PROXY_HOPS` | Proxies in front of the API; `request.ip` is the address the outermost trusted one saw. Unset: 1 on Railway and in development, 0 elsewhere in production (with an error at boot). Railway behind Cloudflare: 2. 0 trusts no forwarding header |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |

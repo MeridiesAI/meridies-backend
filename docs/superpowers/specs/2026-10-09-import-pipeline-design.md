@@ -819,6 +819,20 @@ What shipped differs from the design above in these places; AGENTS.md
 
 - **Parsing** runs in a forked child process (see §7.3, amended), with a
   256 MB heap, a 20 s kill and an environment holding only PATH.
+- **What a parse hands back is capped too** (security review, 2026-10). A
+  small XLSX can point every cell at one shared string: the child holds one
+  string, but V8's serializer sends one copy per cell, so the answer over IPC
+  was gigabytes the API process had to take. The child now counts characters
+  before answering (32,767 a cell, Excel's own limit; 8 million for all of an
+  import's files, which registration and staging both hand out file by file)
+  and refuses by name; the answer comes back as JSON on a pipe whose bytes the
+  parent counts, stopping and killing the child past 32 MiB; and the parent
+  checks its shape before using it.
+- **Headers the model sees** (§7.2): a header goes out as text only when it
+  reads as a label. A file with no header row makes its first student's row
+  the headers, so a header shaped like a value or like the column under it is
+  masked as a cell is, and a row where several headers look like data is
+  masked whole.
 - **Rollout** (§11) is an environment flag: `IMPORTS_ROLLOUT=off|pilot|all`
   and `IMPORTS_PILOT` (firm or solo counselor ids). Changing the pilot list
   needs a redeploy. `IMPORTS_AI=off` is the AI kill switch.
@@ -838,9 +852,41 @@ What shipped differs from the design above in these places; AGENTS.md
   the key because a retry after a failure sends a new invitation). Only the
   uploader sends them. One invitation per address per import: siblings on a
   parent's email are skipped, and the counselor may invite one of them.
-- **Staff approval** (§5.1) is by hand: a first import over 50 invitations is
-  saved, its invitations wait until `invites_approved_at` is set, and one
-  email goes to `ACCESS_REVIEW_EMAIL`.
+  **Across imports and routes:** `accept_invitation` moves the held items of
+  every pending or revoked invitation from the same counselor at the same
+  address. An address whose such invitation already carries a different
+  student's held data is skipped at staging ("Another import is already
+  inviting this address for a different student"), can't be invited from
+  review, is refused when sending, and is refused by every other route that
+  invites (409 `address_holds_other_student` from `insertInvitation`: single,
+  New student, resend, Mass invite, pipeline, referrals; the old roster send
+  per row). The same student is the same non-blank full name, ignoring case
+  and spacing; a re-import or a resend still follows their email, a nickname
+  or a missing name is another student. Read through the service role for
+  that counselor's own invitations, so imports made in a firm they left, and
+  a member's invitations when a firm admin stages, still count.
+  `20261024000062` applies the same rule inside `accept_invitation`, which
+  closes a race between two routes inviting at once; one counselor's import
+  sends are serialized by a lease. Known limits: a refused item is marked
+  failed and Retry refuses it again until the other invitation is accepted
+  or its data expires; once `20261024000062` is applied, held data whose
+  invitation is resent under another name, or has no name, stays behind and
+  expires; the old roster flow's own rows still follow the address.
+- **Staff approval** (§5.1) is by hand and per counselor, not per import:
+  once the invitations a counselor's saved imports have sent or still hold,
+  with this import's, pass 50, the import is saved but its invitations wait
+  until Meridies sets `invites_approved_at` on any one of their imports
+  (which releases all of them, earlier ones included), and one email goes to
+  `ACCESS_REVIEW_EMAIL`. (Amended after review: holding only a first import
+  over 50 let a split list, or a one-row import saved first, skip it.)
+  Counted over every import of the counselor whatever firm it was made in,
+  never on the caller's RLS view. The API applies the rule after each commit
+  request and before every send (through `import_invite_review`, else the
+  service role, else it holds); `20261024000061` makes `request_import_commit`
+  and `import_claim_invites` apply it too. Items received through a caseload
+  transfer count toward the receiver's 50. The old roster send refuses a
+  practice that has the Import page; Mass invite and single invites carry no
+  file's data and are limited by the daily invite quota only.
 - **Retention** (§5.10) runs on every sweep, outside
   `IMPORT_HOLD_EXPIRY_ENABLED` (which still holds back the 30-day expiry of
   accepted data and its warnings until the app's Ready to apply page ships).

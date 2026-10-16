@@ -25,9 +25,12 @@ import { runStructured } from "../lib/anthropic.js";
 import { badRequest, conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, normalizeLink } from "../lib/links.js";
 import { logHost, serializeErr } from "../lib/requestLog.js";
+import { assertAiAllowed } from "../lib/practiceSettings.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
+import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePath } from "../lib/storagePath.js";
+import { assertPathClaimable, removeDeletedDocumentObject } from "../lib/documentClaim.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
 import { DOCUMENT_BUCKET, extractionState, requestExtraction } from "../lib/documentExtraction.js";
 import {
@@ -135,6 +138,55 @@ export async function studentFolderId(
     .limit(1)
     .maybeSingle();
   return (data?.id as string | undefined) ?? null;
+}
+
+/**
+ * The student whose folder tree this folder sits in: the student folder itself,
+ * or the student folder at the top of a custom subfolder's chain. Null for a
+ * folder outside every student's tree. Read on the caller's client; an
+ * unreadable parent ends the walk.
+ *
+ * A file about one student must never be filed in another student's tree:
+ * whoever is handed that tree (a caseload transfer moves it whole, and the
+ * student reads their own folder) would get the other student's file.
+ */
+export async function folderTreeStudent(request: FastifyRequest, folder: Row): Promise<string | null> {
+  let current: Row | null = folder;
+  const seen = new Set<string>();
+  for (let hops = 0; current && hops < 64; hops++) {
+    if (current.kind === "student") return typeof current.student_id === "string" ? current.student_id : null;
+    const parent: string | null = typeof current.parent_id === "string" ? current.parent_id : null;
+    if (!parent || seen.has(parent)) return null;
+    seen.add(parent);
+    const res: { data: unknown; error: { code?: string; message?: string } | null } = await request.db
+      .from("folders")
+      .select("id, parent_id, kind, student_id")
+      .eq("id", parent)
+      .maybeSingle();
+    if (res.error) throw fromPostgrest(res.error);
+    current = (res.data as Row | null) ?? null;
+  }
+  return null;
+}
+
+/** Refuses filing a file about `studentId` into a folder in another student's tree. */
+export async function assertSameStudentTree(request: FastifyRequest, folder: Row, studentId: string | null | undefined): Promise<string | null> {
+  const owner = await folderTreeStudent(request, folder);
+  if (owner && studentId && owner !== studentId) throw badRequest("That folder belongs to a different student");
+  return owner;
+}
+
+/** Every folder in the caller's subtree under (and including) `rootId`, capped. */
+async function subtreeIds(request: FastifyRequest, rootId: string): Promise<string[]> {
+  const all = [rootId];
+  let frontier = [rootId];
+  while (frontier.length > 0 && all.length < 2000) {
+    const { data, error } = await request.db.from("folders").select("id").in("parent_id", frontier).limit(2000);
+    if (error) throw fromPostgrest(error);
+    frontier = ((data ?? []) as Row[]).map((r) => String(r.id)).filter((id) => !all.includes(id));
+    all.push(...frontier);
+  }
+  return all;
 }
 
 export default async function fileRoutes(app: FastifyInstance) {
@@ -247,7 +299,22 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       if (b.parentId) {
         if (b.parentId === id) throw badRequest("A folder can't be inside itself");
-        await assertOwnFolder(request, b.parentId);
+        const parent = await assertOwnFolder(request, b.parentId);
+        // Moved under a student's folder, everything in it becomes part of that
+        // student's tree: refuse when it holds a file about someone else.
+        const treeStudent = await folderTreeStudent(request, parent);
+        if (treeStudent) {
+          const ids = await subtreeIds(request, id);
+          const [docs, links] = await Promise.all([
+            request.db.from("documents").select("id").in("folder_id", ids).not("student_id", "is", null).neq("student_id", treeStudent).limit(1),
+            request.db.from("document_links").select("id").in("folder_id", ids).not("student_id", "is", null).neq("student_id", treeStudent).limit(1),
+          ]);
+          if (docs.error) throw fromPostgrest(docs.error);
+          if (links.error) throw fromPostgrest(links.error);
+          if ((docs.data ?? []).length > 0 || (links.data ?? []).length > 0) {
+            throw badRequest("That folder holds files about another student, so it can't go in this student's folder");
+          }
+        }
       }
       // The student folder is the anchor for that student's filing: rename and
       // recolour it freely, but it stays where the trigger put it.
@@ -353,6 +420,16 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const b = documentBody.parse(request.body);
       assertCounselorSetsRestrictions(request, b);
+      // The bucket and path are the client's word for where it uploaded, and
+      // other code downloads by them: only the documents bucket, only a path
+      // the bucket's insert policy could have accepted (lib/storagePath.ts;
+      // the database refuses the same since 20261024000041).
+      if (!isDocumentsBucket(b.bucket)) throw badRequest("Files are registered in the documents bucket only");
+      if (!isSafeStoragePath(b.storagePath)) throw badRequest("That file path isn't one the app uploads to");
+      // A row is a key to its object (Storage reads follow documents rows):
+      // only where the caller could upload, and never over someone else's
+      // object (lib/documentClaim.ts; the database since 20261024000045).
+      await assertPathClaimable(request, b.storagePath);
       await enforceQuota(
         request.auth.userId,
         "uploads",
@@ -371,9 +448,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       let folderId = b.folderId ?? null;
       if (folderId) {
         const folder = await assertFileableFolder(request, folderId);
-        if (folder.kind === "student" && studentId && folder.student_id !== studentId) {
-          throw badRequest("That folder belongs to a different student");
-        }
+        await assertSameStudentTree(request, folder, studentId);
       }
       // Filed into the student's own folder by default — that folder exists for
       // every roster student, so an upload never lands nowhere.
@@ -385,7 +460,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           owner_id: request.auth.userId,
           student_id: studentId,
           folder_id: folderId,
-          bucket: DOCUMENT_BUCKET,
+          bucket: DOCUMENTS_BUCKET,
           storage_path: b.storagePath,
           filename: b.filename,
           title: b.title ?? null,
@@ -453,6 +528,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       }
 
       const target = b.folderId ? await assertFileableFolder(request, b.folderId) : null;
+      if (target) await assertSameStudentTree(request, target, existing.student_id as string | null);
 
       const update: Row = {};
       if (b.folderId !== undefined) update.folder_id = b.folderId;
@@ -612,21 +688,14 @@ export default async function fileRoutes(app: FastifyInstance) {
         throw notFound("That document isn't on file");
       }
 
-      const { error } = await request.db.from("documents").delete().eq("id", id);
+      const { data: gone, error } = await request.db.from("documents").delete().eq("id", id).select("id");
       if (error) throw fromPostgrest(error);
-      // The file goes with its row, on the caller's own client, so Storage's
-      // delete policy decides: whoever uploaded it can remove it (a file the
-      // student uploaded stays in Storage, unreachable without its row). Best
-      // effort, after the row; (bucket, storage_path) is unique, so no other
-      // row points at the object.
-      const path = typeof existing.storage_path === "string" ? existing.storage_path : "";
-      if (path) {
-        const removed = await request.db.storage
-          .from(String(existing.bucket ?? "student-documents"))
-          .remove([path])
-          .catch(() => null);
-        if (!removed || removed.error) request.log.warn("document file left in storage");
-      }
+      // The file goes with its row, whoever uploaded it, so a deleted file
+      // leaves no object behind for anyone to claim with a new row. Only when
+      // the caller's own delete removed the row (RLS can refuse it silently,
+      // and then the object must stay with the row that still points at it),
+      // and only for a path of the shape the app writes (lib/documentClaim.ts).
+      if ((gone ?? []).length > 0) await removeDeletedDocumentObject(request, existing);
       return { deleted: true };
     }
   );
@@ -697,9 +766,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       let folderId = b.folderId ?? null;
       if (folderId) {
         const folder = await assertFileableFolder(request, folderId);
-        if (folder.kind === "student" && studentId && folder.student_id !== studentId) {
-          throw badRequest("That folder belongs to a different student");
-        }
+        await assertSameStudentTree(request, folder, studentId);
       } else if (isStudent && studentId) {
         folderId = await studentFolderId(request, studentId);
       }
@@ -769,14 +836,21 @@ export default async function fileRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("document_links")
-        .select("id, owner_id")
+        .select("id, owner_id, student_id, folder_id")
         .eq("id", id)
         .maybeSingle();
       if (!existing || existing.owner_id !== request.auth.userId) {
         throw notFound("That link isn't on file");
       }
-      if (b.folderId) await assertFileableFolder(request, b.folderId);
+      const targetFolder = b.folderId ? await assertFileableFolder(request, b.folderId) : null;
       if (b.studentId) await resolveStudentId(request, b.studentId, "edit");
+      // Whatever the link ends up about, it can't sit in another student's tree.
+      const nextStudent = b.studentId !== undefined ? b.studentId : (existing.student_id as string | null);
+      const nextFolderId = b.folderId !== undefined ? b.folderId : (existing.folder_id as string | null);
+      if (nextStudent && nextFolderId) {
+        const folder = targetFolder ?? (await request.db.from("folders").select("id, parent_id, kind, student_id").eq("id", nextFolderId).maybeSingle()).data;
+        if (folder) await assertSameStudentTree(request, folder as Row, nextStudent);
+      }
       if (request.profile.role === "student" && b.studentId === null) {
         throw badRequest("Your links stay in My documents");
       }
@@ -786,6 +860,9 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (b.folderId !== undefined) update.folder_id = b.folderId;
       if (b.studentId !== undefined) update.student_id = b.studentId;
       if (b.availableToLlm !== undefined) update.available_to_llm = b.availableToLlm;
+      // Kept out of AI from now on: the digest a model wrote of it goes too, so nothing AI made of
+      // the page stays on a link marked "keep out of AI".
+      if (b.availableToLlm === false) Object.assign(update, KEPT_OUT);
       if (b.relevance !== undefined) update.relevance = b.relevance;
 
       const { data, error } = await request.db
@@ -826,7 +903,21 @@ export default async function fileRoutes(app: FastifyInstance) {
  */
 async function readLink(request: FastifyRequest, row: Row) {
   const id = row.id as string;
-  await request.db.from("document_links").update({ status: "reading" }).eq("id", id);
+
+  /** Saved as a plain link, no digest: kept out of AI, or AI summaries are off for the practice. */
+  const skip = async (message: string) => {
+    const { data } = await request.db
+      .from("document_links")
+      .update({ ...KEPT_OUT, error: message.slice(0, 500) })
+      .eq("id", id)
+      .select("*")
+      .maybeSingle();
+    return toDocumentLink((data ?? { ...row, status: "skipped", error: message }) as Row);
+  };
+
+  // "Keep out of AI" is a data-handling switch: a link marked so is never fetched for a
+  // summary, and nothing about it reaches a model. It stays saved, as a plain link.
+  if (row.available_to_llm === false) return skip(KEPT_OUT_MESSAGE);
 
   const fail = async (message: string) => {
     const { data } = await request.db
@@ -837,6 +928,16 @@ async function readLink(request: FastifyRequest, row: Row) {
       .maybeSingle();
     return toDocumentLink((data ?? { ...row, status: "failed", error: message }) as Row);
   };
+
+  // The practice's "AI summaries" switch, before anything is fetched: a counselor's own
+  // practice, a student's counselor's (runStructured checks again before the model).
+  try {
+    await assertAiAllowed(request, "link-digest");
+  } catch (err) {
+    return skip(publicMessage(err, "AI summaries aren't available"));
+  }
+
+  await request.db.from("document_links").update({ status: "reading" }).eq("id", id);
 
   let page;
   try {
@@ -917,8 +1018,17 @@ async function readLink(request: FastifyRequest, row: Row) {
     return fail(publicMessage(err, "Couldn't summarize that page"));
   }
 
+  // The switches again, now: the read took seconds, and the owner may have marked the link
+  // "keep out of AI" or the practice switched AI summaries off in the meantime.
+  try {
+    await assertAiAllowed(request, "link-digest");
+  } catch (err) {
+    return skip(publicMessage(err, "AI summaries aren't available"));
+  }
+
   // Outside the catch: a write failure here is a database problem, and marking
-  // the link 'failed' would blame the page for it.
+  // the link 'failed' would blame the page for it. Only onto a link still open to AI
+  // (the condition is in the write, so a PATCH racing it can't be overwritten).
   {
     const { data, error } = await request.db
       .from("document_links")
@@ -934,9 +1044,24 @@ async function readLink(request: FastifyRequest, row: Row) {
         read_at: new Date().toISOString(),
       })
       .eq("id", id)
+      .eq("available_to_llm", true)
       .select("*")
       .maybeSingle();
     if (error) throw fromPostgrest(error);
+    if (!data) return skip(KEPT_OUT_MESSAGE);
     return toDocumentLink(data as Row);
   }
 }
+
+const KEPT_OUT_MESSAGE = "Kept out of AI, so it wasn't read or summarized.";
+/** A link with no AI digest: what keeping it out of AI (or a refused digest) leaves on the row. */
+const KEPT_OUT = {
+  status: "skipped",
+  error: KEPT_OUT_MESSAGE,
+  summary: null,
+  key_points: [] as string[],
+  relevance: null,
+  content_chars: null,
+  extracted: {},
+  read_at: null,
+};

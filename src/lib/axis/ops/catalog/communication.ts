@@ -135,6 +135,7 @@ export const messages: OpGroup = {
     op({
       name: "messages.list",
       kind: "read",
+      outside: false,
       title: "What the composer sent or scheduled for a student, with message ids and status (newest first).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -302,6 +303,7 @@ export const familyReports: OpGroup = {
     op({
       name: "reports.list",
       kind: "read",
+      outside: true,
       title: "Family reports with ids and status, for one student or the whole roster.",
       doc: "{ student_id?, status?: draft|sent|archived }",
       input: z.object({ student_id: uuid.optional(), status: z.enum(REPORT_STATUS).optional() }).strict(),
@@ -469,6 +471,7 @@ export const narrativeFlags: OpGroup = {
     op({
       name: "reports.list_flags",
       kind: "read",
+      outside: true,
       title: "Narrative flags from Coherence with ids, severity, status and sharing (not their text), for one student or the roster.",
       doc: "{ student_id?, status?: open|resolved|dismissed }",
       input: z.object({ student_id: uuid.optional(), status: z.enum(FLAG_STATUS).optional() }).strict(),
@@ -605,6 +608,9 @@ export const blasts: OpGroup = {
     op({
       name: "blasts.audiences",
       kind: "read",
+      // Class years and school names on the list are the students' own text (student_colleges.name,
+      // profiles.grad_year): reading them is outside content, whenever there are any.
+      outside: (body) => asArray(asRecord(body).schools).length > 0 || asArray(asRecord(body).classYears).length > 0,
       title: "Who a blast can go to right now: the roster, class years, schools applied to and application statuses, with counts.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -720,6 +726,7 @@ export const emailTemplates: OpGroup = {
     op({
       name: "templates.list",
       kind: "read",
+      outside: false,
       title: "The counselor's email templates with ids (families or staff set); with template_id, that template's full text too.",
       doc: "{ set?: families|staff (default families), template_id? }",
       input: z.object({ set: z.enum(TEMPLATE_SETS).optional(), template_id: uuid.optional() }).strict(),
@@ -851,6 +858,7 @@ export const notifications: OpGroup = {
     op({
       name: "notifications.list",
       kind: "read",
+      outside: true,
       title: "The counselor's notifications (the bell) with ids, newest first; optionally unread only, one kind or one student.",
       doc: "{ unread? bool, kind?: deadline|red-flag|report|invite|ai|policy|scholarship|aid|opportunity|system, student_id?, limit? 1-200 }",
       input: z

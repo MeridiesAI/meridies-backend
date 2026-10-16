@@ -26,6 +26,7 @@ import {
   type StudentFacts,
   type UpcomingItem,
 } from "./data.js";
+import { plainGradYear } from "../context/identity.js";
 import type { DateWindow } from "./dates.js";
 import type { RosterIndex } from "./entities.js";
 import type { SourceLedger } from "./ledger.js";
@@ -38,6 +39,12 @@ export type DirectAnswer = {
   text: string;
   trace: string[];
   sources: string[];
+  /**
+   * The answer quotes text someone other than the counselor wrote (a deadline's or a student-added
+   * task's title, the student's high school or majors). It is saved to the chat and read back next
+   * turn, so the engine carries this forward like a turn that read outside content.
+   */
+  outside: boolean;
 };
 
 export type CompileContext = {
@@ -94,7 +101,7 @@ export async function compileDirect(u: Understanding, ctx: CompileContext): Prom
   if (u.judgement || !isLookup(u)) return null;
 
   if (!ctx.chatStudentId && !u.students.length && /\bhow many students\b/.test(u.norm)) {
-    return { frame: "roster-count", text: `You have ${ctx.roster.size} active student${ctx.roster.size === 1 ? "" : "s"}.`, trace: ["Counted your roster"], sources: ["Roster"] };
+    return { frame: "roster-count", text: `You have ${ctx.roster.size} active student${ctx.roster.size === 1 ? "" : "s"}.`, trace: ["Counted your roster"], sources: ["Roster"], outside: false };
   }
 
   const studentAttrs = u.attributes.filter((a) => STUDENT_ATTRIBUTES.has(a));
@@ -141,7 +148,7 @@ async function caseloadRisk(ctx: CompileContext, horizon: number): Promise<Direc
         ...ranked.map((r, i) => `${i + 1}. ${plain(r.name, 60)}: ${r.reasons.join("; ")}.`),
       ].join("\n")
     : `Nobody on your roster has overdue work, a red flag or a deadline at risk ${span}.`;
-  return { frame: "caseload-risk", text, trace: ["Ranked the caseload by urgency"], sources: ["Tasks", "Calendar"] };
+  return { frame: "caseload-risk", text, trace: ["Ranked the caseload by urgency"], sources: ["Tasks", "Calendar"], outside: ranked.some((r) => r.outside) };
 }
 
 async function upcoming(ctx: CompileContext, u: Understanding, studentId: string | null, now: Date): Promise<DirectAnswer> {
@@ -159,12 +166,13 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
       text: `Nothing open is due ${window.label}${name ? ` for ${name}` : ""}.`,
       trace: ["Checked deadlines, tasks and meetings"],
       sources: ["Calendar", "Tasks"],
+      outside: false,
     };
   }
   if (SINGULAR_NEXT.test(u.norm)) {
     const kind = /\bmeeting\b/.test(u.norm) ? "meeting" : /\btask\b/.test(u.norm) ? "task" : /\bdeadline\b/.test(u.norm) ? "deadline" : null;
     const next = items.find((i) => !i.overdue && (!kind || i.kind === kind));
-    if (next) return { frame: "upcoming", text: `Next${kind ? ` ${kind}` : ""}: ${line(next)}.`, trace: ["Checked deadlines, tasks and meetings"], sources: ["Calendar", "Tasks"] };
+    if (next) return { frame: "upcoming", text: `Next${kind ? ` ${kind}` : ""}: ${line(next)}.`, trace: ["Checked deadlines, tasks and meetings"], sources: ["Calendar", "Tasks"], outside: next.outside };
   }
   const shown = items.slice(0, 12);
   const more = items.length - shown.length;
@@ -177,6 +185,7 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
     ].join("\n"),
     trace: ["Checked deadlines, tasks and meetings"],
     sources: ["Calendar", "Tasks"],
+    outside: shown.some((i) => i.outside),
   };
 }
 
@@ -186,10 +195,17 @@ async function studentFactsAnswer(ctx: CompileContext, studentId: string, viaCha
   if (!f) return null;
   const n = firstName(f.name) || "This student";
   const lines: string[] = [];
+  // Which printed values are text the student (or an import, or the questionnaire) typed: rank, major,
+  // school, testing status and a class year that isn't four digits. Numbers aren't.
+  let outside = false;
+  const typed = <T>(v: T): T => {
+    outside = true;
+    return v;
+  };
   const satLine = () =>
     f.sat
       ? `${n}'s SAT is ${f.sat.total}${f.sat.superscore ? " (superscore)" : f.sat.ebrw !== null && f.sat.math !== null ? ` (${f.sat.ebrw} reading and writing, ${f.sat.math} math)` : ""}.`
-      : `${n} has no SAT score on file${f.testStatus ? `; testing status: ${plain(f.testStatus, 60)}` : ""}.`;
+      : `${n} has no SAT score on file${f.testStatus ? `; testing status: ${typed(plain(f.testStatus, 60))}` : ""}.`;
   const actLine = () => (f.act !== null ? `${n}'s ACT composite is ${f.act}.` : `${n} has no ACT score on file.`);
   for (const a of attrs) {
     if (a === "gpa") {
@@ -205,13 +221,13 @@ async function studentFactsAnswer(ctx: CompileContext, studentId: string, viaCha
     } else if (a === "sat") lines.push(satLine());
     else if (a === "act") lines.push(actLine());
     else if (a === "tests") lines.push(satLine(), actLine());
-    else if (a === "rank") lines.push(f.classRank ? `${n}'s class rank: ${plain(f.classRank, 60)}.` : `${n} has no class rank on file.`);
-    else if (a === "major") lines.push(f.majors.length ? `${n}'s intended major${f.majors.length === 1 ? " is" : "s are"} ${f.majors.map((m) => plain(m, 60)).join(", ")}.` : `${n} has no intended major on file.`);
-    else if (a === "class_year") lines.push(f.gradYear ? `${n} is in the class of ${plain(f.gradYear, 10)}.` : `${n} has no graduation year on file.`);
-    else if (a === "school") lines.push(f.highSchool ? `${n} attends ${plain(f.highSchool, 100)}.` : `${n} has no high school on file.`);
+    else if (a === "rank") lines.push(f.classRank ? `${n}'s class rank: ${typed(plain(f.classRank, 60))}.` : `${n} has no class rank on file.`);
+    else if (a === "major") lines.push(f.majors.length ? `${n}'s intended major${f.majors.length === 1 ? " is" : "s are"} ${typed(f.majors.map((m) => plain(m, 60)).join(", "))}.` : `${n} has no intended major on file.`);
+    else if (a === "class_year") lines.push(f.gradYear ? `${n} is in the class of ${plainGradYear(f.gradYear) ?? typed(plain(f.gradYear, 10))}.` : `${n} has no graduation year on file.`);
+    else if (a === "school") lines.push(f.highSchool ? `${n} attends ${typed(plain(f.highSchool, 100))}.` : `${n} has no high school on file.`);
   }
   if (!lines.length) return null;
-  return { frame: "student-facts", text: [...new Set(lines)].join("\n"), trace: [`Read ${n}'s record`], sources: ["Student profile", "Grades and scores"] };
+  return { frame: "student-facts", text: [...new Set(lines)].join("\n"), trace: [`Read ${n}'s record`], sources: ["Student profile", "Grades and scores"], outside };
 }
 
 async function collegeFigures(ctx: CompileContext, ids: string[], asks: Attribute[]): Promise<DirectAnswer | null> {
@@ -240,5 +256,5 @@ async function collegeFigures(ctx: CompileContext, ids: string[], asks: Attribut
     blocks.push(facts.length > 1 ? `- ${sentence}` : sentence);
   }
   if (stale) blocks.push("These figures haven't been re-verified against the source in over a year.");
-  return { frame: "college-facts", text: blocks.join("\n"), trace: [`Looked up ${facts.length === 1 ? plain(facts[0]!.name, 80) : `${facts.length} schools`} in the College Scorecard data`], sources: ["College catalog"] };
+  return { frame: "college-facts", text: blocks.join("\n"), trace: [`Looked up ${facts.length === 1 ? plain(facts[0]!.name, 80) : `${facts.length} schools`} in the College Scorecard data`], sources: ["College catalog"], outside: false };
 }

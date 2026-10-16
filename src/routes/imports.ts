@@ -17,15 +17,14 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { env, hasAnthropic, hasImportWorker } from "../env.js";
-import { sendEmail } from "../lib/email.js";
+import { hasAnthropic, hasImportWorker } from "../env.js";
 import { conflict, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { assertImportsReady, step2Migrated, unavailableNow } from "../lib/imports/availability.js";
 import { MAX_FILE_BYTES } from "../lib/imports/caps.js";
 import { fromImportRpc } from "../lib/imports/errors.js";
 import { createUploadUrl, excludeFile, loadImportRow, registerFile, startImport, UPLOAD_TYPES } from "../lib/imports/files.js";
-import { sendImportInvitations } from "../lib/imports/invitations.js";
+import { holdAfterCommit, sendImportInvitations } from "../lib/imports/invitations.js";
 import { kickImportJob } from "../lib/imports/jobs.js";
 import { savePlan, suggestPlan } from "../lib/imports/mapping.js";
 import { namesMatch, normalizeName } from "../lib/imports/names.js";
@@ -35,7 +34,7 @@ import { importsAiEnabled, importsEnabledFor } from "../lib/imports/rollout.js";
 import { reviewGroups, reviewPage, updateReview } from "../lib/imports/review.js";
 import { stageImport } from "../lib/imports/stage.js";
 import { limit } from "../lib/limits.js";
-import { redactText } from "../lib/requestLog.js";
+import { serializeErr } from "../lib/requestLog.js";
 
 type Row = Record<string, unknown>;
 
@@ -162,26 +161,6 @@ function toImportStatus(r: Row) {
     jobError: r.job_error ?? null,
     jobResult: r.job_result ?? null,
   };
-}
-
-/** One email to Meridies when a first import's invitations wait for a check (§5.1). Counts only. */
-async function notifyInviteReview(request: FastifyRequest, importId: string, count: number): Promise<void> {
-  const to = env.ACCESS_REVIEW_EMAIL ?? "team@meridiesai.com";
-  const lines = [
-    `A counselor's first import would send ${count} invitations, so they are held for a check.`,
-    `Counselor: ${request.profile.full_name ?? "(no name)"} <${request.profile.email ?? request.auth.email ?? ""}>`,
-    `Import: ${importId}`,
-    `To approve, as postgres: update public.roster_imports set invites_approved_at = now() where id = '${importId}';`,
-  ];
-  await sendEmail({
-    to,
-    subject: "Import invitations waiting for a check",
-    html: lines.map((l) => `<p>${l.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`).join(""),
-    text: lines.join("\n"),
-    template: "import-invites-review",
-    recipient_kind: "counselor",
-    logger: request.log,
-  }).catch((err: unknown) => request.log.warn({ err: redactText(String(err)) }, "import invite review email failed"));
 }
 
 export default async function importRoutes(app: FastifyInstance) {
@@ -357,9 +336,13 @@ export default async function importRoutes(app: FastifyInstance) {
       throw fromImportRpc(error);
     }
     kickImportJob("commit", id, request.auth.userId, request.log);
-    if (invites > 50) {
-      const { data: held } = await request.db.from("roster_imports").select("invites_held_reason").eq("id", id).maybeSingle();
-      if (held?.invites_held_reason === "first-import-review") void notifyInviteReview(request, id, invites);
+    // Hold the invitations for Meridies when the counselor's imports would
+    // send more than 50 in all (and tell Meridies once). Sending asks again,
+    // so a failure here only delays the email.
+    if (invites > 0) {
+      await holdAfterCommit(request, id).catch((err: unknown) =>
+        request.log.warn({ err: serializeErr(err), importId: id }, "import invite review check failed")
+      );
     }
     return reply.code(202).send({ status: "committing" });
   });
