@@ -1,8 +1,9 @@
 /**
  * Suite integrations.
  *
- * One consent covers a whole provider: connecting Google lights up Drive, Gmail
- * and Calendar together rather than asking three times. The granular provider
+ * Microsoft asks once. Google asks in two steps: Connect is identity plus drive.file (only
+ * the files the counselor picks), and Calendar is added on request (`?add=calendar`); it no
+ * longer lights up Gmail or reads all of Drive. The granular provider
  * values (`common-app`, `scoir`, `csv`, ...) stay for the imports that really
  * are separate things.
  *
@@ -121,16 +122,17 @@ export default async function integrationRoutes(app: FastifyInstance) {
    */
   app.get("/providers", { preHandler: app.authenticate }, async (request) => {
     const db = serviceClient();
-    const accounts = new Map<string, { email: string | null; connectedAt: string | null }>();
+    const accounts = new Map<string, { email: string | null; connectedAt: string | null; scopes: string[] }>();
     if (db) {
       const { data } = await db
         .from("integration_tokens")
-        .select("provider, account_email, created_at")
+        .select("provider, account_email, created_at, scopes")
         .eq("owner_id", request.auth.userId);
       for (const r of data ?? []) {
         accounts.set(String(r.provider), {
           email: (r.account_email as string | null) ?? null,
           connectedAt: (r.created_at as string | null) ?? null,
+          scopes: (r.scopes as string[] | null) ?? [],
         });
       }
     }
@@ -144,6 +146,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
         tokensHeld: Boolean(account),
         accountEmail: account?.email ?? null,
         connectedAt: account?.connectedAt ?? null,
+        calendarEnabled: account ? account.scopes.some((s) => /calendar\.events$|calendars\.readwrite$/i.test(s)) : false,
+        driveGranted: account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
+        // Until the Railway variables are set the app hides the Drive button (Elvin, 10/15).
+        pickerReady: false, // Task 11
       };
     });
   });
@@ -162,7 +168,9 @@ export default async function integrationRoutes(app: FastifyInstance) {
     },
     async (request) => {
       const { provider } = suiteParam.parse(request.params);
-      return { url: await beginAuthorization(request.auth.userId, provider) };
+      const { add } = z.object({ add: z.enum(["calendar"]).optional() }).strict().parse(request.query ?? {});
+      if (add && provider !== "google") throw badRequest("Only Google has add-ons");
+      return { url: await beginAuthorization(request.auth.userId, provider, { add: add ?? null }) };
     }
   );
 

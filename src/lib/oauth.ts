@@ -1,8 +1,8 @@
 /**
  * OAuth 2.0 for the Google and Microsoft suites — authorization code + PKCE.
  *
- * One consent per provider covers files, mail and calendar, which is what the
- * brief asks for. The handshake:
+ * Google asks in two steps (Connect: identity plus drive.file; Calendar only when the
+ * counselor turns it on); Microsoft asks once. The handshake:
  *
  *   1. `beginAuthorization` mints a random `state` and a PKCE verifier, stores
  *      sha256(state) bound to the signed-in user with a ten-minute expiry, and
@@ -34,7 +34,7 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { env } from "../env.js";
-import { badRequest, conflict, HttpError, unavailable } from "./errors.js";
+import { badRequest, HttpError, unavailable } from "./errors.js";
 import { serviceClient } from "./supabase.js";
 import { decryptToken, encryptToken, hasTokenKey } from "./tokenCrypto.js";
 
@@ -46,21 +46,51 @@ const REFRESH_MARGIN_MS = 60 * 1000;
 const HTTP_TIMEOUT_MS = 15_000;
 
 /**
- * Google: Drive read-only (listing and importing a file the counselor picks,
- * and reading a shared Doc's `modifiedTime` for the tracker), Drive per-file
- * (creating supplement Docs), Gmail send,
- * Calendar events (including creating the Meet conference), plus identity.
+ * Google asks in two steps (spec §4.1): Connect is identity plus drive.file (only files the
+ * counselor picks in Google Picker, or files this app created); Calendar is added only when the
+ * counselor turns it on. Nothing the client sends becomes a scope string.
  */
-const GOOGLE_SCOPES = [
-  "openid",
-  "email",
-  "https://www.googleapis.com/auth/drive.readonly",
-  // Create the student's supplement Docs (v7/v10 Application page). drive.file
-  // only reaches files this app created, so it adds no read of anything else.
-  "https://www.googleapis.com/auth/drive.file",
-  "https://www.googleapis.com/auth/gmail.send",
-  "https://www.googleapis.com/auth/calendar.events",
-];
+export const GOOGLE_SCOPE = {
+  driveFile: "https://www.googleapis.com/auth/drive.file",
+  calendarEvents: "https://www.googleapis.com/auth/calendar.events",
+} as const;
+
+const GOOGLE_CONNECT_SCOPES = ["openid", "email", GOOGLE_SCOPE.driveFile];
+const GOOGLE_ADD_ONS = { calendar: [GOOGLE_SCOPE.calendarEvents] } as const;
+export type GoogleAddOn = keyof typeof GOOGLE_ADD_ONS;
+
+/** What Google may hand back. Anything else (an old drive.readonly folded back in) is refused. */
+const GOOGLE_ALLOWED_BACK = new Set<string>([
+  "openid", "email", "https://www.googleapis.com/auth/userinfo.email", GOOGLE_SCOPE.driveFile, GOOGLE_SCOPE.calendarEvents,
+]);
+
+export function googleScopesFor(add: GoogleAddOn | null): string[] {
+  if (add === null) return [...GOOGLE_CONNECT_SCOPES];
+  const extra = Object.hasOwn(GOOGLE_ADD_ONS, add) ? GOOGLE_ADD_ONS[add] : undefined;
+  if (!extra) throw new Error(`Unknown Google add-on: ${String(add)}`);
+  return [...GOOGLE_CONNECT_SCOPES, ...extra];
+}
+
+export function disallowedGoogleScopes(granted: string[]): string[] {
+  return granted.filter((s) => !GOOGLE_ALLOWED_BACK.has(s));
+}
+
+export function accountMismatch(existingAccountId: string | null, newSub: string | null): boolean {
+  if (!existingAccountId) return false;
+  return newSub !== existingAccountId;
+}
+
+export function googleAuthorizeParams(input: { add: GoogleAddOn | null; loginHint: string | null }): Record<string, string> {
+  return {
+    scope: googleScopesFor(input.add).join(" "),
+    // offline + consent: the only way Google reliably issues a refresh token.
+    access_type: "offline",
+    prompt: "consent",
+    // The Calendar consent adds to the first grant instead of replacing it.
+    include_granted_scopes: "true",
+    ...(input.loginHint ? { login_hint: input.loginHint } : {}),
+  };
+}
 
 /**
  * Microsoft identity platform v2. `Files.Read.All` rather than `Files.Read`
@@ -98,13 +128,9 @@ function providerConfig(provider: SuiteProvider): ProviderConfig | null {
       tokenUrl: "https://oauth2.googleapis.com/token",
       clientId: env.GOOGLE_CLIENT_ID,
       clientSecret: env.GOOGLE_CLIENT_SECRET,
-      scopes: GOOGLE_SCOPES,
-      // offline + consent: the only way Google reliably issues a refresh token.
-      extraAuthorizeParams: {
-        access_type: "offline",
-        prompt: "consent",
-        include_granted_scopes: "true",
-      },
+      scopes: googleScopesFor(null),
+      // The Google parameters come from googleAuthorizeParams.
+      extraAuthorizeParams: {},
     };
   }
   if (!env.MICROSOFT_CLIENT_ID || !env.MICROSOFT_CLIENT_SECRET) return null;
@@ -188,7 +214,11 @@ async function readTokenResponse(res: Response): Promise<TokenResponse> {
 
 // ---- 1. Consent URL ---------------------------------------------------------
 
-export async function beginAuthorization(userId: string, provider: SuiteProvider): Promise<string> {
+export async function beginAuthorization(
+  userId: string,
+  provider: SuiteProvider,
+  opts: { add?: GoogleAddOn | null } = {}
+): Promise<string> {
   const { config, db } = configured(provider);
 
   const state = randomBytes(32).toString("base64url");
@@ -206,17 +236,35 @@ export async function beginAuthorization(userId: string, provider: SuiteProvider
   });
   if (error) throw new HttpError(500, "Couldn't start the sign-in");
 
-  const params = new URLSearchParams({
+  const base = {
     client_id: config.clientId,
     redirect_uri: redirectUri(provider),
     response_type: "code",
-    scope: config.scopes.join(" "),
     state,
     code_challenge: sha256B64Url(verifier),
     code_challenge_method: "S256",
-    ...config.extraAuthorizeParams,
-  });
+  };
+  const params =
+    provider === "google"
+      ? new URLSearchParams({
+          ...base,
+          ...googleAuthorizeParams({ add: opts.add ?? null, loginHint: await connectedAccountEmail(userId, "google") }),
+        })
+      : new URLSearchParams({ ...base, scope: config.scopes.join(" "), ...config.extraAuthorizeParams });
   return `${config.authorizeUrl}?${params.toString()}`;
+}
+
+/** The connected account's email, for login_hint and messages. Null when not connected. */
+export async function connectedAccountEmail(ownerId: string, provider: SuiteProvider): Promise<string | null> {
+  const db = serviceClient();
+  if (!db) return null;
+  const { data } = await db
+    .from("integration_tokens")
+    .select("account_email")
+    .eq("owner_id", ownerId)
+    .eq("provider", provider)
+    .maybeSingle();
+  return (data?.account_email as string | null) ?? null;
 }
 
 // ---- 2. Completion ------------------------------------------------------------
@@ -309,6 +357,33 @@ export async function completeAuthorization(
     accountEmail = me.email ?? accountEmail ?? (typeof claims.preferred_username === "string" ? claims.preferred_username : null);
   }
 
+  if (provider === "google") {
+    const extra = disallowedGoogleScopes(granted);
+    const { data: existing } = await db
+      .from("integration_tokens")
+      .select("account_id, account_email")
+      .eq("owner_id", ownerId)
+      .eq("provider", "google")
+      .maybeSingle();
+    const existingId = (existing?.account_id as string | null) ?? null;
+    if (extra.length > 0 || accountMismatch(existingId, accountId)) {
+      // Leave nothing behind at Google for a grant we won't keep.
+      await postForm("https://oauth2.googleapis.com/revoke", { token: token.access_token }).catch(() => undefined);
+      if (extra.length > 0) {
+        log.warn({ provider, extra: extra.length }, "google returned scopes outside the allowlist");
+        await revokeAndForget(ownerId, "google", log);
+        await db.from("integrations").delete().eq("owner_id", ownerId).eq("provider", "google");
+        throw new HttpError(409, "Your Google connection had permissions Meridies no longer uses. Connect Google again.", "google_reconnect");
+      }
+      const connected = (existing?.account_email as string | null) ?? "the connected account";
+      throw new HttpError(
+        409,
+        `You signed in as ${accountEmail ?? "another account"}. Use ${connected}, or disconnect Google and connect the other account.`,
+        "google_other_account"
+      );
+    }
+  }
+
   const { error: saveError } = await db.from("integration_tokens").upsert(
     {
       owner_id: ownerId,
@@ -374,7 +449,9 @@ async function readTokenRow(
     .eq("provider", provider)
     .maybeSingle();
   if (error) throw new HttpError(500, "Couldn't read the connection");
-  if (!row) throw conflict(`${label} isn't connected. Connect it under App Integrations first.`);
+  if (!row) {
+    throw new HttpError(409, `${label} isn't connected. Connect it under App Integrations first.`, `${provider}_disconnected`);
+  }
   return row as TokenRow;
 }
 
@@ -445,7 +522,7 @@ async function refreshGrant(
   if (!row.refresh_token_enc) {
     const message = `${label} access expired and can't be renewed. Reconnect ${label}.`;
     await markGrantBroken(ownerId, provider, message);
-    throw conflict(message);
+    throw new HttpError(409, message, `${provider}_reconnect`);
   }
 
   const res = await postForm(config.tokenUrl, {
@@ -475,7 +552,7 @@ async function refreshGrant(
       ? `${label} access was revoked or has lapsed. Reconnect ${label}.`
       : `${label} couldn't renew access just now.`;
     if (revoked) await markGrantBroken(ownerId, provider, message);
-    throw revoked ? conflict(message) : unavailable(message);
+    throw revoked ? new HttpError(409, message, `${provider}_reconnect`) : unavailable(message);
   }
 
   const update: Record<string, unknown> = {
@@ -515,10 +592,14 @@ export function hasScope(token: LiveToken, scope: string): boolean {
   });
 }
 
-export function requireScope(token: LiveToken, provider: SuiteProvider, scope: string, what: string) {
+export function requireScope(token: LiveToken, provider: SuiteProvider, scope: string, what: string, code?: string) {
   if (!hasScope(token, scope)) {
-    throw conflict(
-      `Your ${providerLabel(provider)} connection doesn't allow ${what}. Reconnect and leave that permission ticked.`
+    throw new HttpError(
+      409,
+      code === "calendar_not_enabled"
+        ? "Turn on Google Calendar to add Meet links."
+        : `Your ${providerLabel(provider)} connection doesn't allow ${what}. Reconnect and leave that permission ticked.`,
+      code
     );
   }
 }
