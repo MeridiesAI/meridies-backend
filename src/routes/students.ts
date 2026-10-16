@@ -12,7 +12,7 @@ import { z } from "zod";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { assertCanEditStudent, assertCanViewStudent, canArchive, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
-import { MAX_PROFILE_CHARS, mergeProfile, profileChars } from "../lib/profileSize.js";
+import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
 import {
   toActivity,
   toAward,
@@ -30,13 +30,16 @@ import {
 
 const idParam = z.object({ id: z.string().uuid("Not a valid student id") });
 
+const ROSTER_COLUMNS =
+  "id, full_name, email, role, onboarding_step, onboarding_complete, counselor_id, avatar_url, timezone, title, headline, hometown, high_school, grad_year, profile, counselor_approved_at, archived_at" as const;
+
 const patchStudentSchema = z
   .object({
     headline: z.string().trim().max(300),
     hometown: z.string().trim().max(200),
     highSchool: z.string().trim().max(200),
     gradYear: z.string().trim().max(10),
-    profile: z.record(z.unknown()).refine((p) => profileChars(p) <= MAX_PROFILE_CHARS, "Profile is too large"),
+    profile: z.record(z.unknown()).refine((p) => profileBytes(p) <= MAX_PROFILE_BYTES, "Profile is too large"),
     archived: z.boolean(),
   })
   .partial()
@@ -46,7 +49,12 @@ export default async function studentRoutes(app: FastifyInstance) {
   /** The counselor's roster, each with their next open deadline. `?archived=true` lists the archived ones instead (to restore one). */
   app.get("/", { preHandler: [app.authenticate, requireRole("counselor"), limit("students:list", 120, 60)] }, async (request) => {
     const { archived } = z.object({ archived: z.enum(["true", "false"]).optional() }).parse(request.query ?? {});
-    let query = request.db.from("profiles").select("*").eq("counselor_id", request.auth.userId);
+    // Named columns, not `*`: only what the roster card needs. The profile blob
+    // stays because the app draws from its keys here (the strength shape,
+    // AxIS's panel, search); it is bounded on every write
+    // (lib/profileSize.ts, and 20261024000081 in the database), like every
+    // other text column below.
+    let query = request.db.from("profiles").select(ROSTER_COLUMNS).eq("counselor_id", request.auth.userId);
     query = archived === "true" ? query.not("archived_at", "is", null) : query.is("archived_at", null);
     const { data: students, error } = await query.order("full_name");
 
@@ -185,11 +193,14 @@ export default async function studentRoutes(app: FastifyInstance) {
         throw forbidden("Only the student's counselor can archive or restore them");
       }
 
-      const { data: current } = await request.db
-        .from("profiles")
-        .select("profile")
-        .eq("id", id)
-        .maybeSingle();
+      // Read only when the profile is being merged: a failed read must not
+      // become an empty base that the merge would then write over the stored one.
+      let current: { profile?: unknown } | null = null;
+      if (patch.profile !== undefined) {
+        const read = await request.db.from("profiles").select("profile").eq("id", id).maybeSingle();
+        if (read.error) throw fromPostgrest(read.error);
+        current = read.data as { profile?: unknown } | null;
+      }
 
       const update: Record<string, unknown> = {};
       if (patch.headline !== undefined) update.headline = patch.headline;
@@ -211,6 +222,7 @@ export default async function studentRoutes(app: FastifyInstance) {
         .select("*")
         .maybeSingle();
 
+      if (isProfileTooLarge(error)) throw badRequest("Profile is too large");
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That student isn't on your roster");
       return toMeridiesUser(data as never, { counselorName: request.profile.full_name });

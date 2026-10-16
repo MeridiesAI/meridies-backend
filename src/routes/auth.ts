@@ -10,7 +10,7 @@ import { accessStatusOf } from "../lib/access.js";
 import { requestAccess, reviewBase } from "../lib/accessReview.js";
 import { badRequest, forbidden, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { limit } from "../lib/limits.js";
-import { MAX_PROFILE_CHARS, mergeProfile } from "../lib/profileSize.js";
+import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
 import { toMeridiesUser } from "../lib/serialize.js";
 import { serviceClient } from "../lib/supabase.js";
 
@@ -33,7 +33,7 @@ const updateMeSchema = z
     // here and the merged value below (lib/profileSize.ts).
     profile: z
       .record(z.unknown())
-      .refine((p) => JSON.stringify(p).length <= MAX_PROFILE_CHARS, "Profile is too large"),
+      .refine((p) => profileBytes(p) <= MAX_PROFILE_BYTES, "Profile is too large"),
   })
   .partial()
   .strict();
@@ -90,6 +90,7 @@ export default async function authRoutes(app: FastifyInstance) {
         .select("*")
         .maybeSingle();
 
+      if (isProfileTooLarge(error)) throw badRequest("Profile is too large");
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("Profile not found");
 

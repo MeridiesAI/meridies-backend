@@ -494,11 +494,16 @@ the database (`20261010*`):
   essay prose.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
-  /auth/me`, the profile bounded at 200,000 characters of JSON measured
-  after the merge, on that route and the counselor's `PATCH /students/:id`
+  /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
+  on that route and the counselor's `PATCH /students/:id`
   (`lib/profileSize.ts`; a profile already over may shrink, never grow), and
-  in the database for PostgREST writes too (`profiles_profile_size`,
-  `20261024000081`, 400,000 characters of jsonb text)), and a trigger on
+  in the database for PostgREST writes too, in the same measure (the UTF-8
+  bytes of the jsonb text, which `profileBytes` reproduces, so the two agree
+  on what fits): `profiles_column_bounds` (`20261024000081`) also bounds
+  every other client-writable profiles column (name, school, hometown and
+  title 200, headline 300, avatar link 2048, phone 40, time zone 80, class
+  year 10; clipped at signup, refused past the bound on update unless the
+  value shrinks). `GET /students` reads named columns, not `*`), and a trigger on
   that column (`private.sync_intake_answers`) copies every answer that has a
   real field into it, through the import pipeline's own functions
   (`import_value_ok`, `import_current_value`, the compare-and-set
