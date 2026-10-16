@@ -14,6 +14,7 @@
  */
 import type { FastifyInstance } from "fastify";
 import { isCounselorApproved } from "./access.js";
+import { GUESS_PAGES, GUESS_TEXT_LIMIT } from "./documentGuess.js";
 import { readDocumentText } from "./documentText.js";
 import { parseSpreadsheet } from "./imports/sheet.js";
 import { extractPdfText, PDF_LIMITS } from "./pdfText.js";
@@ -307,4 +308,15 @@ export function startExtractionRecovery(app: FastifyInstance): void {
   app.addHook("onClose", async () => {
     if (timer) clearInterval(timer);
   });
+}
+
+/** Text for the type guess only: first pages of a PDF (jumps the queue, gives up after 5 s), or a text file. Never stored. */
+export async function guessText(bytes: Uint8Array, mimeType: string, filename: string): Promise<string | null> {
+  const kind = extractorFor(mimeType, filename);
+  if (kind === "pdf") {
+    const r = await extractPdfText(bytes, { maxPages: GUESS_PAGES, priority: "high", waitMs: 5_000 });
+    return r.ok ? r.text.slice(0, GUESS_TEXT_LIMIT) : null;
+  }
+  if (kind === "text") return readDocumentText(Buffer.from(bytes), filename, mimeType)?.slice(0, GUESS_TEXT_LIMIT) ?? null;
+  return null;
 }

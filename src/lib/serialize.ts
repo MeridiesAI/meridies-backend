@@ -383,6 +383,12 @@ export const toDocument = (r: Row) => ({
   availableToLlm: Boolean(r.available_to_llm),
   aiAccess: String(r.ai_access ?? "default") as "default" | "allowed" | "excluded",
   ferpaWaived: Boolean(r.ferpa_waived),
+  /** False for a Drive pick nobody has confirmed yet: out of AI until a type is confirmed. */
+  kindConfirmed: r.kind_confirmed !== false,
+  /** The server's guess for an unconfirmed file (lib/documentGuess.ts); never document text. */
+  kindGuess: (r.kind_guess && typeof r.kind_guess === "object" ? r.kind_guess : null) as
+    | { kind: string | null; basis: "text" | "filename" | "type" | null; matched: string | null; textFound: boolean; keepOut: boolean }
+    | null,
   /** Drive / OneDrive file this was imported from; the tracker watches it. */
   externalProvider: nstr(r.external_provider) as "google" | "microsoft" | null,
   externalWebUrl: nstr(r.external_web_url),

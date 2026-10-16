@@ -123,3 +123,12 @@ export function guessKind(input: { filename: string; mimeType: string | null; te
   }
   return none(textFound);
 }
+
+/** The documents columns an import writes (spec §4.3): no kind means unconfirmed and kept out. */
+export function importFields(input: { kind: string | undefined; availableToLlm: boolean | undefined; guess: KindGuess }) {
+  if (input.kind === undefined) {
+    return { kind: "other", kind_confirmed: false, available_to_llm: false, kind_guess: input.guess as KindGuess | null, requestExtraction: false };
+  }
+  const available = input.availableToLlm ?? true;
+  return { kind: input.kind, kind_confirmed: true, available_to_llm: available, kind_guess: null as KindGuess | null, requestExtraction: available };
+}

@@ -23,11 +23,14 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
+import { guessText, requestExtraction } from "../lib/documentExtraction.js";
+import { guessKind, importFields } from "../lib/documentGuess.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
   beginAuthorization,
   completeAuthorization,
+  connectedAccountEmail,
   providerLabel,
   revokeAndForget,
   SUITE_PROVIDERS,
@@ -39,7 +42,6 @@ import { serviceClient } from "../lib/supabase.js";
 import {
   assertFileId,
   downloadRemoteFile,
-  exportGoogleDocText,
   getRemoteFile,
   listRemoteFiles,
 } from "../lib/suiteApi.js";
@@ -230,9 +232,11 @@ export default async function integrationRoutes(app: FastifyInstance) {
    *
    * The Storage upload runs on the caller's own client, exactly as a browser
    * upload would, so the bucket's own policies apply. The row keeps a pointer
-   * to the live file so the task tracker can see later edits. A Google Doc
-   * also gets its plain text in `parsed_data` — but only when the document is
-   * left available to AI, because that text exists to be read into a prompt.
+   * to the live file so the task tracker can see later edits. No text is read
+   * at import. With no `kind` the file arrives unconfirmed and kept out of AI,
+   * with a server guess of its type (a label only; the text it read is dropped);
+   * the counselor confirms it later and text extraction runs then. A named kind
+   * is confirmed at once and extracted unless kept out.
    */
   app.post(
     "/:provider/files/import",
@@ -262,10 +266,34 @@ export default async function integrationRoutes(app: FastifyInstance) {
 
       await enforceQuota(request.auth.userId, "uploads", "day", 500, "You've registered a lot of files today.");
 
-      const file = await getRemoteFile(request.auth.userId, provider, b.fileId, b.driveId ?? null, request.log);
+      let file;
+      try {
+        file = await getRemoteFile(request.auth.userId, provider, b.fileId, b.driveId ?? null, request.log);
+      } catch (err) {
+        if (provider === "google" && err instanceof HttpError && err.code === "not_found") {
+          const email = (await connectedAccountEmail(request.auth.userId, "google")) ?? "your connected Google account";
+          throw new HttpError(
+            409,
+            `Meridies can't open that file. It may have been picked with a different Google account, or it's no longer available. Pick it again with ${email}.`,
+            "picked_file_unavailable"
+          );
+        }
+        throw err;
+      }
       const download = await downloadRemoteFile(request.auth.userId, provider, file, request.log);
-      const availableToLlm = b.availableToLlm ?? true;
-      const text = availableToLlm ? await exportGoogleDocText(request.auth.userId, file, request.log) : null;
+      // The guess reads a little text in memory and drops it; nothing from it is stored but the label.
+      const guess = b.kind === undefined
+        ? guessKind({
+            filename: file.name,
+            mimeType: file.mimeType,
+            text: await guessText(
+              new Uint8Array(download.bytes.buffer, download.bytes.byteOffset, download.bytes.byteLength),
+              download.mimeType,
+              download.filename
+            ),
+          })
+        : guessKind({ filename: file.name, mimeType: file.mimeType, text: null });
+      const fields = importFields({ kind: b.kind, availableToLlm: b.availableToLlm, guess });
 
       const safeName = download.filename.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 180);
       const storagePath = `${studentId}/${Date.now()}-${safeName}`;
@@ -289,14 +317,17 @@ export default async function integrationRoutes(app: FastifyInstance) {
           title: b.title ?? null,
           mime_type: download.mimeType,
           size_bytes: download.bytes.length,
-          kind: b.kind ?? (file.kind === "document" ? "essay" : "other"),
+          kind: fields.kind,
+          kind_confirmed: fields.kind_confirmed,
+          kind_guess: fields.kind_guess,
           source: "integration",
-          available_to_llm: availableToLlm,
+          available_to_llm: fields.available_to_llm,
           uploaded_by: request.auth.userId,
-          parse_status: text ? "parsed" : "pending",
-          parsed_data: text
-            ? { text, extractedFrom: "google-docs-export", extractedAt: new Date().toISOString() }
-            : {},
+          parse_status: "pending",
+          parsed_data: {},
+          extraction_requested_at: fields.requestExtraction ? new Date().toISOString() : null,
+          extraction_attempts: 0,
+          extraction_lease_until: null,
           external_provider: provider,
           external_file_id: file.id,
           external_drive_id: file.driveId,
@@ -320,6 +351,8 @@ export default async function integrationRoutes(app: FastifyInstance) {
         // The student reads this log: a restricted file's name stays out of it.
         metadata: isRestrictedDocument({ kind: String(data.kind ?? "other") }) ? { source: provider } : { filename: download.filename, source: provider },
       });
+
+      if (fields.requestExtraction) requestExtraction([String(data.id)], request.log);
 
       return reply.code(201).send(toDocument(data as Row));
     }
