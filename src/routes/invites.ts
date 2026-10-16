@@ -9,6 +9,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { hasAnswers } from "../lib/studentSetup.js";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
@@ -198,6 +199,34 @@ const bulkSchema = z
   })
   .strict();
 
+/**
+ * Where each student stands on the wizard's Profile step: answered, skipped, or
+ * not yet. Read on the counselor's client; a student it can't read is null.
+ */
+async function profileStatuses(
+  request: FastifyRequest,
+  studentIds: string[]
+): Promise<Map<string, "not-started" | "skipped" | "completed">> {
+  const out = new Map<string, "not-started" | "skipped" | "completed">();
+  if (studentIds.length === 0) return out;
+  const { data, error } = await request.db
+    .from("profiles")
+    .select("id, skipped:profile->profileSkipped, answers:profile->intakeAnswers")
+    .in("id", studentIds);
+  if (error) {
+    request.log.warn({ code: error.code }, "profile status unreadable");
+    return out;
+  }
+  for (const p of data ?? []) {
+    const row = p as Record<string, unknown>;
+    out.set(
+      String(row.id),
+      hasAnswers(row.answers) ? "completed" : row.skipped === true ? "skipped" : "not-started"
+    );
+  }
+  return out;
+}
+
 const ALREADY_JOINED = "That student has already joined your practice.";
 const QUOTA_MESSAGE = "You've sent a lot of invitations today. Try again tomorrow.";
 
@@ -307,12 +336,18 @@ export default async function inviteRoutes(app: FastifyInstance) {
         invitationDeliveries(request, rows.map((r) => String(r.id))),
       ]);
 
+      const profileStatus = await profileStatuses(
+        request,
+        rows.map((r) => (r.accepted_by ? String(r.accepted_by) : "")).filter(Boolean)
+      );
+
       return rows.map((r) => {
         const detail = toInvitationDetail(r);
         const byRequest = items.get(detail.id);
         return {
           ...detail,
           studentId: r.accepted_by ? String(r.accepted_by) : null,
+          profileStatus: r.accepted_by ? profileStatus.get(String(r.accepted_by)) ?? null : null,
           delivery: deliveries.get(detail.id) ?? null,
           intakeItems: detail.intakeRequests.map((q) => {
             const item = byRequest?.get(q.id) ?? null;

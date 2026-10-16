@@ -29,9 +29,12 @@ const REVIEWED = [
   // (keyed by the caller's own profile, re-read from the database), and asks isCounselorApproved first.
   // lib/documentClaim.ts: inside the caller's own request, after authenticate; asks Storage whether an object is
   // at a path the caller may file into, and removes the object of a documents row the caller just deleted.
+  // lib/myInvitations.ts: inside a student's own request, after authenticate + requireRole("student"): finds pending
+  // invitations to that account's confirmed address (never returns a token) and accepts one by running
+  // accept_invitation as the student; asks approvedCounselorIds first.
   "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
-  "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
+  "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
