@@ -46,6 +46,7 @@ src/
 │   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
 │   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
+│   ├── proseGuard.ts      # the essay gate on streamed answers (AxIS, /chat): first-person cap
 │   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
@@ -196,8 +197,10 @@ pipeline step 2 (`20261023020001`-`03`), caseload transfer
 College Scorecard columns (`20261023080001`), emailed meeting invites
 (`20261023090001`), the meeting owner guard (`20261024000011`, a security
 fix that depends only on applied files and can go in ahead of the rest),
-the RLS and ownership fixes (`20261024000021`-`25`, below) and the
-submission-review and reminder security fixes (`20261024000041`-`43`). They go in later, in filename order
+the RLS and ownership fixes (`20261024000021`-`25`, below), the
+submission-review and reminder security fixes (`20261024000041`-`43`) and
+the security review's chat lock (`20261024000051`, restrictive inserts only;
+the API already refuses students on `/chat`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -625,6 +628,11 @@ Two layers, and they are not redundant:
 
 1. `@fastify/rate-limit` — in-process, per authenticated user (falling back to
    IP). Cheap, soaks up floods, **resets on deploy and doesn't span replicas.**
+   The IP is the one Railway's edge saw: `trustProxy` trusts exactly
+   `TRUST_PROXY_HOPS` hops (default 1), so the X-Forwarded-For entries a
+   client writes to the left of the edge's own are ignored by the limiter and
+   the request log. Never set it back to `true`: that takes the leftmost,
+   client-written entry, and a fresh header per request was a fresh bucket.
    Its hook runs before `authenticate`, so the key comes from verifying the
    bearer token on the spot (`clientKey` in `plugins/rateLimit.ts`,
    `lib/bearer.ts`), not from `request.auth`. A limited request answers 429.
@@ -1093,8 +1101,32 @@ anyone copying it.
   (`POST /axis/actions/:id/undo`) runs only a reversal that names a real write
   op with valid input, as the counselor.
 - **Guards in code, not in the prompt.** A turn that read outside content
-  (documents, mail, connected files) turns every auto change into a card, so
-  text in a file can't change anything without a click. After five auto changes
+  turns every auto change into a card, so text someone else wrote can't change
+  anything without a click. Outside content is documents, mail, connected
+  files, chat attachments, **and any text a student, a family, an import or
+  the web wrote**: the record sections on `OUTSIDE_SECTIONS`
+  (`lib/context/profiles.ts`: profile fields beyond the name and class,
+  academics, majors, activities, awards, courses, scores, the college list,
+  intake answers, deadlines, essays, documents, and tasks when one is the
+  student's own), the roster's high schools, deadlines and student-added
+  tasks, the planner's evidence (another student's record, what is due, the
+  caseload ranking when it quotes a deadline), `get_student_record`,
+  `list_upcoming`, `rank_caseload`, and every `lookup` whose op says
+  `outside` (each read op must declare it, true, false or a check on the
+  route's answer; `axis-ops.test.ts` fails on one that doesn't, and an
+  undeclared one counts as outside). So a change request's system prompt
+  carries only what the counselor wrote (`TRUSTED_SECTIONS`, built
+  `trustedOnly`: the name and class year, meetings, meeting notes, the
+  strength profile and the counselor's own tasks; in a roster chat names,
+  class years, meetings and counselor tasks), and the change finds anything
+  else with a lookup, which marks the turn if it reads such text. The marked
+  turn's next turn inherits it. Known limits: a student's name (up to 200
+  characters, on every card the counselor sees) is not counted; earlier
+  answers in the verbatim history and the memory summary can quote text from
+  more than one turn back; neither is an instruction channel the guard
+  reads. Switching parents or a guardian off (`set_alert_recipients` with
+  either copy flag, `update_guardian` with `alerts_enabled` or
+  `receives_reports`) asks first whichever way it goes. After five auto changes
   in one turn the rest wait for Confirm; twenty changes is the limit per turn.
   Specialists can't write. `dispatch.ts` refuses `/axis`, `/chat`, `/auth`,
   `/ai`, `/me`, `/account`, `/internal`, `/webhooks`, `/imports`, OAuth and the
@@ -1163,6 +1195,19 @@ reads a student's prose: `NO_PROSE_SYSTEM` in, `enforceNoProse()` out.
 two sentences or 240 characters *after* the model responds. Keep both. A system
 prompt is a request, not an enforcement mechanism — if you add another
 essay-adjacent route, it needs the code-level filter too.
+
+Free-text answers that stream (AxIS v2's agent and synthesis paths, the v1
+`/chat` stream) go through `ProseGate` (`lib/proseGuard.ts`) before any of
+them reaches the client: at most `FIRST_PERSON_WORD_CAP` (200) words in
+first-person-singular sentences per answer, past which the rest is withheld
+and the answer ends "I don't write essay text…"; what is saved is what was
+shown. Text streams live while it can't cross the cap, so ordinary answers and
+email drafts are unchanged. AxIS's essay router also catches requests by word
+count, prompt or voice ("650 first-person words for her prompt", "in her
+voice"). `/chat` is counselor-only: a student's free-form chat was a
+DEEP_MODEL ghostwriter guarded only by its prompt, and the app gives students
+no AxIS. Known limit: the gate is a shape test, so a short supplement asked
+for in pieces, or in the third person, is not caught by it.
 
 `/ai/essay-review` is the one route that may change a draft, and the rule is
 narrow: **mechanics only.** `enforceMechanicalEdit()` accepts a replacement only
@@ -1360,7 +1405,13 @@ student uploaded stays in the bucket when a counselor deletes its row).
 `documents.available_to_llm` and `document_links.available_to_llm` are
 data-handling switches, not display preferences. Anything that reads a document
 into a prompt must filter on them (see `routes/tasks.ts`, and the context
-layer below). Students don't see waived recommendation letters, IEP/504 or
+layer below). A link kept out of AI is saved `skipped` and never fetched or
+digested (`readLink` in `routes/files.ts`), and a link digest runs only when
+the practice's "AI summaries" switch is on: the counselor's own practice, or
+for a student their counselor's (`studentPracticeSettings` in
+`lib/practiceSettings.ts`, service client keyed by the caller's own profile,
+failing closed; `assertAiAllowed` applies it to every gated module a student
+reaches, submission review included). Students don't see waived recommendation letters, IEP/504 or
 counselor-only documents they didn't upload (`documents_student_restricted_select`),
 nor the task-document links of those files (`deliverable_documents_student_restricted_select`),
 nor their names in the activity log (the upload's `progress_events` row omits the filename).
@@ -1389,9 +1440,11 @@ migration is safe to apply first; the previous code ignores the new columns.
 
 - **Counselors only.** `buildStudentContext` refuses a caller whose role isn't
   `counselor` (403) before any read, the six `/ai/*` routes that call it have
-  `requireRole("counselor")`, and chat answers 403 before it saves the message
-  or opens the stream when a student id comes with a non-counselor caller (chat
-  without a student id is unchanged). A student's own session never builds a context.
+  `requireRole("counselor")`, and every `/chat` route but deleting your own
+  chat is `requireRole("counselor")` (RLS refuses a non-counselor's new chat
+  rows too, `20261024000051`). A student's own session never builds a context.
+  `buildStudentContext` also returns `outside` (the used sections someone other
+  than the counselor wrote, for AxIS) and takes `trustedOnly`.
 - **One entry point.** `buildStudentContext(request, studentId, feature, { only }?)`
   runs on `request.db`, so it never returns more than the counselor can see. A
   feature is `chat`, `student-ai`, `narrative-coherence`, `college-list` or
@@ -2099,7 +2152,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `import-text-shapes`, `regex-dos`: each scanner against the expression it
   replaced on random input, and the worst cases under 100 ms), document storage
   paths (`storage-path`), the hand-in AI rule (`submissions`), reminder
-  destinations (`studentReminders`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  destinations (`studentReminders`), the streamed-answer essay gate
+  (`prose-guard`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
@@ -2123,9 +2177,12 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
   `-retention`, `-guard`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`)
   `caseload-transfer` (every persona, every table that follows a student,
-  removal, the firm setting) and `regex-dos` (the regular-expression attacks:
+  removal, the firm setting), `regex-dos` (the regular-expression attacks:
   a student's document, a Mass invite paste, an import file; `/health` keeps
-  answering while each runs). `npm run test:imports-load` (pre-release) commits
+  answering while each runs) and `security-guardrails` (a spoofed
+  X-Forwarded-For, `/chat` refused to students in the API and in RLS, link
+  digests and keep-out-of-AI). AxIS's outside-content rule needs a model, so
+  it is covered by `axis-engine` and `axis-ops` against a scripted one. `npm run test:imports-load` (pre-release) commits
   and undoes 5,000 rows and stages 5,000 more through the API; `npm run
   test:caseload-load` checks 500 students in one call. The harness's `user()`
   approves the counselors it makes;
@@ -2199,6 +2256,7 @@ npm run dev               # http://localhost:4000
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
+| `TRUST_PROXY_HOPS` | Proxies in front of the API (default 1, Railway's edge); `request.ip` is the address the outermost one saw. 0 trusts no forwarding header |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |

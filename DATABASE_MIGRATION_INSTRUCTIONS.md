@@ -339,7 +339,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These nineteen files are merged ahead of production's database on purpose: the code was written to
+These twenty-three files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -371,17 +371,22 @@ set's own section below says what it does and how to check it.
 | 11 | `20261023070001_college_photos.sql` | Campus photos |
 | 12 | `20261023080001_college_stats_scorecard_more.sql` | College Scorecard figures |
 | 13 | `20261023090001_meeting_calendar_invites.sql` | Emailed meeting invites |
-| 14 | `20261024000011_meeting_calendar_owner_guard.sql` | Meeting owner and calendar pointer guard (security) |
-| 15 | `20261024000021_firm_membership_writes.sql` | RLS and ownership |
-| 16 | `20261024000022_student_files_ownership.sql` | RLS and ownership |
-| 17 | `20261024000023_invitation_accept_state.sql` | RLS and ownership |
-| 18 | `20261024000024_student_message_recipients.sql` | RLS and ownership |
-| 19 | `20261024000025_profile_archive_counselor_only.sql` | RLS and ownership |
+| 14 | `20261024000011_meeting_calendar_owner_guard.sql` | Security: meeting owner and calendar pointer guard |
+| 15 | `20261024000021_firm_membership_writes.sql` | Security: RLS and ownership |
+| 16 | `20261024000022_student_files_ownership.sql` | Security: RLS and ownership |
+| 17 | `20261024000023_invitation_accept_state.sql` | Security: RLS and ownership |
+| 18 | `20261024000024_student_message_recipients.sql` | Security: RLS and ownership |
+| 19 | `20261024000025_profile_archive_counselor_only.sql` | Security: RLS and ownership |
+| 20 | `20261024000041_document_storage_paths.sql` | Security: submission review and reminders |
+| 21 | `20261024000042_counselor_recorded_phone.sql` | Security: submission review and reminders |
+| 22 | `20261024000043_submit_intake_once.sql` | Security: submission review and reminders |
+| 23 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
 
-(Nineteen files in eight sets. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
+(Twenty-three files: the first thirteen are six feature sets, the other ten are four sets of security
+fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
-Then the security fixes for submission review and student reminders, after the files above (they
-depend on none of them), in this order: `20261024000041_document_storage_paths.sql` (a documents row
+Files 20-22, the security fixes for submission review and student reminders, depend on none of the
+others: `20261024000041_document_storage_paths.sql` (a documents row
 names only the documents bucket and a path the bucket's insert policy could have taken, and never
 moves; client roles only), `20261024000042_counselor_recorded_phone.sql`
 (`profiles.phone_recorded_by_counselor`, trigger-written; reminder texts go only to it, so until it
@@ -397,7 +402,7 @@ satisfies both. No function, policy or trigger is defined in two of these files;
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all nineteen:
+After all twenty-three:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -653,3 +658,18 @@ select policyname from pg_policies where schemaname = 'public' and tablename = '
 ```
 
 and `node --test test/integration/meeting-calendar-owner.test.mjs` against a staging copy.
+
+## Security: AxIS chats are the counselor's: `20261024000051`
+
+Restrictive INSERT policies: only an approved counselor creates an `ai_conversations`,
+`ai_messages` or `ai_attachments` row or uploads into the `axis-attachments` bucket. Reads,
+renames and deletes keep their owner policies. Either order is safe: the API already answers
+403 to a student on every `/chat` route but deleting their own chat (AGENTS.md, "The essay
+restriction"). Not in `REQUIRED_SCHEMA`.
+
+Check:
+
+```sql
+select polname from pg_policy where polname in
+  ('ai_conversations_insert_counselor', 'ai_messages_insert_counselor', 'ai_attachments_insert_counselor', 'axis_attachments_insert_counselor');  -- 4 rows
+```
