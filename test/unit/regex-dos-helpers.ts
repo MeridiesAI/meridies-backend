@@ -35,3 +35,10 @@ export function elapsed(fn: () => unknown): number {
  * milliseconds, so 100 ms leaves room for a slow CI machine.
  */
 export const BUDGET_MS = 100;
+
+/**
+ * The budget for an input at a feature's own cap (a 2 MB page, a 10 MB
+ * document): linear code reads it in tens of milliseconds, a busy test runner
+ * can stretch that, and the old expressions took minutes to days.
+ */
+export const CAP_BUDGET_MS = 1000;

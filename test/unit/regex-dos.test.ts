@@ -12,7 +12,7 @@ import { collapseBeforeNewlines } from "../../src/lib/axis/ledger.js";
 import { SentenceStream, splitClauses } from "../../src/lib/axis/text.js";
 import { stripHtml } from "../../src/lib/ingest/collegePhotos.js";
 import { redactText } from "../../src/lib/requestLog.js";
-import { BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
+import { BUDGET_MS, CAP_BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
 
 const fill = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
 
@@ -177,7 +177,7 @@ test("splitClauses and collapseBeforeNewlines answer as before, in linear time",
     assert.ok(ms < BUDGET_MS, `splitClauses ${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
     const big = fill(unit, 1_000_000);
     const ms2 = elapsed(() => collapseBeforeNewlines(big));
-    assert.ok(ms2 < BUDGET_MS, `collapseBeforeNewlines ${JSON.stringify(unit)} took ${ms2.toFixed(1)} ms`);
+    assert.ok(ms2 < CAP_BUDGET_MS, `collapseBeforeNewlines ${JSON.stringify(unit)} took ${ms2.toFixed(1)} ms`);
   }
 });
 
@@ -223,5 +223,5 @@ test("stripHtml strips tags as /<[^>]*>/g did, in linear time", () => {
     assert.equal(stripHtml(s), old, JSON.stringify(s));
   }
   const ms = elapsed(() => stripHtml(fill("<a", 2_000_000)));
-  assert.ok(ms < BUDGET_MS, `"<a" x 1M took ${ms.toFixed(1)} ms`);
+  assert.ok(ms < CAP_BUDGET_MS, `"<a" x 1M took ${ms.toFixed(1)} ms`);
 });

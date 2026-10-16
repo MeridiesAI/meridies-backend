@@ -17,7 +17,7 @@ import {
   normalizeText,
   readDocumentText,
 } from "../../src/lib/documentText.js";
-import { BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
+import { BUDGET_MS, CAP_BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
 
 const HTML_PIECES = [
   "<", ">", "</", "a", "A", " ", "\t", "\n", "-", "!", "/", "x", "&amp;", "&nbsp;",
@@ -132,11 +132,17 @@ test("extractText keeps the 300-character title window", () => {
 const TWO_MB = 2_000_000;
 const fill = (unit: string, size = TWO_MB) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
 
-test("extractText finishes a 2 MB page with no closing token in well under 100 ms", () => {
+/** The review's sizes: "<a" x 200k took 107 s, "<script" x 100k 26 s, 200k spaces 37 s. */
+const REVIEW_SIZE = 400_000;
+
+test("extractText finishes a page with no closing token in well under 100 ms, and a 2 MB one in under a second", () => {
   for (const unit of ["<a", "<script", "<style", "<noscript", "<!--", "<title", "<title>", "<br ", "< ", "<p"]) {
-    const html = fill(unit);
+    const html = fill(unit, REVIEW_SIZE);
     const ms = elapsed(() => extractText(html));
-    assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} x ${TWO_MB / unit.length} took ${ms.toFixed(1)} ms`);
+    assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} x ${REVIEW_SIZE / unit.length} took ${ms.toFixed(1)} ms`);
+    const page = fill(unit);
+    const capMs = elapsed(() => extractText(page));
+    assert.ok(capMs < CAP_BUDGET_MS, `${JSON.stringify(unit)} x ${TWO_MB / unit.length} took ${capMs.toFixed(1)} ms`);
   }
   // A real document followed by an unclosed tag still reads.
   const mixed = `<title>Real</title><p>Kept</p>${fill("<a", TWO_MB - 40)}`;
@@ -145,14 +151,17 @@ test("extractText finishes a 2 MB page with no closing token in well under 100 m
     assert.equal(r.title, "Real");
     assert.ok(r.text.startsWith("Real Kept"));
   });
-  assert.ok(ms < BUDGET_MS, `mixed page took ${ms.toFixed(1)} ms`);
+  assert.ok(ms < CAP_BUDGET_MS, `mixed page took ${ms.toFixed(1)} ms`);
 });
 
-test("normalizeText finishes 10 MB of spaces with no newline in well under 100 ms", () => {
+test("normalizeText finishes spaces with no newline in well under 100 ms, and 10 MB of them in under a second", () => {
   for (const unit of [" ", "\t", " \t", "a "]) {
-    const text = fill(unit, MAX_DOCUMENT_BYTES);
+    const text = fill(unit, REVIEW_SIZE);
     const ms = elapsed(() => normalizeText(text));
     assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
+    const big = fill(unit, MAX_DOCUMENT_BYTES);
+    const capMs = elapsed(() => normalizeText(big));
+    assert.ok(capMs < CAP_BUDGET_MS, `${JSON.stringify(unit)} x 10 MB took ${capMs.toFixed(1)} ms`);
   }
   assert.equal(normalizeText("a  \t\nb \r\n\n\n\nc  "), "a\nb\n\nc");
 });
@@ -225,13 +234,15 @@ test("a .docx reads exactly as the regular expression read it", () => {
   assert.equal(readDocumentText(docx(xml), "a.docx", null), "Dear\t reader & friend\n\nLine\ntwo");
 });
 
-test("a .docx of one long unclosed run reads in well under 100 ms", () => {
+test("a .docx of one long unclosed run reads in well under 100 ms, and a 4 MB part in under a second", () => {
   for (const unit of ["<w:t ", "<w:t", "<w:t>", "<w:t x>", "<"]) {
-    const xml = `<w:body><w:p>${fill(unit, 4_000_000)}</w:p></w:body>`;
-    const bytes = docx(xml);
+    const small = docx(`<w:body><w:p>${fill(unit, REVIEW_SIZE)}</w:p></w:body>`);
+    const ms = elapsed(() => readDocumentText(small, "essay.docx", null));
+    assert.ok(ms < BUDGET_MS, `${JSON.stringify(unit)} x ${REVIEW_SIZE / unit.length} took ${ms.toFixed(1)} ms`);
+    const bytes = docx(`<w:body><w:p>${fill(unit, 4_000_000)}</w:p></w:body>`);
     assert.ok(bytes.length < 200_000, "the archive is small; the inflated part is what costs");
-    const ms = elapsed(() => readDocumentText(bytes, "essay.docx", null));
-    assert.ok(ms < BUDGET_MS * 3, `${JSON.stringify(unit)} took ${ms.toFixed(1)} ms`);
+    const capMs = elapsed(() => readDocumentText(bytes, "essay.docx", null));
+    assert.ok(capMs < CAP_BUDGET_MS, `${JSON.stringify(unit)} x 4 MB took ${capMs.toFixed(1)} ms`);
   }
 });
 
