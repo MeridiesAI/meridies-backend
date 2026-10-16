@@ -181,12 +181,20 @@ const bulkSchema = z
           .object({
             email: z.string().trim().toLowerCase().email().max(320),
             name: z.string().trim().max(200).nullable().optional(),
+            // New student, several at once: each row's own basics.
+            gradeLevel: basicsShape.gradeLevel,
+            gradYear: basicsShape.gradYear,
+            timezone: basicsShape.timezone,
           })
           .strict()
       )
       .min(1)
       .max(100),
     note: z.string().trim().max(1000).nullable().optional(),
+    /** The "Information required" list, the same for every recipient. */
+    intakeRequests: basicsShape.intakeRequests,
+    /** The open requests go out with each invitation, as "Send to student" does. */
+    sendRequests: z.boolean().optional(),
   })
   .strict();
 
@@ -482,7 +490,9 @@ export default async function inviteRoutes(app: FastifyInstance) {
     "/bulk",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:bulk", 10, 3600)] },
     async (request) => {
-      const { recipients, note } = bulkSchema.parse(request.body);
+      const { recipients, note, intakeRequests, sendRequests } = bulkSchema.parse(request.body);
+      const requests = intakeRequests ?? [];
+      const bulkNote = note ?? (sendRequests ? requestNote(requests) : null);
       const unique = [...new Map(recipients.map((r) => [r.email, r])).values()];
       const statuses = await addressStatuses(request, unique.map((r) => r.email));
       const toSend = unique.filter((r) => !statuses.has(r.email));
@@ -510,8 +520,13 @@ export default async function inviteRoutes(app: FastifyInstance) {
           const { row, emailSent } = await createInvitation(request, {
             email: r.email,
             fullName: r.name ?? null,
-            note: note ?? null,
+            gradeLevel: r.gradeLevel ?? null,
+            gradYear: r.gradYear ?? null,
+            timezone: r.timezone ?? null,
+            note: bulkNote,
             source: "mass",
+            intakeRequests: requests,
+            requestedAt: sendRequests ? new Date().toISOString() : null,
           });
           results.push({
             email: r.email,
