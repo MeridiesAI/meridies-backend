@@ -43,9 +43,13 @@ const columns = {
 for (const [name, max] of Object.entries(columns)) {
   const over = await rest(s.token, "PATCH", `/rest/v1/profiles?id=eq.${s.id}`, { [name]: big(2_000_000) }, { Prefer: "return=minimal" });
   check(`a 2 MB ${name} through PostgREST is refused`, over.status >= 400, `status ${over.status}`);
-  const atMax = await rest(s.token, "PATCH", `/rest/v1/profiles?id=eq.${s.id}`, { [name]: big(max) }, { Prefer: "return=minimal" });
-  check(`…while ${max} characters of ${name} are accepted`, atMax.status < 300 && (await col(s.id, name)) === max, `status ${atMax.status}`);
+  // grad_year is also a four-digit year (20261024000052), so its longest accepted value is a year.
+  const fits = name === "grad_year" ? "2027" : big(max);
+  const atMax = await rest(s.token, "PATCH", `/rest/v1/profiles?id=eq.${s.id}`, { [name]: fits }, { Prefer: "return=minimal" });
+  check(`…while ${fits.length} characters of ${name} are accepted`, atMax.status < 300 && (await col(s.id, name)) === fits.length, `status ${atMax.status}`);
 }
+const oddYear = await rest(s.token, "PATCH", `/rest/v1/profiles?id=eq.${s.id}`, { grad_year: big(10) }, { Prefer: "return=minimal" });
+check("…and 10 characters of grad_year that aren't a year are refused", oddYear.status >= 400, `status ${oddYear.status}`);
 await rest(s.token, "PATCH", `/rest/v1/profiles?id=eq.${s.id}`, { full_name: "Psize Student", phone: null, timezone: null, avatar_url: null }, { Prefer: "return=minimal" });
 
 // Signup copies full_name and avatar_url from the user's own metadata: clipped, never refused.
