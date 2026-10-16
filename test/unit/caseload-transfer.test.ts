@@ -270,3 +270,10 @@ test("receiver email: students listed (50, then a count), attention items said o
   assert.doesNotMatch(text, /—/);
   assert.doesNotMatch(brandedText(studentEmail({ receiverName: "Cal", firmName: "F", url: "u" }).template), /—/);
 });
+
+test("keptFiles: read from the answer, 0 when an older function leaves it out", () => {
+  assert.equal(toTransferResult(rawResult).attention.keptFiles, 0);
+  const withKept = { ...rawResult, attention: { ...rawResult.attention, keptFiles: 2 } };
+  assert.equal(toTransferResult(withKept).attention.keptFiles, 2);
+  assert.equal(toTransferResponse(toTransferResult(withKept), { planned: 0 }).attention.keptFiles, 2);
+});

@@ -2173,7 +2173,15 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   a moved student that the old counselor owns and that would cascade with
   their account moves (meetings, notes, reports, messages, research runs,
   outcomes, the student folder with its subtree, documents and links,
-  supplement Doc rows, accepted invitations); open work moves; scheduled sends
+  supplement Doc rows, accepted invitations); open work moves. A document or
+  link moves only when it is about a moved student (to that student's
+  receiver) or has no student and is filed in the moved folder tree (with
+  the tree); one about anybody else filed in that tree stays with its owner,
+  unfiled, and is counted as `attention.keptFiles` (`20261024000082`), and a
+  moved file whose folder isn't the receiver's afterwards is unfiled. The
+  files routes refuse filing a document or link about one student anywhere in
+  another student's folder tree, or moving a folder that holds one there
+  (`folderTreeStudent` in `routes/files.ts`); scheduled sends
   and queued parent alerts are cancelled; a group meeting moves only when
   every attendee goes to the same receiver; held import data moves into a
   carrier import owned by the student's receiver (no import function
