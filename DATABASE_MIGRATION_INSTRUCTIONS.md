@@ -467,7 +467,10 @@ Closes table-level paths a signed-in user could take straight through PostgREST 
 "Only `accept_invitation()` marks an invitation accepted", the composer, "Firm teams", "Documents
 and AI context", "A student can't archive or restore themselves"). Each file is independent of the
 others and of the sets above, and safe for the build that is serving: the API never made any of the
-writes these files refuse. Nothing is deleted; rows planted before them stay, and each file's header
+writes these files refuse (one edge: a build from before the follow-up fixes, texting a student whose
+phone on file has no digits, gets a 403 where it used to record a failed send; the current build answers
+that with its own 400). `20261024000024` caps a counselor's direct message inserts at 200 a day, above
+the composer's own limits. Nothing is deleted; rows planted before them stay, and each file's header
 has a read-only audit query. They change grants, policies, triggers and one function body
 (`private.deliverables_sync_intake_request`, now also requiring the task's student to be the one who
 accepted the invitation).
@@ -479,7 +482,8 @@ select count(*) from information_schema.role_table_grants
  where table_schema = 'public' and table_name = 'firm_members' and grantee = 'authenticated'
    and privilege_type in ('INSERT','UPDATE','DELETE');                                 -- 0
 select count(*) from pg_trigger where tgname in ('invitations_guard_client', 'deliverables_guard_intake_link',
-  'student_messages_guard_client', 'profiles_guard_self_archive');                     -- 4
+  'student_messages_guard_client', 'profiles_guard_self_archive',
+  'documents_guard_client', 'document_links_guard_client');                            -- 6
 ```
 
 and `node --test test/integration/ownership-rls.test.mjs` against a staging copy.

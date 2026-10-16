@@ -360,11 +360,27 @@ forget it.
   the composer would have resolved itself (`allowedRecipients`): the student
   by id at their contact email (else login email) or phone on file, or a
   guardian of this student still receiving messages at the same address;
-  it sends to the addresses on file, never the row's. In the database
+  it sends to the addresses on file, never the row's. A message to the
+  student goes to their address or phone on file at send time (a student
+  who changed it since still gets it, and can't cancel it by changing it);
+  a guardian must still have the address the row froze. The cron also
+  sends at most `DISPATCH_DAILY_CAP` (100) messages a day per counselor,
+  whoever wrote the rows: over it a row waits an hour and is tried again
+  (`hold_reason` says so), nothing is dropped. In the database
   (`20261024000024`) a client insert must name exactly such recipients and
-  start `queued` or `scheduled`; a client update moves status only
-  scheduled -> cancelled or queued -> sent | failed | cancelled, and
-  `scheduled_for` is the dispatch cron's alone.
+  start `queued` or `scheduled`, and a counselor's client inserts are
+  capped at 200 a day (`consume_rate_limit`, errcode 54000, which the route
+  answers as 429); the check answers only for the caller's own student, so
+  a foreign insert always fails at RLS the same way and the guard can't be
+  used to test guesses at someone's address. A client update moves status
+  only scheduled -> cancelled or queued -> sent | failed | cancelled, and
+  `scheduled_for` is the dispatch cron's alone. Addresses on file are
+  counselor-writable (guardians, contact email, phone), so what bounds a
+  counselor's sending is the volume: the route's 30 an hour and 100 a day,
+  and the two caps above for rows written any other way. Follow-up, in a
+  later PR once this build is live: insert on the service client and
+  revoke INSERT from `authenticated` (doing it now would break the serving
+  build's composer the moment the migration applies).
   A composer alert counts toward the parent-alert throttle, so the sweep can't
   send a second alert right behind a hand-written one.
 - **`student_private_notes` is counselor-only both ways**, the same reasoning
@@ -1542,7 +1558,17 @@ A document or link names no student or one the caller can edit
 caller's folders, or in the student folder of a student they can edit; a
 client creates only plain folders under a parent of their own, and can't
 point a folder at a student they can't edit (restrictive policies,
-`20261024000022`; the routes check the same in code). Owning the row was
+`20261024000022`; the routes check the same in code). A client inserts a
+document or link only as its owner (`owner_id` = the caller), never changes
+`owner_id`, and moves a row only into a folder it may file into
+(`private.can_file_into_folder`; the `*_guard_client` triggers, keyed on
+`current_user` so caseload transfer still moves rows). Before that, an
+editor of any student could plant a row "owned" by a counselor in another
+practice, which showed in that counselor's Files and, filed into their
+Policy & research folder, reached their college-research prompt; that
+prompt also drops a filed link about a student the counselor can't see
+(`readableResearch` in `routes/collegeAi.ts`), so a row planted earlier
+never reaches it. Owning the row was
 enough before, so any approved counselor could plant a "transcript" with
 their own parsed text on another practice's student, where its counselor's
 Files and the AI context layer read it.
