@@ -133,7 +133,12 @@ function run(job: Job): Promise<PdfTextResult> {
           maxYoungGenerationSizeMb: PDF_LIMITS.maxYoungGenerationSizeMb,
         },
         execArgv: workerExecArgv(),
+        // Nothing a worker prints may reach our logs: capture both streams and discard them.
+        stdout: true,
+        stderr: true,
       });
+      worker.stdout.resume();
+      worker.stderr.resume();
     } catch {
       finish({ ok: false, reason: "unreadable" });
       return;

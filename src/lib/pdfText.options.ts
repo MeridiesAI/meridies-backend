@@ -8,4 +8,6 @@ export const PDFJS_OPTIONS = {
   enableScripting: false,
   disableFontFace: true,
   useSystemFonts: false,
+  // 0 = errors only: PDF.js warnings can carry strings from the file and must not reach the logs.
+  verbosity: 0,
 } as const;

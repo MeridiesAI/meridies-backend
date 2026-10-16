@@ -1,9 +1,11 @@
 import { getResolvedPDFJS } from "unpdf";
 import { PDFJS_OPTIONS } from "./pdfText.options.js";
 
+type GetDocument = (params: { data: Uint8Array } & typeof PDFJS_OPTIONS) => ReturnType<Awaited<ReturnType<typeof getResolvedPDFJS>>["getDocument"]>;
+
 /** Text of the first `maxPages` pages, cut at `maxChars`. Runs in whatever thread calls it: the pool calls it inside a worker. */
-export async function extractInThisThread(bytes: Uint8Array, maxPages: number, maxChars: number): Promise<{ text: string; pages: number }> {
-  const { getDocument } = await getResolvedPDFJS();
+export async function extractInThisThread(bytes: Uint8Array, maxPages: number, maxChars: number, getDocumentOverride?: GetDocument): Promise<{ text: string; pages: number }> {
+  const getDocument: GetDocument = getDocumentOverride ?? (await getResolvedPDFJS()).getDocument;
   // PDF.js refuses a Buffer (a Uint8Array subclass); hand it a plain view of the same bytes.
   const data = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   // destroy() lives on the loading task in PDF.js 6, not on the document proxy.

@@ -33,12 +33,26 @@ test("text comes out of a normal PDF, in a worker", async () => {
   }
 });
 
+test("extraction passes the safety options to every getDocument call", async () => {
+  const { getResolvedPDFJS } = await import("unpdf");
+  const real = (await getResolvedPDFJS()).getDocument;
+  const seen: Array<Record<string, unknown>> = [];
+  await extractInThisThread(textPdf(["x"]), 50, 1000, (params) => {
+    seen.push(params);
+    return real(params);
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.isEvalSupported, false);
+  assert.equal(seen[0]!.enableScripting, false);
+  assert.equal(seen[0]!.verbosity, 0);
+});
+
 test("embedded JavaScript never runs: an OpenAction script and a crafted FontMatrix", async () => {
   delete (globalThis as Record<string, unknown>).__meridiesMarker;
-  // The script PDF is otherwise valid, so it must still read: the marker staying unset is then meaningful.
   const withScript = await extractInThisThread(javascriptPdf(), 50, 200_000);
   assert.match(withScript.text, /Has a script/);
-  await extractInThisThread(fontMatrixPdf(), 50, 200_000).catch(() => undefined);
+  const crafted = await extractInThisThread(fontMatrixPdf(), 50, 200_000);
+  assert.match(crafted.text, /Crafted font/);
   assert.equal((globalThis as Record<string, unknown>).__meridiesMarker, undefined);
 });
 
