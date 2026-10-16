@@ -869,31 +869,75 @@ there).
   stored one) is published only when it has been quiet for `STABLE_DAYS` (7):
   the Wikidata item (`schema:dateModified`, in the same SPARQL query), the
   Commons file version (imageinfo `timestamp`) and its description page
-  (latest revision, `prop=revisions`) all last edited at least that long
-  before the run, and the file not reached through a redirect (whose age no
-  API gives); or a run at least that long ago held this exact candidate
-  (source, title, sha1, credit and license) and it is unchanged now. A
-  **replacement** of a photo already shown always needs that earlier
+  (latest revision, and the page's `touched` time from `prop=info`, which
+  also moves when a template the page uses is edited, such as a
+  `{{Creator:}}` or a photographer's own credit template) all last changed
+  at least that long before the run, and the file not reached through a
+  redirect (whose age no API gives); or a run at least that long ago held
+  this exact candidate (source, title, sha1, credit and license) and
+  **nothing it depends on changed after that sighting** (`quietSince`: the
+  file version, the page revision and `touched`, and for Wikidata the item,
+  all at or before it; otherwise the wait starts again, so reverting an edit
+  and re-applying it just before the next run doesn't ride on the old
+  sighting). A busy Wikidata item (edited every week) therefore waits for a
+  quiet week or a pick. A redirect is never confirmed by a sighting. A
+  **replacement** of a photo already shown (another file, or a new version
+  under the same title, whichever source showed it) always needs that
   sighting, so with the monthly cron it goes live a run later; until then
   the old photo keeps serving. Unknown or future times are never stable.
-  **A team pick is published at once** (the team looked at it), except a new
-  version uploaded over the picked file, which is a replacement like any
-  other. An unchanged file whose description page was edited within the
-  week keeps the credit already shown (only `checked_at` moves). Held
-  candidates are `college_photo_candidates` rows (service_role only; why,
-  first and last seen), the team's review queue: read it in the SQL editor
-  or in the `--dry-run` CSV (action `held-new` / `held-replace`, the reasons,
-  the title shown today). To publish a held photo now, pick it; to keep it
-  off, pick `none` or a better file. Each run's counts (`added`, `replaced`,
-  `held-new`, `held-replace`, `hold:<reason>`, `confirmed`, `text-held`, ...)
-  are on its `ingest_runs.counts`. Holding is not an error: the run and its
-  heartbeat stay clean. Deletions are not held by this gate (a removal is
-  the safe direction; the mass-deletion guard below still applies). Without
-  the migration nothing is remembered: a new photo still passes on its
-  timestamps, a replacement is held with `no-review-table`, and the run's
-  row is finished without counts. The known limit: an edit that survives a
-  week of Wikidata and Commons patrol and lands across a run is published,
-  as is anything on a picked title before the team picked it.
+- **A team pick wins, within limits.** An unpinned pick is published at once
+  (the team looked at it), except a new version of the file already shown
+  (same title, whatever showed it: picking the title Wikidata shows doesn't
+  wave through a version uploaded yesterday) and a title that now redirects
+  (`pick-redirected`: whoever edits the redirect page chooses the file; the
+  team updates the title). The picks CSV takes an optional fourth column,
+  `commons_sha1` (header `unitid,commons_title,note,commons_sha1`): a pinned
+  pick is published at once while the file is that version, whatever else
+  changed, and held as `pick-changed` while it isn't (only the team moves a
+  pin, never a sighting). Pinning is how the team publishes a held new
+  version now.
+- **The bytes are the version judged** (`sameVersion`). Thumbnail URLs on
+  upload.wikimedia.org name the file, not the version, so a swap between the
+  metadata read and the downloads would store the swapped bytes under the
+  reviewed sha1, and reverting the swap (same sha1) would keep them there
+  for good. Downloads go `DOWNLOAD_CHUNK` (20) at a time: the 500 px lookup
+  (now `iiprop=timestamp|url|sha1`) must still show the judged sha1 and
+  upload time, both copies are fetched, then Commons is asked again and the
+  copies are uploaded only if title, sha1 and upload time are unchanged (a
+  revert is a new upload with a new time). Otherwise nothing downloaded is
+  kept: `changed-during-run`, the stored photo and its queue row stay. A
+  failed re-check keeps nothing either.
+- **Credits and licenses wait too** (`textDecision`). The credit is shown
+  on every surface and on `/colleges/photo-credits`. For an unchanged file,
+  new text (compared by hash with what the row shows) replaces it only after
+  a sighting at least a week old with nothing changed since; before the
+  migration, only once the page's revision and `touched` times are a week
+  old. Until then the row keeps its text (its other facts, the title after a
+  move, still refresh): `held-text`, `text-held`, with `text-changed` and,
+  when recent, `page-recent`. The sighting covers MediaWiki's job-queue lag
+  in moving `touched` after a template edit.
+- **The review queue.** Held candidates are `college_photo_candidates` rows
+  (service_role only; why, first and last seen; one row per college, for a
+  held photo or held text), the team's review queue: read it in the SQL
+  editor or in the `--dry-run` CSV (action `held-new` / `held-replace` /
+  `held-text`, the reasons, the title shown today). To publish a held photo
+  now, pick it (pinned to its sha1 if it is a new version of the file
+  shown); to keep it off, pick `none` or a better file. Each run's counts
+  (`added`, `replaced`, `held-new`, `held-replace`, `hold:<reason>`,
+  `confirmed`, `text-held`, `changed-during-run`, ...) are on its
+  `ingest_runs.counts`. Holding is not an error: the run and its heartbeat
+  stay clean. Deletions are not held by this gate (a removal is the safe
+  direction; the mass-deletion guard below still applies). Without the
+  migration nothing is remembered: a new photo still passes on its
+  timestamps, a replacement is held with `no-review-table` (every new
+  version of a shown file waits until the migration or a pinned pick),
+  changed text waits for a quiet page, and the run's row is finished without
+  counts. Known limits: an edit that survives a week of Wikidata and Commons
+  patrol, with nothing else changing, is published; an unpinned pick shows
+  whatever version its file has when the team's pick first runs; a template
+  edit whose `touched` update lags past the run is caught only with the
+  queue; and Wikidata's item time is the item's, so an unrelated bot edit
+  also restarts the wait.
 - **What a file must be**: a JPEG on Commons (normalised titles and moved
   files followed), at least 1000 px wide and 1.2:1 landscape unless picked,
   CC0, public domain, CC BY or CC BY-SA (never NC or ND; the CHECK refuses
@@ -910,8 +954,8 @@ there).
   lease `college-photos`, 3 hours; `ingest_runs` + `job_heartbeats`), or
   `npx tsx --env-file=.env scripts/ingest/college-photos.ts [--limit N]
   [--only <unitids>] [--dry-run]`. It re-checks every stored file and
-  downloads only changed ones (same sha1: text refreshed, nothing
-  downloaded); a deleted or relicensed file loses its row and objects. A
+  downloads only changed ones (same sha1: nothing downloaded, the text
+  refreshed under the rule above); a deleted or relicensed file loses its row and objects. A
   Wikidata or picks failure ends the run before anything changes, and
   deletions the picks didn't ask for are **held** when they would remove more
   than a tenth of the stored photos (and more than five), so a truncated
@@ -932,11 +976,18 @@ there).
   queue and `ingest_runs.counts`) goes in after it, either order with the
   code; not in `REQUIRED_SCHEMA` either.
 - **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
-  review gate and `csvCell`), `test/integration/college-photos.test.mjs`
-  (RLS, the bucket, a fixture load through the real store, every surface)
-  and `college-photos-review.test.mjs` (a vandal's P18 and a new version
-  over a file held while the old photo keeps serving, published a week on,
-  a pick at once, the dry-run CSV, and the run without the migration). Nothing reaches Wikimedia: the
+  review gate, the version check, text holds, pins, the store without the
+  migration, and `csvCell`), `test/integration/college-photos.test.mjs`
+  (RLS, the bucket, a fixture load through the real store, every surface),
+  `college-photos-review.test.mjs` (a vandal's P18 and a new version over a
+  file held while the old photo keeps serving, published a week on, a pick
+  at once, the dry-run CSV) and `college-photos-attacks.test.mjs` (a swap
+  during the downloads with and without a revert, a pick of the title shown,
+  a pick that now redirects, a revert re-applied around its sighting, a
+  credit changed through a template; fixtures in `attacks/`, whose
+  `commons-imageinfo-500-recheck.json` is what a fixture run serves on the
+  re-check). No suite renames shared tables: the no-migration path is unit
+  tested on an injected store. Nothing reaches Wikimedia: the
   fixtures in `test/fixtures/college-photos/` are hand-written in the
   documented shapes (see its README), and the cron route is only tested for
   401 and 409.

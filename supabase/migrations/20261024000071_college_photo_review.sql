@@ -6,12 +6,16 @@
 -- over its file, minutes before the monthly run. So the loader
 -- (src/lib/ingest/collegePhotos.ts, reviewDecision) publishes a new or
 -- changed photo only once it has been stable for a week: the Wikidata item and
--- the Commons file and its description page last edited at least seven days
--- before the run, read from the APIs the loader already calls, or the same
--- candidate seen unchanged by a run at least seven days earlier. A replacement
--- of a photo already shown always needs that earlier sighting; until then the
--- old photo keeps serving. A team pick (scripts/ingest/data/college-photo-picks.csv)
--- is published at once, unless a new version was uploaded over the picked file.
+-- the Commons file and its description page (and the templates it uses) last
+-- changed at least seven days before the run, read from the APIs the loader
+-- already calls, or the same candidate seen by a run at least seven days
+-- earlier with nothing changed since. A replacement of a photo already shown
+-- always needs that earlier sighting; until then the old photo keeps serving.
+-- A team pick (scripts/ingest/data/college-photo-picks.csv) is published at
+-- once, unless it is a new version of the file already shown or its title now
+-- redirects; a pick pinned to a sha1 is published while the file is that
+-- version. A changed credit or license for a photo already shown waits the
+-- same way (a row for the same file, holding the new text).
 --
 -- 1. college_photo_candidates: what a run held back and why, one row per
 --    college, with when a run first and last saw that exact candidate (title,

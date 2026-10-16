@@ -566,7 +566,7 @@ naming this file.
 | # | File | What it does |
 |---|---|---|
 | 1 | `20261023070001_college_photos.sql` | `college_photos` (one freely licensed Commons photo per college with its credit, license, deed and file page; any signed-in user reads, only service_role writes; the approval gate) and the public **`college-photos`** Storage bucket (3 MB, JPEG only, no `storage.objects` policy: only the loader writes). Adds `college-photos` to the `ingest_runs` and `job_heartbeats` labels by reading the current CHECKs back, and a `job_heartbeats` row (31 days) |
-| 2 | `20261024000071_college_photo_review.sql` | `college_photo_candidates`, the review queue: a new or changed photo the loader held until Wikidata and Commons have been quiet about it for a week, with why and when a run first and last saw it (service_role only, no policies, the approval gate). Adds the nullable `ingest_runs.counts` (each run's counts by outcome). Either order: without it new photos still pass on their timestamps, replacements are held, and the run's row is finished without counts |
+| 2 | `20261024000071_college_photo_review.sql` | `college_photo_candidates`, the review queue: a new or changed photo (or a changed credit for one already shown) the loader held until Wikidata and Commons have been quiet about it for a week, with why and when a run first and last saw it (service_role only, no policies, the approval gate). Adds the nullable `ingest_runs.counts` (each run's counts by outcome). Either order: without it new photos still pass on their timestamps, replacements are held, and the run's row is finished without counts |
 
 Check:
 
