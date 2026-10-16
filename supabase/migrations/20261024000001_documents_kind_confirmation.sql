@@ -7,6 +7,10 @@
 --   reads text from the stored copy and clears it. Old rows stay null: there is no backfill.
 -- extraction_attempts / extraction_lease_until: a claim holds a 2-minute lease; recovery returns an
 --   expired lease to the queue and gives up after 3 attempts (parse_status 'failed').
+--
+-- Deploy order: safe to apply before the code. Nothing live reads these columns, and no rows change.
+--   The code PR (#58) adds documents.kind_confirmed to REQUIRED_SCHEMA, so its build won't go live
+--   until this migration is applied.
 
 alter table public.documents
   add column if not exists kind_confirmed boolean not null default true,
