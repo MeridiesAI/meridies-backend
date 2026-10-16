@@ -33,14 +33,47 @@ const PG_URL_SHAPE = /^postgres(?:ql)?:\/\/(?:[^@/?#\s,]*@)?(?:localhost|127\.0\
  * when the URL names this machine: PGHOSTADDR (used when the URL has no
  * hostaddr), and a service file (PGSERVICE, PGSERVICEFILE, PGSYSCONFDIR) that
  * can carry a hostaddr. PGHOST is dropped too, for a URL without a host.
+ * PSQLRC names a startup file psql runs before the command, and a startup
+ * file can `\connect` anywhere; psql also runs with -X (psqlArgs), which
+ * skips ~/.psqlrc and the system one.
  */
-export const LIBPQ_HOST_ENV = ["PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR"];
+export const LIBPQ_HOST_ENV = ["PGHOST", "PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE", "PGSYSCONFDIR", "PSQLRC"];
 
-/** The environment psql runs with: this process's, minus every variable that could move the host. */
+/** The only PG* variables psql keeps: none of them can name a server. */
+export const PG_ENV_KEPT = ["PGPASSWORD", "PGPASSFILE", "PGSSLMODE", "PGCONNECT_TIMEOUT", "PGAPPNAME"];
+
+/**
+ * The environment psql runs with: this process's, minus every PG* variable
+ * not on PG_ENV_KEPT (so no libpq setting this list didn't foresee can move
+ * the host) and minus PSQLRC.
+ */
 export function psqlEnv(env = process.env) {
-  const out = { ...env };
-  for (const k of LIBPQ_HOST_ENV) delete out[k];
+  const out = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (LIBPQ_HOST_ENV.includes(k)) continue;
+    if (k.startsWith("PG") && !PG_ENV_KEPT.includes(k)) continue;
+    out[k] = v;
+  }
   return out;
+}
+
+/** psql's arguments for one query: -X first, so no startup file runs (none can \connect elsewhere). */
+export function psqlArgs(dbUrl, query) {
+  return ["-X", dbUrl, "-v", "ON_ERROR_STOP=1", "-tAc", query];
+}
+
+/**
+ * The psql binary: `psql` from PATH unless PSQL names another psql (a path
+ * ending in /psql). Anything else is refused, since a wrapper of another name
+ * could connect wherever it liked.
+ */
+export function psqlBinary(env = process.env) {
+  const named = env.PSQL;
+  if (named === undefined || named === "") return "psql";
+  if (!/(^|\/)psql$/.test(named)) {
+    throw new Error("Refusing to run: PSQL must be psql (or a path ending in /psql).");
+  }
+  return named;
 }
 
 /** True only for an http(s) or postgres(ql) URL whose every effective host is this machine. */
