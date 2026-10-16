@@ -1,6 +1,7 @@
 // The rules .github/workflows/migrations.yml must keep, read as text (no YAML
 // dependency). actionlint in ci.yml checks the syntax; this checks the intent.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
@@ -149,4 +150,27 @@ test("secrets reach only the steps that call the CLI, and no expression is paste
 test("the checkouts keep no credentials", () => {
   const checkouts = wf.split("actions/checkout@").length - 1;
   assert.equal((wf.match(/persist-credentials: false/g) ?? []).length, checkouts);
+});
+
+test("the SQL run against production is pinned by hash in the workflow, and checked before each run", () => {
+  const pinned = /PROBLEMS_SQL_SHA256:\s*"([0-9a-f]{64})"/.exec(wf)?.[1];
+  const actual = createHash("sha256").update(readFileSync("scripts/migrations/problems.sql")).digest("hex");
+  assert.equal(pinned, actual, "scripts/migrations/problems.sql changed: update PROBLEMS_SQL_SHA256 in migrations.yml in the same review");
+  for (const [name, job] of [["plan", plan], ["apply", apply]] as const) {
+    const steps = job.split(/\n {6}- /);
+    steps.forEach((step, i) => {
+      if (!/supabase db query[^\n]*-f scripts\/migrations\/problems\.sql/.test(step)) return;
+      const before = steps.slice(0, i).join("\n");
+      assert.match(before, /sha256sum --check --strict -/, `${name}: a database check runs before the hash check`);
+    });
+  }
+});
+
+test("in the plan, our own code runs only after the last step that holds a secret", () => {
+  const steps = plan.split(/\n {6}- /);
+  const lastSecret = steps.reduce((at, step, i) => (/secrets\.SUPABASE_(ACCESS_TOKEN|DB_PASSWORD) \}\}/.test(step) ? i : at), -1);
+  assert.ok(lastSecret > 0);
+  steps.forEach((step, i) => {
+    if (/\bnode\b|\bnpm\b|\bnpx\b/.test(runScripts(step).join("\n"))) assert.ok(i > lastSecret, `plan step "${step.split("\n")[0]}" runs our code before a secret step`);
+  });
 });

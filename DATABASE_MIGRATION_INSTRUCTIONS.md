@@ -13,8 +13,10 @@ workflow runs.
    run summary: each pending file in order, the first line of its header comment, and flags for
    statements an approver must read (dropped tables or columns, deleted or updated rows, a changed
    column type, dynamic SQL in a DO block, a new table without RLS or the approval gate). It also runs
-   the RLS and approval-gate check read-only (`scripts/migrations/problems.sql`) and reports what it
-   finds as warnings.
+   the RLS and approval-gate check (`scripts/migrations/problems.sql`, only when its sha256 matches
+   `PROBLEMS_SQL_SHA256` in the workflow) and reports what it finds as warnings. The plan holds
+   write-capable production credentials before anyone approves anything; see "What the plan job can
+   reach" below.
 3. **An approver reads the plan.** The list is everything production hasn't applied, which can be more
    than this PR's files. For any flagged file, confirm a recent backup exists (Supabase > Database >
    Backups) and read the file. Then:
@@ -95,6 +97,39 @@ A rejected migration's code still reaches production with the next deploy of `ma
    and that the database check reads the Management API's answer. The check may warn about tables made
    outside migrations (the stray `public.test`, LAUNCH_CHECKLIST); deal with those before the first
    apply so its warnings mean something.
+
+### What the plan job can reach (the trade-off, and how to close it)
+
+The plan job has no reviewers, and as set up above its environment holds the same
+`SUPABASE_ACCESS_TOKEN` and `SUPABASE_DB_PASSWORD` as the apply. The token can run any SQL through the
+Management API. So the approval (reviewers, or the typed confirm and `MIGRATION_APPROVERS`) gates
+`supabase db push`, not everything the workflow does with production credentials: whoever can merge
+to `main` (or start a manual run on it) controls the workflow file, and with it the plan job.
+
+What the repository does about it:
+
+- In the plan job every step that holds a secret runs before any of our own code
+  (`scripts/migrations/plan.mjs`), so an edit to that script can't plant a `$GITHUB_ENV` or
+  `$GITHUB_PATH` entry that a secret-holding step would pick up.
+- `scripts/migrations/problems.sql` runs against production (plan and apply) only when its sha256
+  matches `PROBLEMS_SQL_SHA256` in `migrations.yml`. Changing the SQL that runs before approval means
+  changing the workflow file too, and `npm test` (`migrations-workflow.test.ts`) fails until both
+  agree. When you change the check, update the hash in the same PR and say so in its description.
+- The CLI calls are the pinned CLI reading repository files as data: `db push --dry-run` reads the
+  migration files and runs none of them.
+
+What it can't do: stop a merged edit to `migrations.yml` itself from using the plan's secrets. Close
+that outside the repository:
+
+1. **A read-only credential for the plan.** Give `production-db-plan` its own secrets instead of the
+   apply's: ideally a database role with `SELECT` on `supabase_migrations.schema_migrations` and the
+   catalogs, logging in through the session pooler, and a workflow change to use it with `--db-url`
+   for the plan's dry run and check (the unit test's ban on `--db-url` moves to the apply job then).
+   Until that exists, the plan's credentials are as powerful as the apply's.
+2. **Review by an approver.** A `CODEOWNERS` entry naming the `MIGRATION_APPROVERS` for
+   `.github/workflows/**`, `scripts/migrations/**` and `supabase/migrations/**`, with branch protection
+   on `main` requiring code-owner review, so nothing that runs with production credentials merges
+   without one of them.
 
 **GitHub plan.** The repository is private. Required reviewers on a private repository's environment
 need GitHub Enterprise; Team has environments, environment secrets and branch rules but no reviewers.

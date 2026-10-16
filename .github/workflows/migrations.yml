@@ -16,6 +16,25 @@
 # approver applies with a manual run: apply on, confirm = the newest version the
 # plan lists, and the person clicking listed in vars.MIGRATION_APPROVERS.
 #
+# What the plan job can reach, and why it is ordered the way it is. The plan has
+# no reviewers, and its environment (production-db-plan) holds the same
+# SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD as the apply: the Management API
+# token can run any SQL. So whoever can merge to main (or start a manual run)
+# controls what the plan does with them; the approval gates only the apply. Two
+# things here keep an innocent-looking file from using them:
+#   - every step that holds a secret runs before any of our own code
+#     (scripts/migrations/plan.mjs) runs in that job, so a script can't plant
+#     $GITHUB_ENV or $GITHUB_PATH entries that a secret-holding step would pick up;
+#   - the database check runs scripts/migrations/problems.sql only when its
+#     sha256 matches PROBLEMS_SQL_SHA256 below, so changing what runs against
+#     production before approval means changing this file (a unit test keeps the
+#     two in step).
+# Neither stops a merged edit to this workflow itself. The real fix is outside
+# the repository: give production-db-plan its own read-only credential instead
+# of the apply's, and require an approver's review (CODEOWNERS + branch
+# protection) for .github/workflows/**, scripts/migrations/** and
+# supabase/migrations/**. DATABASE_MIGRATION_INSTRUCTIONS.md, "Setup, once".
+#
 # Rules: the CLI version is pinned here and in ci.yml together (a unit test checks
 # they match); every CLI call passes --agent no so its output doesn't depend on who
 # runs it; secrets sit only on the steps that call the CLI; never pass --debug (it
@@ -53,6 +72,9 @@ concurrency:
 env:
   SUPABASE_CLI_VERSION: "2.121.0"
   SUPABASE_PROJECT_REF: kerstlpuvpmstiavxblv
+  # sha256 of scripts/migrations/problems.sql, the only SQL of ours that runs
+  # against production; a unit test fails when the file changes without this.
+  PROBLEMS_SQL_SHA256: "71a3b6e1e02ed272fd34a62924189036528b9f9cce9ca742f65fe8e817da5078"
 
 jobs:
   plan:
@@ -99,10 +121,6 @@ jobs:
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: supabase link --project-ref "$SUPABASE_PROJECT_REF" --agent no --yes
 
-      - name: Connection
-        if: steps.secrets.outputs.configured == 'true'
-        run: node scripts/migrations/plan.mjs pooler --file supabase/.temp/pooler-url --summary "$GITHUB_STEP_SUMMARY"
-
       - name: Dry run
         id: dry
         if: steps.secrets.outputs.configured == 'true'
@@ -117,6 +135,23 @@ jobs:
           cat "$RUNNER_TEMP/dry-run.log"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
+      - name: The database check is the reviewed one
+        if: steps.secrets.outputs.configured == 'true'
+        run: echo "$PROBLEMS_SQL_SHA256  scripts/migrations/problems.sql" | sha256sum --check --strict -
+
+      - name: Database check (read-only)
+        if: steps.secrets.outputs.configured == 'true'
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase db query --linked --agent no --output-format json -f scripts/migrations/problems.sql \
+            > "$RUNNER_TEMP/problems.json" 2> "$RUNNER_TEMP/problems.log" || { cat "$RUNNER_TEMP/problems.log"; exit 1; }
+
+      # Our own code runs only from here on, after the last step that holds a secret.
+      - name: Connection
+        if: steps.secrets.outputs.configured == 'true'
+        run: node scripts/migrations/plan.mjs pooler --file supabase/.temp/pooler-url --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Read the dry run
         id: read
         if: steps.secrets.outputs.configured == 'true'
@@ -127,14 +162,6 @@ jobs:
         run: |
           node scripts/migrations/plan.mjs plan --dry-run "$RUNNER_TEMP/dry-run.json" --exit-code "$RC" \
             --summary "$GITHUB_STEP_SUMMARY" --outputs "$GITHUB_OUTPUT" --mode "$EVENT" --sha "$SHA"
-
-      - name: Database check (read-only)
-        if: steps.secrets.outputs.configured == 'true'
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-        run: |
-          supabase db query --linked --agent no --output-format json -f scripts/migrations/problems.sql \
-            > "$RUNNER_TEMP/problems.json" 2> "$RUNNER_TEMP/problems.log" || { cat "$RUNNER_TEMP/problems.log"; exit 1; }
 
       - name: Read the database check
         if: steps.secrets.outputs.configured == 'true'
@@ -201,6 +228,9 @@ jobs:
           RC: ${{ steps.dry.outputs.rc }}
           HASH: ${{ needs.plan.outputs.hash }}
         run: node scripts/migrations/plan.mjs plan --dry-run "$RUNNER_TEMP/dry-run.json" --exit-code "$RC" --expect-hash "$HASH" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: The database check is the reviewed one
+        run: echo "$PROBLEMS_SQL_SHA256  scripts/migrations/problems.sql" | sha256sum --check --strict -
 
       - name: Database check before
         env:
