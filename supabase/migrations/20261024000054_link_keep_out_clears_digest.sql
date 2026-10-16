@@ -9,6 +9,7 @@
 -- every write: whenever a row is (or becomes) kept out of AI, the summary, key
 -- points, page size and extraction notes are cleared and a 'read' status
 -- becomes 'skipped'. Relevance is left alone (the owner may set it by hand).
+-- Links already kept out that still carry a digest are cleared once, below.
 --
 -- Deploy order: either.
 --   * Code first: the API already clears the digest and never writes one onto
@@ -45,3 +46,9 @@ drop trigger if exists document_links_keep_out_clears_digest on public.document_
 create trigger document_links_keep_out_clears_digest
   before insert or update on public.document_links
   for each row execute function private.document_links_keep_out_clears_digest();
+
+-- Links already kept out of AI that still carry a digest: the trigger clears them.
+update public.document_links
+   set available_to_llm = available_to_llm
+ where available_to_llm = false
+   and (summary is not null or cardinality(key_points) > 0 or status in ('read', 'reading', 'queued'));

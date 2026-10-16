@@ -46,7 +46,8 @@ src/
 │   ├── accountability.ts  # stall detection, escalation sweep, anti-spam throttle
 │   ├── sweepSchedule.ts   # scheduled sweep: every counselor, under a Postgres lease
 │   ├── anthropic.ts       # model wrapper, ai_runs audit, essay guardrails
-│   ├── proseGuard.ts      # the essay gate on streamed answers (AxIS, /chat): first-person cap
+│   ├── proseGuard.ts      # the essay gate on streamed answers and AxIS cards: narrative and first-person caps
+│   ├── proxyTrust.ts      # how many proxy hops request.ip trusts (TRUST_PROXY_HOPS, else by deployment)
 │   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
@@ -696,12 +697,16 @@ Two layers, and they are not redundant:
 
 1. `@fastify/rate-limit` — in-process, per authenticated user (falling back to
    IP). Cheap, soaks up floods, **resets on deploy and doesn't span replicas.**
-   The IP is the one Railway's edge saw: `trustProxy` trusts exactly
-   `TRUST_PROXY_HOPS` hops (unset: 1 on Railway and in development, 0
-   elsewhere in production, `lib/proxyTrust.ts`), so the X-Forwarded-For entries a
-   client writes to the left of the edge's own are ignored by the limiter and
-   the request log. Never set it back to `true`: that takes the leftmost,
+   The IP is the one the outermost trusted proxy saw: `trustProxy` trusts
+   exactly `TRUST_PROXY_HOPS` hops (`lib/proxyTrust.ts`; unset, 1 on Railway,
+   detected by its `RAILWAY_*` variables, and in development, 0 elsewhere in
+   production with an error at boot), so the X-Forwarded-For entries a client
+   writes to the left of the edge's own are ignored by the limiter and the
+   request log. Never set it back to `true`: that takes the leftmost,
    client-written entry, and a fresh header per request was a fresh bucket.
+   Behind Cloudflare and Railway set 2 (a request carrying Cloudflare headers
+   while one hop is trusted logs that once): too few hops puts every caller in
+   the proxy's one bucket.
    Its hook runs before `authenticate`, so the key comes from verifying the
    bearer token on the spot (`clientKey` in `plugins/rateLimit.ts`,
    `lib/bearer.ts`), not from `request.auth`. A limited request answers 429.
@@ -1287,11 +1292,25 @@ anyone copying it.
   strength profile and the counselor's own tasks; in a roster chat names,
   class years, meetings and counselor tasks), and the change finds anything
   else with a lookup, which marks the turn if it reads such text. The marked
-  turn's next turn inherits it. Known limits: a student's name (up to 200
-  characters, on every card the counselor sees) is not counted; earlier
-  answers in the verbatim history and the memory summary can quote text from
-  more than one turn back; neither is an instruction channel the guard
-  reads. Switching parents or a guardian off (`set_alert_recipients` with
+  turn's next turn inherits it, and so does the turn after a direct answer or
+  essay advice that quoted such text (`DirectAnswer.outside`: a deadline's or
+  a student-added task's title, the high school, majors, rank). A student's
+  name and class year are the student's own fields, so AxIS shows them only
+  in the shape of a name and a year (`lib/context/identity.ts`: name
+  characters, at most six words and 60 characters; four digits) in the
+  trusted record, the trusted roster and the roster index every card and
+  lookup names students from; `20261024000052` refuses a new class year that
+  isn't four digits and a name past 200 characters. A task accepted from
+  Research (`source = 'counselor'`, but the title is the research model's,
+  from a web page) is not the counselor's words: trusted builds leave it out
+  and counselor task reads carry `fromResearch` (`lib/research/origin.ts`,
+  from `recommendations.accepted_as`; an unreadable answer vouches for no
+  task). Earlier changes are recalled each turn (`recentActionsText`) by
+  their summary only when it was filed in a clean turn and not labelled from
+  a read of its target (`payload.outside === false`); otherwise by the
+  operation's catalog title. Known limits: a short run of plain words is a
+  valid name shape; earlier answers in the verbatim history and the memory
+  summary can quote text from more than one turn back. Switching parents or a guardian off (`set_alert_recipients` with
   either copy flag, `update_guardian` with `alerts_enabled` or
   `receives_reports`) asks first whichever way it goes. After five auto changes
   in one turn the rest wait for Confirm; twenty changes is the limit per turn.
@@ -1365,16 +1384,28 @@ essay-adjacent route, it needs the code-level filter too.
 
 Free-text answers that stream (AxIS v2's agent and synthesis paths, the v1
 `/chat` stream) go through `ProseGate` (`lib/proseGuard.ts`) before any of
-them reaches the client: at most `FIRST_PERSON_WORD_CAP` (200) words in
-first-person-singular sentences per answer, past which the rest is withheld
-and the answer ends "I don't write essay text…"; what is saved is what was
-shown. Text streams live while it can't cross the cap, so ordinary answers and
-email drafts are unchanged. AxIS's essay router also catches requests by word
-count, prompt or voice ("650 first-person words for her prompt", "in her
-voice"). `/chat` is counselor-only: a student's free-form chat was a
-DEEP_MODEL ghostwriter guarded only by its prompt, and the app gives students
-no AxIS. Known limit: the gate is a shape test, so a short supplement asked
-for in pieces, or in the third person, is not caught by it.
+them reaches the client. It counts first-person-singular sentences two ways:
+narrative words (sentences that address nobody, no "you"/"your": an essay is
+told, an email is addressed), at most `NARRATIVE_WORD_CAP` (200), and every
+first-person word, at most `FIRST_PERSON_WORD_CAP` (450, so "as you know" in
+every sentence doesn't get a statement through). Past either the rest is
+withheld and the answer ends "I don't write essay text…"; what is saved is
+what was shown. Text streams live while it can't cross a cap, so ordinary
+answers and long family emails in the counselor's voice are unchanged. The
+free text AxIS files on a card (an `email_draft`, a queue item's notes, a
+message body, any string input of a write) passes `proseRefusal`
+(`lib/axis/ops/run.ts`): `essayShaped` per card and `TURN_NARRATIVE_CAP`
+(400) narrative words per turn, so a statement can't arrive as three drafts.
+AxIS's essay router also catches requests by word count, prompt or voice
+("650 first-person words for her prompt", "write it in her voice"), but not a
+question about a limit or a prompt. `/chat` is counselor-only (it clips its
+planning steps in code): a student's free-form chat was a DEEP_MODEL
+ghostwriter guarded only by its prompt, and the app gives students no AxIS.
+`/ai/award-appeal` and `/ai/parent-alert` are counselor-only too (no student
+screen calls them; a student could steer either into an essay) and refuse a
+draft `essayShaped` judges an essay; `/ai/draft-quality`'s findings pass
+`enforceNoProse`. Known limit: the gate is a shape test, so a short
+supplement asked for in pieces, or in the third person, is not caught by it.
 
 `/ai/essay-review` is the one route that may change a draft, and the rule is
 narrow: **mechanics only.** `enforceMechanicalEdit()` accepts a replacement only
@@ -1587,12 +1618,18 @@ their uploader can register them again.
 data-handling switches, not display preferences. Anything that reads a document
 into a prompt must filter on them (see `routes/tasks.ts`, and the context
 layer below). A link kept out of AI is saved `skipped` and never fetched or
-digested (`readLink` in `routes/files.ts`), and a link digest runs only when
-the practice's "AI summaries" switch is on: the counselor's own practice, or
-for a student their counselor's (`studentPracticeSettings` in
-`lib/practiceSettings.ts`, service client keyed by the caller's own profile,
-failing closed; `assertAiAllowed` applies it to every gated module a student
-reaches, submission review included). Students don't see waived recommendation letters, IEP/504 or
+digested (`readLink` in `routes/files.ts`), and holds no digest however it got
+there: the digest write is conditional on `available_to_llm` still being true
+and the switches are checked again after the model, `PATCH /files/links/:id {
+availableToLlm: false }` clears the digest, and `20261024000054` empties one
+in the database. A link digest runs only when the practice's "AI summaries"
+switch is on (refused: the link is saved `skipped` with the reason): the
+counselor's own practice, or for a student their counselor's
+(`studentPracticeSettings` in `lib/practiceSettings.ts`: the service client
+keyed by the caller's own profile, else `my_practice_ai_settings()` on the
+student's token, `20261024000053`; failing closed without an answer;
+`assertAiAllowed` applies it to every gated module a student reaches,
+submission review included). Students don't see waived recommendation letters, IEP/504 or
 counselor-only documents they didn't upload (`documents_student_restricted_select`),
 nor the task-document links of those files (`deliverable_documents_student_restricted_select`),
 nor their names in the activity log (the upload's `progress_events` row omits the filename).
@@ -2417,7 +2454,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   replaced on random input, and the worst cases under 100 ms), document storage
   paths (`storage-path`), the hand-in AI rule (`submissions`), reminder
   destinations (`studentReminders`), the streamed-answer essay gate
-  (`prose-guard`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
+  (`prose-guard`), the name and class-year shapes and proxy hops
+  (`identity-proxy`), and AxIS (`axis-*`: understanding, risk, ledger, retrieval, grounding, the
   loop and engine against a scripted model, and the fail-safes).
 - `npm run test:integration`: persona suites (`test/integration`) against a
   local Supabase and a running API, as real counselor and student accounts,
@@ -2443,9 +2481,12 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `caseload-transfer` (every persona, every table that follows a student,
   removal, the firm setting), `regex-dos` (the regular-expression attacks:
   a student's document, a Mass invite paste, an import file; `/health` keeps
-  answering while each runs) and `security-guardrails` (a spoofed
+  answering while each runs), `security-guardrails` (a spoofed
   X-Forwarded-For, `/chat` refused to students in the API and in RLS, link
-  digests and keep-out-of-AI). AxIS's outside-content rule needs a model, so
+  digests and keep-out-of-AI) and `security-guardrails-followup` (a class
+  year or name written through PostgREST, the counselor drafts refused to
+  students, a late digest on a kept-out link, the student's practice switches
+  function, `fromResearch`). AxIS's outside-content rule needs a model, so
   it is covered by `axis-engine` and `axis-ops` against a scripted one. `npm run test:imports-load` (pre-release) commits
   and undoes 5,000 rows and stages 5,000 more through the API; `npm run
   test:caseload-load` checks 500 students in one call. The harness's `user()`
@@ -2527,7 +2568,7 @@ npm run dev               # http://localhost:4000
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
 | `PORT` | Defaults to 4000 |
-| `TRUST_PROXY_HOPS` | Proxies in front of the API. Unset: 1 on Railway (its edge) and in development, 0 elsewhere in production; Railway behind Cloudflare: 2. `request.ip` is the address the outermost trusted proxy saw. 0 trusts no forwarding header |
+| `TRUST_PROXY_HOPS` | Proxies in front of the API; `request.ip` is the address the outermost trusted one saw. Unset: 1 on Railway and in development, 0 elsewhere in production (with an error at boot). Railway behind Cloudflare: 2. 0 trusts no forwarding header |
 | `CRON_SECRET` | Optional, 32+ chars; authenticates `/internal/*` and `/communication/internal/dispatch`, which 503 without it |
 | `IMPORT_DATABASE_URL` | Optional; import save/undo/apply. Must log in as `import_worker` via the Supabase session pooler. The role is created NOLOGIN by migration; turn on its login and set its password by hand |
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |

@@ -776,22 +776,41 @@ select polname from pg_policy where polname in
 
 ---
 
-## AI guardrails, more: `20261024000052`-`54`
+## Security: a name and class year are labels: `20261024000052`
 
-Three independent files, each safe in either order with the code and with the build before it; none
-is in `REQUIRED_SCHEMA`.
-
-| # | File | What it does |
-|---|---|---|
-| 1 | `20261024000052_profile_identity_text.sql` | Trigger `profiles_guard_identity_text`: a new `grad_year` is four digits (or empty) and a new `full_name` at most 200 characters (23514 on update; on insert the name is cut and a malformed year dropped), since AxIS reads both as labels |
-| 2 | `20261024000053_student_practice_ai_settings.sql` | `public.my_practice_ai_settings()`: the caller's own practice's two AI switches, for a student's request when the API has no service-role key (two booleans, no argument, null for anyone but a student of an approved counselor) |
-| 3 | `20261024000054_link_keep_out_clears_digest.sql` | Trigger `document_links_keep_out_clears_digest`: a link kept out of AI holds no summary, key points or extraction notes, and a `read` status becomes `skipped` |
-
-Check:
+A trigger on `profiles` (`profiles_guard_identity_text`): an update that sets `grad_year` to
+anything but four digits or empty, or `full_name` past 200 characters, is refused (23514); an
+insert is normalised instead (name cut to 200, a malformed year dropped), so a sign-up never
+fails. A row that already holds an odd value keeps saving its other columns. Either order is
+safe: the routes already refuse a malformed class year and AxIS shows only the shape of a name
+and a year. Not in `REQUIRED_SCHEMA`.
 
 ```sql
-select tgname from pg_trigger where tgname in ('profiles_guard_identity_text', 'document_links_keep_out_clears_digest');  -- 2 rows
-select to_regprocedure('public.my_practice_ai_settings()') is not null;                                          -- true
+select tgname from pg_trigger where tgname = 'profiles_guard_identity_text';  -- 1 row
+select count(*) from public.profiles where grad_year !~ '^[0-9]{4}$' and btrim(grad_year) <> '';  -- odd values left as they are
+```
+
+## Security: a student's practice AI switches: `20261024000053`
+
+`public.my_practice_ai_settings()`, SECURITY DEFINER, no argument: for a student of an approved
+counselor, their practice's `ai_summaries` and `auto_parse_documents` (defaults without a row);
+null for anyone else. The API asks it only without a service-role key; before it is applied a
+student's gated AI there is refused as before. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select proname from pg_proc where proname = 'my_practice_ai_settings';  -- 1 row
+```
+
+## Security: a link kept out of AI holds no digest: `20261024000054`
+
+A trigger on `document_links` (`document_links_keep_out_clears_digest`): a row that is, or
+becomes, `available_to_llm = false` has its summary, key points, page size and extraction notes
+cleared and a `read`/`reading`/`queued` status set to `skipped` (existing rows too, when it is applied). Relevance is left alone. Either
+order is safe. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select tgname from pg_trigger where tgname = 'document_links_keep_out_clears_digest';  -- 1 row
+select count(*) from public.document_links where available_to_llm = false and summary is not null;  -- 0
 ```
 
 ---

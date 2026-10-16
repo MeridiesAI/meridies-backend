@@ -75,7 +75,7 @@ const studentLink = await call(student.token, "POST", "/files/links", { url: "ht
 check("the student's link is saved", studentLink.status === 201, `status ${studentLink.status} ${JSON.stringify(studentLink.body).slice(0, 200)}`);
 check(
   "the student's link digest follows their practice's AI summaries switch",
-  studentLink.body?.status === "failed" && /AI summaries are turned off/.test(String(studentLink.body?.error)),
+  studentLink.body?.status === "skipped" && /AI summaries are turned off/.test(String(studentLink.body?.error)),
   `status ${studentLink.body?.status} error ${studentLink.body?.error}`
 );
 const studentRuns = await sql(`select count(*) from public.ai_runs where module = 'link-digest' and actor_id = '${student.id}'`);
