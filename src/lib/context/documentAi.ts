@@ -28,17 +28,26 @@ export function isRestrictedDocument(doc: { kind: string; ferpa_waived?: boolean
 
 /**
  * Kinds a student hands in for a task that the context layer leaves out only because nobody categorized them
- * (`other`) or because it never reads them as background (`essay`, `common-app`). Handing one in for a check is
- * the explicit request to read that file, so submission review reads them.
+ * (`other`) or because it never reads them as background (`essay`, `common-app`, and the aid tab's
+ * `award-letter` and `financial`, and a recommendation letter the student may see). Handing one in for a check
+ * is the explicit request to read that file, so submission review reads them, as it did before the shared rule
+ * applied. A waived letter is refused earlier in documentAiDecision; IEP/504 and counselor-only files are never
+ * on this list (isRestrictedDocument).
  */
-export const HAND_IN_READABLE_KINDS = ["other", "essay", "common-app"] as const;
+export const HAND_IN_READABLE_KINDS = [
+  "other",
+  "essay",
+  "common-app",
+  "award-letter",
+  "financial",
+  "recommendation-letter",
+] as const;
 
 /**
  * Whether AxIS may read a file handed in for a task (lib/submissionReview.ts): documentAiDecision in its fixed
  * order (keep-out, a waived recommendation letter, the practice's document-reading switch, `ai_access =
  * 'excluded'`), so every per-file and per-practice switch holds. The one widening is HAND_IN_READABLE_KINDS;
- * every other kind outside the defaults (IEP/504, counselor-only, financial, award letters, recommendation
- * letters) stays out unless the counselor set the file to `allowed`.
+ * the restricted kinds (IEP/504, counselor-only) stay out unless the counselor set the file to `allowed`.
  */
 export function handInAiDecision(
   doc: { kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean },
@@ -48,7 +57,8 @@ export function handInAiDecision(
   if (decision.allowed) return decision;
   if (
     (decision.reason === "not-categorized" || decision.reason === "kind-excluded") &&
-    (HAND_IN_READABLE_KINDS as readonly string[]).includes(doc.kind)
+    (HAND_IN_READABLE_KINDS as readonly string[]).includes(doc.kind) &&
+    !isRestrictedDocument(doc)
   ) {
     return { allowed: true, reason: null };
   }

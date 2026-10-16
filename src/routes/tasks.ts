@@ -533,12 +533,27 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const { data: existing } = await request.db
         .from("deliverables")
-        .select("student_id, source, visible_to_student, intake_request_id")
+        .select("student_id, source, status, visible_to_student, intake_request_id")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound("That task isn't on file");
       const studentId = existing.student_id as string;
       await resolveStudentId(request, studentId, "edit");
+
+      // A request from New student moves only with the student's Submit: once
+      // it is with the counselor (review) or received (complete) the student
+      // can't take it back, and they never send it themselves by setting its
+      // status. Otherwise a student loops "back to in progress, Submit again"
+      // and every round re-reads the files and re-emails the counselor. The
+      // database says the same (20261024000044).
+      if (request.profile.role === "student" && existing.intake_request_id && b.status !== undefined) {
+        const current = String(existing.status ?? "");
+        if (current === "review" || current === "complete") {
+          if (b.status !== current) throw conflict("This is with your counselor now.");
+        } else if (b.status === "review" || b.status === "complete") {
+          throw conflict("Use Submit to send this to your counselor.");
+        }
+      }
 
       if (b.visibleToStudent !== undefined) {
         if (request.profile.role !== "counselor") {
@@ -808,7 +823,10 @@ export default async function taskRoutes(app: FastifyInstance) {
       // loop of hand-ins can't flood the counselor's inbox or spend AI.
       // A New student request is only attached here; its Submit is capped on
       // its own route.
-      if (!(task.intake_request_id && request.profile.role === "student")) {
+      // Only a student's own hand-ins count: a counselor (or AxIS for them)
+      // handing in for the student spends their own AI quota, tells nobody,
+      // and must not be locked out by what the student did.
+      if (request.profile.role === "student" && !task.intake_request_id) {
         await enforceRateLimit(`hand-in:task:${id}`, HAND_INS_PER_TASK_HOUR, 3600, "That's a lot of hand-ins for one task. Try again in an hour.");
         await enforceRateLimit(`hand-in:student:${studentId}`, HAND_INS_PER_STUDENT_DAY, 86_400, "That's a lot of hand-ins for one day. Try again tomorrow.");
       }

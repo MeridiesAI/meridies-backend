@@ -104,7 +104,7 @@ test("a hand-in follows the shared per-document AI rule before anything is read"
     kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, ...over,
   });
   // read: the defaults, plus what a student hands in that nobody categorized
-  for (const kind of ["transcript", "resume", "test-report", "activity-list", "other", "essay", "common-app"]) {
+  for (const kind of ["transcript", "resume", "test-report", "activity-list", "other", "essay", "common-app", "award-letter", "financial", "recommendation-letter"]) {
     assert.deepEqual(handInAiDecision(doc({ kind }), true), { allowed: true, reason: null }, kind);
   }
   // never read
@@ -113,7 +113,7 @@ test("a hand-in follows the shared per-document AI rule before anything is read"
   assert.equal(handInAiDecision(doc({}), false).reason, "practice-setting");
   assert.equal(handInAiDecision(doc({ ai_access: "excluded" }), true).reason, "excluded");
   assert.equal(handInAiDecision(doc({ kind: "other", ai_access: "excluded" }), true).reason, "excluded");
-  for (const kind of ["iep-504", "counselor-only", "financial", "award-letter", "recommendation-letter"]) {
+  for (const kind of ["iep-504", "counselor-only"]) {
     assert.equal(handInAiDecision(doc({ kind }), true).allowed, false, kind);
     // a counselor's explicit allow still opens a restricted kind (never a waived letter)
     assert.equal(handInAiDecision(doc({ kind, ai_access: "allowed" }), true).allowed, true, kind);
@@ -121,4 +121,12 @@ test("a hand-in follows the shared per-document AI rule before anything is read"
   for (const r of ["keep-out", "waived", "practice-setting", "excluded", "kind-excluded"] as const) {
     assert.ok(aiRuleSkipReason(r).length > 10);
   }
+});
+
+test("the counselor's Submit email carries at most 60 characters of the student's display name", async () => {
+  const { intakeSubmittedHeading, SUBJECT_NAME_MAX } = await import("../../src/lib/newStudentIntake.js");
+  assert.equal(intakeSubmittedHeading("Ana Lopez"), "Ana Lopez sent what you asked for");
+  assert.equal(intakeSubmittedHeading("   "), "Your new student sent what you asked for");
+  const long = intakeSubmittedHeading(`Click https://evil.example now ${"x".repeat(200)}`);
+  assert.ok(long.length <= SUBJECT_NAME_MAX + " sent what you asked for".length, String(long.length));
 });

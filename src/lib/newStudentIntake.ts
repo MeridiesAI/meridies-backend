@@ -19,6 +19,7 @@ import { badRequest, conflict, fromPostgrest, notFound } from "./errors.js";
 import { serviceClient } from "./supabase.js";
 import { startSubmissionReview } from "./submissionReview.js";
 import { isCounselorApproved } from "./access.js";
+import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
 
@@ -195,19 +196,42 @@ export async function submitMyIntake(request: FastifyRequest): Promise<string[]>
   const taskIds = ((data ?? []) as string[]).map(String).filter((id) => !alreadyWithCounselor.has(id));
   if (!taskIds.length) return [];
 
-  if (taskIds.length) {
-    const { data: docs } = await request.db
-      .from("deliverable_documents")
-      .select("deliverable_id, document_id")
-      .in("deliverable_id", taskIds)
-      .eq("role", "submission");
-    for (const d of (docs ?? []) as Row[]) {
-      await startSubmissionReview(request, { taskId: String(d.deliverable_id), documentId: String(d.document_id) });
-    }
+  const { data: docs } = await request.db
+    .from("deliverable_documents")
+    .select("deliverable_id, document_id")
+    .in("deliverable_id", taskIds)
+    .eq("role", "submission");
+  for (const d of (docs ?? []) as Row[]) {
+    // An item moves to review again only after the counselor sends it back
+    // (the student can't take it back themselves since 20261024000044), so a
+    // few reads a day per item is every honest round. On a database without
+    // that migration this is what stops a loop of reads.
+    const taskId = String(d.deliverable_id);
+    if (!(await consumeRateLimit(`intake-read:${taskId}`, INTAKE_READS_PER_ITEM_DAY, 86_400, request.log))) continue;
+    await startSubmissionReview(request, { taskId, documentId: String(d.document_id) });
   }
 
-  await tellCounselor(request, taskIds).catch((err) => request.log.error({ err }, "intake submit notify failed"));
+  // One notice and one email per Submit, at most INTAKE_NOTICES_PER_DAY a day
+  // per student: an honest student submits once, and again after each item
+  // the counselor sends back. The Building profile card shows every submit
+  // whether or not the counselor was emailed about it.
+  if (await consumeRateLimit(`intake-submit-notice:${request.auth.userId}`, INTAKE_NOTICES_PER_DAY, 86_400, request.log)) {
+    await tellCounselor(request, taskIds).catch((err) => request.log.error({ err }, "intake submit notify failed"));
+  }
   return taskIds;
+}
+
+/** Counselor notices (bell and email) about a student's Submit, per day. */
+export const INTAKE_NOTICES_PER_DAY = 3;
+/** AxIS reads of one New student item, per day. */
+export const INTAKE_READS_PER_ITEM_DAY = 3;
+/** How much of the student's own display name an email subject carries. */
+export const SUBJECT_NAME_MAX = 60;
+
+/** "<name> sent what you asked for", with the student's display name (which they write) cut short. */
+export function intakeSubmittedHeading(fullName: unknown): string {
+  const name = oneLine(String(fullName ?? ""), SUBJECT_NAME_MAX) || "Your new student";
+  return `${name} sent what you asked for`;
 }
 
 async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
@@ -215,10 +239,9 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
   const counselorId = request.profile.counselor_id;
   if (!svc || !counselorId) return;
   if (!(await isCounselorApproved(svc, counselorId))) return;
-  const name = String(request.profile.full_name ?? "").trim() || "Your new student";
   const { data: tasks } = await request.db.from("deliverables").select("title").in("id", taskIds);
   const items = ((tasks ?? []) as Row[]).map((t) => String(t.title));
-  const heading = oneLine(`${name} sent what you asked for`, 200);
+  const heading = intakeSubmittedHeading(request.profile.full_name);
   const href = "/dashboard/counselor#student-profiles";
 
   const { error } = await svc.from("notifications").insert({
