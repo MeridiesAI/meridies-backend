@@ -127,17 +127,22 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 - [ ] **`INTEGRATION_TOKEN_KEY`**: generate it with `openssl rand -base64 32`, set it once, and never
   change it. Rotating it disconnects every integration. Set it before anyone connects Google or
   Microsoft.
-- [ ] **Google OAuth (Files, Gmail, Calendar)**:
-  - set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+- [ ] **Google OAuth (picked files, Calendar on request)**:
+  - Google connects only files the counselor picks (`drive.file`, through Google Picker) and, when they turn it
+    on, Calendar (`calendar.events`). No Gmail, and no restricted scope, so no CASA security assessment.
+  - set the Railway variables `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `INTEGRATION_TOKEN_KEY` (above),
+    `GOOGLE_PICKER_API_KEY` and `GOOGLE_PROJECT_NUMBER`, and only after the backend and app PRs are both live.
+    Until they are set every Google route answers 503 (`picker-config`: `picker_not_configured`) and the app hides
+    the Drive button.
   - register `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/google`
-  - add the scopes `src/lib/oauth.ts` asks for to the consent screen, including `drive.file` (new
-    in v10). Counselors who already connected must reconnect once.
-  - **Submit the app for Google verification and publish the consent screen.**
-    `drive.readonly` and `gmail.send` are restricted scopes, and `calendar.events` is sensitive.
-    Until Google verifies the app, it stays in Testing mode: only listed test users (100 max) can
-    connect, and their tokens expire after 7 days. Restricted scopes can require a third-party
-    security assessment, which takes weeks, so start early. Until then, add each counselor as a
-    test user.
+  - on the consent screen add `drive.file` and `calendar.events` (the scopes `src/lib/oauth.ts` asks for);
+    restrict the Picker API key to the Picker API and the app's origin
+  - publish the consent screen. `drive.file` and `calendar.events` are not restricted scopes, so no third-party
+    security assessment is needed, but until Google verifies the app it stays in Testing mode (100 test users,
+    tokens expire after 7 days): add each counselor as a test user until then.
+  - run `scripts/smoke/google-picker.md` once by hand against the deployed setup
+- [ ] **Do not set `NODE_OPTIONS=--max-old-space-size` on Railway.** The PDF text worker caps its own heap at
+  256 MB with `resourceLimits`, and a process-wide heap flag can override that limit.
 - [ ] **Microsoft OAuth**:
   - set `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET`
   - register `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/microsoft`
