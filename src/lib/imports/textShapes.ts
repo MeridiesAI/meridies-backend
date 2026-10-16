@@ -22,6 +22,27 @@ export function isEmailShape(v: string): boolean {
   return dot !== -1 && dot < v.length - 1;
 }
 
+/**
+ * `/[^\s@]+@[^\s@]+\.[^\s@]+/.test(v)`: an email address anywhere in the
+ * text. Each "@" looks only at the run of non-space, non-"@" characters after
+ * it, and those runs never overlap, so the scan is linear.
+ */
+export function containsEmailShape(v: string): boolean {
+  let at = v.indexOf("@");
+  while (at !== -1) {
+    const before = at > 0 ? v[at - 1] : "";
+    let end = at + 1;
+    while (end < v.length && v[end] !== "@" && !isSpace(v[end])) end++;
+    if (before !== "" && before !== "@" && !isSpace(before)) {
+      // A dot with at least one character before it (after the "@") and one after it.
+      const dot = v.indexOf(".", at + 2);
+      if (dot !== -1 && dot < end - 1) return true;
+    }
+    at = end < v.length && v[end] === "@" ? end : v.indexOf("@", end);
+  }
+  return false;
+}
+
 const SCORE_WORDS = ["exam score", "score", "result"] as const;
 
 /**

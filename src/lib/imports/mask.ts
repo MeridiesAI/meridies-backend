@@ -15,7 +15,7 @@
  */
 
 import { parseName } from "./names.js";
-import { isEmailShape } from "./textShapes.js";
+import { containsEmailShape, isEmailShape } from "./textShapes.js";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}(t[\d:.]+z?)?$/i;
 const SLASH_DATE = /^\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}$/;
@@ -121,7 +121,7 @@ const NUMBER_RUN = /\d+(?:[\s/.()-]+\d+)*/g;
  * Year 2027", "AP Biology 2024", "Grade 10 Fall 2024") stands alone.
  */
 export function headerHoldsValue(header: string): boolean {
-  if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(header)) return true;
+  if (containsEmailShape(header)) return true;
   for (const run of header.match(NUMBER_RUN) ?? []) {
     const groups = run.match(/\d+/g) ?? [];
     if (groups.join("").length >= 5 || groups.length >= 3) return true;

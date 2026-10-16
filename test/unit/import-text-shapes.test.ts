@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { maskHeader, maskValue } from "../../src/lib/imports/mask.js";
 import { presetTarget } from "../../src/lib/imports/presets.js";
-import { isEmailShape, scoreColumnParts, scoreSuffixStart, splitListCell } from "../../src/lib/imports/textShapes.js";
+import { containsEmailShape, isEmailShape, scoreColumnParts, scoreSuffixStart, splitListCell } from "../../src/lib/imports/textShapes.js";
 import { cleanCell, parseNumber } from "../../src/lib/imports/values.js";
 import { workbookUses1904 } from "../../src/lib/imports/zipGuard.js";
 import { BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
@@ -29,6 +29,19 @@ test("isEmailShape matches /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/", () => {
   for (let i = 0; i < 20000; i++) {
     const s = randomText(rand, ["a", "@", ".", " ", "\t", " ", "x.y", "-", "@."], 1 + Math.floor(rand() * 10));
     assert.equal(isEmailShape(s), EMAIL.test(s), JSON.stringify(s));
+  }
+});
+
+test("containsEmailShape matches /[^\\s@]+@[^\\s@]+\\.[^\\s@]+/", () => {
+  const CONTAINS = /[^\s@]+@[^\s@]+\.[^\s@]+/;
+  const rand = seeded(27);
+  for (let i = 0; i < 20000; i++) {
+    const s = randomText(rand, ["a", "@", ".", " ", "\t", " ", "x.y", "-", "@.", "1"], 1 + Math.floor(rand() * 12));
+    assert.equal(containsEmailShape(s), CONTAINS.test(s), JSON.stringify(s));
+  }
+  for (const s of ["a".repeat(40000), "a@" + "b".repeat(40000), "a@.".repeat(15000), "Cell " + "@a.".repeat(15000)]) {
+    assert.ok(elapsed(() => containsEmailShape(s)) < BUDGET_MS, `${s.slice(0, 8)}… took too long`);
+    assert.ok(elapsed(() => maskHeader(s)) < BUDGET_MS, `maskHeader ${s.slice(0, 8)}… took too long`);
   }
 });
 
