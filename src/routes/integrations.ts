@@ -21,6 +21,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { env } from "../env.js";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
 import { guessText, requestExtraction } from "../lib/documentExtraction.js";
@@ -28,9 +29,13 @@ import { guessKind, importFields } from "../lib/documentGuess.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
+  accessTokenFor,
   beginAuthorization,
   completeAuthorization,
   connectedAccountEmail,
+  GOOGLE_SCOPE,
+  hasScope,
+  pickerConfigProblem,
   providerLabel,
   revokeAndForget,
   SUITE_PROVIDERS,
@@ -151,7 +156,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
         calendarEnabled: account ? account.scopes.some((s) => /calendar\.events$|calendars\.readwrite$/i.test(s)) : false,
         driveGranted: account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
         // Until the Railway variables are set the app hides the Drive button (Elvin, 10/15).
-        pickerReady: false, // Task 11
+        pickerReady:
+          provider === "google" &&
+          reason === null &&
+          pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null,
       };
     });
   });
@@ -207,6 +215,37 @@ export default async function integrationRoutes(app: FastifyInstance) {
   );
 
   // ---- Files -----------------------------------------------------------------
+
+  /**
+   * What the browser needs to open Google Picker (spec §4.2). The API key is public by nature and
+   * restricted in Google Cloud; no token or secret is returned. The browser gets its own
+   * drive.file-only token from Google.
+   */
+  app.get(
+    "/google/picker-config",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRole("counselor"),
+        limit("integrations:picker-config", 60, 60),
+      ],
+    },
+    async (request) => {
+      const problem = pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER });
+      if (problem) throw new HttpError(503, problem, "picker_not_configured");
+      const token = await accessTokenFor(request.auth.userId, "google"); // 409 google_disconnected / google_reconnect
+      if (!hasScope(token, GOOGLE_SCOPE.driveFile)) {
+        throw new HttpError(409, "Meridies needs access to the files you pick. Connect Google again and leave Drive ticked.", "drive_not_granted");
+      }
+      return {
+        clientId: env.GOOGLE_CLIENT_ID,
+        apiKey: env.GOOGLE_PICKER_API_KEY,
+        appId: env.GOOGLE_PROJECT_NUMBER,
+        accountEmail: token.accountEmail,
+        maxFiles: env.GOOGLE_PICKER_MAX_FILES,
+      };
+    }
+  );
 
   /** Drive / OneDrive files the counselor's connected account can see. */
   app.get(

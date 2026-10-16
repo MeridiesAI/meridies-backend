@@ -162,6 +162,14 @@ export function unavailableReason(provider: SuiteProvider): string | null {
   return null;
 }
 
+/** What Google Picker needs beyond the sign-in client: the first missing setting, named, or null. */
+export function pickerConfigProblem(e: { clientId?: string; apiKey?: string; projectNumber?: string }): string | null {
+  if (!e.clientId) return "Google Drive isn't set up on this server yet (missing GOOGLE_CLIENT_ID).";
+  if (!e.apiKey) return "Google Drive isn't set up on this server yet (missing GOOGLE_PICKER_API_KEY).";
+  if (!e.projectNumber) return "Google Drive isn't set up on this server yet (missing GOOGLE_PROJECT_NUMBER).";
+  return null;
+}
+
 function configured(provider: SuiteProvider) {
   const reason = unavailableReason(provider);
   if (reason) throw unavailable(reason);
