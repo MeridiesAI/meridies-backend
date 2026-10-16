@@ -62,7 +62,8 @@ src/
 │   ├── studentPage.ts     # info card, derived polygon scores, recorded-growth scrubber
 │   ├── studentApplication.ts # College list board + Application DTOs and rules
 │   ├── supplementDocs.ts  # supplement Google Docs under drive.file
-│   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts (10 MB cap, linear scans)
+│   ├── documentText.ts    # .txt/.md/.docx text on the server, for word counts (bounded work, linear scans)
+│   ├── storageDownload.ts # a Storage object read up to a byte cap while streaming; never trusts size_bytes
 │   ├── linearText.ts      # tag/block stripping and line trims in linear time, for text a user supplied
 │   ├── studentAid.ts      # Financial aid page: FAFSA status + due date only, matching
 │   ├── inviteDelivery.ts  # an invitation's (or a composer attempt's) delivery status, as the webhooks left it
@@ -2291,9 +2292,20 @@ step 1's and is never gated.
   import cell or header, an AxIS message or a model's streamed reply. Use the
   scanners in `lib/linearText.ts` and `lib/imports/textShapes.ts` (each names
   the expression it replaces and is checked against it on random input), cap
-  the input before matching (`MAX_DOCUMENT_BYTES` for document text, a window
-  for log redaction), or anchor and bound the pattern so each position does a
-  bounded amount of work. A new scan of such text gets a unit test that feeds
+  the input before matching (a window for log redaction, `MAX_HEADER_CHARS`
+  (500) on an import header, cut when the sheet is read), or anchor and bound
+  the pattern so each position does a bounded amount of work; two `\s*` around
+  an optional group (`free\s*(and|&)?\s*reduced`) is the same quadratic shape.
+  Linear is not enough when the input is amplified: bound the work on what is
+  parsed, not only on what was uploaded. Document text (`lib/documentText.ts`)
+  inflates `word/document.xml` to `MAX_XML_BYTES` (2 MB) at most, reads a .txt
+  up to `MAX_TEXT_FILE_BYTES` (1 MB), and treats text past `MAX_TEXT_CHARS`
+  (200,000) as unreadable, because a 37 KB archive used to expand to 19 MB and
+  cost over a second of parsing per request. `documents.size_bytes` is the
+  client's word: read a Storage object with `downloadCapped`
+  (`lib/storageDownload.ts`), which streams and stops past the cap, never with
+  `download()`, which buffers the whole object (up to the bucket's 50 MB)
+  before anything can look at its length. A new scan of such text gets a unit test that feeds
   the worst case and asserts it finishes in well under 100 ms
   (`test/unit/regex-dos-helpers.ts`); `test/integration/regex-dos.test.mjs`
   runs the review's attacks against the API and checks `/health` still
@@ -2480,8 +2492,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `-retention`, `-guard`, `-security`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`),
   `caseload-transfer` (every persona, every table that follows a student,
   removal, the firm setting), `regex-dos` (the regular-expression attacks:
-  a student's document, a Mass invite paste, an import file; `/health` keeps
-  answering while each runs), `security-guardrails` (a spoofed
+  a student's document, a Mass invite paste, an import file and its header
+  row, a .docx that inflates to 19 MB and a 10 MB .txt registered with no
+  size, each read six times at once; `/health` keeps answering while each
+  runs), `security-guardrails` (a spoofed
   X-Forwarded-For, `/chat` refused to students in the API and in RLS, link
   digests and keep-out-of-AI) and `security-guardrails-followup` (a class
   year or name written through PostgREST, the counselor drafts refused to

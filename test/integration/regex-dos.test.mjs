@@ -16,7 +16,7 @@ import { API, CLIENT, call, check, sql, user } from "./harness.mjs";
 import { addImportFile, enc } from "./imports-helpers.mjs";
 
 const SB = process.env.SUPABASE_URL;
-/** REDOS_ONLY=txt,docx,mass,import runs some of the attacks (each one holds an unfixed API for minutes). */
+/** REDOS_ONLY=txt,docx,mass,import,header,inflate,cr runs some of the attacks (each one holds an unfixed API for minutes). */
 const ONLY = process.env.REDOS_ONLY ? new Set(process.env.REDOS_ONLY.split(",")) : null;
 const runs = (name) => !ONLY || ONLY.has(name);
 const ANON = process.env.SUPABASE_ANON_KEY;
@@ -55,7 +55,8 @@ async function withHealthProbe(attack) {
   return { attack: await pending, health: worst };
 }
 
-async function storeAsStudent(student, name, bytes, mime) {
+/** `sizeBytes` is what the client registers: by default the real size; `null` says nothing. */
+async function storeAsStudent(student, name, bytes, mime, sizeBytes = bytes.length) {
   const path = `${student.id}/${Date.now()}-${name}`;
   const r = await fetch(`${SB}/storage/v1/object/student-documents/${path}`, {
     method: "POST",
@@ -63,7 +64,7 @@ async function storeAsStudent(student, name, bytes, mime) {
     body: bytes,
   });
   if (!r.ok) throw new Error(`storage upload ${r.status} ${await r.text()}`);
-  const doc = await call(student.token, "POST", "/files/documents", { storagePath: path, filename: name, mimeType: mime, sizeBytes: bytes.length });
+  const doc = await call(student.token, "POST", "/files/documents", { storagePath: path, filename: name, mimeType: mime, sizeBytes });
   if (doc.status !== 201) throw new Error(`register ${doc.status} ${JSON.stringify(doc.body)}`);
   return doc.body.id;
 }
@@ -153,4 +154,65 @@ if (runs("import")) {
     check("…and the API answers /health while it is profiled", health.status === 200, `slowest /health ${health.ms} ms (${health.status})`);
     await call(counselor.token, "DELETE", `/imports/${start.body.id}`);
   }
+}
+
+// ---- 5. A counselor's import file whose header row is crafted ----------------------
+// sensitiveHeader's `free\s*(and|&|\/)?\s*reduced` split a run of spaces after
+// "free" O(n²) ways, on the main thread after the parse child had finished: a
+// 160 KB header held the API for 43 s.
+if (runs("header")) {
+  const start = await call(counselor.token, "POST", "/imports", { permissionConfirmed: true });
+  if (start.status === 403 || start.status === 503) {
+    check("imports are switched on for this API (IMPORTS_ROLLOUT=all and the migrations)", false, `status ${start.status} ${JSON.stringify(start.body)}`);
+  } else {
+    const bytes = enc(`email,free${" ".repeat(160_000)}lunch\na@b.co,yes\n`);
+    const { attack, health } = await withHealthProbe(() => addImportFile(counselor, start.body.id, "roster.csv", bytes));
+    check(`a ${bytes.length}-byte import file with a header of "free" and 160,000 spaces is profiled promptly`, attack.status === 200 || attack.status === 201, `status ${attack.status} in ${attack.ms} ms ${JSON.stringify(attack.body ?? "").slice(0, 160)}`);
+    check("…and the API answers /health while it is profiled", health.status === 200, `slowest /health ${health.ms} ms (${health.status})`);
+    await call(counselor.token, "DELETE", `/imports/${start.body.id}`);
+  }
+}
+
+/** `count` essay-from-document calls on one document at once, as one student can send them. */
+function repeated(documentId, count) {
+  return async () => {
+    const results = await Promise.all(
+      Array.from({ length: count }, () =>
+        call(student.token, "POST", "/application/essays/from-document", { studentId: student.id, documentId, essayKind: "other" })
+      )
+    );
+    const bad = results.find((r) => r.status !== 201 && r.status !== 200);
+    return { status: bad ? bad.status : 201, body: results.map((r) => r.body?.textStatus) };
+  };
+}
+
+// ---- 6. A student's small .docx that inflates to 19 MB, read again and again -----
+// The 20 MB inflate cap let a 37 KB archive expand to 19 MB of one-letter runs,
+// 1.2 s of parsing per call at 60 calls a minute. Six at once held the API for
+// about 7 s; now the inflate stops at 2 MB and the file reads as unreadable.
+if (runs("inflate")) {
+  const xml = `<w:document><w:body>${"<w:t>x</w:t>".repeat(1_600_000)}</w:body></w:document>`;
+  const bytes = docx(xml);
+  const id = await storeAsStudent(student, "inflate.docx", bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  const { attack, health } = await withHealthProbe(repeated(id, 6));
+  check(`six reads of a ${bytes.length}-byte .docx inflating to 19 MB answer within 3 s`, attack.status === 201 && attack.ms < 3000, `status ${attack.status} in ${attack.ms} ms ${JSON.stringify(attack.body)}`);
+  check("…and they read it as unreadable rather than parsing 19 MB", Array.isArray(attack.body) && attack.body.every((s) => s === "unreadable"), JSON.stringify(attack.body));
+  check("…and the API answers /health while they run", health.status === 200, `slowest /health ${health.ms} ms (${health.status})`);
+}
+
+// ---- 7. A student's 10 MB .txt of carriage returns, registered with no size --------
+// normalizeText took 1.6 s on 10 MB of "\r", and a row registered with
+// `sizeBytes: null` skipped the size check, so the whole object was downloaded
+// and buffered every call. Now the download stops past the 1 MB text cap.
+if (runs("cr")) {
+  const bytes = Buffer.alloc(10 * 1024 * 1024, 0x0d);
+  const id = await storeAsStudent(student, "returns.txt", bytes, "text/plain", null);
+  const { attack, health } = await withHealthProbe(repeated(id, 6));
+  check("six reads of a 10 MB .txt of \"\\r\" registered with no size answer within 3 s", attack.status === 201 && attack.ms < 3000, `status ${attack.status} in ${attack.ms} ms ${JSON.stringify(attack.body)}`);
+  check("…and the file reads as unreadable (over the text cap)", Array.isArray(attack.body) && attack.body.every((s) => s === "unreadable"), JSON.stringify(attack.body));
+  check("…and the API answers /health while they run", health.status === 200, `slowest /health ${health.ms} ms (${health.status})`);
+  // A real essay registered with no size still reads.
+  const ok = await storeAsStudent(student, "real.txt", Buffer.from("My essay has five words."), "text/plain", null);
+  const r = await call(student.token, "POST", "/application/essays/from-document", { studentId: student.id, documentId: ok, essayKind: "other" });
+  check("a real .txt registered with no size still reads", r.status === 201 && r.body?.textStatus === "read", `status ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
 }
