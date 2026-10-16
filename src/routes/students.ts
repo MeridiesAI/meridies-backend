@@ -38,7 +38,7 @@ const patchStudentSchema = z
     headline: z.string().trim().max(300),
     hometown: z.string().trim().max(200),
     highSchool: z.string().trim().max(200),
-    gradYear: z.string().trim().max(10),
+    gradYear: z.string().trim().regex(/^(\d{4})?$/, "Use a four-digit year, like 2027"),
     profile: z.record(z.unknown()).refine((p) => profileBytes(p) <= MAX_PROFILE_BYTES, "Profile is too large"),
     archived: z.boolean(),
   })

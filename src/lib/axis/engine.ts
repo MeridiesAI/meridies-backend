@@ -263,7 +263,8 @@ export async function runAxisTurn(opts: {
   // ---- 2. Understanding ----
   const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state });
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
-  // A direct or essay answer runs no model over outside content: whatever the last turn read stays in force.
+  // A direct or essay answer runs no tools: whatever the last turn read stays in force, and an answer that
+  // quotes text someone else wrote (below) taints the next turn the way reading it would have.
   const state = { ...nextState(u, history.state, chatStudent), ...(history.state?.outside ? { outside: true } : {}) };
   const ledger = new SourceLedger();
   const trace: { label: string }[] = [];
@@ -290,7 +291,8 @@ export async function runAxisTurn(opts: {
       if (citations.length) emit("citations", { citations });
       request.log.info({ axis: { path: "direct", frame: direct.frame, ms: Date.now() - startedAt } }, "axis turn");
       return {
-        path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u, state,
+        path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u,
+        state: direct.outside ? { ...state, outside: true } : state,
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
       };
     }
@@ -303,7 +305,10 @@ export async function runAxisTurn(opts: {
     const text = await essayAdvice(request, studentId, content, ctx.record, { signal, precharged: takePrepaid() });
     emit("delta", { text });
     return {
-      path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u, state,
+      // The bullets were written over the student's record (their essays, activities): saved to the
+      // chat, they are outside content for the next turn.
+      path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u,
+      state: ctx.outside ? { ...state, outside: true } : state,
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
     };
   }

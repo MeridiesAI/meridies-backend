@@ -16,6 +16,8 @@
 
 import type { FastifyRequest } from "fastify";
 import { DEEP_MODEL, FAST_MODEL } from "./anthropic.js";
+import { plainGradYear, plainName } from "./context/identity.js";
+import { researchTaskIds } from "./research/origin.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "./context/pack.js";
 
 export type ChatToolKey =
@@ -209,8 +211,8 @@ export async function buildRosterContext(
       .order("starts_at")
       .limit(60),
     (trusted
-      ? db.from("deliverables").select("student_id, title, status, due_date, last_activity_at, source").eq("source", "counselor")
-      : db.from("deliverables").select("student_id, title, status, due_date, last_activity_at, source")
+      ? db.from("deliverables").select("id, student_id, title, status, due_date, last_activity_at, source").eq("source", "counselor")
+      : db.from("deliverables").select("id, student_id, title, status, due_date, last_activity_at, source")
     )
       .neq("status", "complete")
       .lte("due_date", horizon)
@@ -220,7 +222,7 @@ export async function buildRosterContext(
   if (roster.error) return null;
 
   const names = new Map(
-    ((roster.data ?? []) as Record<string, unknown>[]).map((r) => [String(r.id), String(r.full_name ?? "")])
+    ((roster.data ?? []) as Record<string, unknown>[]).map((r) => [String(r.id), trusted ? plainName(r.full_name) : String(r.full_name ?? "")])
   );
   const who = (id: unknown) => names.get(String(id)) ?? "Student";
   const label = <T extends Record<string, unknown>>(rows: T[] | null) =>
@@ -235,12 +237,26 @@ export async function buildRosterContext(
     sources.push("Calendar");
   }
 
+  // A change turn's roster names each student by the shape of a name and a year only
+  // (lib/context/identity.ts): the student writes both fields, at any length through PostgREST.
   const students = ((roster.data ?? []) as Record<string, unknown>[]).map((r) =>
-    trusted ? { name: r.full_name, gradYear: r.grad_year } : { name: r.full_name, gradYear: r.grad_year, highSchool: r.high_school }
+    trusted
+      ? { name: plainName(r.full_name), gradYear: plainGradYear(r.grad_year) }
+      : { name: r.full_name, gradYear: r.grad_year, highSchool: r.high_school }
   );
   const deadlineRows = label(deadlines.data as Record<string, unknown>[] | null);
-  const taskRows = label(tasks.data as Record<string, unknown>[] | null);
+  let taskList = (tasks.data ?? []) as Record<string, unknown>[];
+  // A change turn leaves out tasks accepted from Research: their titles are the research model's,
+  // from a web page (lib/research/origin.ts). Unreadable, it can't vouch for any task.
+  let unvouched = false;
+  if (trusted && taskList.length) {
+    const research = await researchTaskIds(db, { taskIds: taskList.map((t) => String(t.id)) });
+    if (research) taskList = taskList.filter((t) => !research.has(String(t.id)));
+    else unvouched = true;
+  }
+  const taskRows = label(taskList.map(({ id: _id, ...rest }) => rest));
   const outside =
+    unvouched ||
     (!trusted && students.some((st) => typeof (st as { highSchool?: unknown }).highSchool === "string" && String((st as { highSchool?: unknown }).highSchool).trim() !== "")) ||
     deadlineRows.length > 0 ||
     taskRows.some((t) => (t as Record<string, unknown>).source !== "counselor");

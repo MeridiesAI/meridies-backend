@@ -608,7 +608,9 @@ export const blasts: OpGroup = {
     op({
       name: "blasts.audiences",
       kind: "read",
-      outside: false,
+      // Class years and school names on the list are the students' own text (student_colleges.name,
+      // profiles.grad_year): reading them is outside content, whenever there are any.
+      outside: (body) => asArray(asRecord(body).schools).length > 0 || asArray(asRecord(body).classYears).length > 0,
       title: "Who a blast can go to right now: the roster, class years, schools applied to and application statuses, with counts.",
       doc: "{}",
       input: z.object({}).strict(),

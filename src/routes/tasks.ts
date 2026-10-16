@@ -48,6 +48,7 @@ import { enforceRateLimit, limit } from "../lib/limits.js";
 import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
+import { researchTaskIds } from "../lib/research/origin.js";
 
 type Row = Record<string, unknown>;
 
@@ -180,7 +181,10 @@ export async function hydrate(
   if (tasks.length === 0) return [];
   const ids = tasks.map((t) => t.id as string);
 
-  const [stages, docs, tracker] = await Promise.all([
+  // Which counselor tasks were accepted from Research (lib/research/origin.ts): AxIS reads their
+  // titles as outside content. Counselors only (a student can't read recommendations).
+  const counselorTasks = request.profile.role === "counselor" ? tasks.filter((t) => t.source !== "student").map((t) => t.id as string) : [];
+  const [stages, docs, tracker, research] = await Promise.all([
     request.db
       .from("deliverable_stages")
       .select("*")
@@ -194,6 +198,7 @@ export async function hydrate(
       )
       .in("deliverable_id", ids),
     request.db.from("deliverable_tracker_latest").select("*").in("deliverable_id", ids),
+    counselorTasks.length ? researchTaskIds(request.db, { taskIds: counselorTasks }) : Promise.resolve(new Set<string>()),
   ]);
 
   const stageBy = new Map<string, Row[]>();
@@ -218,6 +223,8 @@ export async function hydrate(
       stages: stageBy.get(t.id as string) ?? [],
       documents: docBy.get(t.id as string) ?? [],
       tracker: trackerBy.get(t.id as string) ?? null,
+      // Unreadable: every counselor task may be one (AxIS then treats them as outside content).
+      ...(request.profile.role === "counselor" ? { fromResearch: t.source !== "student" && (research === null || research.has(t.id as string)) } : {}),
     })
   );
 }

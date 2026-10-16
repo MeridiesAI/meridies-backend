@@ -33,7 +33,7 @@ import { getConnectors, getRetrieval, type ConnectedProvider, type RetrievedChun
 import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
-import { markOutside, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { markOutside, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
 
 export type ProposedAction = {
   id: string;
@@ -398,20 +398,26 @@ const DEFS: ToolDef[] = [
           to: z.enum(["parents", "student"]).optional(),
         })
         .parse(raw);
+      // The draft's body lands whole on a card and in the composer: the essay guardrail applies to it.
+      const prose = proseRefusal(ctx.turn, { title: i.title, detail: i.detail ?? "" });
+      if (prose) return { content: `Not drafted: ${prose}`, isError: true, fresh: false };
       const target = i.student_id ?? ctx.studentId;
       const studentId = target ? await resolveStudentId(ctx.request, target, "view") : null;
       if (i.type === "email_draft" && !studentId) return { content: "An email draft needs a student.", isError: true, fresh: false };
+      // `outside`: written in a turn that read someone else's words, so later turns recall it by kind only.
+      const outside = ctx.turn.tainted || ctx.turn.sawOutside;
       const payload =
         i.type === "work_item"
-          ? { title: i.title, detail: i.detail ?? null, dueDate: i.due_date ?? null }
-          : { to: i.to ?? "parents", subject: i.title, body: i.detail ?? "" };
+          ? { title: i.title, detail: i.detail ?? null, dueDate: i.due_date ?? null, outside }
+          : { to: i.to ?? "parents", subject: i.title, body: i.detail ?? "", outside };
       const { data, error } = await ctx.request.db
         .from("axis_actions")
         .insert({ owner_id: ctx.request.auth.userId, conversation_id: ctx.conversationId, student_id: studentId, type: i.type, payload })
         .select("id")
         .single();
       if (error) throw fromPostgrest(error);
-      const action: ProposedAction = { id: String(data.id), type: i.type, studentId, payload };
+      const { outside: _stored, ...shown } = payload;
+      const action: ProposedAction = { id: String(data.id), type: i.type, studentId, payload: shown };
       ctx.onAction(action);
       return { content: `Proposed (id ${action.id}). The counselor sees a card to confirm or dismiss it; tell them it's waiting, don't say it's done.`, fresh: true };
     },

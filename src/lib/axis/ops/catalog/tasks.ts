@@ -102,7 +102,8 @@ export const tasks: OpGroup = {
     op({
       name: "tasks.list",
       kind: "read",
-      outside: (body) => asArray(body).some((t) => t.source !== "counselor"),
+      // A student's own task, or one accepted from Research (its title is from a web page).
+      outside: (body) => asArray(body).some((t) => t.source !== "counselor" || t.fromResearch !== false),
       title: "A student's open tasks with ids (include_complete adds finished ones).",
       doc: "{ student_id, include_complete? bool, source?: counselor|student }",
       input: z.object({ student_id: uuid, include_complete: z.boolean().optional(), source: z.enum(["counselor", "student"]).optional() }).strict(),
@@ -124,7 +125,7 @@ export const tasks: OpGroup = {
     op({
       name: "tasks.get",
       kind: "read",
-      outside: (body) => { const t = asRecord(body); return t.source !== "counselor" || asArray(t.documents).length > 0; },
+      outside: (body) => { const t = asRecord(body); return t.source !== "counselor" || t.fromResearch !== false || asArray(t.documents).length > 0; },
       title: "One task with its steps and attached files, with their ids.",
       doc: "{ task_id }",
       input: z.object({ task_id: uuid }).strict(),

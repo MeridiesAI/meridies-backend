@@ -5,7 +5,9 @@
  */
 import type { FastifyRequest } from "fastify";
 import { freshness } from "../collegesV10.js";
+import { plainName } from "../context/identity.js";
 import { buildStudentContext, type StudentContext } from "../context/index.js";
+import { researchTaskIds } from "../research/origin.js";
 import type { SectionName } from "../context/profiles.js";
 import { fromPostgrest } from "../errors.js";
 import { gpaLabel } from "../gpa.js";
@@ -40,7 +42,9 @@ export function loadRoster(request: FastifyRequest): Promise<RosterIndex> {
       .is("archived_at", null)
       .limit(1000);
     if (error) throw fromPostgrest(error);
-    return new RosterIndex(((data ?? []) as Row[]).map((r): RosterRow => ({ id: String(r.id), name: str(r.full_name) })));
+    // Names as AxIS shows them everywhere (find_student, cards, rankings): name characters only,
+    // clipped (lib/context/identity.ts). The student writes their own name, at any length.
+    return new RosterIndex(((data ?? []) as Row[]).map((r): RosterRow => ({ id: String(r.id), name: plainName(str(r.full_name)) })));
   });
 }
 
@@ -144,7 +148,7 @@ export async function upcomingItems(
   const today = isoDay();
   const { from, to } = opts.window;
   let dq = db.from("deadlines").select("student_id, title, school, type, due_date").eq("done", false).lte("due_date", to);
-  let tq = db.from("deliverables").select("student_id, title, status, due_date, source").neq("status", "complete").lte("due_date", to);
+  let tq = db.from("deliverables").select("id, student_id, title, status, due_date, source").neq("status", "complete").lte("due_date", to);
   if (from) {
     dq = dq.gte("due_date", from);
     tq = tq.gte("due_date", from);
@@ -169,6 +173,9 @@ export async function upcomingItems(
     opts.meetings && to >= today ? mq.order("starts_at").limit(limit) : Promise.resolve({ data: [], error: null }),
   ]);
   for (const r of [deadlines, tasks, meetings]) if (r.error) throw fromPostgrest(r.error);
+  // A counselor task accepted from Research carries the research model's words (lib/research/origin.ts).
+  const counselorTaskIds = ((tasks.data ?? []) as Row[]).filter((t) => t.source === "counselor").map((t) => String(t.id));
+  const research = counselorTaskIds.length ? await researchTaskIds(db, { taskIds: counselorTaskIds }) : new Set<string>();
   const mine = (sid: string) => !!opts.studentId || !opts.roster || !!opts.roster.get(sid);
   const items: UpcomingItem[] = [
     ...((deadlines.data ?? []) as Row[]).map((d): UpcomingItem => ({
@@ -183,7 +190,7 @@ export async function upcomingItems(
     })),
     ...((tasks.data ?? []) as Row[]).map((t): UpcomingItem => ({
       kind: "task",
-      outside: t.source !== "counselor",
+      outside: t.source !== "counselor" || research === null || research.has(String(t.id)),
       studentId: String(t.student_id),
       title: str(t.title),
       detail: null,

@@ -25,7 +25,7 @@ const updateMeSchema = z
     headline: z.string().trim().max(300),
     hometown: z.string().trim().max(200),
     highSchool: z.string().trim().max(200),
-    gradYear: z.string().trim().max(10),
+    gradYear: z.string().trim().regex(/^(\d{4})?$/, "Use a four-digit year, like 2027"),
     // Free-form intake answers. Merged, not replaced, so a partial save can
     // never wipe answers the client didn't happen to send. Bounded: a save of
     // profile.intakeAnswers runs the questionnaire sync in the database
