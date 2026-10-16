@@ -572,13 +572,14 @@ export default async function fileRoutes(app: FastifyInstance) {
         throw notFound("That document isn't on file");
       }
 
-      const { error } = await request.db.from("documents").delete().eq("id", id);
+      const { data: gone, error } = await request.db.from("documents").delete().eq("id", id).select("id");
       if (error) throw fromPostgrest(error);
       // The file goes with its row, whoever uploaded it, so a deleted file
-      // leaves no object behind for anyone to claim with a new row. Only after
-      // the caller's own delete went through (RLS decided they may), and only
-      // for a path of the shape the app writes (lib/documentClaim.ts).
-      await removeDeletedDocumentObject(request, existing);
+      // leaves no object behind for anyone to claim with a new row. Only when
+      // the caller's own delete removed the row (RLS can refuse it silently,
+      // and then the object must stay with the row that still points at it),
+      // and only for a path of the shape the app writes (lib/documentClaim.ts).
+      if ((gone ?? []).length > 0) await removeDeletedDocumentObject(request, existing);
       return { deleted: true };
     }
   );

@@ -158,6 +158,15 @@ const hasFn = async (name, fragment) =>
   const del = await call(owner.token, "DELETE", `/files/documents/${mine.body.id}`);
   check("the counselor deletes the student's document", del.status === 200, `status ${del.status}`);
   check("…and its object goes with it", (await objectCount(orphan)) === 0, String(await objectCount(orphan)));
+
+  // A delete that RLS refuses (silently, no row) must not take the object: the row still points at it.
+  const counselorFile = `${ownerStudent.id}/${tag}-counselor-only.txt`;
+  await upload(owner, counselorFile, "Counselor's private notes.");
+  const cdoc = await register(owner, { studentId: ownerStudent.id, storagePath: counselorFile, filename: "notes.txt", kind: "counselor-only" });
+  check("the counselor files a counselor-only document", cdoc.status === 201, `status ${cdoc.status}`);
+  await call(ownerStudent.token, "DELETE", `/files/documents/${cdoc.body.id}`);
+  const rowLeft = Number(await sql(`select count(*) from public.documents where id = '${cdoc.body.id}'`));
+  check("a row the student couldn't delete keeps its object", rowLeft === 0 || (await objectCount(counselorFile)) === 1, `row ${rowLeft}, object ${await objectCount(counselorFile)}`);
 }
 
 // ---- 3. The student's hand-in count doesn't hold their counselor -----------------------
