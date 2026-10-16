@@ -177,7 +177,12 @@ writes the pending files, their header lines and any destructive statements
 approver in `vars.MIGRATION_APPROVERS` runs it by hand with apply on and confirm
 set to the newest version. It re-checks the list (refusing if it changed),
 pushes, and fails on any table it left without RLS or the approval gate
-(`scripts/migrations/problems.sql`). Without `SUPABASE_ACCESS_TOKEN` /
+(`scripts/migrations/problems.sql`, run only when its sha256 matches
+`PROBLEMS_SQL_SHA256` in the workflow: change both together). The plan holds
+the same write-capable credentials as the apply with no approval, so in the
+plan every secret-holding step runs before any of our code; the runbook says
+what is left and how to close it (a read-only credential for
+`production-db-plan`, CODEOWNERS). Without `SUPABASE_ACCESS_TOKEN` /
 `SUPABASE_DB_PASSWORD` it skips green with a notice. The code and its migration
 land minutes apart in no guaranteed order (with Railway's "Wait for CI" the
 migration's own commit deploys after it, a later merge that touches no
@@ -201,7 +206,10 @@ the RLS and ownership fixes (`20261024000021`-`25`, below), the
 submission-review and reminder security fixes (`20261024000041`-`43`),
 the security review's chat lock (`20261024000051`, restrictive inserts only;
 the API already refuses students on `/chat`), the per-counselor import
-invitation review (`20261024000061`) and the campus photo review queue (`20261024000071`). They go in later, in filename order
+invitation review (`20261024000061`), the campus photo review queue
+(`20261024000071`), the profile size trigger (`20261024000081`) and the
+caseload transfer's file rule (`20261024000082`, which replaces
+`transfer_caseload` from `20261023030002`). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database

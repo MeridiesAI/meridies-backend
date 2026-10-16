@@ -374,7 +374,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These twenty-five files are merged ahead of production's database on purpose: the code was written to
+These twenty-seven files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -418,8 +418,10 @@ set's own section below says what it does and how to check it.
 | 23 | `20261024000051_chat_counselor_only.sql` | Security: AxIS chats are the counselor's |
 | 24 | `20261024000061_import_invite_review_per_counselor.sql` | Security: import invitation review (after file 7) |
 | 25 | `20261024000071_college_photo_review.sql` | Security: campus photos wait for review (after file 11) |
+| 26 | `20261024000081_profile_size_limit.sql` | Security: profile size bound for PostgREST writes |
+| 27 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: caseload transfer moves only the moved students' files (after file 9) |
 
-(Twenty-five files: the first thirteen are six feature sets, the other twelve are six sets of security
+(Twenty-seven files: the first thirteen are six feature sets, the other fourteen are seven sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 20-22, the security fixes for submission review and student reminders, depend on none of the
@@ -434,12 +436,13 @@ applying with `test/integration/submission-hardening.test.mjs` and `student-remi
 
 Order between the sets matters in two places: step 2's staging (file 6) and review (file 7) call
 `private.intake_owns_current` from file 3, and the caseload transfer (file 9) reads step 2's
-`import_items.invite_state` / `invite_claimed_at` (file 5). Applying the files in the order above
-satisfies both. No function, policy or trigger is defined in two of these files; the shared CHECK
+`import_items.invite_state` / `invite_claimed_at` (file 5), and file 27 replaces
+`transfer_caseload` from file 9 (same signature and grants). Applying the files in the order above
+satisfies all three. Apart from `transfer_caseload` (files 9 and 27), no function, policy or trigger is defined in two of these files; the shared CHECK
 constraints (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten
 additively, each file reading the current list back.
 
-After all twenty-five:
+After all twenty-seven:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -735,4 +738,36 @@ Check:
 ```sql
 select prosrc like '%v_prior + v_invites > 50%' from pg_proc
  where oid = to_regprocedure('public.request_import_commit(uuid,integer)');   -- true
+```
+
+---
+
+## Profile size bound: `20261024000081`
+
+A `BEFORE INSERT OR UPDATE OF profile` trigger on `public.profiles`
+(`private.profiles_profile_size`) refuses a `profile` over 400,000 characters of jsonb text that is
+larger than the stored one (errcode 23514, "Profile is too large"). The API already bounds the merged
+value at 200,000 characters of JSON (`lib/profileSize.ts`) on `PATCH /auth/me` and
+`PATCH /students/:id`; this adds the same rule for a direct PostgREST write. A trigger, not a CHECK,
+so a row already over the bound still takes every other update (accept_invitation, a transfer, a name
+change) and can shrink. Either order with the code; not in `REQUIRED_SCHEMA`.
+
+Check, before applying, how many profiles are already over (they keep working, but can't grow):
+
+```sql
+select count(*) from public.profiles where length(profile::text) > 400000;
+select tgname from pg_trigger where tgrelid = 'public.profiles'::regclass and tgname = 'profiles_profile_size';  -- one row
+```
+
+## Caseload transfer, files: `20261024000082`
+
+Replaces `public.transfer_caseload` (file 9 above) with the same signature, grants and body except
+the step that moves documents and links: a file moves only when it is about a moved student (to that
+student's receiver) or has no student and is filed in the moved folder tree (with the tree). A file
+about anyone else filed in that tree stays with its owner and is unfiled; the answer counts these as
+`attention.keptFiles`. Apply after `20261023030002` (filename order does it). Either order with the
+code: the API reads `keptFiles` as 0 when the function doesn't send it. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select prosrc like '%keptFiles%' from pg_proc where proname = 'transfer_caseload';  -- true
 ```
