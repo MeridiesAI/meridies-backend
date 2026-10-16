@@ -744,6 +744,9 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (b.folderId !== undefined) update.folder_id = b.folderId;
       if (b.studentId !== undefined) update.student_id = b.studentId;
       if (b.availableToLlm !== undefined) update.available_to_llm = b.availableToLlm;
+      // Kept out of AI from now on: the digest a model wrote of it goes too, so nothing AI made of
+      // the page stays on a link marked "keep out of AI".
+      if (b.availableToLlm === false) Object.assign(update, KEPT_OUT);
       if (b.relevance !== undefined) update.relevance = b.relevance;
 
       const { data, error } = await request.db
@@ -785,17 +788,20 @@ export default async function fileRoutes(app: FastifyInstance) {
 async function readLink(request: FastifyRequest, row: Row) {
   const id = row.id as string;
 
-  // "Keep out of AI" is a data-handling switch: a link marked so is never fetched for a
-  // summary, and nothing about it reaches a model. It stays saved, as a plain link.
-  if (row.available_to_llm === false) {
+  /** Saved as a plain link, no digest: kept out of AI, or AI summaries are off for the practice. */
+  const skip = async (message: string) => {
     const { data } = await request.db
       .from("document_links")
-      .update({ status: "skipped", error: "Kept out of AI, so it wasn't read or summarized." })
+      .update({ ...KEPT_OUT, error: message.slice(0, 500) })
       .eq("id", id)
       .select("*")
       .maybeSingle();
-    return toDocumentLink((data ?? { ...row, status: "skipped" }) as Row);
-  }
+    return toDocumentLink((data ?? { ...row, status: "skipped", error: message }) as Row);
+  };
+
+  // "Keep out of AI" is a data-handling switch: a link marked so is never fetched for a
+  // summary, and nothing about it reaches a model. It stays saved, as a plain link.
+  if (row.available_to_llm === false) return skip(KEPT_OUT_MESSAGE);
 
   const fail = async (message: string) => {
     const { data } = await request.db
@@ -812,7 +818,7 @@ async function readLink(request: FastifyRequest, row: Row) {
   try {
     await assertAiAllowed(request, "link-digest");
   } catch (err) {
-    return fail(publicMessage(err, "AI summaries aren't available"));
+    return skip(publicMessage(err, "AI summaries aren't available"));
   }
 
   await request.db.from("document_links").update({ status: "reading" }).eq("id", id);
@@ -896,8 +902,17 @@ async function readLink(request: FastifyRequest, row: Row) {
     return fail(publicMessage(err, "Couldn't summarize that page"));
   }
 
+  // The switches again, now: the read took seconds, and the owner may have marked the link
+  // "keep out of AI" or the practice switched AI summaries off in the meantime.
+  try {
+    await assertAiAllowed(request, "link-digest");
+  } catch (err) {
+    return skip(publicMessage(err, "AI summaries aren't available"));
+  }
+
   // Outside the catch: a write failure here is a database problem, and marking
-  // the link 'failed' would blame the page for it.
+  // the link 'failed' would blame the page for it. Only onto a link still open to AI
+  // (the condition is in the write, so a PATCH racing it can't be overwritten).
   {
     const { data, error } = await request.db
       .from("document_links")
@@ -913,9 +928,24 @@ async function readLink(request: FastifyRequest, row: Row) {
         read_at: new Date().toISOString(),
       })
       .eq("id", id)
+      .eq("available_to_llm", true)
       .select("*")
       .maybeSingle();
     if (error) throw fromPostgrest(error);
+    if (!data) return skip(KEPT_OUT_MESSAGE);
     return toDocumentLink(data as Row);
   }
 }
+
+const KEPT_OUT_MESSAGE = "Kept out of AI, so it wasn't read or summarized.";
+/** A link with no AI digest: what keeping it out of AI (or a refused digest) leaves on the row. */
+const KEPT_OUT = {
+  status: "skipped",
+  error: KEPT_OUT_MESSAGE,
+  summary: null,
+  key_points: [] as string[],
+  relevance: null,
+  content_chars: null,
+  extracted: {},
+  read_at: null,
+};

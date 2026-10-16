@@ -78,13 +78,20 @@ export function aiSwitchFor(module: AiModule): "aiSummaries" | "autoParseDocumen
  * The Data & privacy settings of the practice a student belongs to: their
  * counselor's firm, or the solo counselor's own row. A student can't read
  * practice_settings under RLS, so this reads on the service client, keyed by
- * the caller's own profile (never a client-supplied id). Null when it can't be
- * answered (no service role, no counselor, an unapproved counselor, a read
- * error): callers fail closed on null.
+ * the caller's own profile (never a client-supplied id); without one (a local
+ * stack) it asks the database on the student's own token
+ * (my_practice_ai_settings, 20261024000053). Null when it can't be answered
+ * (no counselor, an unapproved counselor, a read error, neither way
+ * available): callers fail closed on null.
  */
-export async function studentPracticeSettings(studentId: string, counselorId: string | null): Promise<PrivacySettings | null> {
+export async function studentPracticeSettings(
+  studentId: string,
+  counselorId: string | null,
+  db?: FastifyRequest["db"]
+): Promise<PrivacySettings | null> {
+  if (!counselorId) return null;
   const svc = serviceClient();
-  if (!svc || !counselorId) return null;
+  if (!svc) return db ? ownPracticeSettings(db) : null;
   try {
     // AI reads nothing for the student of a counselor Meridies hasn't approved (or has revoked).
     if (!(await isCounselorApproved(svc, counselorId))) return null;
@@ -99,6 +106,18 @@ export async function studentPracticeSettings(studentId: string, counselorId: st
     const { data, error } = await builder.maybeSingle();
     if (error) return null;
     return toPrivacySettings(data as Row | null);
+  } catch {
+    return null;
+  }
+}
+
+/** The caller's own practice's AI switches through the SECURITY DEFINER function. Null: no answer. */
+async function ownPracticeSettings(db: FastifyRequest["db"]): Promise<PrivacySettings | null> {
+  try {
+    const { data, error } = await db.rpc("my_practice_ai_settings");
+    if (error || !data || typeof data !== "object") return null;
+    const row = data as Row;
+    return toPrivacySettings({ ai_summaries: row.ai_summaries, auto_parse_documents: row.auto_parse_documents });
   } catch {
     return null;
   }
@@ -130,7 +149,7 @@ export async function assertAiAllowed(request: FastifyRequest, module: AiModule)
   }
   if (role === "student") {
     const profile = request.profile as { counselor_id?: string | null } | null;
-    const settings = await studentPracticeSettings(request.auth.userId, profile?.counselor_id ?? null);
+    const settings = await studentPracticeSettings(request.auth.userId, profile?.counselor_id ?? null, request.db);
     if (!settings) throw forbidden("This AI feature isn't available until your counselor's practice is set up.");
     refuse(module, settings);
     return;
