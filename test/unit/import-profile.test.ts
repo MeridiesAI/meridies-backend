@@ -84,6 +84,49 @@ test("real headers still reach the model as written", () => {
   assert.equal(headers[7], "<text, 1 word, capitalized>");
 });
 
+test("a value written after a label word is masked, and a lowercase name is a name", () => {
+  for (const h of [
+    "Cell 555 123 4567", "555.123.4567 home", "DOB 05/14/2008", "Born 5/14/2008", "Mobile (555) 123 4567",
+    "ID 1234 5678", "Parent cell 555 867 5309", "DOB 5/1/08", "Born May 14 2008",
+  ]) {
+    const m = maskHeader(h);
+    assert.ok(!/\d/.test(m.replace(/<[^>]*>/g, "")) && m.startsWith("<"), `${h} reached the model as ${m}`);
+  }
+  assert.equal(maskHeader("jane doe"), "<name>");
+  assert.equal(maskHeader("jane doe", ["<text, 2 words, capitalized>"]), "<name>");
+  // A label's own number still reads as written.
+  for (const h of ["Grad Year 2027", "AP Biology 2024", "Grade 10 Fall 2024 GPA", "Class of 2027", "SAT Math"]) {
+    assert.equal(maskHeader(h), h);
+  }
+});
+
+test("a headerless sheet whose first row is a name, phone and birth date reaches the model only as shapes", () => {
+  const first = ["jane doe", "Lincoln High", "Cell 555 123 4567", "DOB 05/14/2008"];
+  const sheet: ParsedSheet = {
+    name: "S", headerRow: 1, date1904: false, headers: first, rowNumbers: [2, 3],
+    rows: [["Mia Lee", "Roosevelt High", "Cell 555 222 3333", "DOB 01/02/2007"], ["Leo Park", "Kennedy High", "Home 555 444 1111", "DOB 03/03/2008"]],
+  };
+  const view = JSON.stringify(modelView(profileSheet(sheet), 1));
+  for (const leak of ["jane", "doe", "Lincoln", "555", "05/14", "2008"]) {
+    assert.ok(!view.toLowerCase().includes(leak.toLowerCase()), `${leak} reached the model view: ${view}`);
+  }
+});
+
+test("single words shaped like their column don't mask a real header row", () => {
+  const sheet: ParsedSheet = {
+    name: "S", headerRow: 1, date1904: false, rowNumbers: [2, 3],
+    headers: ["Email", "First Name", "Last Name", "Sport", "Teacher", "GPA", "Club", "Instrument", "Mascot", "Tutor"],
+    rows: [
+      ["mia@x.org", "Mia", "Lee", "Soccer", "Smith", "3.9", "Debate", "Piano", "Tigers", "Okafor"],
+      ["leo@x.org", "Leo", "Park", "Tennis", "Jones", "3.1", "Chess", "Violin", "Lions", "Nguyen"],
+    ],
+  };
+  const headers = modelView(profileSheet(sheet), 1).columns.map((c) => c.header);
+  assert.deepEqual(headers.slice(0, 8), ["Email", "First Name", "Last Name", "Sport", "Teacher", "GPA", "Club", "Instrument"]);
+  // A word that isn't a label and has its column's shape is masked on its own.
+  assert.deepEqual(headers.slice(8), ["<text, 1 word, capitalized>", "<text, 1 word, capitalized>"]);
+});
+
 // --- sensitive values (§7.4) ---------------------------------------------------
 
 test("never-stored categories are recognised by header", () => {

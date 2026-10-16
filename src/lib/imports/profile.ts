@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { headerLooksLikeData, headerLooksLikeName, maskHeader, maskValue } from "./mask.js";
+import { headerIsStrongData, headerLooksLikeName, maskHeader, maskValue } from "./mask.js";
 import { sensitiveHeader, type SensitiveCategory } from "./sensitive.js";
 import type { ParsedSheet } from "./sheet.js";
 import { parseDate, parseNumber } from "./values.js";
@@ -127,12 +127,15 @@ export function isWide(headers: string[], rowCount: number): boolean {
 
 /**
  * A "header row" that is really a student's row: two or more of its cells,
- * or half of its non-blank ones, look like data (a value's shape, a name,
- * or the shape of the column under it). Then no header in it is a label.
+ * or half of its non-blank ones, are strong evidence of data (a value's
+ * shape or a value inside it, a name shaped like the column under it, a
+ * number, date, phone or email shaped like its column). A single word shaped
+ * like its column ("Sport" over "Soccer") doesn't count, so a real header row
+ * keeps its labels. Then no header in it is a label.
  */
 export function headerRowIsData(columns: Array<Pick<ColumnProfile, "header" | "samples">>): boolean {
   const filled = columns.filter((c) => c.header.trim() !== "");
-  const dataLike = filled.filter((c) => headerLooksLikeData(c.header, c.samples)).length;
+  const dataLike = filled.filter((c) => headerIsStrongData(c.header, c.samples)).length;
   return dataLike >= 2 || (filled.length > 0 && dataLike * 2 >= filled.length);
 }
 

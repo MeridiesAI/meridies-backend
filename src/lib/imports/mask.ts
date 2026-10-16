@@ -92,18 +92,50 @@ const HEADER_WORDS = new Set([
   "expected", "primary", "secondary", "alternate", "personal", "login", "mailing", "street", "testing",
   "evidence", "based", "nm", "fname", "lname", "erw", "wks", "wk", "yr", "hrs", "uw", "w", "m", "levels",
   "category", "title", "final", "college", "for", "or", "a", "an", "dates", "unit", "units", "hometown", "town",
+  "sport", "sports", "teacher", "teachers", "ethnicity", "race", "club", "clubs", "instrument", "award", "awards",
+  "honor", "team", "varsity", "captain", "president", "volunteer", "service", "job", "employer", "favorite",
+  "comment", "comments", "result", "results", "decision", "deadline", "application", "essay", "program", "programs",
+  // Course and exam names, so a score column's header ("Calc BC", "Human Geography") stays readable.
+  "calc", "precalc", "precalculus", "algebra", "geometry", "trigonometry", "trig", "bio", "chem", "phys", "mechanics",
+  "electricity", "magnetism", "gov", "govt", "politics", "comparative", "psych", "econ", "macro", "macroeconomics",
+  "micro", "microeconomics", "stats", "apush", "euro", "hist", "geography", "geo", "human", "studio", "design",
+  "drawing", "seminar", "research", "chinese", "japanese", "latin", "german", "italian", "culture", "cultures",
+  "composition", "theory", "principles", "csa", "csp", "african", "american", "sciences", "social", "studies",
+  "global", "sl", "hl", "tok", "theatre", "theater", "film", "dance", "philosophy", "sociology", "anthropology",
+  "business", "technology", "information", "systems", "health", "physical", "education", "pe", "mathematics",
+  "analysis", "approaches", "applications", "interpretation", "integrated", "precal", "lab", "general",
 ]);
 
 const VALUE_SHAPED = (h: string) =>
   isEmailShape(h) || ISO_DATE.test(h) || SLASH_DATE.test(h) || MONTH_DATE.test(h) || RATIO.test(h) || NUMBER.test(h) ||
   (PHONE.test(h) && h.replace(/\D/g, "").length >= 7) || /\d{3}-\d{2}-\d{4}/.test(h) || /\d{7,}/.test(h);
 
+/** Digits joined by spaces or / . ( ) - ("555 123 4567", "05/14/2008", "(555) 123"). */
+const NUMBER_RUN = /\d+(?:[\s/.()-]+\d+)*/g;
+
+/**
+ * Does the header carry a value inside it, whatever words surround it
+ * ("Cell 555 123 4567", "DOB 05/14/2008", "ID 1234 5678", "Born May 14
+ * 2008")? A run of digits joined by separators holding five or more digits
+ * or three or more groups, or an email address. A label's own number ("Grad
+ * Year 2027", "AP Biology 2024", "Grade 10 Fall 2024") stands alone.
+ */
+export function headerHoldsValue(header: string): boolean {
+  if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(header)) return true;
+  for (const run of header.match(NUMBER_RUN) ?? []) {
+    const groups = run.match(/\d+/g) ?? [];
+    if (groups.join("").length >= 5 || groups.length >= 3) return true;
+  }
+  return false;
+}
+
 /**
  * Words of a column label ("SAT Math", "Grad Year 2027", "AP 5"): every word
- * a header word or a generic one, numbers of at most four digits, and at
- * least one word that isn't a number.
+ * a header word or a generic one, numbers of at most four digits, at least
+ * one word that isn't a number, and no value inside it (headerHoldsValue).
  */
 export function headerIsLabel(header: string): boolean {
+  if (headerHoldsValue(header)) return false;
   const ws = header.toLowerCase().split(/[^\p{L}\p{N}+#'’-]+/u).filter(Boolean);
   if (ws.length === 0) return false;
   let word = false;
@@ -115,16 +147,55 @@ export function headerIsLabel(header: string): boolean {
   return word;
 }
 
+/** A cell shape without its letter case, so "jane doe" matches a column of "Mia Lee". */
+function shapeKey(shape: string): string {
+  return shape.replace(/, (uppercase|capitalized|lowercase|mixed case|no letters)(?=[,>])/, "");
+}
+
+function matchesColumn(header: string, sampleShapes: readonly string[]): boolean {
+  const key = shapeKey(maskValue(header));
+  return sampleShapes.some((s) => shapeKey(s) === key);
+}
+
+/**
+ * Two to four words of letters only, in any case, that don't read as a
+ * label ("jane doe", "Lincoln High", "Doe, Jane"). Masked as `<name>`: a
+ * real header shaped like this ("Favorite Sport") loses its words for that
+ * column only.
+ */
+export function headerMaybeName(header: string): boolean {
+  const h = header.trim();
+  if (h.length < 3 || h.length > 60 || headerIsLabel(h)) return false;
+  const ws = h.replace(/,/g, " ").split(/\s+/).filter(Boolean);
+  return ws.length >= 2 && ws.length <= 4 && ws.every((w) => /^\p{L}[\p{L}.'’-]*$/u.test(w));
+}
+
 /**
  * Does this header read as a data cell rather than a label? A value's shape
- * (email, date, number, phone, an ID's digits), or the shape of the values
- * under it ("jane doe" over a column of names), unless it reads as a label.
+ * or a value inside it (email, date, number, phone, an ID's digits), a
+ * name, or the shape of the values under it ("Okafor" over a column of
+ * surnames), unless it reads as a label.
  */
 export function headerLooksLikeData(header: string, sampleShapes: readonly string[] = []): boolean {
   const h = header.trim();
   if (h === "" || headerIsLabel(h)) return false;
-  if (VALUE_SHAPED(h) || headerLooksLikeName(h)) return true;
-  return sampleShapes.includes(maskValue(h));
+  if (VALUE_SHAPED(h) || headerHoldsValue(h) || headerLooksLikeName(h) || headerMaybeName(h)) return true;
+  return matchesColumn(h, sampleShapes);
+}
+
+/**
+ * Strong evidence that a header is a student's cell, for deciding that the
+ * whole row is data (profile.ts headerRowIsData). A single word shaped like
+ * its column ("Sport" over "Soccer", "Teacher" over "Smith") is not: real
+ * headers look like that too, and masking a real row would leave the model
+ * nothing to map. Such a header is still masked on its own (maskHeader).
+ */
+export function headerIsStrongData(header: string, sampleShapes: readonly string[] = []): boolean {
+  const h = header.trim();
+  if (h === "" || headerIsLabel(h)) return false;
+  if (VALUE_SHAPED(h) || headerHoldsValue(h) || headerLooksLikeName(h)) return true;
+  if (headerMaybeName(h)) return matchesColumn(h, sampleShapes);
+  return matchesColumn(h, sampleShapes) && !maskValue(h).startsWith("<text,");
 }
 
 /**
@@ -144,15 +215,16 @@ export function headerLooksLikeName(header: string): boolean {
 
 /**
  * What the model sees of a header: the text when it reads as a label (or
- * looks like nothing under it), `<name>` for a person's name, and a cell's
- * shape for anything that looks like data. `sampleShapes` are the masked
- * shapes of the column's values (profile.ts).
+ * looks like nothing under it), `<name>` for anything shaped like a
+ * person's name, and a cell's shape for anything that looks like data or
+ * holds a value. `sampleShapes` are the masked shapes of the column's
+ * values (profile.ts).
  */
 export function maskHeader(header: string, sampleShapes: readonly string[] = []): string {
   const h = header.trim();
   if (h === "") return "<blank>";
   if (headerIsLabel(h)) return h.slice(0, 80);
-  if (headerLooksLikeName(h)) return "<name>";
+  if (headerLooksLikeName(h) || headerMaybeName(h)) return "<name>";
   if (/\d{3}-\d{2}-\d{4}/.test(h) || /\d{7,}/.test(h)) return "<number>";
   if (headerLooksLikeData(h, sampleShapes)) return maskValue(h);
   return h.slice(0, 80);
