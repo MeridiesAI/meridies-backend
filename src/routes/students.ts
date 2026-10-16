@@ -9,9 +9,10 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { assertCanEditStudent, assertCanViewStudent, canArchive, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { MAX_PROFILE_CHARS, mergeProfile, profileChars } from "../lib/profileSize.js";
 import {
   toActivity,
   toAward,
@@ -35,7 +36,7 @@ const patchStudentSchema = z
     hometown: z.string().trim().max(200),
     highSchool: z.string().trim().max(200),
     gradYear: z.string().trim().max(10),
-    profile: z.record(z.unknown()),
+    profile: z.record(z.unknown()).refine((p) => profileChars(p) <= MAX_PROFILE_CHARS, "Profile is too large"),
     archived: z.boolean(),
   })
   .partial()
@@ -198,7 +199,9 @@ export default async function studentRoutes(app: FastifyInstance) {
       if (patch.archived !== undefined)
         update.archived_at = patch.archived ? new Date().toISOString() : null;
       if (patch.profile !== undefined) {
-        update.profile = { ...((current?.profile as object) ?? {}), ...patch.profile };
+        const { merged, tooLarge } = mergeProfile(current?.profile, patch.profile);
+        if (tooLarge) throw badRequest("Profile is too large");
+        update.profile = merged;
       }
 
       const { data, error } = await request.db
