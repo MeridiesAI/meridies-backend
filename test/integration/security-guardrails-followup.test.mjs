@@ -26,7 +26,8 @@ const okName = await rest(student.token, "PATCH", `/rest/v1/profiles?id=eq.${stu
 check("an ordinary name still saves", okName.status === 204, `status ${okName.status}`);
 // A row that already held an odd class year keeps working: only a new value is checked.
 await sql(`alter table public.profiles disable trigger profiles_guard_identity_text`);
-await sql(`update public.profiles set grad_year = 'Class of 2027' where id = '${student.id}'`);
+// At most 10 characters: the column bounds (20261024000081) still apply to this write.
+await sql(`update public.profiles set grad_year = 'Class 2027' where id = '${student.id}'`);
 await sql(`alter table public.profiles enable trigger profiles_guard_identity_text`);
 const other = await rest(student.token, "PATCH", `/rest/v1/profiles?id=eq.${student.id}`, { hometown: "Ithaca, NY" }, { Prefer: "return=minimal" });
 check("a profile with an old odd class year still saves other fields", other.status === 204, `status ${other.status}`);
