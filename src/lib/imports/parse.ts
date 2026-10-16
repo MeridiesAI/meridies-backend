@@ -10,20 +10,88 @@
  * PATH (no keys, no NODE_OPTIONS), no stdin, and the parent never prints
  * what it writes.
  *
+ * The heap flag protects the child, not this process. So the file goes in
+ * over IPC, but the answer comes back as JSON on a pipe (fd 3) whose bytes
+ * are counted as they arrive: past MAX_PARSE_OUTPUT_BYTES the parent stops
+ * reading and kills the child, whatever the child meant to send. What does
+ * arrive is checked against ParseOutcome's shape and the character budget
+ * before anyone uses it. (Over advanced IPC a workbook whose cells share one
+ * string would arrive as one copy per cell: gigabytes from a small file.)
+ *
  * Built, the child is dist/lib/imports/parseWorker.js. Under tsx (dev and
  * the unit tests) it is the .ts source, loaded with tsx's loader.
  * scripts/smoke/parse-worker.mjs checks the built path (CI runs it).
  */
 
 import { fork } from "node:child_process";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { PARSE_TIMEOUT_MS, WORKER_HEAP_MB } from "./caps.js";
-import type { ParseOutcome } from "./sheet.js";
+import { z } from "zod";
+import {
+  MAX_CELL_CHARS,
+  MAX_COLUMNS,
+  MAX_PARSE_OUTPUT_BYTES,
+  MAX_PARSED_CHARS,
+  PARSE_TIMEOUT_MS,
+  WORKER_HEAP_MB,
+} from "./caps.js";
+import { PARSE_FAILURES, type ParseOutcome } from "./sheet.js";
 
 const fromSource = import.meta.url.endsWith(".ts");
 const CHILD = fileURLToPath(new URL(fromSource ? "./parseWorker.ts" : "./parseWorker.js", import.meta.url));
 
-export type ParseLimits = { timeoutMs?: number; heapMb?: number; maxRows: number };
+export type ParseLimits = {
+  timeoutMs?: number;
+  heapMb?: number;
+  maxRows: number;
+  /** What is left of the import's character budget; MAX_PARSED_CHARS by default. */
+  maxChars?: number;
+  /** The answer's byte budget on its pipe; MAX_PARSE_OUTPUT_BYTES by default (tests lower it). */
+  maxOutputBytes?: number;
+};
+
+const cell = z.string().max(MAX_CELL_CHARS);
+const sheetShape = z
+  .object({
+    name: z.string().max(60),
+    headerRow: z.number().int().positive(),
+    headers: z.array(cell).max(MAX_COLUMNS),
+    rows: z.array(z.array(cell)),
+    rowNumbers: z.array(z.number().int().positive()),
+    date1904: z.boolean(),
+  })
+  .strict();
+const outcomeShape = z.union([
+  z.object({ ok: z.literal(true), detectedType: z.enum(["csv", "xlsx"]), sheets: z.array(sheetShape).min(1), chars: z.number().int().nonnegative() }).strict(),
+  z.object({ ok: z.literal(false), detectedType: z.enum(["csv", "xlsx", "unknown"]), reason: z.enum(PARSE_FAILURES) }).strict(),
+]);
+
+/**
+ * The child's answer, trusted only once it has the outcome's shape and
+ * stays inside the limits it was given: rows padded to the header width,
+ * one row number per row, at most maxRows rows, and the characters it
+ * claims (counted again here) within the budget.
+ */
+export function checkOutcome(raw: unknown, maxRows: number, maxChars: number): ParseOutcome | null {
+  const parsed = outcomeShape.safeParse(raw);
+  if (!parsed.success) return null;
+  const out = parsed.data;
+  if (!out.ok) return out;
+  let rows = 0;
+  let chars = 0;
+  for (const s of out.sheets) {
+    if (s.rows.length !== s.rowNumbers.length) return null;
+    rows += s.rows.length;
+    for (const h of s.headers) chars += h.length;
+    for (const r of s.rows) {
+      if (r.length !== s.headers.length) return null;
+      for (const c of r) chars += c.length;
+    }
+  }
+  if (rows > maxRows || chars !== out.chars) return null;
+  if (chars > maxChars) return { ok: false, detectedType: out.detectedType, reason: "too-large-unpacked" };
+  return out;
+}
 
 /**
  * At most this many parse processes per API instance; the rest wait their
@@ -66,18 +134,26 @@ export async function parseInWorker(bytes: Uint8Array, fileName: string, limits:
 
 function parseOnce(bytes: Uint8Array, fileName: string, limits: ParseLimits): Promise<ParseOutcome> {
   const heap = limits.heapMb ?? WORKER_HEAP_MB;
+  const maxChars = Math.max(0, limits.maxChars ?? MAX_PARSED_CHARS);
+  const maxBytes = limits.maxOutputBytes ?? MAX_PARSE_OUTPUT_BYTES;
   return new Promise<ParseOutcome>((resolve) => {
     let settled = false;
     const child = fork(CHILD, [], {
       execArgv: childArgs(heap),
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
       serialization: "advanced",
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      // fd 3: the answer, as JSON. fd 4: IPC, for the file going in only.
+      stdio: ["ignore", "ignore", "ignore", "pipe", "ipc"],
     });
+    const answer = child.stdio[3] as Readable;
+    const chunks: Buffer[] = [];
+    let received = 0;
     const finish = (out: ParseOutcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      chunks.length = 0;
+      answer.destroy();
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       resolve(out);
     };
@@ -85,17 +161,35 @@ function parseOnce(bytes: Uint8Array, fileName: string, limits: ParseLimits): Pr
       () => finish({ ok: false, detectedType: "unknown", reason: "timeout" }),
       limits.timeoutMs ?? PARSE_TIMEOUT_MS
     );
-    child.once("message", (m) => finish(m as ParseOutcome));
+    answer.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      received += chunk.length;
+      // Stop reading the moment the answer outgrows its budget.
+      if (received > maxBytes) return finish({ ok: false, detectedType: "unknown", reason: "too-large-unpacked" });
+      chunks.push(chunk);
+    });
+    answer.on("error", () => finish({ ok: false, detectedType: "unknown", reason: "unreadable" }));
     child.once("error", () => finish({ ok: false, detectedType: "unknown", reason: "unreadable" }));
-    child.once("exit", (code, signal) =>
-      finish({
-        ok: false,
-        detectedType: "unknown",
-        // V8 aborts (SIGABRT, exit 134) or traps (SIGTRAP) on heap exhaustion.
-        reason: signal === "SIGABRT" || signal === "SIGTRAP" || code === 134 ? "memory" : "unreadable",
-      })
-    );
-    child.send({ bytes, fileName, maxRows: limits.maxRows });
+    // 'close' comes after the child has exited and its pipe has ended.
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      if (code !== 0) {
+        return finish({
+          ok: false,
+          detectedType: "unknown",
+          // V8 aborts (SIGABRT, exit 134) or traps (SIGTRAP) on heap exhaustion.
+          reason: signal === "SIGABRT" || signal === "SIGTRAP" || code === 134 ? "memory" : "unreadable",
+        });
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        return finish({ ok: false, detectedType: "unknown", reason: "unreadable" });
+      }
+      finish(checkOutcome(raw, limits.maxRows, maxChars) ?? { ok: false, detectedType: "unknown", reason: "unreadable" });
+    });
+    child.send({ bytes, fileName, maxRows: limits.maxRows, maxChars });
   });
 }
 
@@ -111,6 +205,10 @@ export function parseFailureMessage(reason: string, fileName: string): string {
       return `${name} contains macros. Save it as a plain .xlsx or CSV.`;
     case "too-large-unpacked":
       return `${name} couldn't be read (too large when unpacked)`;
+    case "cell-too-long":
+      return `${name} has a cell longer than 32,767 characters`;
+    case "import-too-large":
+      return `${name} would make this import too large to read. Import it on its own.`;
     case "external-links":
       return `${name} couldn't be read (it links to other files)`;
     case "unsafe-xml":

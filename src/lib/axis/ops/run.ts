@@ -9,7 +9,9 @@
  *    happens until the counselor clicks Confirm, which runs the same request.
  *
  * An auto write is turned into a confirm one when the turn has read outside
- * content (documents, mail, connected files), so text in a file can't make
+ * content (documents, mail, connected files, and any text a student, a family,
+ * an import or the web wrote: the student's record sections, their tasks and
+ * deadlines, a lookup marked `outside`), so text someone else wrote can't make
  * AxIS change anything without a click, and after five auto writes in one
  * turn, so a runaway loop stops at a card. A turn holds twenty writes at most.
  */
@@ -19,6 +21,7 @@ import { ZodError } from "zod";
 import { HttpError } from "../../errors.js";
 import { resolveStudentId } from "../../guards.js";
 import { wrapUntrusted } from "../../context/pack.js";
+import { essayShaped, narrativeWords } from "../../proseGuard.js";
 import { assertAllowedCall, counselorMessage, dispatch, failureMessage, isTransient } from "./dispatch.js";
 import { getOp, headingOf, riskOf } from "./registry.js";
 import type { OpCall, OpDef, OpHelpers, UndoStep } from "./types.js";
@@ -30,10 +33,12 @@ export const MAX_AUTO_WRITES_PER_TURN = 5;
 export type TurnBudget = {
   /** Changes wait for a click: outside content reached the model this turn, or the turn before. */
   tainted: boolean;
-  /** This turn itself read outside content (documents, mail, connected files, web-derived lookups). Carried to the next turn. */
+  /** This turn itself read outside content (documents, mail, connected files, student-written text, web-derived lookups). Carried to the next turn. */
   sawOutside: boolean;
   writes: number;
   autoWrites: number;
+  /** Narrative (first-person, unaddressed) words in the free text this turn filed: the essay guardrail's turn count. */
+  proseWords: number;
 };
 
 /** `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history. */
@@ -42,12 +47,57 @@ export const newTurnBudget = (outside = false, inherited = false): TurnBudget =>
   sawOutside: outside,
   writes: 0,
   autoWrites: 0,
+  proseWords: 0,
 });
+
+/** Narrative words one turn may file across all its changes and drafts (lib/proseGuard.ts). */
+export const TURN_NARRATIVE_CAP = 400;
+
+const ESSAY_REFUSAL =
+  "that reads as essay text (first-person narrative), which AxIS doesn't write, on a card or anywhere else. Keep it to logistics and progress, or give the counselor bullet points about the draft instead.";
+
+/** Every string in an input, ids and dates aside. */
+function textsIn(v: unknown, out: string[] = [], depth = 0): string[] {
+  if (depth > 6) return out;
+  if (typeof v === "string") {
+    if (v.length >= 20 && !isUuid(v)) out.push(v);
+  } else if (Array.isArray(v)) {
+    for (const x of v) textsIn(x, out, depth + 1);
+  } else if (v && typeof v === "object") {
+    for (const x of Object.values(v)) textsIn(x, out, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * The essay guardrail for the free text AxIS files (a message body, a note, an email draft): the
+ * streamed answer has its gate (lib/proseGuard.ts ProseGate), and a card is the other way prose
+ * reaches the screen. Null when the input may be filed, else why not. Counts what it lets through
+ * toward the turn, so a statement can't arrive as three drafts.
+ */
+export function proseRefusal(turn: TurnBudget, input: unknown): string | null {
+  const texts = textsIn(input);
+  if (!texts.length) return null;
+  const joined = texts.join("\n");
+  if (essayShaped(joined)) return ESSAY_REFUSAL;
+  const words = narrativeWords(joined);
+  if (turn.proseWords + words > TURN_NARRATIVE_CAP) return ESSAY_REFUSAL;
+  turn.proseWords += words;
+  return null;
+}
 
 /** Marks the turn as having read outside content. */
 export function markOutside(turn: TurnBudget): void {
   turn.tainted = true;
   turn.sawOutside = true;
+}
+
+/** Whether a read's answer brings outside text into the turn. Undeclared, or a check that throws: yes. */
+export function readsOutside(def: Pick<OpDef, "outside">, body: unknown): boolean {
+  const o = def.outside;
+  if (typeof o === "boolean") return o;
+  if (typeof o === "function") return safelySync(() => o(body)) ?? true;
+  return true;
 }
 
 export type OperationStatus = "pending" | "executed" | "confirmed" | "dismissed" | "failed" | "undone";
@@ -82,7 +132,16 @@ export type OpContext = {
 export type OpOutput = { content: string; isError?: boolean; fresh: boolean };
 
 /** The row as it is stored. `input` is only ever read back by Confirm, never sent to the app. */
-export type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> & { input: Record<string, unknown> };
+export type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> & {
+  input: Record<string, unknown>;
+  /**
+   * The summary may quote text someone other than the counselor wrote: it was filed in a turn that
+   * read outside content, or built from a read of the target (a task's title, a school's name).
+   * Later turns then recall the change by its operation, not its summary (recentActionsText).
+   * Absent on rows filed before this existed, which are treated the same way.
+   */
+  outside?: boolean;
+};
 
 const clipText = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 const isUuid = (s: unknown): s is string => typeof s === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
@@ -243,6 +302,7 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
   const res = await dispatch(ctx.request, call);
   if (res.status >= 400) return { content: failureMessage(res), isError: true, fresh: false };
   const content = def.reply ? (safelySync(() => def.reply!(res.body, input)) ?? "That lookup's answer couldn't be read.") : "Done.";
+  if (readsOutside(def, res.body)) markOutside(ctx.turn);
   return { content: content || "Nothing found.", fresh: !!content };
 }
 
@@ -261,10 +321,16 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   // The request this becomes, checked now: a card for a path AxIS may not call (or essay prose) is never filed.
   const call: OpCall = def.request(input);
   assertAllowedCall(call);
+  // Essay prose in any free-text field (a message body, a note) is never filed either: a card shows it whole.
+  const prose = proseRefusal(ctx.turn, input);
+  if (prose) return notRun(prose);
   const studentId = await studentFor(ctx, def, input, "edit");
   const h = helpers(ctx.request, ctx.roster);
   // Labels are best effort: a failed lookup of the target falls back to the op's title, never fails the change.
-  const described = await safely(() => def.describe?.(input, h));
+  // A label built from a read of the target may carry the target's text (whoever wrote it).
+  let describedFromRead = false;
+  const hDescribe: OpHelpers = { ...h, get: (url) => ((describedFromRead = true), h.get(url)) };
+  const described = await safely(() => def.describe?.(input, hDescribe));
   const summary = clipText(typeof described === "string" && described.trim() ? described : def.title, 300);
   const detailLines = await safely(() => def.details?.(input, h));
   const details = (Array.isArray(detailLines) ? detailLines : []).slice(0, 12).map((d) => clipText(String(d), 1600));
@@ -286,7 +352,8 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   if (risk === "auto") ctx.turn.autoWrites++;
 
   const warning = risk === "confirm" ? (def.warning ?? null) : null;
-  const stored = fitPayload({ op: def.name, area: headingOf(def.name), summary, details, warning, reason, input });
+  const summaryOutside = ctx.turn.tainted || ctx.turn.sawOutside || (describedFromRead && typeof described === "string" && described.trim() !== "");
+  const stored = fitPayload({ op: def.name, area: headingOf(def.name), summary, details, warning, reason, outside: summaryOutside, input });
   if (!stored) return notRun("that change is too large for AxIS to file or record. Nothing was changed; tell the counselor to make it in the app.");
   // A card the counselor confirms must show all of it (a message's whole body): never a trimmed one.
   if (risk === "confirm" && stored.details !== details) {
@@ -410,6 +477,13 @@ const STATUS_WORDS: Record<string, string> = {
  * The changes AxIS made or proposed in this chat, newest first, so a follow-up
  * knows what the counselor confirmed, dismissed or undid since the last answer.
  * Goes in the user turn (not the cached system prompt). Empty when there are none.
+ *
+ * Read on every later turn, and never counted as outside content, so it carries
+ * no text someone other than the counselor wrote: a change whose summary may
+ * quote such text (filed in a turn that read outside content, or labelled from
+ * a read of its target: StoredPayload.outside, and every row from before the
+ * flag) is recalled by its operation's catalog title instead, and an email
+ * draft or queue item by its kind. The failure reason is a route's text.
  */
 export async function recentActionsText(request: FastifyRequest, conversationId: string): Promise<string> {
   const { data, error } = await request.db
@@ -422,12 +496,16 @@ export async function recentActionsText(request: FastifyRequest, conversationId:
   const lines = data.map((r) => {
     const p = (r.payload ?? {}) as Record<string, unknown>;
     const res = (r.result ?? {}) as Record<string, unknown>;
+    const trusted = p.outside === false;
+    const def = typeof p.op === "string" ? getOp(p.op) : undefined;
     const what =
       r.type === "operation"
-        ? String(p.summary ?? p.op ?? "a change")
+        ? trusted
+          ? String(p.summary ?? p.op ?? "a change")
+          : `${def?.title ?? "A change"} (${typeof p.op === "string" && def ? p.op : "operation"})`
         : r.type === "email_draft"
-          ? `Email draft: ${String(p.subject ?? "")}`
-          : `Work Queue item: ${String(p.title ?? "")}`;
+          ? trusted ? `Email draft: ${String(p.subject ?? "")}` : "An email draft for the composer"
+          : trusted ? `Work Queue item: ${String(p.title ?? "")}` : "A Work Queue item";
     const status = String(r.status);
     // The failure reason is a route's text kept on the row (and `result` is writable by the client): data, like the summary.
     const failed = status === "failed" && typeof res.message === "string" && res.message.trim() ? ` ${wrapUntrusted("reason", clipText(res.message, 300))}` : "";

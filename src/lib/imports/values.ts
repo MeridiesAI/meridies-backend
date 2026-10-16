@@ -9,6 +9,8 @@
  * import-values.test.ts checks the mirror against the same cases as the SQL.
  */
 
+import { isEmailShape, splitListCell } from "./textShapes.js";
+
 export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
 
 export type DateOrder = "MDY" | "DMY" | "YMD" | "excel1900" | "excel1904";
@@ -74,7 +76,7 @@ export function valueOk(type: string, v: Json | undefined): boolean {
       return isIsoDate(str(v));
     case "email": {
       const s = str(v);
-      return s !== null && s.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+      return s !== null && s.length <= 320 && isEmailShape(s);
     }
     case "bool":
       return typeof v === "boolean";
@@ -145,7 +147,9 @@ export function parseNumber(raw: string, commaDecimal = false): number | null {
   if (s === "") return null;
   if (commaDecimal) s = s.replace(/\./g, "").replace(",", ".");
   else if (/^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, "");
-  if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(s)) return null;
+  // `\d+\.?\d*` split its digits between two quantifiers every possible way
+  // before failing; the optional group says the same with one way to read it.
+  if (!/^[-+]?(\d+(\.\d*)?|\.\d+)$/.test(s)) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
@@ -302,7 +306,7 @@ export function cleanCell(type: string, raw: string, opts: CleanOptions = {}): C
       break;
     }
     case "text[]":
-      value = s.split(/[;|\n]+|,(?![^(]*\))/).map((x) => x.trim()).filter(Boolean).slice(0, 11);
+      value = splitListCell(s).map((x) => x.trim()).filter(Boolean).slice(0, 11);
       break;
     case "enum:gender":
       value = cleanEnum("gender", s);

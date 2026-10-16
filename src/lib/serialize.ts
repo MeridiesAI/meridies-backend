@@ -291,7 +291,7 @@ export const toTaskDocument = (r: Row) => {
  */
 export const toTask = (
   r: Row,
-  extras: { stages?: Row[]; documents?: Row[]; tracker?: Row | null } = {}
+  extras: { stages?: Row[]; documents?: Row[]; tracker?: Row | null; fromResearch?: boolean } = {}
 ) => ({
   id: str(r.id),
   studentId: str(r.student_id),
@@ -331,6 +331,8 @@ export const toTask = (
   stages: (extras.stages ?? []).map(toTaskStage),
   documents: (extras.documents ?? []).map(toTaskDocument),
   tracker: extras.tracker ? toTrackerCheck(extras.tracker) : null,
+  /** Counselor reads only: accepted from a Research suggestion (its title is the research model's). */
+  ...(extras.fromResearch !== undefined ? { fromResearch: extras.fromResearch } : {}),
 });
 
 export const toTrackerCheck = (r: Row) => ({

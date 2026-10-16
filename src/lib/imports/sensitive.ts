@@ -10,6 +10,8 @@
  *   flagged for the counselor, never blocked or silently redacted.
  */
 
+import { MAX_HEADER_CHARS } from "./caps.js";
+
 export type SensitiveCategory =
   | "government-id"
   | "financial"
@@ -19,12 +21,12 @@ export type SensitiveCategory =
   | "beliefs-identity"
   | "login-secret";
 
-const HEADER_RULES: ReadonlyArray<[SensitiveCategory, RegExp]> = [
+export const HEADER_RULES: ReadonlyArray<[SensitiveCategory, RegExp]> = [
   ["government-id", /\b(ssn|social\s*security|soc\.?\s*sec|passport|driver'?s?\s*licen[cs]e|drivers?\s*lic|licen[cs]e\s*(no|number|#)|state\s*id|a[\s-]?number|alien|immigration|itin|tax\s*id|national\s*id)\b/i],
   ["financial", /\b(income|salary|wages?|agi|tax(es)?|bank|account\s*(no|number|#)|routing|iban|swift|credit\s*card|card\s*(no|number|#)|debit|efc|sai|net\s*worth|assets)\b/i],
   ["health", /\b(iep|504|diagnos\w*|medica\w*|medicine|accommodat\w*|disabilit\w*|disabled|health|allerg\w*|mental|therap\w*|counsel+ing\s*notes|illness|adhd|autism)\b/i],
   ["discipline", /\b(disciplin\w*|suspen\w*|expel\w*|expulsion|criminal|arrest\w*|police|detention|infraction|misconduct|incident)\b/i],
-  ["economic-status", /\b(free\s*(and|&|\/)?\s*reduced|reduced\s*lunch|lunch\s*status|frl|frpl|fee\s*waiver|low[\s-]*income|pell|title\s*i)\b/i],
+  ["economic-status", /\b(free\s*(?:(?:and|&|\/)\s*)?reduced|reduced\s*lunch|lunch\s*status|frl|frpl|fee\s*waiver|low[\s-]*income|pell|title\s*i)\b/i],
   ["beliefs-identity", /\b(religio\w*|faith|church|ethnic\w*|race|racial|sexual\s*orientation|orientation|lgbt\w*|gender\s*identity|political|immigration\s*status|undocumented)\b/i],
   ["login-secret", /\b(password|passcode|pin\s*(code|number)?|security\s*(question|answer)|secret)\b/i],
 ];
@@ -32,9 +34,15 @@ const HEADER_RULES: ReadonlyArray<[SensitiveCategory, RegExp]> = [
 /** Headers that suggest an SSN, for the bare 9-digit rule. */
 const SSN_HEADER = /\b(ssn|social\s*security|soc\.?\s*sec|tax\s*id|itin)\b/i;
 
-/** The category a header names, or null. */
+/**
+ * The category a header names, or null. Only the first MAX_HEADER_CHARS are
+ * read (toSheet already cuts headers there; this is the backstop for any other
+ * caller). Every rule reads its whitespace one way: `free\s*(and|&|\/)?\s*reduced`
+ * had two `\s*` around an optional group, so a long run of spaces after
+ * "free" split O(n²) ways (a 160 KB header took 43 s on the main thread).
+ */
 export function sensitiveHeader(header: string): SensitiveCategory | null {
-  const h = header.replace(/[_.]+/g, " ");
+  const h = header.slice(0, MAX_HEADER_CHARS).replace(/[_.]+/g, " ");
   for (const [category, re] of HEADER_RULES) if (re.test(h)) return category;
   return null;
 }
@@ -48,7 +56,7 @@ const NINE_DIGITS = /^\d{9}$/;
 export function blockValue(value: string, header: string): boolean {
   if (SSN_SHAPE.test(value)) return true;
   const bare = value.trim();
-  return NINE_DIGITS.test(bare) && SSN_HEADER.test(header.replace(/[_.]+/g, " "));
+  return NINE_DIGITS.test(bare) && SSN_HEADER.test(header.slice(0, MAX_HEADER_CHARS).replace(/[_.]+/g, " "));
 }
 
 /** Kept, but shown to the counselor as a possible ID number. */

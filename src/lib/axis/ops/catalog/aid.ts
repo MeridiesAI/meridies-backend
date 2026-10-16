@@ -310,6 +310,7 @@ export const aid: OpGroup = {
     op({
       name: "aid.overview",
       kind: "read",
+      outside: true,
       title: "A student's Financial aid page: FAFSA and CSS status and due dates, each school's checklist (student_college_id).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -320,6 +321,7 @@ export const aid: OpGroup = {
     op({
       name: "aid.award_letters",
       kind: "read",
+      outside: true,
       title: "A student's award letters with ids, and each letter's line items with ids (names only, no amounts).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -346,6 +348,7 @@ export const aid: OpGroup = {
     op({
       name: "aid.appeals",
       kind: "read",
+      outside: true,
       title: "A student's award appeals with ids, school and status.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -703,6 +706,7 @@ export const scholarships: OpGroup = {
     op({
       name: "scholarships.find",
       kind: "read",
+      outside: true,
       title: "Catalog scholarships that match a student under the current search, with scholarship ids and which are recommended.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -732,6 +736,7 @@ export const scholarships: OpGroup = {
     op({
       name: "scholarships.list",
       kind: "read",
+      outside: true,
       title: "The scholarship matches on a student's list with match ids and status (saved, applying, applied, awarded are on their side).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -877,6 +882,7 @@ export const opportunities: OpGroup = {
     op({
       name: "opportunities.list",
       kind: "read",
+      outside: true,
       title: "A student's program and opportunity recommendations with ids and status (sent, saved, applied are on their side).",
       doc: "{ student_id, status?: suggested|counselor-review|approved|sent|saved|applied|dismissed }",
       input: z.object({ student_id: uuid, status: z.enum(OPP_STATUS).optional() }).strict(),

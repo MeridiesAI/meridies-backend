@@ -3,7 +3,8 @@
   "vars": [
    "item",
    "unitid",
-   "image"
+   "image",
+   "modified"
   ]
  },
  "results": {
@@ -20,6 +21,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Great%20dome%20of%20MIT%2C%20Feb%202021.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -34,6 +40,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Stanford%20Oval%20May%202011%20panorama.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -48,6 +59,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Cornell%20West%20Campus.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -62,6 +78,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Some%20other%20campus.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -72,6 +93,11 @@
     "unitid": {
      "type": "literal",
      "value": "130794"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -86,6 +112,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Sather_Tower_e%CC%81te%CC%81.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -100,6 +131,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Not%20a%20unitid.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -114,6 +150,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Richardsonian%20Romanesque%20Brown.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -128,6 +169,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Aerial%20view%20of%20Brown%20University.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -142,6 +188,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/System%20campus.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -156,6 +207,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/System%20campus.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -170,6 +226,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Columbia%20University%20seal.png"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -184,6 +245,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Baker%20Library%20tower%20portrait.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -198,6 +264,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Packer%20Chapel%20NC.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -212,6 +283,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Ballou%20Hall%20with%20students.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -226,6 +302,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Vassar%20nonfree.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -240,6 +321,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Bucknell%20no%20credit.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -254,6 +340,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Nott%20Memorial%20deleted.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -268,6 +359,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/College%20Hall%20Penn%20old%20name.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -282,6 +378,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Rush%20Rhees%20PD.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -296,6 +397,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Swarthmore%20Parrish%20Hall.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -310,6 +416,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Hamilton%20long%20credit.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    },
    {
@@ -324,6 +435,11 @@
     "image": {
      "type": "uri",
      "value": "http://commons.wikimedia.org/wiki/Special:FilePath/Binghamton%20campus%20wide.jpg"
+    },
+    "modified": {
+     "datatype": "http://www.w3.org/2001/XMLSchema#dateTime",
+     "type": "literal",
+     "value": "2026-08-01T09:30:00Z"
     }
    }
   ]

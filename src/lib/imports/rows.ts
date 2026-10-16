@@ -10,6 +10,7 @@ import { findField, ROW_PARTS, ROW_REQUIRED, type FieldDef, type RowTable } from
 import type { ParsePlan, PlanColumn } from "./plan.js";
 import { blockValue, flagValue } from "./sensitive.js";
 import type { ParsedSheet } from "./sheet.js";
+import { isEmailShape } from "./textShapes.js";
 import { cleanCell, cleanEnum, parseDate, parseNumber, testKindOf, valueOk, type Json } from "./values.js";
 
 export type RecordKey = {
@@ -57,7 +58,6 @@ export function columnLetter(i: number): string {
 }
 
 const cap = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s);
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function gradYearOf(raw: string): number | null {
   const m = /(?:^|\D)((?:19|20|21)\d{2})(?:\D|$)/.exec(raw.trim());
@@ -133,7 +133,7 @@ export function applyPlan(plan: ParsePlan, files: ParsedFile[], fields: FieldDef
       const emailRaw = raw("email")?.toLowerCase() ?? null;
       const fullCol = keyCol("full_name");
       const key: RecordKey = {
-        email: emailRaw && EMAIL.test(emailRaw) && emailRaw.length <= 320 ? emailRaw : null,
+        email: emailRaw && emailRaw.length <= 320 && isEmailShape(emailRaw) ? emailRaw : null,
         name: cap(nameFrom(raw("full_name"), raw("first_name"), raw("last_name"), fullCol?.parse?.name) ?? "", 200) || null,
         birthday: null,
         gradYear: raw("grad_year") ? gradYearOf(raw("grad_year") as string) : null,

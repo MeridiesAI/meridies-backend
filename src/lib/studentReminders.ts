@@ -13,6 +13,21 @@
  * - Never inside the counselor's quiet hours; a later run picks it up.
  * - Only students still on a counselor's roster and not archived.
  * - Runs under its own lease so two replicas can't send the same reminder.
+ *
+ * Where it goes (the student writes their preferences, so neither address is
+ * trusted as a destination on its own):
+ * - Email only ever goes to the student's own sign-in address
+ *   (`profiles.email`, which no client can write). The address typed in
+ *   Settings is not followed.
+ * - A text goes only to the number the student's counselor recorded on the
+ *   student's card (`profiles.phone_recorded_by_counselor`, written by a
+ *   trigger when the counselor saves the phone, never by the student;
+ *   20261024000042), and only when the student's own reminder number is that
+ *   same number. Before that migration, or with no number recorded, no text
+ *   goes out.
+ * - At most MAX_REMINDERS_PER_DAY per channel per student per due date, and
+ *   a title the student wrote never goes into a text (smsTitle) or an email
+ *   (emailTitle): their own to-dos are reminded with a generic line.
  */
 
 import { hostname } from "node:os";
@@ -34,6 +49,10 @@ const LEASE_TTL_SECONDS = 10 * 60;
 const MAX_STUDENTS = 2000;
 
 export const REMINDER_TEMPLATE = "task-due-reminder";
+/** Reminders per channel, per student, per due date. */
+export const MAX_REMINDERS_PER_DAY = 5;
+/** The longest task title a text carries. */
+export const SMS_TITLE_MAX = 60;
 
 export type ReminderTally = { ran: boolean; sent: number; skipped: number; reason?: string };
 
@@ -55,17 +74,117 @@ function taskUrl(taskId: string): string {
   return `${env.APP_URL.replace(/\/+$/, "")}/dashboard/student?task=${encodeURIComponent(taskId)}`;
 }
 
-export function reminderSms(title: string, url: string): string {
-  return `Meridies: "${title}" is due tomorrow. ${url}`;
+const oneLine = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
+
+/**
+ * A phone number written any common way, as E.164, or null. A bare US
+ * number (10 digits, or 11 starting with 1) reads as +1; anything else must
+ * carry its own "+".
+ */
+export function normalizePhone(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const v = raw.trim().replace(/[\s().-]/g, "");
+  if (/^\+[1-9]\d{6,14}$/.test(v)) return v;
+  if (/^\d{10}$/.test(v)) return `+1${v}`;
+  if (/^1\d{10}$/.test(v)) return `+${v}`;
+  return null;
 }
 
-export function reminderEmail(first: string, title: string, url: string) {
+/**
+ * Where this student's reminders may go. Email: the sign-in address, never
+ * the one typed in Settings. Text: the number the counselor recorded, and
+ * only when the student's own reminder number is that number.
+ */
+export function reminderDestinations(
+  pref: { email_enabled?: unknown; sms_enabled?: unknown; sms_phone?: unknown },
+  profile: { email?: unknown; phone_recorded_by_counselor?: unknown }
+): { email: string | null; sms: string | null } {
+  const login = typeof profile.email === "string" && profile.email.includes("@") ? profile.email : null;
+  const email = pref.email_enabled === true ? login : null;
+  const recorded = normalizePhone(profile.phone_recorded_by_counselor);
+  const chosen = normalizePhone(pref.sms_phone);
+  const sms = pref.sms_enabled === true && recorded && chosen === recorded ? recorded : null;
+  return { email, sms };
+}
+
+/**
+ * What of a task's title a text may carry: nothing for a to-do the student
+ * wrote themselves, and for a counselor's task at most SMS_TITLE_MAX
+ * characters with no link, address or phone number in it.
+ */
+export function smsTitle(title: string, source: unknown): string | null {
+  if (source !== "counselor") return null;
+  const t = oneLine(title, 300);
+  if (!t) return null;
+  if (/https?:|www\.|@|\b[a-z0-9-]+\.(com|net|org|io|ly|co|me|app|xyz|info|biz|link|us|gl)\b|\d{6,}/i.test(t)) return null;
+  return t.length > SMS_TITLE_MAX ? `${t.slice(0, SMS_TITLE_MAX - 1).trimEnd()}…` : t;
+}
+
+export function reminderSms(title: string | null, url: string): string {
+  return title ? `Meridies: "${title}" is due tomorrow. ${url}` : `Meridies: a task on your To-Do is due tomorrow. ${url}`;
+}
+
+/**
+ * What of a task's title an email may carry: a counselor's title (the
+ * counselor wrote it), never one the student wrote. accept_invitation doesn't
+ * compare the account's email with the invitation's, so where Supabase's
+ * "Confirm email" is off the sign-in address is only as good as the signup,
+ * and a student-written title in Meridies' email would be text of their
+ * choosing sent to an address nobody checked.
+ */
+export function emailTitle(title: string, source: unknown): string | null {
+  if (source !== "counselor") return null;
+  return oneLine(title, 200) || null;
+}
+
+/** The reminder's subject line: the counselor's title, or a generic line. */
+export function reminderSubject(title: string | null): string {
+  return title ? oneLine(`Due tomorrow: ${title}`, 120) : "A task on your To-Do is due tomorrow";
+}
+
+/** The first name the greeting uses (the student writes it): one word, short. */
+export function greetingName(fullName: unknown): string {
+  const first = String(fullName ?? "").trim().split(/\s+/)[0] ?? "";
+  return first.slice(0, 40) || "there";
+}
+
+export function reminderEmail(first: string, title: string | null, url: string) {
   return {
-    heading: `Due tomorrow: ${title}`,
-    paragraphs: [`Hi ${first}, "${title}" is due tomorrow.`],
+    heading: title ? `Due tomorrow: ${title}` : "A task on your To-Do is due tomorrow",
+    paragraphs: [title ? `Hi ${first}, "${title}" is due tomorrow.` : `Hi ${first}, a task on your To-Do is due tomorrow.`],
     cta: { label: "Open the task", url },
-    footnote: "You're receiving this because you turned on email reminders in Meridies Settings.",
+    footnote: "You're receiving this at your Meridies sign-in email because you turned on email reminders in Settings.",
   };
+}
+
+/** How many reminders this student already has on this channel for this due date; an unreadable log counts as full. */
+async function sentToday(svc: SupabaseClient, studentId: string, template: string, channel: "email" | "sms"): Promise<number> {
+  const { count, error } = await svc
+    .from("message_deliveries")
+    .select("id", { count: "exact", head: true })
+    .eq("student_id", studentId)
+    .eq("template", template)
+    .eq("channel", channel)
+    .eq("recipient_kind", "student");
+  if (error) return MAX_REMINDERS_PER_DAY;
+  return count ?? 0;
+}
+
+let recordedPhoneMissingUntil = 0;
+
+/** The profiles the job needs; without 20261024000042 the recorded phone reads as absent (no texts). */
+async function loadProfiles(svc: SupabaseClient, ids: string[], log: Log): Promise<Row[]> {
+  const base = "id, full_name, email, counselor_id, archived_at, role";
+  if (Date.now() >= recordedPhoneMissingUntil) {
+    const { data, error } = await svc.from("profiles").select(`${base}, phone_recorded_by_counselor`).in("id", ids);
+    if (!error) return (data ?? []) as Row[];
+    if (error.code !== "42703" && error.code !== "PGRST204") throw new Error(`profiles read failed (${error.code ?? "unknown"})`);
+    recordedPhoneMissingUntil = Date.now() + 5 * 60_000;
+    log.warn("student reminders: profiles.phone_recorded_by_counselor is missing (20261024000042 not applied); no texts are sent");
+  }
+  const { data, error } = await svc.from("profiles").select(base).in("id", ids);
+  if (error) throw new Error(`profiles read failed (${error.code ?? "unknown"})`);
+  return (data ?? []) as Row[];
 }
 
 async function alreadySent(svc: SupabaseClient, taskId: string, template: string, channel: "email" | "sms") {
@@ -97,18 +216,14 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
   try {
     const { data: prefs, error } = await svc
       .from("student_preferences")
-      .select("student_id, sms_enabled, sms_phone, email_enabled, email_address")
+      .select("student_id, sms_enabled, sms_phone, email_enabled")
       .or("sms_enabled.eq.true,email_enabled.eq.true")
       .limit(MAX_STUDENTS);
     if (error) throw new Error(`student_preferences read failed (${error.code ?? "unknown"})`);
     if (!prefs?.length) return { ran: true, sent, skipped };
 
     const ids = prefs.map((p) => String(p.student_id));
-    const { data: profiles, error: pErr } = await svc
-      .from("profiles")
-      .select("id, full_name, counselor_id, archived_at, role")
-      .in("id", ids);
-    if (pErr) throw new Error(`profiles read failed (${pErr.code ?? "unknown"})`);
+    const profiles = await loadProfiles(svc, ids, log);
     const byId = new Map((profiles ?? []).map((p) => [String(p.id), p as Row]));
     // A counselor who is not approved sends nothing, reminders included.
     const approved = await approvedCounselorIds(
@@ -127,6 +242,11 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
         skipped += 1;
         continue;
       }
+      const to = reminderDestinations(pref, profile);
+      if (!to.email && !to.sms) {
+        skipped += 1;
+        continue;
+      }
 
       let settings = settingsFor.get(`${counselorId}:${sid}`);
       if (!settings) {
@@ -138,44 +258,52 @@ export async function sendStudentReminders(svc: SupabaseClient, log: Log): Promi
       const tomorrow = localDate(settings.timezone, new Date(), 1);
       const { data: tasks, error: tErr } = await svc
         .from("deliverables")
-        .select("id, title, due_date, status")
+        .select("id, title, due_date, status, source")
         .eq("student_id", sid)
         // A counselor-only task is never the student's reminder.
         .eq("visible_to_student", true)
         .eq("due_date", tomorrow)
         .neq("status", "complete")
+        // The counselor's tasks first, so the daily cap never crowds them out.
+        .order("source", { ascending: true })
+        .order("created_at", { ascending: true })
         .limit(50);
       if (tErr) {
         log.warn({ code: tErr.code }, "student reminders: tasks read failed");
         continue;
       }
 
-      const first = String(profile.full_name ?? "").trim().split(/\s+/)[0] || "there";
+      const first = greetingName(profile.full_name);
+      const template = reminderTemplate(tomorrow);
+      let emailBudget = to.email ? MAX_REMINDERS_PER_DAY - (await sentToday(svc, sid, template, "email")) : 0;
+      let smsBudget = to.sms ? MAX_REMINDERS_PER_DAY - (await sentToday(svc, sid, template, "sms")) : 0;
       for (const t of tasks ?? []) {
         const taskId = String(t.id);
         const title = String(t.title ?? "Your task");
-        const template = reminderTemplate(tomorrow);
         const url = taskUrl(taskId);
         const base = { student_id: sid, deliverable_id: taskId, recipient_kind: "student" as const, recipient_id: sid, template, logger: log };
 
-        if (pref.email_enabled && pref.email_address) {
-          if (await alreadySent(svc, taskId, template, "email")) skipped += 1;
+        if (to.email) {
+          if (emailBudget <= 0 || (await alreadySent(svc, taskId, template, "email"))) skipped += 1;
           else {
-            const message = reminderEmail(first, title, url);
+            emailBudget -= 1;
+            const shown = emailTitle(title, t.source);
+            const message = reminderEmail(first, shown, url);
             const r = await sendEmail({
               ...base,
-              to: String(pref.email_address),
-              subject: `Due tomorrow: ${title}`,
+              to: to.email,
+              subject: reminderSubject(shown),
               html: brandedEmail(message),
               text: brandedText(message),
             });
             if (r.sent) sent += 1;
           }
         }
-        if (pref.sms_enabled && pref.sms_phone) {
-          if (await alreadySent(svc, taskId, template, "sms")) skipped += 1;
+        if (to.sms) {
+          if (smsBudget <= 0 || (await alreadySent(svc, taskId, template, "sms"))) skipped += 1;
           else {
-            const r = await sendSms({ ...base, to: String(pref.sms_phone), body: reminderSms(title, url) });
+            smsBudget -= 1;
+            const r = await sendSms({ ...base, to: to.sms, body: reminderSms(smsTitle(title, t.source), url) });
             if (r.sent) sent += 1;
           }
         }

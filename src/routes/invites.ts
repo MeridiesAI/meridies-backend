@@ -10,9 +10,9 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
+import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
   addressStatuses,
@@ -106,6 +106,8 @@ async function onboardingStep(
   const row = data as unknown as Record<string, unknown>;
   const inv = toInvitationDetail(row);
   if (inv.status !== "accepted" || !inv.acceptedBy) throw conflict("They haven't joined yet.");
+  // The accepted state is only trusted when the roster bears it out.
+  if (!(await acceptedStudentOnRoster(request, inv.acceptedBy))) throw conflict("They haven't joined yet.");
   if (inv.confirmedAt) throw conflict("This student is already confirmed.");
 
   const step = body.receive ?? body.sendBack;
@@ -117,6 +119,7 @@ async function onboardingStep(
       .select("id, status, title")
       .eq("intake_invitation_id", id)
       .eq("intake_request_id", step.requestId)
+      .eq("student_id", inv.acceptedBy)
       .maybeSingle();
     if (taskError) throw fromPostgrest(taskError);
 
@@ -382,6 +385,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
         source: old.source,
         intakeRequests: old.intakeRequests,
         requestedAt: old.requestedAt ? new Date().toISOString() : null,
+        resendOf: id,
       });
       // A referral pointing at the old invitation follows it to the new one.
       await request.db
@@ -517,11 +521,12 @@ export default async function inviteRoutes(app: FastifyInstance) {
             invitationId: String(row.id),
           });
         } catch (err) {
-          request.log.error({ err }, "mass invite row failed");
+          const held = err instanceof HttpError && err.code === "address_holds_other_student";
+          if (!held) request.log.error({ err }, "mass invite row failed");
           results.push({
             email: r.email,
             status: "failed",
-            reason: "Could not send an invitation to this address",
+            reason: held ? (err as HttpError).message : "Could not send an invitation to this address",
             invitationId: null,
           });
         }

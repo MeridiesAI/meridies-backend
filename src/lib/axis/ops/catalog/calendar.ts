@@ -223,6 +223,7 @@ export const meetings: OpGroup = {
     op({
       name: "meetings.list",
       kind: "read",
+      outside: false,
       title: "Meetings with ids, oldest first: a student's (incl. invited) or all the counselor's; pass from for upcoming ones.",
       doc: "{ student_id?, status?: scheduled|held|cancelled|no-show, from? ISO datetime, to? ISO datetime, limit? 1–200 }",
       input: z
@@ -545,6 +546,7 @@ export const calendar: OpGroup = {
     op({
       name: "calendar.list",
       kind: "read",
+      outside: true,
       title: "Everything dated in a window (deadlines, meetings, tasks and their steps, practice events) with kind and ref ids.",
       doc: "{ from YYYY-MM-DD, to YYYY-MM-DD (≤400 days), tz? IANA zone, student_id?, include_done? bool, include_cancelled? bool }",
       input: z
@@ -591,6 +593,7 @@ export const calendar: OpGroup = {
     op({
       name: "calendar.event_types",
       kind: "read",
+      outside: false,
       title: "The counselor's own calendar event types with ids (plus the built-in type keys).",
       doc: "{}",
       input: z.object({}).strict(),

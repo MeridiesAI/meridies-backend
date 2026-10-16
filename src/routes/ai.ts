@@ -22,6 +22,7 @@ import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { essayShaped } from "../lib/proseGuard.js";
 import { toEssayReview } from "../lib/serialize.js";
 
 const BASE_SYSTEM = [
@@ -382,6 +383,11 @@ export default async function aiRoutes(app: FastifyInstance) {
           },
           required: ["verdict", "aiLikelihood", "qualityScore", "findings"],
         },
+        // It reads a student's essay: its findings are diagnosis, never sentences a student could paste.
+        validate: (value) => {
+          const v = value as { verdict: "ok" | "low-effort" | "likely-ai" | "needs-review"; aiLikelihood: number; qualityScore: number; findings: unknown };
+          return { ...v, findings: enforceNoProse(Array.isArray(v.findings) ? v.findings.map(String) : []) };
+        },
       });
 
       await request.db.from("draft_quality_checks").insert({
@@ -640,7 +646,9 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/award-appeal",
-    { preHandler: [app.authenticate, aiLimit("award-appeal")] },
+    // A counselor's draft (the app calls it from no student screen): a student's own call was a
+    // letter generator they could steer into an essay with `circumstances`.
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("award-appeal")] },
     async (request) => {
       const b = z
         .object({
@@ -687,6 +695,12 @@ export default async function aiRoutes(app: FastifyInstance) {
           required: ["draftBody", "basis"],
         },
       });
+
+      // The essay guardrail in code: a letter is first person, but it is short and addressed;
+      // a first-person narrative the size of a personal statement is not an appeal.
+      if (essayShaped(result.draftBody, { narrative: 300, firstPerson: 450 })) {
+        throw badRequest("That draft read like an essay rather than an appeal letter, so it wasn't kept. Describe the family's circumstances as facts and try again.");
+      }
 
       const { data, error } = await request.db
         .from("award_appeals")
@@ -909,7 +923,8 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/parent-alert",
-    { preHandler: [app.authenticate, aiLimit("parent-alert")] },
+    // A counselor's draft to a family (the app calls it from no student screen).
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("parent-alert")] },
     async (request) => {
       const b = z
         .object({
@@ -980,6 +995,11 @@ export default async function aiRoutes(app: FastifyInstance) {
           required: ["subject", "body"],
         },
       });
+
+      // A short note to a family, never essay prose (lib/proseGuard.ts).
+      if (essayShaped(`${result.subject}\n${result.body}`)) {
+        throw badRequest("That draft read like an essay rather than a note to the family, so it wasn't kept. Try again with plain context.");
+      }
 
       return {
         channel: b.channel,

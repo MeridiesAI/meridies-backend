@@ -114,6 +114,12 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 - [x] **Remove the redirect entry `https://*meridiesai.com`** (done 2026-10-06). With no dot after `*` it also matches
   look-alike domains such as `fakemeridiesai.com`, which could receive login links.
   `https://app.meridiesai.com/**` already covers the app.
+- [ ] **Keep "Confirm email" on** (Auth > Providers > Email). Several sends trust the sign-in
+  address as the student's own (due-tomorrow reminders, hand-in verdicts, intake send-backs), and
+  `accept_invitation` doesn't compare the account's email with the invitation's: with confirmation
+  off, anyone holding an invitation link could sign up as any address and have Meridies mail it.
+  The code keeps student-written text out of reminder emails either way, but the address itself is
+  only as good as the signup.
 - [ ] **Merge the app's signup fix** (meridies-app #16, in review) (`fix/signup-email-confirmation`): confirmation links go through
   `/auth/callback`. Without it, an email signup lands on the Site URL and is never signed in.
 

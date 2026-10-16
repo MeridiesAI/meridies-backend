@@ -9,6 +9,11 @@ export type ContextUsage = {
 
 export type StudentContext = ContextUsage & {
   text: string;
+  /**
+   * The used sections that carry text someone other than the counselor wrote (OUTSIDE_SECTIONS,
+   * tasks judged per row). Empty for a trustedOnly build. Never sent to a client.
+   */
+  outside: string[];
   studentName: string | null;
   /** Untrusted student text (names, schools, hometown): wrap with wrapUntrusted before it enters a prompt. */
   facts: {

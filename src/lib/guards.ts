@@ -17,6 +17,17 @@ export function requireRole(role: Role) {
   };
 }
 
+/**
+ * Whether the caller may archive or restore `studentId`: a counselor writing
+ * about someone other than themselves. Edit access (assertCanEditStudent) and
+ * RLS decide which counselor; this only keeps a student, who passes the edit
+ * check for their own record, from switching off what their counselor sends
+ * about them.
+ */
+export function canArchive(role: Role | string | null | undefined, callerId: string, studentId: string): boolean {
+  return role === "counselor" && callerId !== studentId;
+}
+
 /** Throws unless the caller is the student or a counselor who owns them. */
 export async function assertCanViewStudent(
   request: FastifyRequest,

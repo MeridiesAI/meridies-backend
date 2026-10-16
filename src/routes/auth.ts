@@ -8,13 +8,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { accessStatusOf } from "../lib/access.js";
 import { requestAccess, reviewBase } from "../lib/accessReview.js";
-import { forbidden, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { limit } from "../lib/limits.js";
+import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
 import { toMeridiesUser } from "../lib/serialize.js";
 import { serviceClient } from "../lib/supabase.js";
-
-/** The same bound as an intake configuration (routes/intake.ts). */
-const MAX_PROFILE_CHARS = 200_000;
 
 const updateMeSchema = z
   .object({
@@ -27,14 +25,15 @@ const updateMeSchema = z
     headline: z.string().trim().max(300),
     hometown: z.string().trim().max(200),
     highSchool: z.string().trim().max(200),
-    gradYear: z.string().trim().max(10),
+    gradYear: z.string().trim().regex(/^(\d{4})?$/, "Use a four-digit year, like 2027"),
     // Free-form intake answers. Merged, not replaced, so a partial save can
     // never wipe answers the client didn't happen to send. Bounded: a save of
     // profile.intakeAnswers runs the questionnaire sync in the database
-    // (20261023010002), so nobody parks a megabyte here.
+    // (20261023010002), so nobody parks a megabyte here. The patch is checked
+    // here and the merged value below (lib/profileSize.ts).
     profile: z
       .record(z.unknown())
-      .refine((p) => JSON.stringify(p).length <= MAX_PROFILE_CHARS, "Profile is too large"),
+      .refine((p) => profileBytes(p) <= MAX_PROFILE_BYTES, "Profile is too large"),
   })
   .partial()
   .strict();
@@ -78,7 +77,9 @@ export default async function authRoutes(app: FastifyInstance) {
       if (patch.highSchool !== undefined) update.high_school = patch.highSchool;
       if (patch.gradYear !== undefined) update.grad_year = patch.gradYear;
       if (patch.profile !== undefined) {
-        update.profile = { ...(request.profile.profile ?? {}), ...patch.profile };
+        const { merged, tooLarge } = mergeProfile(request.profile.profile, patch.profile);
+        if (tooLarge) throw badRequest("Profile is too large");
+        update.profile = merged;
       }
 
       // `role` is deliberately absent: a user cannot promote themselves.
@@ -89,6 +90,7 @@ export default async function authRoutes(app: FastifyInstance) {
         .select("*")
         .maybeSingle();
 
+      if (isProfileTooLarge(error)) throw badRequest("Profile is too large");
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("Profile not found");
 

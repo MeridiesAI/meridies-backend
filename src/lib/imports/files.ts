@@ -16,7 +16,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { badRequest, conflict, fromPostgrest, notFound } from "../errors.js";
-import { MAX_FILE_BYTES, MAX_ROWS } from "./caps.js";
+import { MAX_FILE_BYTES, MAX_PARSED_CHARS, MAX_ROWS } from "./caps.js";
 import { withWorkerTransaction } from "./db.js";
 import { fromImportRpc } from "./errors.js";
 import { parseFailureMessage, parseInWorker } from "./parse.js";
@@ -121,6 +121,21 @@ export async function createUploadUrl(
   return { fileId, bucket: "imports" as const, path: data.path ?? path, token: data.token, signedUrl: data.signedUrl, maxBytes: MAX_FILE_BYTES };
 }
 
+/**
+ * Characters the import's other profiled files already hold (each profile
+ * keeps its count), so this file gets only what is left of the budget.
+ * Staging enforces the same total again; a file with no count counts as 0.
+ */
+async function charsUsed(request: FastifyRequest, importId: string): Promise<number> {
+  const { data, error } = await request.db
+    .from("import_files")
+    .select("chars:profile->chars")
+    .eq("import_id", importId)
+    .eq("status", "profiled");
+  if (error) throw fromPostgrest(error);
+  return ((data ?? []) as Row[]).reduce((n, r) => n + (typeof r.chars === "number" ? r.chars : 0), 0);
+}
+
 export async function registerFile(
   request: FastifyRequest,
   importId: string,
@@ -143,11 +158,14 @@ export async function registerFile(
   } else {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const parsed = await parseInWorker(bytes, filename, { maxRows: MAX_ROWS });
+    const used = await charsUsed(request, importId);
+    const parsed = await parseInWorker(bytes, filename, { maxRows: MAX_ROWS, maxChars: MAX_PARSED_CHARS - used });
     if (!parsed.ok) {
-      file = { ...base, sha256, status: "failed", error: parseFailureMessage(parsed.reason, filename), detectedType: parsed.detectedType };
+      // Over what is left of the budget, when other files hold some of it.
+      const reason = parsed.reason === "too-large-unpacked" && used > 0 ? "import-too-large" : parsed.reason;
+      file = { ...base, sha256, status: "failed", error: parseFailureMessage(reason, filename), detectedType: parsed.detectedType };
     } else {
-      profile = profileFile(parsed.sheets);
+      profile = { ...profileFile(parsed.sheets), chars: parsed.chars };
       const wide = profile.sheets.some((s) => s.wide);
       const rowCount = profile.sheets.reduce((n, s) => n + s.rowCount, 0);
       file = wide

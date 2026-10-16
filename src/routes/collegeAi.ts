@@ -153,6 +153,23 @@ async function collegeDossier(request: FastifyRequest, collegeId: string) {
   };
 }
 
+/**
+ * Only research the counselor could have filed themselves goes into a
+ * prompt: a link about a student must be about one they can see. A row
+ * someone else planted under this counselor's name (owner_id is a column the
+ * permissive policy let any editor of the student set, before
+ * 20261024000022) names a student from another practice, which RLS hides
+ * from this counselor, so it is dropped here.
+ */
+async function readableResearch(request: FastifyRequest, links: Row[]): Promise<Row[]> {
+  const ids = [...new Set(links.map((l) => l.student_id).filter((v): v is string => typeof v === "string"))];
+  if (ids.length === 0) return links;
+  const { data, error } = await request.db.from("profiles").select("id").in("id", ids);
+  if (error) return links.filter((l) => !l.student_id); // fail closed
+  const visible = new Set(((data ?? []) as Row[]).map((r) => String(r.id)));
+  return links.filter((l) => !l.student_id || visible.has(String(l.student_id)));
+}
+
 /** Read links filed under Policy & research › <school>, where the counselor allowed AI to read them. */
 async function filedResearch(request: FastifyRequest, schoolName: string) {
   const { data: root } = await request.db
@@ -173,13 +190,14 @@ async function filedResearch(request: FastifyRequest, schoolName: string) {
   if (!folder) return [];
   const { data: links } = await request.db
     .from("document_links")
-    .select("title, url, summary, key_points")
+    .select("title, url, summary, key_points, owner_id, student_id")
     .eq("folder_id", folder.id as string)
+    .eq("owner_id", request.auth.userId)
     .eq("available_to_llm", true)
     .eq("status", "read")
     .order("created_at", { ascending: false })
     .limit(8);
-  return ((links ?? []) as Row[]).map((l) => ({
+  return (await readableResearch(request, (links ?? []) as Row[])).map((l) => ({
     title: l.title,
     url: l.url,
     summary: typeof l.summary === "string" ? l.summary.slice(0, 1500) : null,

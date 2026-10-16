@@ -10,6 +10,10 @@
  *
  * Who receives anything is decided here, on the caller's own client (RLS
  * applies), and fails closed:
+ *  - the meeting's own student must be on its owner's caseload, or nothing
+ *    is sent at all;
+ *  - a student at their sign-in address (`profiles.email`), never the
+ *    student-writable contact email, so a student can't redirect an invite;
  *  - a student must still be readable, not archived, and on the meeting
  *    owner's caseload (their counselor, or a collaborator of theirs);
  *  - a guardian only while the student's `copy_parents` is on
@@ -20,7 +24,10 @@
  *
  * Invites are transactional, like a task assignment: the counselor is acting
  * now, so quiet hours don't hold them. Each round that sends an invite or an
- * update costs one of 60 an hour per meeting owner; a round of cancellations
+ * update costs one of 60 an hour per meeting owner, charged only after the
+ * round is resolved to someone who will receive it, and never for a meeting
+ * whose stored owner doesn't hold its student (a row forged to name another
+ * counselor can't spend their allowance); a round of cancellations
  * is never held back, because a family keeping a meeting that is off is worse
  * than one more email. Sends run after the response, one at a time about a
  * quarter second apart (Resend's default limit is about two a second), each a
@@ -323,6 +330,13 @@ function validEmail(v: unknown): string | null {
   }
 }
 
+/** Skip reason for a meeting whose stored owner doesn't hold its student. */
+export const NOT_OWNERS_STUDENT = "The meeting's student isn't on its counselor's caseload, so no invites were emailed";
+
+function ownerHolds(student: Row | undefined, owner: string, sharedWithOwner: boolean): boolean {
+  return Boolean(student) && (student!.counselor_id === owner || sharedWithOwner);
+}
+
 export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promise<ResolvedRound | { skip: string }> {
   const meeting = plan.describe;
   const owner = meeting.counselorId;
@@ -335,18 +349,20 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
   const organizer = { name: s((org as Row).full_name), email: organizerEmail };
 
   const studentIds = uniq([
+    meeting.primaryStudentId,
     ...plan.messages.filter((m) => m.audience !== "counselor").map((m) => m.studentId),
     ...plan.keep.map((k) => k.studentId),
   ]);
 
-  const [profiles, details] = await Promise.all([
-    db.from("profiles").select("id, full_name, email, archived_at, counselor_id").in("id", studentIds),
-    db.from("student_personal_details").select("student_id, contact_email").in("student_id", studentIds),
-  ]);
+  // The student's sign-in address only (profiles.email, which no client can
+  // write). student_personal_details.contact_email is student-writable, so
+  // following it would let a student point the counselor's invite, and every
+  // later update and cancellation, at any address (the same rule as the
+  // student's due-tomorrow reminders).
+  const profiles = await db.from("profiles").select("id, full_name, email, archived_at, counselor_id").in("id", studentIds);
   // Fails closed: without these we can't say who may receive what, or at which address.
-  if (profiles.error || details.error) return { skip: "Couldn't read who to invite" };
+  if (profiles.error) return { skip: "Couldn't read who to invite" };
 
-  const contact = new Map(((details.data ?? []) as Row[]).map((d) => [String(d.student_id), validEmail(d.contact_email)]));
   const rows = new Map(((profiles.data ?? []) as Row[]).map((p) => [String(p.id), p]));
 
   // On the owner's caseload: their student, or one shared with them. An unreadable answer is "no".
@@ -355,6 +371,13 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
   if (notOwn.length > 0) {
     const { data, error } = await db.from("student_collaborators").select("student_id").eq("counselor_id", owner).in("student_id", notOwn);
     if (!error) for (const r of (data ?? []) as Row[]) shared.add(String(r.student_id));
+  }
+  // The owner must hold the meeting's own student (archived or not): a row
+  // naming as its owner someone with no hold on the student (forged through
+  // PostgREST before 20261024000011, or left by a collaborator since removed)
+  // sends nothing, and spends nothing of that counselor's throttle.
+  if (!ownerHolds(rows.get(meeting.primaryStudentId), owner, shared.has(meeting.primaryStudentId))) {
+    return { skip: NOT_OWNERS_STUDENT };
   }
   const onRoster = new Set(
     studentIds.filter((id) => {
@@ -406,7 +429,7 @@ export async function resolveRound(db: SupabaseClient, plan: InvitePlan): Promis
   }
 
   const studentName = (id: string) => s(rows.get(id)?.full_name);
-  const studentEmail = (id: string) => contact.get(id) ?? validEmail(rows.get(id)?.email);
+  const studentEmail = (id: string) => validEmail(rows.get(id)?.email);
 
   /** Who an audience reaches; counts the invited who can't be reached. */
   const reach = (a: { audience: PlannedMessage["audience"]; studentId: string }, count: boolean) => {
@@ -635,6 +658,7 @@ export type InviteRoundSummary =
 
 export const INVITES_UNAVAILABLE: InviteRoundSummary = { status: "unavailable", reason: "Calendar invites aren't switched on yet" };
 export const INVITE_ROUNDS_PER_HOUR = 60;
+const NO_ADDRESS = "No one invited has an email address on file";
 const THROTTLED = "Too many calendar invites this hour, so invites and updates weren't emailed";
 
 type Prepared = { summary: InviteRoundSummary; round: ResolvedRound | null };
@@ -649,8 +673,18 @@ export async function prepareInviteRound(
   deps: { consume: typeof consumeRateLimit; now: Date } = { consume: consumeRateLimit, now: new Date() }
 ): Promise<Prepared> {
   try {
-    let plan = planInviteRound({ ...input, now: deps.now });
+    const plan = planInviteRound({ ...input, now: deps.now });
     if (!plan) return { summary: { status: "none" }, round: null };
+
+    // Resolve before charging the throttle: a round that sends nothing (its
+    // organizer unreadable, its student not on the owner's caseload) must not
+    // spend the owner's hourly allowance, or anyone able to edit a row naming
+    // another counselor could use theirs up.
+    let resolved = await resolveRound(request.db, plan);
+    if ("skip" in resolved) return { summary: { status: "skipped", reason: resolved.skip }, round: null };
+    if (!resolved.recipients.some((r) => r.kind !== "counselor")) {
+      return { summary: { status: "skipped", reason: resolved.notes[0] ?? NO_ADDRESS }, round: null };
+    }
 
     const notes: string[] = [];
     // Only a round that adds or updates an invite is counted: cancellations always go.
@@ -661,18 +695,17 @@ export async function prepareInviteRound(
       if (!allowed) {
         const cancels = plan.messages.filter((m) => m.method === "CANCEL");
         if (!cancels.some((m) => m.audience !== "counselor")) return { summary: { status: "skipped", reason: THROTTLED }, round: null };
-        plan = { ...plan, messages: cancels };
+        resolved = await resolveRound(request.db, { ...plan, messages: cancels });
+        if ("skip" in resolved) return { summary: { status: "skipped", reason: resolved.skip }, round: null };
         notes.push(THROTTLED);
       }
     }
 
-    const resolved = await resolveRound(request.db, plan);
-    if ("skip" in resolved) return { summary: { status: "skipped", reason: resolved.skip }, round: null };
     notes.push(...resolved.notes);
     const invitees = resolved.recipients.filter((r) => r.kind !== "counselor").length;
     if (invitees === 0) {
       return {
-        summary: { status: "skipped", reason: notes[0] ?? "No one invited has an email address on file" },
+        summary: { status: "skipped", reason: notes[0] ?? NO_ADDRESS },
         round: null,
       };
     }

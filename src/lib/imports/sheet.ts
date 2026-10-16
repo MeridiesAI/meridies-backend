@@ -11,7 +11,7 @@
 import { parse as parseCsv } from "csv-parse/sync";
 import { zipSync } from "fflate";
 import readXlsxFile from "read-excel-file/universal";
-import { HEADER_SEARCH_ROWS, MAX_COLUMNS } from "./caps.js";
+import { HEADER_SEARCH_ROWS, MAX_CELL_CHARS, MAX_COLUMNS, MAX_HEADER_CHARS, MAX_PARSE_OUTPUT_BYTES, MAX_PARSED_CHARS } from "./caps.js";
 import { detectType } from "./magic.js";
 import { inspectXlsx } from "./zipGuard.js";
 
@@ -32,6 +32,7 @@ export type ParseFailure =
   | "legacy-xls"
   | "macro"
   | "too-large-unpacked"
+  | "cell-too-long"
   | "external-links"
   | "unsafe-xml"
   | "unreadable"
@@ -41,8 +42,14 @@ export type ParseFailure =
   | "timeout"
   | "memory";
 
+export const PARSE_FAILURES = [
+  "not-spreadsheet", "legacy-xls", "macro", "too-large-unpacked", "cell-too-long", "external-links", "unsafe-xml",
+  "unreadable", "too-many-rows", "too-many-columns", "empty", "timeout", "memory",
+] as const satisfies readonly ParseFailure[];
+
 export type ParseOutcome =
-  | { ok: true; detectedType: "csv" | "xlsx"; sheets: ParsedSheet[] }
+  /** chars: every header and cell in the answer, counted (the import's budget, caps.ts). */
+  | { ok: true; detectedType: "csv" | "xlsx"; sheets: ParsedSheet[]; chars: number }
   | { ok: false; detectedType: "csv" | "xlsx" | "unknown"; reason: ParseFailure };
 
 /** The first row with two or more non-empty cells, within the first rows. */
@@ -78,7 +85,8 @@ export function toSheet(
 ): ParsedSheet | "empty" | "too-many-rows" | "too-many-columns" {
   const h = findHeaderRow(raw);
   if (h === -1) return "empty";
-  let headers = raw[h].map((c) => c.trim());
+  // Cut before trimming the end, so a header padded past the cap still trims.
+  let headers = raw[h].map((c) => c.trim().slice(0, MAX_HEADER_CHARS).trim());
   // Trailing blank headers with no data under them are noise.
   while (headers.length > 0 && headers[headers.length - 1] === "") headers = headers.slice(0, -1);
   if (headers.length > MAX_COLUMNS) return "too-many-columns";
@@ -93,6 +101,38 @@ export function toSheet(
     if (rows.length > maxRows) return "too-many-rows";
   }
   return { name, headerRow: lines?.[h] ?? h + 1, headers, rows, rowNumbers, date1904 };
+}
+
+/**
+ * The characters a sheet hands back (headers and cells), or why it can't:
+ * a cell over MAX_CELL_CHARS, or a total over `budget`. Counts lengths only,
+ * so a sheet whose cells all share one string costs nothing to check.
+ */
+export function sheetChars(sheet: ParsedSheet, budget: number): number | "cell-too-long" | "too-large-unpacked" {
+  let total = 0;
+  for (const row of [sheet.headers, ...sheet.rows]) {
+    for (const c of row) {
+      if (c.length > MAX_CELL_CHARS) return "cell-too-long";
+      total += c.length;
+    }
+    if (total > budget) return "too-large-unpacked";
+  }
+  return total;
+}
+
+/**
+ * The parse process's answer as the JSON its parent reads: within the byte
+ * budget, or a too-large failure in its place (escaped or multi-byte text
+ * can outgrow the character count).
+ */
+export function answerJson(out: ParseOutcome): string {
+  try {
+    const json = JSON.stringify(out);
+    if (json.length * 3 <= MAX_PARSE_OUTPUT_BYTES || Buffer.byteLength(json) <= MAX_PARSE_OUTPUT_BYTES) return json;
+  } catch {
+    // An answer too long for one string: refused like any other too large.
+  }
+  return JSON.stringify({ ok: false, detectedType: out.detectedType, reason: "too-large-unpacked" });
 }
 
 /** `,` `;` or tab, whichever splits the first lines most consistently. */
@@ -117,7 +157,13 @@ function sheetNameForCsv(fileName: string): string {
   return (base || "Sheet1").slice(0, 60);
 }
 
-export async function parseSpreadsheet(bytes: Uint8Array, fileName: string, maxRows: number): Promise<ParseOutcome> {
+export async function parseSpreadsheet(
+  bytes: Uint8Array,
+  fileName: string,
+  maxRows: number,
+  /** What is left of the import's character budget (caps.ts MAX_PARSED_CHARS). */
+  maxChars: number = MAX_PARSED_CHARS
+): Promise<ParseOutcome> {
   const detected = detectType(bytes);
   if (detected.type === "refused") return { ok: false, detectedType: "unknown", reason: detected.reason };
 
@@ -148,7 +194,9 @@ export async function parseSpreadsheet(bytes: Uint8Array, fileName: string, maxR
     }
     const sheet = toSheet(sheetNameForCsv(fileName), records, false, maxRows, lines);
     if (typeof sheet === "string") return { ok: false, detectedType: "csv", reason: sheet };
-    return { ok: true, detectedType: "csv", sheets: [sheet] };
+    const chars = sheetChars(sheet, maxChars);
+    if (typeof chars === "string") return { ok: false, detectedType: "csv", reason: chars };
+    return { ok: true, detectedType: "csv", sheets: [sheet], chars };
   }
 
   const verdict = inspectXlsx(bytes);
@@ -165,14 +213,20 @@ export async function parseSpreadsheet(bytes: Uint8Array, fileName: string, maxR
   }
   const sheets: ParsedSheet[] = [];
   let total = 0;
+  let chars = 0;
   for (const s of workbook) {
     const raw = s.data.map((row) => row.map(cellText));
     const sheet = toSheet(String(s.sheet).slice(0, 60), raw, verdict.date1904, maxRows - total);
     if (sheet === "empty") continue;
     if (typeof sheet === "string") return { ok: false, detectedType: "xlsx", reason: sheet };
+    // Shared strings: every cell may be the same string object here, and a
+    // copy each in any answer. Count before anything is sent.
+    const n = sheetChars(sheet, maxChars - chars);
+    if (typeof n === "string") return { ok: false, detectedType: "xlsx", reason: n };
+    chars += n;
     total += sheet.rows.length;
     sheets.push(sheet);
   }
   if (sheets.length === 0) return { ok: false, detectedType: "xlsx", reason: "empty" };
-  return { ok: true, detectedType: "xlsx", sheets };
+  return { ok: true, detectedType: "xlsx", sheets, chars };
 }

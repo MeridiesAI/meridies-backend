@@ -24,14 +24,31 @@ export function loggedUrl(url: string): string {
  * quotes a request or a row has no business carrying a whole essay into a log.
  */
 export function redactText(input: string, max = 2000): string {
-  const out = input
+  // Only what can be shown is redacted. Some of the expressions below cost
+  // more than linear time on a long unbroken run (an address pattern rescans a
+  // run with no "@" from every position), and an error can quote a whole
+  // request, so a long input is cut first: past `max`, with a margin, and back
+  // to the last whitespace, so the token the cut would split (half an address,
+  // a JWT without its signature, which the patterns would no longer catch) is
+  // dropped whole rather than shown in part.
+  let text = input;
+  const window = max + 512;
+  if (text.length > window) {
+    let end = window;
+    while (end > 0 && !/\s/.test(text[end]!)) end--;
+    text = text.slice(0, end);
+  }
+  const out = text
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, "[jwt]")
     .replace(/\b(sk-ant-[A-Za-z0-9_-]+|sk_(live|test)_[A-Za-z0-9]+|re_[A-Za-z0-9]{16,}|SG\.[A-Za-z0-9._-]{20,})/g, "[key]")
     .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
     .replace(/\+\d{10,15}\b/g, "[phone]")
     .replace(/(https?:\/\/[^\s?#"'<>]+)\?[^\s#"'<>]*/gi, (_m, base: string) => `${base}?…`);
-  return out.length > max ? `${out.slice(0, max)}… [${out.length - max} more characters]` : out;
+  const dropped = input.length - text.length;
+  if (out.length <= max && dropped === 0) return out;
+  const shown = out.slice(0, max);
+  return `${shown}… [${out.length - shown.length + dropped} more characters]`;
 }
 
 /**

@@ -87,6 +87,13 @@ export function maximalMarginalRelevance(items: Scored[], k: number, budgetChars
 const FILLER = /^(can you|could you|please|would you|tell me|show me|do you know|i want to know)\s+/i;
 
 /** Up to three different ways of asking the port for the same thing. */
+/** `s.replace(/[?!.]+$/, "")` without rescanning a long run of marks from each one. */
+function trimEndMarks(s: string): string {
+  let end = s.length;
+  while (end > 0 && (s[end - 1] === "?" || s[end - 1] === "!" || s[end - 1] === ".")) end--;
+  return s.slice(0, end);
+}
+
 export function retrievalQueries(u: Understanding, studentNames: string[] = []): string[] {
   const nameWords = new Set(studentNames.flatMap((n) => tokens(n)));
   const strip = (s: string) =>
@@ -95,7 +102,7 @@ export function retrievalQueries(u: Understanding, studentNames: string[] = []):
       .filter((w) => !nameWords.has(tokens(w)[0] ?? ""))
       .join(" ")
       .trim();
-  const asked = strip(u.text.replace(FILLER, "").replace(/[?!.]+$/, ""));
+  const asked = strip(trimEndMarks(u.text.replace(FILLER, "")));
   const keywords = u.keywords.filter((k) => !nameWords.has(k)).join(" ");
   const schools = u.colleges.length
     ? `${u.colleges.map((c) => c.name).join(" ")} ${u.keywords.filter((k) => !nameWords.has(k) && !u.colleges.some((c) => tokens(c.name).includes(k))).join(" ")}`

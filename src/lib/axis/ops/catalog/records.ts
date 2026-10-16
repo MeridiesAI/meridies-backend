@@ -106,6 +106,7 @@ export const courses: OpGroup = {
     op({
       name: "courses.list",
       kind: "read",
+      outside: true,
       title: "A student's courses with ids.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -234,6 +235,7 @@ export const testScores: OpGroup = {
     op({
       name: "test_scores.list",
       kind: "read",
+      outside: true,
       title: "A student's individual test scores (AP, SAT, ACT, IB, TOEFL, IELTS…) with ids.",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),
@@ -435,6 +437,7 @@ export const meetingNotes: OpGroup = {
     op({
       name: "meeting_notes.list",
       kind: "read",
+      outside: false,
       title: "A student's meeting notes with ids (newest first).",
       doc: "{ student_id }",
       input: z.object({ student_id: uuid }).strict(),

@@ -11,7 +11,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { headerLooksLikeName, maskHeader, maskValue } from "./mask.js";
+import { headerIsStrongData, headerLooksLikeName, maskHeader, maskValue } from "./mask.js";
 import { sensitiveHeader, type SensitiveCategory } from "./sensitive.js";
 import type { ParsedSheet } from "./sheet.js";
 import { parseDate, parseNumber } from "./values.js";
@@ -47,7 +47,12 @@ export type SheetProfile = {
   columns: ColumnProfile[];
 };
 
-export type FileProfile = { fingerprint: string; sheets: SheetProfile[] };
+export type FileProfile = {
+  fingerprint: string;
+  sheets: SheetProfile[];
+  /** Characters the parse handed back (headers and cells), toward the import's budget (caps.ts). */
+  chars?: number;
+};
 
 const SAFE_RANGE_MAX = 2100;
 const SLASH = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/;
@@ -92,7 +97,7 @@ export function profileColumn(header: string, index: number, values: string[]): 
   return {
     index,
     header,
-    maskedHeader: maskHeader(header),
+    maskedHeader: maskHeader(header, samples),
     nonEmpty: cells.length,
     pctEmpty: values.length === 0 ? 100 : Math.round(((values.length - cells.length) / values.length) * 100),
     distinct,
@@ -120,8 +125,27 @@ export function isWide(headers: string[], rowCount: number): boolean {
   return headers.length >= 20 && headers.length > 3 * Math.max(rowCount, 1);
 }
 
+/**
+ * A "header row" that is really a student's row: two or more of its cells,
+ * or half of its non-blank ones, are strong evidence of data (a value's
+ * shape or a value inside it, a name shaped like the column under it, a
+ * number, date, phone or email shaped like its column). A single word shaped
+ * like its column ("Sport" over "Soccer") doesn't count, so a real header row
+ * keeps its labels. Then no header in it is a label.
+ */
+export function headerRowIsData(columns: Array<Pick<ColumnProfile, "header" | "samples">>): boolean {
+  const filled = columns.filter((c) => c.header.trim() !== "");
+  const dataLike = filled.filter((c) => headerIsStrongData(c.header, c.samples)).length;
+  return dataLike >= 2 || (filled.length > 0 && dataLike * 2 >= filled.length);
+}
+
 export function profileSheet(sheet: ParsedSheet): SheetProfile {
   const columns = sheet.headers.map((h, i) => profileColumn(h, i, sheet.rows.map((r) => r[i] ?? "")));
+  // No header row: every "header" is a cell of the first student's row, and
+  // the model sees its shape like any other cell (§7.2).
+  if (headerRowIsData(columns)) {
+    for (const c of columns) c.maskedHeader = c.header.trim() === "" ? "<blank>" : maskValue(c.header);
+  }
   return {
     name: sheet.name,
     headerRow: sheet.headerRow,

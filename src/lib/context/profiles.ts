@@ -25,3 +25,25 @@ export const PROFILES: Record<Feature, { budget: number; sections: SectionName[]
   activities: { budget: 24_000, essayBodies: false, sections: ["personal", "activities", "awards", "academics",
     "courses", "testScores", "profile"] },
 };
+
+/**
+ * Sections whose text someone other than the counselor may have written: the
+ * student (every attach_student_policies table, their own profile fields, the
+ * tasks and deadlines they add, intake answers), Profile Update's AI rows, an
+ * import, the questionnaire, or an uploaded file. AxIS treats a turn that read
+ * any of them as having read outside content (lib/axis/ops/run.ts), so text in
+ * them can't make a change happen without the counselor's click.
+ *
+ * Not on it, because only counselors write them: meeting notes, meetings, and
+ * the strength profile (counselor-only since 20261010). Tasks are judged per
+ * row (a student's own task is theirs; a counselor's task title the student
+ * can't change), and a `trustedOnly` build keeps the profile to the name and
+ * class year (see buildStudentContext).
+ */
+export const OUTSIDE_SECTIONS: ReadonlySet<SectionName> = new Set<SectionName>([
+  "profile", "academics", "personal", "activities", "awards", "courses", "testScores", "colleges",
+  "intake", "deadlines", "tasks", "essays", "documents",
+]);
+
+/** Sections a counselor alone writes, plus the trusted forms of profile and tasks: what an AxIS change turn reads. */
+export const TRUSTED_SECTIONS: readonly SectionName[] = ["profile", "upcomingMeetings", "meetingNotes", "polygon", "tasks"];

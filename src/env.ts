@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { z } from "zod";
+import { proxyTrust } from "./lib/proxyTrust.js";
 
 /** `KEY=` in a .env file means unset, not an invalid empty value. */
 function blankIsUnset<T extends z.ZodTypeAny>(schema: T) {
@@ -83,6 +84,12 @@ const envSchema = z.object({
   // told to report status there, and its signature is computed over that URL.
   RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
   PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
+  // How many proxies stand between the internet and this process (Railway's
+  // edge: one). Unset: one on Railway and in development, none elsewhere in
+  // production (lib/proxyTrust.ts). request.ip is the address the outermost
+  // trusted proxy saw; the X-Forwarded-For entries a client wrote itself are
+  // never trusted. 0 trusts no header (direct exposure).
+  TRUST_PROXY_HOPS: blankIsUnset(z.coerce.number().int().min(0).max(5).optional()),
   // Where counselor access requests are sent for review (lib/accessReview.ts).
   ACCESS_REVIEW_EMAIL: blankIsUnset(z.string().email().optional()),
 
@@ -137,6 +144,7 @@ export const corsOrigins = env.CORS_ORIGIN.split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
+export const trustProxy = proxyTrust(process.env, env.TRUST_PROXY_HOPS, env.NODE_ENV);
 export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
 export const hasImportWorker = Boolean(env.IMPORT_DATABASE_URL);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);

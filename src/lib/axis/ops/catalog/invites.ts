@@ -136,6 +136,7 @@ export const invites: OpGroup = {
     op({
       name: "invites.list",
       kind: "read",
+      outside: true,
       title: "Your invitations with ids and status. Give an address the counselor named, or an id, to see one with its requests.",
       doc: "{ status?: pending|accepted|revoked, email?, invitation_id? }",
       input: z
@@ -347,6 +348,7 @@ export const newStudents: OpGroup = {
     op({
       name: "invites.building",
       kind: "read",
+      outside: true,
       title: "Building profile cards on Overview: who joined, and each requested item's request_id and status.",
       doc: "{}",
       input: z.object({}).strict(),
@@ -433,6 +435,7 @@ export const rosterImports: OpGroup = {
     op({
       name: "invites.list_imports",
       kind: "read",
+      outside: true,
       title: "Your roster imports (staged files of students to invite) with ids and counts.",
       doc: "{}",
       input: z.object({}).strict(),

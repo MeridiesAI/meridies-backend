@@ -16,11 +16,24 @@ import { documentAiDecision } from "./documentAi.js";
 import type { Section } from "./pack.js";
 import type { SectionName } from "./profiles.js";
 import type { ContextUsage, StudentContext } from "./types.js";
+import { plainGradYear, plainName } from "./identity.js";
+import { researchTaskIds } from "../research/origin.js";
 
 type Row = Record<string, unknown>;
 type Omitted = ContextUsage["omitted"][number];
-export type LoaderOptions = { essayBodies: boolean; practiceReadsDocuments: boolean };
-export type LoaderResult = { section: Section | null; omitted?: Omitted[]; facts?: Partial<StudentContext["facts"]> };
+export type LoaderOptions = {
+  essayBodies: boolean;
+  practiceReadsDocuments: boolean;
+  /** Only what a counselor wrote: the profile's name and class year, the counselor's own tasks. */
+  trustedOnly?: boolean;
+};
+export type LoaderResult = {
+  section: Section | null;
+  omitted?: Omitted[];
+  facts?: Partial<StudentContext["facts"]>;
+  /** Overrides the section's place on OUTSIDE_SECTIONS for this result (tasks per row, a trusted profile). */
+  outside?: boolean;
+};
 export type Loader = (db: SupabaseClient, studentId: string, opts: LoaderOptions) => Promise<LoaderResult>;
 
 /** The longest document text read into a prompt; a longer document is dropped whole. */
@@ -63,15 +76,21 @@ const textSection = (name: SectionName, label: string, source: string, lines: st
 // A scale is shown as plain text only when it is a bare number ("4.0", "100").
 const SAFE_SCALE = /^\d{1,3}(\.\d{1,2})?$/;
 
-const profile: Loader = async (db, studentId) => {
+const profile: Loader = async (db, studentId, opts) => {
   const r = await one(db.from("profiles")
     .select(columns("profiles", ["full_name", "grad_year", "high_school", "hometown", "headline"]))
     .eq("id", studentId).maybeSingle());
   if (!r) return { section: null };
-  const lines = compact([kv("Name", r.full_name), kv("Graduation year", r.grad_year), kv("High school", r.high_school),
-    kv("Hometown", r.hometown), kv("Headline", r.headline)]);
+  // A trusted build names the student and their class, each reduced to the shape a name and a
+  // year have (lib/context/identity.ts): both are the student's fields, writable through PostgREST
+  // at any length, so nothing else of them reaches a change turn.
+  const lines = opts.trustedOnly
+    ? compact([kv("Name", plainName(r.full_name)), kv("Graduation year", plainGradYear(r.grad_year))])
+    : compact([kv("Name", r.full_name), kv("Graduation year", r.grad_year), kv("High school", r.high_school),
+      kv("Hometown", r.hometown), kv("Headline", r.headline)]);
   return {
     ...textSection("profile", "Student", "profile", lines),
+    ...(opts.trustedOnly ? { outside: false } : {}),
     facts: {
       gradYear: str(r.grad_year) || null,
       identity: { name: str(r.full_name) || null, email: null, school: str(r.high_school) || null, hometown: str(r.hometown) || null },
@@ -237,12 +256,27 @@ const polygon: Loader = async (db, studentId) => {
     rows.map((a) => compact([`${str(a.label)}: ${num(a.score) ?? "unscored"} of ${num(a.max_score) ?? "?"}`, kv("note", a.note)]).join("; ")));
 };
 
-const tasks: Loader = async (db, studentId) => {
-  const rows = await many(db.from("deliverables")
-    .select(columns("deliverables", ["title", "kind", "status", "due_date"]))
-    .eq("student_id", studentId).neq("status", "complete").order("due_date").limit(20));
-  return textSection("tasks", "Open tasks", "tasks",
-    rows.map((t) => compact([str(t.title), kv("kind", t.kind), kv("status", t.status), kv("due", t.due_date)]).join("; ")));
+const tasks: Loader = async (db, studentId, opts) => {
+  let q = db.from("deliverables")
+    .select(columns("deliverables", ["id", "title", "kind", "status", "due_date", "source"]))
+    .eq("student_id", studentId).neq("status", "complete");
+  // A counselor's task title is theirs (the student may only record progress on it); a student's own task isn't.
+  if (opts.trustedOnly) q = q.eq("source", "counselor");
+  let rows = await many(q.order("due_date").limit(20));
+  // Nor is a task accepted from Research: its title is the research model's, from a web page
+  // (lib/research/origin.ts). A trusted build leaves those out; unreadable, it can't vouch for any.
+  let unvouched = false;
+  if (opts.trustedOnly && rows.length) {
+    const research = await researchTaskIds(db, { taskIds: rows.map((t) => str(t.id)).filter(Boolean) });
+    if (research) rows = rows.filter((t) => !research.has(str(t.id)));
+    else unvouched = true;
+  }
+  return {
+    ...textSection("tasks", "Open tasks", "tasks",
+      rows.map((t) => compact([str(t.title), kv("kind", t.kind), kv("status", t.status), kv("due", t.due_date),
+        t.source === "student" ? "added by the student" : null]).join("; "))),
+    outside: unvouched || rows.some((t) => t.source !== "counselor"),
+  };
 };
 
 /**

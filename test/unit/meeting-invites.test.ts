@@ -22,6 +22,7 @@ import {
   type PlanInput,
   type PlannedMessage,
   type ResolvedRound,
+  NOT_OWNERS_STUDENT,
 } from "../../src/lib/meetingInvites.js";
 
 const NOW = new Date("2026-10-15T12:00:00Z");
@@ -249,13 +250,13 @@ function baseTables(over: Partial<Tables> = {}): Tables {
 const emails = (r: Awaited<ReturnType<typeof resolveRound>>) =>
   "skip" in r ? r.skip : r.recipients.map((x) => `${x.kind}:${x.email}:${x.method}`).sort();
 
-test("recipients: the student's contact email, guardians with alerts on, the counselor's copy, deduped", async () => {
+test("recipients: the student's sign-in email, guardians with alerts on, the counselor's copy, deduped", async () => {
   const p = plan({ after: m({ guardiansInvited: true }), attendeesAfter: [A, B] })!;
   const r = await resolveRound(fakeDb(baseTables()), p);
   assert.deepEqual(emails(r), [
     "counselor:dana@practice.test:PUBLISH",
     "guardian:pat@example.com:REQUEST",
-    "student:avery.personal@example.com:REQUEST",
+    "student:avery@example.com:REQUEST",
     "student:blake@example.com:REQUEST",
   ]);
   assert.ok(!("skip" in r));
@@ -291,22 +292,32 @@ test("a student shared with the meeting's counselor is on their caseload", async
 test("copy_parents off, or its read failing, keeps that student's guardians out (fail closed)", async () => {
   const p = plan({ after: m({ guardiansInvited: true }), attendeesAfter: [A] })!;
   const off = await resolveRound(fakeDb(baseTables({ student_alert_prefs: [{ student_id: A, copy_parents: false, copy_student: false }] })), p);
-  assert.deepEqual(emails(off), ["counselor:dana@practice.test:PUBLISH", "student:avery.personal@example.com:REQUEST"]);
+  assert.deepEqual(emails(off), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
   if (!("skip" in off)) assert.match(off.notes.join(" "), /switched off/);
 
   const broken = await resolveRound(fakeDb(baseTables({ student_alert_prefs: { error: { code: "XX000", message: "boom" } } })), p);
-  assert.deepEqual(emails(broken), ["counselor:dana@practice.test:PUBLISH", "student:avery.personal@example.com:REQUEST"]);
+  assert.deepEqual(emails(broken), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
 
   const noGuardians = await resolveRound(fakeDb(baseTables({ guardians: { error: { code: "XX000", message: "boom" } } })), p);
-  assert.deepEqual(emails(noGuardians), ["counselor:dana@practice.test:PUBLISH", "student:avery.personal@example.com:REQUEST"]);
+  assert.deepEqual(emails(noGuardians), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
 });
 
 test("an unreadable roster or organizer skips the whole round", async () => {
   const p = plan({})!;
-  assert.equal(emails(await resolveRound(fakeDb(baseTables({ student_personal_details: { error: { code: "XX000", message: "x" } } })), p)), "Couldn't read who to invite");
+  assert.match(String(emails(await resolveRound(fakeDb(baseTables({ profiles: { error: { code: "XX000", message: "x" } } })), p))), /Couldn't read/);
   const t = baseTables();
   (t.profiles as Record<string, unknown>[])[0]!.email = null;
   assert.match(String(emails(await resolveRound(fakeDb(t), p))), /counselor/);
+});
+
+test("a contact email the student wrote is never followed, and its read isn't needed", async () => {
+  // student_personal_details is student-writable: an invite there would let a
+  // student send the counselor's invite (and its updates) to anyone.
+  const p = plan({ attendeesAfter: [A] })!;
+  const planted = baseTables({ student_personal_details: [{ student_id: A, contact_email: "attacker@evil.test" }] });
+  assert.deepEqual(emails(await resolveRound(fakeDb(planted), p)), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
+  const unreadable = baseTables({ student_personal_details: { error: { code: "XX000", message: "x" } } });
+  assert.deepEqual(emails(await resolveRound(fakeDb(unreadable), p)), ["counselor:dana@practice.test:PUBLISH", "student:avery@example.com:REQUEST"]);
 });
 
 test("a guardian of two siblings is never cancelled while one sibling is still invited", async () => {
@@ -355,6 +366,52 @@ test("a round nobody can receive is skipped with a reason", async () => {
   const r = await prepareInviteRound(req(fakeDb(t)), { before: null, after: m(), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: async () => true, now: NOW });
   assert.equal(r.summary.status, "skipped");
   assert.equal(r.round, null);
+});
+
+test("a meeting whose stored owner doesn't hold its student sends nothing and spends none of their throttle", async () => {
+  // A row naming counselor V as its owner, about C's student A: forged through
+  // PostgREST before 20261024000011, or left by a collaborator since removed.
+  const V = "f0000000-0000-4000-8000-00000000000f";
+  const t = baseTables();
+  (t.profiles as Record<string, unknown>[]).push({ id: V, full_name: "Victim Counselor", email: "victim@practice.test", counselor_id: null, archived_at: null });
+  const spentOn: string[] = [];
+  const consume = async (key: string) => (spentOn.push(key), true);
+  for (const input of [
+    { before: null, after: m({ counselorId: V }), attendeesBefore: [], attendeesAfter: [A], notify: true },
+    { before: m({ counselorId: V, sendInvites: false }), after: m({ counselorId: V }), attendeesBefore: [A], attendeesAfter: [A], notify: true },
+    { before: m({ counselorId: V }), after: m({ counselorId: V, title: "Moved" }), attendeesBefore: [A], attendeesAfter: [A], notify: true },
+  ]) {
+    const r = await prepareInviteRound(req(fakeDb(t)), input, { consume: consume as never, now: NOW });
+    assert.deepEqual(r.summary, { status: "skipped", reason: NOT_OWNERS_STUDENT });
+    assert.equal(r.round, null);
+  }
+  assert.deepEqual(spentOn, [], "the victim's throttle key is never charged");
+
+  // An unreadable owner's profile (another practice's counselor) skips before the charge too.
+  const r = await prepareInviteRound(req(fakeDb(baseTables())), { before: null, after: m({ counselorId: V }), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: consume as never, now: NOW });
+  assert.equal(r.summary.status, "skipped");
+  assert.deepEqual(spentOn, []);
+
+  // The real owner's round is charged once, on their own key.
+  const ok = await prepareInviteRound(req(fakeDb(t)), { before: null, after: m(), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: consume as never, now: NOW });
+  assert.equal(ok.summary.status, "sending");
+  assert.deepEqual(spentOn, [`meeting-invites:${C}`]);
+});
+
+test("a write collaborator's meeting on a shared student is still the owner's to invite for", async () => {
+  const t = baseTables({ student_collaborators: [{ student_id: A, counselor_id: "collab" }] });
+  (t.profiles as Record<string, unknown>[]).push({ id: "collab", full_name: "Collab", email: "collab@practice.test", counselor_id: null, archived_at: null });
+  const r = await prepareInviteRound(req(fakeDb(t)), { before: null, after: m({ counselorId: "collab" }), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: async () => true, now: NOW });
+  assert.equal(r.summary.status, "sending");
+});
+
+test("a round nobody can receive doesn't spend the throttle", async () => {
+  let spent = 0;
+  const t = baseTables();
+  (t.profiles as Record<string, unknown>[])[1]!.archived_at = "2026-01-01T00:00:00Z";
+  const r = await prepareInviteRound(req(fakeDb(t)), { before: null, after: m(), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: async () => (spent++, true), now: NOW });
+  assert.equal(r.summary.status, "skipped");
+  assert.equal(spent, 0);
 });
 
 // ---- The email ---------------------------------------------------------------------------------

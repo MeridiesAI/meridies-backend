@@ -30,6 +30,7 @@ import { isIP, type LookupFunction } from "node:net";
 import { Readable } from "node:stream";
 import zlib from "node:zlib";
 import { badRequest } from "./errors.js";
+import { asciiLower, replaceBlocks, replaceTags } from "./linearText.js";
 
 const MAX_BYTES = 2_000_000;
 const MAX_REDIRECTS = 3;
@@ -213,21 +214,55 @@ function decodeEntities(s: string): string {
     .replace(/&#x27;/gi, "'");
 }
 
-export function extractText(html: string): { title: string | null; text: string } {
-  const titleMatch = html.match(/<title[^>]*>([\s\S]{0,300}?)<\/title>/i);
-  const title = titleMatch ? decodeEntities(titleMatch[1]!).trim().slice(0, 300) : null;
+/**
+ * The first `<title ...>` and up to 300 characters before its `</title>`, the
+ * way `/<title[^>]*>([\s\S]{0,300}?)<\/title>/i` finds it, without the
+ * regular expression's rescans (see linearText.ts).
+ */
+function findTitle(html: string, lower: string): string | null {
+  let from = 0;
+  let gt = -1;
+  let close = -1;
+  for (;;) {
+    const start = lower.indexOf("<title", from);
+    if (start < 0) return null;
+    // `[^>]*` stops at the first ">" after the tag name; a later "<title"
+    // before that ">" shares it, so it is looked up once.
+    if (gt < start + 6) gt = lower.indexOf(">", start + 6);
+    if (gt < 0) return null;
+    // The lazy `{0,300}?` ends at the first "</title>" after the ">", which
+    // is also shared; no "</title>" anywhere after it means no title at all.
+    if (close < gt + 1) close = lower.indexOf("</title>", gt + 1);
+    if (close < 0) return null;
+    if (close - (gt + 1) <= 300) return html.slice(gt + 1, close);
+    from = start + 1;
+  }
+}
 
-  const text = decodeEntities(
-    html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-      .replace(/<!--[\s\S]*?-->/g, " ")
-      .replace(/<\/(p|div|li|h[1-6]|tr|section|article)>/gi, "\n")
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-  )
-    .replace(/[ \t ]+/g, " ")
+/**
+ * A page's title and readable text. Linear in the page (a 2 MB body is the
+ * most `readCapped` lets through): every scan here is `indexOf` from a moving
+ * position, never a regular expression that rescans when its closing token is
+ * missing (`<script` with no `</script>`, `<!--` with no `-->`, `<a` with no
+ * `>`), which took minutes per request on the event loop every tenant shares.
+ */
+export function extractText(html: string): { title: string | null; text: string } {
+  const rawTitle = findTitle(html, asciiLower(html));
+  const title = rawTitle === null ? null : decodeEntities(rawTitle).trim().slice(0, 300);
+
+  let body = replaceBlocks(html, "<script", "</script>", " ");
+  body = replaceBlocks(body, "<style", "</style>", " ");
+  body = replaceBlocks(body, "<noscript", "</noscript>", " ");
+  body = replaceBlocks(body, "<!--", "-->", " ");
+  body = body
+    // Fixed-length alternatives: each start position is a bounded check.
+    .replace(/<\/(p|div|li|h[1-6]|tr|section|article)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n");
+  const text = decodeEntities(replaceTags(body, " "))
+    // Every run of spaces, tabs and no-break spaces to one space, as
+    // `/[ \t\u00a0]+/g` did, without rewriting the single spaces already there
+    // (a page of 500,000 of them took 140 ms that way).
+    .replace(/[ \t\u00a0]{2,}|[\t\u00a0]/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 

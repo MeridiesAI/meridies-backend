@@ -7,7 +7,7 @@ import { deriveAccount, totals } from "../../src/lib/payments.js";
 // @ts-expect-error plain ESM script, no types
 import { BILLING_FAMILIES, BILLING_TOTALS, shiftDate } from "../../scripts/seed/billing-scenario.mjs";
 // @ts-expect-error plain ESM script, no types
-import { assertLocalStack, isLocalUrl } from "../../scripts/seed/local-only.mjs";
+import { assertLocalStack, isLocalUrl, LIBPQ_HOST_ENV, psqlArgs, psqlBinary, psqlEnv } from "../../scripts/seed/local-only.mjs";
 
 type Row = Record<string, unknown>;
 type Invoice = { label: string; amountCents: number; issuedDaysAgo: number; dueInDays: number };
@@ -89,4 +89,54 @@ test("local-only guard: this machine only, and never the production project", ()
   assert.throws(() => assertLocalStack({ API_URL: "https://api.meridiesai.com" }), /API_URL is not a localhost address/);
   // A local tunnel that still names the production project is refused too.
   assert.throws(() => assertLocalStack({ DB_URL: "postgresql://postgres.kerstlpuvpmstiavxblv:pw@127.0.0.1:6543/postgres" }), /production project/);
+});
+
+test("local-only guard: a postgres URL can't name another host through libpq keywords or a parser gap", () => {
+  for (const bad of [
+    // libpq reads these from the query string and they beat the URL's host.
+    "postgresql://postgres:pw@127.0.0.1:5432/postgres?hostaddr=203.0.113.5",
+    "postgresql://postgres:pw@localhost/postgres?host=203.0.113.5",
+    "postgresql://postgres:pw@localhost/postgres?HOST=db.example.com",
+    "postgresql://postgres:pw@localhost/postgres?h%6Fst=203.0.113.5",
+    "postgresql://postgres:pw@localhost/postgres?service=prod",
+    "postgresql://postgres:pw@localhost/postgres?sslmode=require&hostaddr=203.0.113.5",
+    // libpq splits userinfo at the first "@" (WHATWG at the last) and reads "a,b" as two hosts.
+    "postgresql://user@db.example.com@127.0.0.1/postgres",
+    "postgresql://localhost,db.example.com/postgres",
+    "postgresql://localhost/postgres%3Fhost%3Ddb.example.com",
+  ]) {
+    assert.equal(isLocalUrl(bad), false, bad);
+  }
+  for (const ok of ["postgresql://postgres:postgres@127.0.0.1:54322/postgres?sslmode=disable", "postgres://localhost/postgres", "postgresql://[::1]:5432/postgres"]) {
+    assert.equal(isLocalUrl(ok), true, ok);
+  }
+  assert.throws(() => assertLocalStack({ DB_URL: "postgresql://postgres:pw@127.0.0.1:5432/postgres?hostaddr=203.0.113.5" }), /DB_URL is not a localhost address/);
+});
+
+test("psql runs without the libpq variables that could move its host", () => {
+  const env = psqlEnv({ PATH: "/usr/bin", PGHOSTADDR: "203.0.113.5", PGHOST: "db.example.com", PGSERVICE: "prod", PGSERVICEFILE: "/tmp/x", PGSYSCONFDIR: "/tmp", PGCONNECT_TIMEOUT: "5" });
+  for (const k of LIBPQ_HOST_ENV) assert.equal(env[k], undefined, k);
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.PGCONNECT_TIMEOUT, "5");
+});
+
+test("psql runs with no startup file and no PG* setting outside the short list", () => {
+  const env = psqlEnv({ PATH: "/usr/bin", HOME: "/home/x", PSQLRC: "/tmp/evil.psqlrc", PGOPTIONS: "-c x=y", PGDATABASE: "other", PGPORT: "6543", PGPASSWORD: "pw", PGSSLMODE: "disable" });
+  assert.equal(env.PSQLRC, undefined);
+  assert.equal(env.PGOPTIONS, undefined);
+  assert.equal(env.PGDATABASE, undefined);
+  assert.equal(env.PGPORT, undefined);
+  assert.equal(env.PGPASSWORD, "pw");
+  assert.equal(env.PGSSLMODE, "disable");
+  assert.equal(env.HOME, "/home/x");
+  const args = psqlArgs("postgresql://postgres@127.0.0.1:54322/postgres", "select 1");
+  assert.equal(args[0], "-X", "no ~/.psqlrc, which could \\connect elsewhere");
+  assert.deepEqual(args.slice(1), ["postgresql://postgres@127.0.0.1:54322/postgres", "-v", "ON_ERROR_STOP=1", "-tAc", "select 1"]);
+});
+
+test("PSQL may only name psql", () => {
+  assert.equal(psqlBinary({}), "psql");
+  assert.equal(psqlBinary({ PSQL: "/usr/lib/postgresql/17/bin/psql" }), "/usr/lib/postgresql/17/bin/psql");
+  assert.throws(() => psqlBinary({ PSQL: "/tmp/wrapper.sh" }), /PSQL must be psql/);
+  assert.throws(() => psqlBinary({ PSQL: "psql-remote" }), /PSQL must be psql/);
 });
