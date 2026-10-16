@@ -10,7 +10,8 @@
  * the narrow `drive.file` scope: the app can only touch files it created.
  *
  * Reading answers back for word counts uses the Doc's plain-text export and
- * splits it on the prompts the Doc was written from.
+ * splits it on the prompts the Doc was written from. Reading answers back uses
+ * drive.file: the Doc was created by this app, or picked by the counselor.
  *
  * Every request goes to a fixed Google host with an id Google issued, so this
  * is not the lib/links.ts SSRF surface.
@@ -21,7 +22,6 @@ import { accessTokenFor, requireScope, type LiveToken } from "./oauth.js";
 import { normalizeText } from "./documentText.js";
 
 export const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-const GOOGLE_DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const HTTP_TIMEOUT_MS = 20_000;
 const MAX_EXPORT_BYTES = 2 * 1024 * 1024;
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
@@ -159,23 +159,33 @@ export async function createSupplementDoc(
   return { fileId: created.id, webUrl, shareStatus };
 }
 
-/** Plain text of a Google Doc the owner can read, or null when it can't be read. */
-export async function exportDocText(ownerId: string, fileId: string, log: Log): Promise<string | null> {
-  if (!GOOGLE_ID.test(fileId)) return null;
+/** A picked or app-created Doc's plain text; `not-picked` when Google says the app can't see it. */
+export async function exportDocTextResult(
+  ownerId: string,
+  fileId: string,
+  log: Log
+): Promise<{ ok: true; text: string } | { ok: false; reason: "not-picked" | "failed" }> {
+  if (!GOOGLE_ID.test(fileId)) return { ok: false, reason: "failed" };
   const res = await googleCall(
     ownerId,
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/export?mimeType=text%2Fplain`,
     {},
-    { name: GOOGLE_DRIVE_READ_SCOPE, what: "reading Drive" }
+    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "reading Docs you picked" }
   );
+  if (res.status === 404) return { ok: false, reason: "not-picked" };
   if (!res.ok) {
     log.warn({ status: res.status }, "google doc export failed");
-    return null;
+    return { ok: false, reason: "failed" };
   }
   const declared = Number(res.headers.get("content-length") ?? "0");
-  if (declared > MAX_EXPORT_BYTES) return null;
+  if (declared > MAX_EXPORT_BYTES) return { ok: false, reason: "failed" };
   const text = await res.text();
-  return text.length > MAX_EXPORT_BYTES ? null : normalizeText(text);
+  return text.length > MAX_EXPORT_BYTES ? { ok: false, reason: "failed" } : { ok: true, text: normalizeText(text) };
+}
+
+export async function exportDocText(ownerId: string, fileId: string, log: Log): Promise<string | null> {
+  const r = await exportDocTextResult(ownerId, fileId, log);
+  return r.ok ? r.text : null;
 }
 
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();

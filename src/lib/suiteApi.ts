@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { badRequest, conflict, HttpError, unavailable } from "./errors.js";
 import {
   accessTokenFor,
+  GOOGLE_SCOPE,
   providerLabel,
   requireScope,
   type LiveToken,
@@ -23,8 +24,11 @@ const HTTP_TIMEOUT_MS = 20_000;
 /** Largest file an import will copy into Storage. */
 export const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
 
-const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+/** drive.file: only files the counselor picked in Google Picker, or files this app created. */
+export const GOOGLE_FILE_SCOPE = GOOGLE_SCOPE.driveFile;
+export const GOOGLE_CALENDAR_SCOPE = GOOGLE_SCOPE.calendarEvents;
+const GOOGLE_FILES = { name: GOOGLE_FILE_SCOPE, what: "reading the files you picked", code: "drive_not_granted" };
+const GOOGLE_CALENDAR = { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar", code: "calendar_not_enabled" };
 const MS_FILES_SCOPE = "Files.Read.All";
 const MS_CALENDAR_SCOPE = "Calendars.ReadWrite";
 
@@ -45,10 +49,10 @@ async function call(
   provider: SuiteProvider,
   url: string,
   init: RequestInit,
-  scope: { name: string; what: string }
+  scope: { name: string; what: string; code?: string }
 ): Promise<{ res: Response; token: LiveToken }> {
   let token = await accessTokenFor(ownerId, provider);
-  requireScope(token, provider, scope.name, scope.what);
+  requireScope(token, provider, scope.name, scope.what, scope.code);
 
   const go = (t: LiveToken) =>
     fetch(url, {
@@ -65,11 +69,21 @@ async function call(
   return { res, token };
 }
 
+export function googleFileFailureCode(status: number): string | null {
+  return status === 404 ? "not_found" : null;
+}
+
 /** Map a provider failure to something safe to show. Bodies are never echoed. */
 function providerFailure(provider: SuiteProvider, res: Response, log: Log, what: string): HttpError {
   log.warn({ provider, status: res.status, what }, "provider request failed");
   const label = providerLabel(provider);
-  if (res.status === 404) return new HttpError(404, `${label} couldn't find that ${what}, or it isn't shared with you.`);
+  if (res.status === 404) {
+    return new HttpError(
+      404,
+      `${label} couldn't find that ${what}, or it isn't shared with you.`,
+      googleFileFailureCode(404) ?? undefined
+    );
+  }
   if (res.status === 403) return conflict(`${label} refused access to that ${what}.`);
   if (res.status === 429) return new HttpError(429, `${label} is rate-limiting requests — try again shortly.`);
   return unavailable(`${label} didn't answer the ${what} request.`);
@@ -188,7 +202,11 @@ function graphItemUrl(fileId: string, driveId: string | null | undefined): strin
   return `${base}/items/${encodeURIComponent(fileId)}`;
 }
 
-/** Files the connected account can see, newest first; `q` filters by name. */
+/**
+ * Files the connected account can see, newest first; `q` filters by name.
+ * Under Google's drive.file, files.list returns only files the app can reach
+ * (earlier picks and supplement Docs): the app's "Recently added from Drive".
+ */
 export async function listRemoteFiles(
   ownerId: string,
   provider: SuiteProvider,
@@ -211,7 +229,7 @@ export async function listRemoteFiles(
       provider,
       `https://www.googleapis.com/drive/v3/files?${params.toString()}`,
       {},
-      { name: GOOGLE_DRIVE_SCOPE, what: "reading Drive" }
+      GOOGLE_FILES
     );
     if (!res.ok) throw providerFailure(provider, res, log, "file list");
     const body = (await res.json()) as { files?: GoogleFile[] };
@@ -255,7 +273,7 @@ export async function getRemoteFile(
       provider,
       `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=${encodeURIComponent(GOOGLE_FIELDS)}&supportsAllDrives=true`,
       {},
-      { name: GOOGLE_DRIVE_SCOPE, what: "reading Drive" }
+      GOOGLE_FILES
     );
     if (!res.ok) throw providerFailure(provider, res, log, "file");
     return fromGoogle((await res.json()) as GoogleFile);
@@ -310,7 +328,7 @@ export async function downloadRemoteFile(
     const url = exp
       ? `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}/export?mimeType=${encodeURIComponent(exp.mime)}`
       : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`;
-    const { res } = await call(ownerId, provider, url, {}, { name: GOOGLE_DRIVE_SCOPE, what: "reading Drive" });
+    const { res } = await call(ownerId, provider, url, {}, GOOGLE_FILES);
     if (!res.ok) throw providerFailure(provider, res, log, "file download");
     const bytes = await readCapped(res);
     const filename = exp && !file.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${file.name}.${exp.ext}` : file.name;
@@ -349,7 +367,7 @@ export async function exportGoogleDocText(
     "google",
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}/export?mimeType=text%2Fplain`,
     {},
-    { name: GOOGLE_DRIVE_SCOPE, what: "reading Drive" }
+    GOOGLE_FILES
   );
   if (!res.ok) {
     log.warn({ status: res.status }, "google doc text export failed");
@@ -420,7 +438,7 @@ export async function createConferenceEvent(
           },
         }),
       },
-      { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar" }
+      GOOGLE_CALENDAR
     );
     if (!res.ok) throw providerFailure(provider, res, log, "calendar event");
     let ev = (await res.json()) as GoogleEvent;
@@ -436,7 +454,7 @@ export async function createConferenceEvent(
         provider,
         `${base}/${encodeURIComponent(eventId)}`,
         {},
-        { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar" }
+        GOOGLE_CALENDAR
       );
       if (again.res.ok) {
         ev = { ...ev, ...((await again.res.json()) as GoogleEvent) };
@@ -514,7 +532,7 @@ export async function updateCalendarEvent(
     url,
     { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     provider === "google"
-      ? { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar" }
+      ? GOOGLE_CALENDAR
       : { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
   );
   if (!res.ok) throw providerFailure(provider, res, log, "calendar event");
@@ -536,7 +554,7 @@ export async function deleteCalendarEvent(
     url,
     { method: "DELETE" },
     provider === "google"
-      ? { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar" }
+      ? GOOGLE_CALENDAR
       : { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
   );
   // Already gone (404/410) is the outcome we wanted.
