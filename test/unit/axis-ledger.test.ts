@@ -13,7 +13,7 @@ const chunk = (over: Partial<RetrievedChunk> = {}): RetrievedChunk => ({
   chunkId: "c1", documentId: "d1", studentId: "s1", title: "Transcript.pdf", text: "AP Calculus BC: A", score: 1, source: "upload", ...over,
 });
 const doc = (over: Partial<DocRow> = {}): DocRow => ({
-  id: "d1", student_id: "s1", kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, ...over,
+  id: "d1", student_id: "s1", kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, kind_confirmed: true, ...over,
 });
 
 test("ledger: numbers passages, keeps a passage's number when found again, holds the turn budget", () => {

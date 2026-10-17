@@ -23,7 +23,7 @@ export const AI_ALLOWLIST = {
   student_polygon_axes: ["label", "score", "max_score", "note"],
   deliverables: ["id", "title", "kind", "status", "due_date", "source"],
   essays: ["title", "prompt", "school", "status", "word_count", "body", "document_id"],
-  documents: ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "parsed_data"],
+  documents: ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "kind_confirmed", "parsed_data"],
 } as const;
 
 export type AllowTable = keyof typeof AI_ALLOWLIST;

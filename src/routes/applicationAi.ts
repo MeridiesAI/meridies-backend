@@ -130,7 +130,7 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
   const [essays, list, acts, honors] = await Promise.all([
     request.db
       .from("essays")
-      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document_id, document:documents(available_to_llm)")
+      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document_id, document:documents(available_to_llm, kind_confirmed)")
       .eq("student_id", studentId)
       .order("sort_order")
       .limit(300),

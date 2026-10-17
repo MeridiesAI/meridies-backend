@@ -54,6 +54,7 @@ test("a timeout or an unknown error is not called a missing schema", async () =>
 
 test("the list names the column every signed-in request reads", () => {
   assert.ok(REQUIRED_SCHEMA.profiles.includes("counselor_approved_at"));
+  assert.deepEqual(REQUIRED_SCHEMA.documents, ["kind_confirmed"]);
 });
 
 test("the probe is a GET, never a HEAD: a HEAD error has no body, so no code to read", async () => {

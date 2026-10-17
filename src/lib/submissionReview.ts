@@ -30,9 +30,10 @@
  * Storage RLS decides whether they may read it, and only from the documents
  * bucket at a path of the shape lib/storagePath.ts allows. A documents row is
  * the client's word for where a file is; the service role never follows it.
- * Before anything is downloaded, the file passes the shared per-document AI
- * rule (handInAiDecision: keep-out, a waived letter, the practice switch,
- * `ai_access = 'excluded'`, restricted kinds).
+ * Before anything is downloaded, the file passes the task rule
+ * (documentReadableForTask: an unconfirmed type, keep-out, a waived letter, the
+ * practice switch, `ai_access = 'excluded'`, and the sensitive kinds unless the
+ * counselor allowed the file).
  */
 
 import type { FastifyRequest } from "fastify";
@@ -45,7 +46,7 @@ import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { serviceClient } from "./supabase.js";
 import { toPrivacySettings } from "./practiceSettings.js";
 import { isCounselorApproved } from "./access.js";
-import { handInAiDecision, type DocumentAiReason } from "./context/documentAi.js";
+import { documentReadableForTask, toAiDoc } from "./context/documentAi.js";
 import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePathShape } from "./storagePath.js";
 import { consumeRateLimit } from "./limits.js";
 
@@ -206,31 +207,6 @@ async function documentReadingAllowed(svc: Svc, studentId: string): Promise<bool
 }
 
 /** What the counselor and student read when the per-document rule keeps a file away from AxIS. */
-export function aiRuleSkipReason(reason: DocumentAiReason): string {
-  switch (reason) {
-    case "keep-out":
-      return "This file is kept out of AI, so AxIS didn't read it.";
-    case "waived":
-      return "AxIS never reads a recommendation letter the student waived the right to see.";
-    case "practice-setting":
-      return "Automatic document reading is off for this practice.";
-    case "excluded":
-      return "This file is set to stay out of AI, so AxIS didn't read it.";
-    default:
-      return "AxIS doesn't read this kind of file unless the counselor allows AI for it.";
-  }
-}
-
-/** The fields the per-document rule reads, with the defaults a row from before 20261016000001 would have. */
-function aiFields(doc: Row) {
-  return {
-    kind: typeof doc.kind === "string" ? doc.kind : "other",
-    available_to_llm: doc.available_to_llm !== false,
-    ai_access: typeof doc.ai_access === "string" ? doc.ai_access : "default",
-    ferpa_waived: doc.ferpa_waived === true,
-  };
-}
-
 /**
  * At most this many counselor notices (bell and email) per task an hour, and
  * per student a day, however often a file is handed in. The route throttles
@@ -318,11 +294,25 @@ export async function startSubmissionReview(
   return { status: "checking" };
 }
 
+/** Why AxIS won't read this file for a hand-in, or null when it may. */
+export function refusalFor(row: Record<string, unknown>, practiceReadsDocuments: boolean): string | null {
+  const verdict = documentReadableForTask(toAiDoc(row), practiceReadsDocuments);
+  if (verdict.allowed) return null;
+  switch (verdict.reason) {
+    case "not-categorized": return "Choose a type for this file first, so AxIS knows what it is.";
+    case "keep-out": return "This file is kept out of AI, so AxIS didn't read it.";
+    case "practice-setting": return "Automatic document reading is off for this practice.";
+    case "waived": return "AxIS never reads a recommendation letter the student waived the right to see.";
+    case "excluded": return "This file is set to stay out of AI, so AxIS didn't read it.";
+    default: return "This kind of file stays out of AI, so AxIS didn't read it.";
+  }
+}
+
 async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, studentId: string): Promise<Prepared> {
-  // The shared per-document rule first (the practice's and the file's own
-  // switches): they are the reason a counselor can act on.
-  const rule = handInAiDecision(aiFields(doc), await documentReadingAllowed(svc, studentId));
-  if (!rule.allowed) return { status: "skipped", reason: aiRuleSkipReason(rule.reason) };
+  // The practice's and the file's own switches first: they are the reason a
+  // counselor can act on.
+  const refusal = refusalFor(doc, await documentReadingAllowed(svc, studentId));
+  if (refusal) return { status: "skipped", reason: refusal };
   if (!doc.storage_path) return { status: "skipped", reason: "AxIS reads uploaded files; this one is a link." };
 
   const filename = String(doc.filename ?? "file");

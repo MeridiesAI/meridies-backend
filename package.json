@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
-    "test:integration": "node --test test/integration/*.test.mjs",
+    "test:integration": "node --import tsx --test test/integration/*.test.mjs",
     "test:imports-load": "node test/integration/imports-load.mjs",
     "test:caseload-load": "node test/integration/caseload-transfer-load.mjs",
     "test:perf": "node test/integration/perf-roster.mjs",
@@ -34,6 +34,7 @@
     "jose": "^5.9.6",
     "pg": "^8.23.1",
     "read-excel-file": "9.3.12",
+    "unpdf": "1.8.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {

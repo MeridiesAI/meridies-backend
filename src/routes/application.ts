@@ -20,7 +20,8 @@ import { registerCollection } from "../lib/collection.js";
 import { canReadDocumentText, maxReadBytes, readDocumentText } from "../lib/documentText.js";
 import { downloadCapped } from "../lib/storageDownload.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
-import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { serializeErr } from "../lib/requestLog.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
@@ -49,6 +50,7 @@ import {
   currentCycle,
   docTitle,
   exportDocText,
+  exportDocTextResult,
   googleDocIdFromUrl,
   splitAnswers,
   type DocPrompt,
@@ -823,6 +825,8 @@ export default async function applicationRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (docError) throw fromPostgrest(docError);
       if (!doc || doc.student_id !== studentId) throw notFound("That document isn't filed to this student");
+      // An unconfirmed Drive pick's text must not reach an essay body (which AI features read).
+      if (doc.kind_confirmed === false) throw new HttpError(409, "Choose a type for this file first.", "document_unconfirmed");
 
       let text: string | null = null;
       const parsed = (doc.parsed_data ?? {}) as Row;
@@ -877,7 +881,9 @@ export default async function applicationRoutes(app: FastifyInstance) {
   /**
    * Re-read the Docs behind a student's essays, so every word count counts the
    * words in the document. Reads only with the caller's own grant: the
-   * supplement Docs they created, and links they set themselves.
+   * supplement Docs they created, and linked Docs they picked. A linked Doc
+   * is read only when the counselor picked it; an unpicked one is reported in
+   * `notPicked` so the app can offer "Pick this Doc to keep it in sync".
    */
   app.post(
     "/essays/sync",
@@ -889,6 +895,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const now = new Date().toISOString();
       let updated = 0;
       const failed: string[] = [];
+      const notPicked: string[] = [];
 
       const { data: docs } = await request.db
         .from("supplement_docs")
@@ -905,7 +912,10 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const jobs: (() => Promise<void>)[] = [];
       for (const d of docs ?? []) {
         jobs.push(async () => {
-          const text = await exportDocText(me, String(d.external_file_id), request.log).catch(() => null);
+          const text = await exportDocText(me, String(d.external_file_id), request.log).catch((err: unknown) => {
+            request.log.warn({ err: serializeErr(err) }, "supplement doc export threw");
+            return null;
+          });
           if (text === null) {
             failed.push(String(d.college_name));
             return;
@@ -929,11 +939,16 @@ export default async function applicationRoutes(app: FastifyInstance) {
         const fileId = googleDocIdFromUrl(String(e.external_url));
         if (!fileId) continue;
         jobs.push(async () => {
-          const text = await exportDocText(me, fileId, request.log).catch(() => null);
-          if (text === null) {
-            failed.push(String(e.id));
+          const r = await exportDocTextResult(me, fileId, request.log).catch((err: unknown) => {
+            request.log.warn({ err: serializeErr(err) }, "linked essay doc export threw");
+            return { ok: false as const, reason: "failed" as const };
+          });
+          if (!r.ok) {
+            if (r.reason === "not-picked") notPicked.push(String(e.id));
+            else failed.push(String(e.id));
             return;
           }
+          const text = r.text;
           if (text === (e.body ?? "")) return;
           const { error } = await request.db
             .from("essays")
@@ -945,7 +960,11 @@ export default async function applicationRoutes(app: FastifyInstance) {
 
       // Four at a time, like lib/liveDocuments.ts: polite to the provider.
       for (let i = 0; i < jobs.length; i += 4) {
-        await Promise.all(jobs.slice(i, i + 4).map((job) => job().catch(() => undefined)));
+        await Promise.all(
+          jobs.slice(i, i + 4).map((job) =>
+            job().catch((err: unknown) => request.log.warn({ err: serializeErr(err) }, "essay sync job failed"))
+          )
+        );
       }
 
       const { data: fresh, error } = await request.db
@@ -959,6 +978,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       return {
         updated,
         failed: failed.length,
+        notPicked,
         essays: (fresh ?? []).map((r) => essayDto(request, r as Row)),
       };
     }

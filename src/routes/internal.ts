@@ -23,6 +23,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
 import { summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
+import { recoverExtractions } from "../lib/documentExtraction.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
 import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
 import { startLinkCheck } from "../lib/ingest/linkCheck.js";
@@ -51,6 +52,12 @@ async function requireCronSecret(request: FastifyRequest): Promise<void> {
 }
 
 export default async function internalRoutes(app: FastifyInstance) {
+  /** Re-queue confirmed documents whose extraction was asked for and never finished; expire leases (also runs on boot and every minute). */
+  app.post("/documents/extraction-recover", { preHandler: [requireCronSecret] }, async (request, reply) => {
+    const queued = await recoverExtractions(request.log);
+    return reply.code(202).send({ queued });
+  });
+
   app.post(
     "/accountability/sweep",
     {

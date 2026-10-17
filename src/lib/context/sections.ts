@@ -12,7 +12,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "../errors.js";
 import { gpaLabel } from "../gpa.js";
 import { columns } from "./ai-allowlist.js";
-import { documentAiDecision } from "./documentAi.js";
+import { documentAiDecision, toAiDoc } from "./documentAi.js";
 import type { Section } from "./pack.js";
 import type { SectionName } from "./profiles.js";
 import type { ContextUsage, StudentContext } from "./types.js";
@@ -280,12 +280,15 @@ const tasks: Loader = async (db, studentId, opts) => {
 };
 
 /**
- * An essay body may be read when the essay has no linked file, or its linked file came back and is not
- * kept out of AI. A linked file that did not come back (hidden by RLS) fails closed.
+ * An essay body may be read when the essay has no linked file, or its linked file came back, its type is
+ * confirmed and it is not kept out of AI. A linked file that did not come back (hidden by RLS) fails closed.
+ * Every embed that feeds this selects both `available_to_llm` and `kind_confirmed`.
  */
 export function essayBodyReadable(documentId: unknown, document: unknown): boolean {
   if (documentId === null || documentId === undefined) return true;
-  return typeof document === "object" && document !== null && (document as Row).available_to_llm !== false;
+  if (typeof document !== "object" || document === null) return false;
+  const d = document as Row;
+  return d.available_to_llm !== false && d.kind_confirmed !== false;
 }
 
 const essays: Loader = async (db, studentId, opts) => {
@@ -295,7 +298,7 @@ const essays: Loader = async (db, studentId, opts) => {
     ? (["title", "prompt", "school", "status", "word_count", "body", "document_id"] as const)
     : (["title", "prompt", "school", "status", "word_count", "document_id"] as const);
   const rows = await many(db.from("essays")
-    .select(`${columns("essays", essayCols)}, document:documents(${columns("documents", ["available_to_llm"])})`)
+    .select(`${columns("essays", essayCols)}, document:documents(${columns("documents", ["available_to_llm", "kind_confirmed"])})`)
     .eq("student_id", studentId).order("sort_order").limit(30));
   if (rows.length === 0) return empty("essays");
   const untrusted: { source: string; text: string }[] = [{
@@ -317,13 +320,10 @@ const documents: Loader = async (db, studentId, opts) => {
   }
   // Metadata first: parsed text can be large, and a file the rule keeps out never needs it read.
   const rows = await many(db.from("documents")
-    .select(columns("documents", ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived"]))
+    .select(columns("documents", ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "kind_confirmed"]))
     .eq("student_id", studentId).order("created_at"));
   if (rows.length === 0) return empty("documents");
-  const allowed = rows.filter((d) => documentAiDecision(
-    { kind: str(d.kind), available_to_llm: d.available_to_llm !== false, ai_access: str(d.ai_access) || "default", ferpa_waived: d.ferpa_waived === true },
-    opts.practiceReadsDocuments
-  ).allowed);
+  const allowed = rows.filter((d) => documentAiDecision(toAiDoc(d), opts.practiceReadsDocuments).allowed);
   const parsedById = new Map<string, Row | null>();
   if (allowed.length > 0) {
     const texts = await many(db.from("documents")
@@ -338,10 +338,7 @@ const documents: Loader = async (db, studentId, opts) => {
   let blocked = 0;
   let unparsed = 0;
   for (const d of rows) {
-    const decision = documentAiDecision(
-      { kind: str(d.kind), available_to_llm: d.available_to_llm !== false, ai_access: str(d.ai_access) || "default", ferpa_waived: d.ferpa_waived === true },
-      opts.practiceReadsDocuments
-    );
+    const decision = documentAiDecision(toAiDoc(d), opts.practiceReadsDocuments);
     if (!decision.allowed) {
       if (decision.reason === "not-categorized") uncategorized++;
       else blocked++;

@@ -9,6 +9,7 @@ import { HttpError } from "./lib/errors.js";
 import { loggedUrl, serializeErr } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
+import { startExtractionRecovery } from "./lib/documentExtraction.js";
 import { startSweepInterval } from "./lib/sweepSchedule.js";
 import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
@@ -211,6 +212,7 @@ export function buildApp() {
   app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
   startSweepInterval(app);
+  startExtractionRecovery(app);
 
   app.addHook("onReady", async () => {
     if (!hasServiceRole) {

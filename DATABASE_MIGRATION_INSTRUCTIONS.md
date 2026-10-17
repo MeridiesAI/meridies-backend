@@ -278,9 +278,10 @@ Then Supabase dashboard > Advisors > Security: there should be no new "RLS disab
 ### 5. Settings outside the database
 
 1. **Google consent screen.** Google Cloud Console > APIs & Services > OAuth consent screen > Scopes:
-   add `https://www.googleapis.com/auth/drive.file`. Counselors who already connected Google need to
-   disconnect and connect again once. Until they do, "Add essay" on the Application page explains
-   the missing permission and files the prompts as plain records.
+   Google now asks for `openid email https://www.googleapis.com/auth/drive.file` (Calendar,
+   `calendar.events`, later and on request). There are no existing production connections to reconnect.
+   Until a counselor connects, "Add essay" on the Application page explains the missing permission and
+   files the prompts as plain records.
 2. **Railway cron for scheduled messages.** Add a second cron next to the accountability sweep,
    every 5 to 15 minutes:
 

@@ -42,10 +42,14 @@ import {
   taskAssignmentSms,
   type TaskNotification,
 } from "../lib/email.js";
-import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { documentReadableForTask, toAiDoc, unconfirmedAttachedNote } from "../lib/context/documentAi.js";
+import { essayBodyReadable } from "../lib/context/sections.js";
+import { composeTrackerNote } from "../lib/trackerNote.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceRateLimit, limit } from "../lib/limits.js";
-import { checkLiveDocuments, type LiveFileCheck } from "../lib/liveDocuments.js";
+import { checkLiveDocuments, holdsNoActivity, isGrantProblem, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
+import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 import { researchTaskIds } from "../lib/research/origin.js";
@@ -194,7 +198,7 @@ export async function hydrate(
       .from("deliverable_documents")
       .select(
         "deliverable_id, document_id, role, note, created_at, " +
-          "document:documents(id, filename, title, mime_type, size_bytes, kind, available_to_llm, ai_access, ferpa_waived, bucket, storage_path)"
+          "document:documents(id, filename, title, mime_type, size_bytes, kind, available_to_llm, ai_access, ferpa_waived, external_provider, bucket, storage_path)"
       )
       .in("deliverable_id", ids),
     request.db.from("deliverable_tracker_latest").select("*").in("deliverable_id", ids),
@@ -1026,6 +1030,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       await resolveStudentId(request, studentId, "edit");
 
       const settings = await settingsFor(request, studentId);
+      const { settings: practice } = await loadPracticeSettings(request);
 
       const [{ data: events }, { data: attached }, { data: stages }] = await Promise.all([
         request.db
@@ -1038,8 +1043,8 @@ export default async function taskRoutes(app: FastifyInstance) {
           .from("deliverable_documents")
           .select(
             "role, document:documents(id, owner_id, filename, title, description, parsed_data, " +
-              "parse_status, available_to_llm, updated_at, external_provider, external_file_id, " +
-              "external_drive_id, external_modified_at)"
+              "parse_status, available_to_llm, kind, ai_access, ferpa_waived, kind_confirmed, updated_at, " +
+              "external_provider, external_file_id, external_drive_id, external_modified_at)"
           )
           .eq("deliverable_id", id),
         request.db
@@ -1070,8 +1075,13 @@ export default async function taskRoutes(app: FastifyInstance) {
       const liveEditInWindow = live.latestEdit !== null && !isStalled(live.latestEdit, settings);
       const liveCaveat = liveProblems(live.checks);
 
-      // Only documents the counselor left available to AI context are read.
-      const readable = attachedDocs.filter((row) => row.doc && row.doc.available_to_llm !== false);
+      // The task rule (unconfirmed, keep-out, waived, practice switch, sensitive kinds): lib/context/documentAi.ts.
+      const readable = attachedDocs.filter(
+        (row) => row.doc && documentReadableForTask(toAiDoc(row.doc), practice.autoParseDocuments).allowed
+      );
+      const status = liveStatusOf(live.checks);
+      // Unconfirmed attachments are why the tracker may have nothing to read: say so in the note.
+      const unconfirmedNote = unconfirmedAttachedNote(attachedDocs.map((r) => r.doc), practice.autoParseDocuments);
 
       const submissions = readable.filter((r) => documentText(r.doc!).length > 0);
 
@@ -1079,6 +1089,15 @@ export default async function taskRoutes(app: FastifyInstance) {
       const hasWork = submissions.length > 0 || essayBody.length > 0;
 
       if (stale && !hasWork) {
+        if (holdsNoActivity(live.checks)) {
+          const held = live.checks.filter((c) => isGrantProblem(c.errorCode));
+          const label = held[0]!.provider === "google" ? "Google" : "Microsoft";
+          throw new HttpError(
+            409,
+            `${label} is disconnected, so Meridies can't see edits to ${quoteNames(held)}. Reconnect ${label} to check this task.`,
+            `${held[0]!.provider}_disconnected`
+          );
+        }
         const days = daysSince(lastActivity);
         const watched = live.checks.filter((c) => !c.error);
         const base = lastActivity
@@ -1088,7 +1107,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           : watched.length > 0
             ? `No edits to ${quoteNames(watched)} since this task was assigned.`
             : "Nothing has happened on this task since it was assigned.";
-        const note = liveCaveat ? `${base} ${liveCaveat}` : base;
+        const note = composeTrackerNote(base, unconfirmedNote, liveCaveat);
 
         const saved = await saveCheck(request, {
           studentId,
@@ -1101,7 +1120,7 @@ export default async function taskRoutes(app: FastifyInstance) {
           source: "system",
           checkedBy: request.auth.userId,
         });
-        return reply.code(201).send(saved);
+        return reply.code(201).send({ ...saved, liveStatus: status });
       }
 
       // Live edits but nothing readable to compare (a Word file, or a document
@@ -1119,14 +1138,14 @@ export default async function taskRoutes(app: FastifyInstance) {
           deliverableId: id,
           documentId: latest.documentId,
           verdict: "on-track",
-          note: liveCaveat ? `${base} ${liveCaveat}` : base,
+          note: composeTrackerNote(base, unconfirmedNote, liveCaveat),
           daysSinceActivity: daysSince(lastActivity),
           stallAfterDays: settings.stall_after_days,
           documentsChecked: 0,
           source: "system",
           checkedBy: request.auth.userId,
         });
-        return reply.code(201).send(saved);
+        return reply.code(201).send({ ...saved, liveStatus: status });
       }
 
       const instructions = String(task.instructions ?? "").trim();
@@ -1220,7 +1239,7 @@ export default async function taskRoutes(app: FastifyInstance) {
         checkedBy: request.auth.userId,
       });
 
-      return reply.code(201).send(saved);
+      return reply.code(201).send({ ...saved, liveStatus: status });
     }
   );
 }
@@ -1256,14 +1275,18 @@ function documentText(doc: Row): string {
   return "";
 }
 
+/** The linked essay's draft, under the context layer's essay rule (its linked file confirmed and not kept out). */
 async function loadEssayBody(request: FastifyRequest, task: Row): Promise<string> {
   if (!task.essay_id) return "";
   const { data } = await request.db
     .from("essays")
-    .select("body")
+    .select("body, document_id, document:documents(available_to_llm, kind_confirmed)")
     .eq("id", task.essay_id as string)
     .maybeSingle();
-  return String(data?.body ?? "").trim();
+  if (!data) return "";
+  const row = data as unknown as Row;
+  if (!essayBodyReadable(row.document_id, row.document)) return "";
+  return String(row.body ?? "").trim();
 }
 
 /** Collapse to a single line and cap it: the note renders inline in a table. */

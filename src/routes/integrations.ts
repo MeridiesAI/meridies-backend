@@ -1,8 +1,9 @@
 /**
  * Suite integrations.
  *
- * One consent covers a whole provider: connecting Google lights up Drive, Gmail
- * and Calendar together rather than asking three times. The granular provider
+ * Microsoft asks once. Google asks in two steps: Connect is identity plus drive.file (only
+ * the files the counselor picks), and Calendar is added on request (`?add=calendar`); it no
+ * longer lights up Gmail or reads all of Drive. The granular provider
  * values (`common-app`, `scoir`, `csv`, ...) stay for the imports that really
  * are separate things.
  *
@@ -20,13 +21,21 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { env } from "../env.js";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
-import { isRestrictedDocument } from "../lib/context/documentAi.js";
+import { importNameRestricted } from "../lib/context/documentAi.js";
+import { guessText, requestExtraction } from "../lib/documentExtraction.js";
+import { guessKind, importFields } from "../lib/documentGuess.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
+  accessTokenFor,
   beginAuthorization,
   completeAuthorization,
+  connectedAccountEmail,
+  GOOGLE_SCOPE,
+  hasScope,
+  pickerConfigProblem,
   providerLabel,
   revokeAndForget,
   SUITE_PROVIDERS,
@@ -38,7 +47,6 @@ import { serviceClient } from "../lib/supabase.js";
 import {
   assertFileId,
   downloadRemoteFile,
-  exportGoogleDocText,
   getRemoteFile,
   listRemoteFiles,
 } from "../lib/suiteApi.js";
@@ -121,16 +129,17 @@ export default async function integrationRoutes(app: FastifyInstance) {
    */
   app.get("/providers", { preHandler: app.authenticate }, async (request) => {
     const db = serviceClient();
-    const accounts = new Map<string, { email: string | null; connectedAt: string | null }>();
+    const accounts = new Map<string, { email: string | null; connectedAt: string | null; scopes: string[] }>();
     if (db) {
       const { data } = await db
         .from("integration_tokens")
-        .select("provider, account_email, created_at")
+        .select("provider, account_email, created_at, scopes")
         .eq("owner_id", request.auth.userId);
       for (const r of data ?? []) {
         accounts.set(String(r.provider), {
           email: (r.account_email as string | null) ?? null,
           connectedAt: (r.created_at as string | null) ?? null,
+          scopes: (r.scopes as string[] | null) ?? [],
         });
       }
     }
@@ -144,6 +153,13 @@ export default async function integrationRoutes(app: FastifyInstance) {
         tokensHeld: Boolean(account),
         accountEmail: account?.email ?? null,
         connectedAt: account?.connectedAt ?? null,
+        calendarEnabled: account ? account.scopes.some((s) => /calendar\.events$|calendars\.readwrite$/i.test(s)) : false,
+        driveGranted: account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
+        // Until the Railway variables are set the app hides the Drive button (Elvin, 10/15).
+        pickerReady:
+          provider === "google" &&
+          reason === null &&
+          pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null,
       };
     });
   });
@@ -162,7 +178,9 @@ export default async function integrationRoutes(app: FastifyInstance) {
     },
     async (request) => {
       const { provider } = suiteParam.parse(request.params);
-      return { url: await beginAuthorization(request.auth.userId, provider) };
+      const { add } = z.object({ add: z.enum(["calendar"]).optional() }).strict().parse(request.query ?? {});
+      if (add && provider !== "google") throw badRequest("Only Google has add-ons");
+      return { url: await beginAuthorization(request.auth.userId, provider, { add: add ?? null }) };
     }
   );
 
@@ -198,6 +216,37 @@ export default async function integrationRoutes(app: FastifyInstance) {
 
   // ---- Files -----------------------------------------------------------------
 
+  /**
+   * What the browser needs to open Google Picker (spec §4.2). The API key is public by nature and
+   * restricted in Google Cloud; no token or secret is returned. The browser gets its own
+   * drive.file-only token from Google.
+   */
+  app.get(
+    "/google/picker-config",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRole("counselor"),
+        limit("integrations:picker-config", 60, 60),
+      ],
+    },
+    async (request) => {
+      const problem = pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER });
+      if (problem) throw new HttpError(503, problem, "picker_not_configured");
+      const token = await accessTokenFor(request.auth.userId, "google"); // 409 google_disconnected / google_reconnect
+      if (!hasScope(token, GOOGLE_SCOPE.driveFile)) {
+        throw new HttpError(409, "Meridies needs access to the files you pick. Connect Google again and leave Drive ticked.", "drive_not_granted");
+      }
+      return {
+        clientId: env.GOOGLE_CLIENT_ID,
+        apiKey: env.GOOGLE_PICKER_API_KEY,
+        appId: env.GOOGLE_PROJECT_NUMBER,
+        accountEmail: token.accountEmail,
+        maxFiles: env.GOOGLE_PICKER_MAX_FILES,
+      };
+    }
+  );
+
   /** Drive / OneDrive files the counselor's connected account can see. */
   app.get(
     "/:provider/files",
@@ -222,9 +271,11 @@ export default async function integrationRoutes(app: FastifyInstance) {
    *
    * The Storage upload runs on the caller's own client, exactly as a browser
    * upload would, so the bucket's own policies apply. The row keeps a pointer
-   * to the live file so the task tracker can see later edits. A Google Doc
-   * also gets its plain text in `parsed_data` — but only when the document is
-   * left available to AI, because that text exists to be read into a prompt.
+   * to the live file so the task tracker can see later edits. No text is read
+   * at import. With no `kind` the file arrives unconfirmed and kept out of AI,
+   * with a server guess of its type (a label only; the text it read is dropped);
+   * the counselor confirms it later and text extraction runs then. A named kind
+   * is confirmed at once and extracted unless kept out.
    */
   app.post(
     "/:provider/files/import",
@@ -255,10 +306,34 @@ export default async function integrationRoutes(app: FastifyInstance) {
 
       await enforceQuota(request.auth.userId, "uploads", "day", 500, "You've registered a lot of files today.");
 
-      const file = await getRemoteFile(request.auth.userId, provider, b.fileId, b.driveId ?? null, request.log);
+      let file;
+      try {
+        file = await getRemoteFile(request.auth.userId, provider, b.fileId, b.driveId ?? null, request.log);
+      } catch (err) {
+        if (provider === "google" && err instanceof HttpError && err.code === "not_found") {
+          const email = (await connectedAccountEmail(request.auth.userId, "google")) ?? "your connected Google account";
+          throw new HttpError(
+            409,
+            `Meridies can't open that file. It may have been picked with a different Google account, or it's no longer available. Pick it again with ${email}.`,
+            "picked_file_unavailable"
+          );
+        }
+        throw err;
+      }
       const download = await downloadRemoteFile(request.auth.userId, provider, file, request.log);
-      const availableToLlm = b.availableToLlm ?? true;
-      const text = availableToLlm ? await exportGoogleDocText(request.auth.userId, file, request.log) : null;
+      // The guess reads a little text in memory and drops it; nothing from it is stored but the label.
+      const guess = b.kind === undefined
+        ? guessKind({
+            filename: file.name,
+            mimeType: file.mimeType,
+            text: await guessText(
+              new Uint8Array(download.bytes.buffer, download.bytes.byteOffset, download.bytes.byteLength),
+              download.mimeType,
+              download.filename
+            ),
+          })
+        : guessKind({ filename: file.name, mimeType: file.mimeType, text: null });
+      const fields = importFields({ kind: b.kind, availableToLlm: b.availableToLlm, guess });
 
       const safeName = download.filename.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 180);
       const storagePath = `${studentId}/${Date.now()}-${safeName}`;
@@ -282,14 +357,17 @@ export default async function integrationRoutes(app: FastifyInstance) {
           title: b.title ?? null,
           mime_type: download.mimeType,
           size_bytes: download.bytes.length,
-          kind: b.kind ?? (file.kind === "document" ? "essay" : "other"),
+          kind: fields.kind,
+          kind_confirmed: fields.kind_confirmed,
+          kind_guess: fields.kind_guess,
           source: "integration",
-          available_to_llm: availableToLlm,
+          available_to_llm: fields.available_to_llm,
           uploaded_by: request.auth.userId,
-          parse_status: text ? "parsed" : "pending",
-          parsed_data: text
-            ? { text, extractedFrom: "google-docs-export", extractedAt: new Date().toISOString() }
-            : {},
+          parse_status: "pending",
+          parsed_data: {},
+          extraction_requested_at: fields.requestExtraction ? new Date().toISOString() : null,
+          extraction_attempts: 0,
+          extraction_lease_until: null,
           external_provider: provider,
           external_file_id: file.id,
           external_drive_id: file.driveId,
@@ -311,8 +389,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
         event: "uploaded",
         actor_id: request.auth.userId,
         // The student reads this log: a restricted file's name stays out of it.
-        metadata: isRestrictedDocument({ kind: String(data.kind ?? "other") }) ? { source: provider } : { filename: download.filename, source: provider },
+        metadata: importNameRestricted(String(data.kind ?? "other"), guess) ? { source: provider } : { filename: download.filename, source: provider },
       });
+
+      if (fields.requestExtraction) requestExtraction([String(data.id)], request.log);
 
       return reply.code(201).send(toDocument(data as Row));
     }

@@ -28,7 +28,7 @@ function fakeDb(tables: Record<string, Record<string, unknown>[]>, calls: Call[]
 }
 
 const doc = (id: string, kind: string, over: Record<string, unknown> = {}) => ({
-  id, filename: `${id}.pdf`, title: null, kind, available_to_llm: true, ai_access: "default", ferpa_waived: false,
+  id, filename: `${id}.pdf`, title: null, kind, available_to_llm: true, ai_access: "default", ferpa_waived: false, kind_confirmed: true,
   parsed_data: { text: `TEXT-${id}` }, ...over,
 });
 

@@ -20,6 +20,8 @@ export const REQUIRED_SCHEMA: Record<string, string[]> = {
   profiles: ["counselor_approved_at", "counselor_approved_via", "counselor_revoked_at"],
   // 20261017000001: the account review link.
   counselor_access_requests: ["token_hash", "superseded_by"],
+  // 20261024000001: the context layer's documents loader selects it on every AxIS read.
+  documents: ["kind_confirmed"],
 };
 
 /** PostgREST's ways of saying "no such column" and "no such table". */

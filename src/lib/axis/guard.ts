@@ -7,7 +7,7 @@
  * student-scoped chat from quoting another student's file.
  */
 import type { FastifyRequest } from "fastify";
-import { documentAiDecision } from "../context/documentAi.js";
+import { documentAiDecision, toAiDoc } from "../context/documentAi.js";
 import { fromPostgrest } from "../errors.js";
 import { loadPracticeSettings } from "../practiceSettings.js";
 import type { RetrievedChunk } from "./ports.js";
@@ -19,6 +19,7 @@ export type DocRow = {
   available_to_llm: boolean;
   ai_access: string;
   ferpa_waived: boolean;
+  kind_confirmed: boolean;
 };
 
 export type DropReason = "not-visible" | "ai-rule" | "other-student";
@@ -38,7 +39,7 @@ export function chunkAllowed(
   // A filed document we couldn't read back is one RLS hid, or one that was deleted. Fail closed.
   if (!doc) return { ok: false, reason: "not-visible" };
   if (scopeStudentId && doc.student_id && doc.student_id !== scopeStudentId) return { ok: false, reason: "other-student" };
-  return documentAiDecision(doc, practiceReadsDocuments).allowed ? { ok: true } : { ok: false, reason: "ai-rule" };
+  return documentAiDecision(toAiDoc(doc), practiceReadsDocuments).allowed ? { ok: true } : { ok: false, reason: "ai-rule" };
 }
 
 export async function filterAllowedChunks(
@@ -53,7 +54,7 @@ export async function filterAllowedChunks(
     const [rows, practice] = await Promise.all([
       request.db
         .from("documents")
-        .select("id, student_id, kind, available_to_llm, ai_access, ferpa_waived")
+        .select("id, student_id, kind, available_to_llm, ai_access, ferpa_waived, kind_confirmed")
         .in("id", ids),
       loadPracticeSettings(request),
     ]);

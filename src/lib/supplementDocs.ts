@@ -10,7 +10,8 @@
  * the narrow `drive.file` scope: the app can only touch files it created.
  *
  * Reading answers back for word counts uses the Doc's plain-text export and
- * splits it on the prompts the Doc was written from.
+ * splits it on the prompts the Doc was written from. Reading answers back uses
+ * drive.file: the Doc was created by this app, or picked by the counselor.
  *
  * Every request goes to a fixed Google host with an id Google issued, so this
  * is not the lib/links.ts SSRF surface.
@@ -21,7 +22,6 @@ import { accessTokenFor, requireScope, type LiveToken } from "./oauth.js";
 import { normalizeText } from "./documentText.js";
 
 export const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-const GOOGLE_DRIVE_READ_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 const HTTP_TIMEOUT_MS = 20_000;
 const MAX_EXPORT_BYTES = 2 * 1024 * 1024;
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
@@ -66,10 +66,10 @@ async function googleCall(
   ownerId: string,
   url: string,
   init: RequestInit,
-  scope: { name: string; what: string }
+  scope: { name: string; what: string; code?: string }
 ): Promise<Response> {
   let token: LiveToken = await accessTokenFor(ownerId, "google");
-  requireScope(token, "google", scope.name, scope.what);
+  requireScope(token, "google", scope.name, scope.what, scope.code);
   const go = (t: LiveToken) =>
     fetch(url, {
       ...init,
@@ -127,7 +127,7 @@ export async function createSupplementDoc(
       headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
       body,
     },
-    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "creating Docs" }
+    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "creating Docs", code: "drive_not_granted" }
   );
   if (!res.ok) throw failure(res, log, "creating the Doc");
   const created = (await res.json()) as { id?: string; webViewLink?: string };
@@ -147,7 +147,7 @@ export async function createSupplementDoc(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "user", role: "writer", emailAddress: input.shareWith }),
       },
-      { name: GOOGLE_DRIVE_FILE_SCOPE, what: "sharing Docs" }
+      { name: GOOGLE_DRIVE_FILE_SCOPE, what: "sharing Docs", code: "drive_not_granted" }
     ).catch((err: unknown) => {
       log.warn({ err: err instanceof Error ? err.message : "unknown" }, "doc share failed");
       return null;
@@ -159,23 +159,46 @@ export async function createSupplementDoc(
   return { fileId: created.id, webUrl, shareStatus };
 }
 
-/** Plain text of a Google Doc the owner can read, or null when it can't be read. */
-export async function exportDocText(ownerId: string, fileId: string, log: Log): Promise<string | null> {
-  if (!GOOGLE_ID.test(fileId)) return null;
+/** A picked or app-created Doc's plain text; `not-picked` when Google says the app can't see it. */
+export async function exportDocTextResult(
+  ownerId: string,
+  fileId: string,
+  log: Log
+): Promise<{ ok: true; text: string } | { ok: false; reason: "not-picked" | "failed" }> {
+  if (!GOOGLE_ID.test(fileId)) return { ok: false, reason: "failed" };
   const res = await googleCall(
     ownerId,
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/export?mimeType=text%2Fplain`,
     {},
-    { name: GOOGLE_DRIVE_READ_SCOPE, what: "reading Drive" }
+    { name: GOOGLE_DRIVE_FILE_SCOPE, what: "reading Docs you picked", code: "drive_not_granted" }
   );
-  if (!res.ok) {
+  const declaredBytes = Number(res.headers.get("content-length") ?? "0");
+  // The body is read only for an OK answer whose declared size is acceptable.
+  const text = res.ok && declaredBytes <= MAX_EXPORT_BYTES ? await res.text() : null;
+  const outcome = docExportOutcome({ status: res.status, declaredBytes, text });
+  if (!outcome.ok && outcome.reason === "failed" && res.status !== 404 && res.status !== 403 && !res.ok) {
     log.warn({ status: res.status }, "google doc export failed");
-    return null;
   }
-  const declared = Number(res.headers.get("content-length") ?? "0");
-  if (declared > MAX_EXPORT_BYTES) return null;
-  const text = await res.text();
-  return text.length > MAX_EXPORT_BYTES ? null : normalizeText(text);
+  return outcome;
+}
+
+/** Pure mapping of a Doc export answer: 404 or 403 (drive.file's appNotAuthorizedToFile) is not-picked, any other failure or oversize is failed. */
+export function docExportOutcome(a: {
+  status: number;
+  declaredBytes: number;
+  text: string | null;
+}): { ok: true; text: string } | { ok: false; reason: "not-picked" | "failed" } {
+  if (a.status === 404 || a.status === 403) return { ok: false, reason: "not-picked" };
+  if (a.status < 200 || a.status > 299) return { ok: false, reason: "failed" };
+  if (a.declaredBytes > MAX_EXPORT_BYTES || a.text === null || a.text.length > MAX_EXPORT_BYTES) {
+    return { ok: false, reason: "failed" };
+  }
+  return { ok: true, text: normalizeText(a.text) };
+}
+
+export async function exportDocText(ownerId: string, fileId: string, log: Log): Promise<string | null> {
+  const r = await exportDocTextResult(ownerId, fileId, log);
+  return r.ok ? r.text : null;
 }
 
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();

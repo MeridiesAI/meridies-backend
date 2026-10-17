@@ -278,6 +278,8 @@ export const toTaskDocument = (r: Row) => {
     availableToLlm: doc ? Boolean(doc.available_to_llm) : null,
     aiAccess: doc ? (String(doc.ai_access ?? "default") as "default" | "allowed" | "excluded") : null,
     ferpaWaived: doc ? Boolean(doc.ferpa_waived) : null,
+    /** Drive / OneDrive file this came from; the app shows "Google disconnected" against it. */
+    externalProvider: doc ? (nstr(doc.external_provider) as "google" | "microsoft" | null) : null,
     /** Where the file is, so whoever can see it can open it (Storage RLS decides). */
     bucket: doc ? nstr(doc.bucket) : null,
     storagePath: doc ? nstr(doc.storage_path) : null,
@@ -366,7 +368,8 @@ export const toFolder = (r: Row) => ({
   createdAt: nstr(r.created_at),
 });
 
-export const toDocument = (r: Row) => ({
+/** A document for the API. A student caller never gets the server's type guess (`viewerRole` "student"). */
+export const toDocument = (r: Row, viewerRole?: string) => ({
   id: str(r.id),
   studentId: nstr(r.student_id),
   folderId: nstr(r.folder_id),
@@ -383,6 +386,12 @@ export const toDocument = (r: Row) => ({
   availableToLlm: Boolean(r.available_to_llm),
   aiAccess: String(r.ai_access ?? "default") as "default" | "allowed" | "excluded",
   ferpaWaived: Boolean(r.ferpa_waived),
+  /** False for a Drive pick nobody has confirmed yet: out of AI until a type is confirmed. */
+  kindConfirmed: r.kind_confirmed !== false,
+  /** The server's guess for an unconfirmed file (lib/documentGuess.ts); never document text. */
+  kindGuess: (viewerRole !== "student" && r.kind_guess && typeof r.kind_guess === "object" ? r.kind_guess : null) as
+    | { kind: string | null; basis: "text" | "filename" | "type" | null; matched: string | null; textFound: boolean; keepOut: boolean }
+    | null,
   /** Drive / OneDrive file this was imported from; the tracker watches it. */
   externalProvider: nstr(r.external_provider) as "google" | "microsoft" | null,
   externalWebUrl: nstr(r.external_web_url),

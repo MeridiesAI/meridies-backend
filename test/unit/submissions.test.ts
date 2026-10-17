@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkFindings, cleanReview, nextTaskStatus, readMode } from "../../src/lib/submissionReview.js";
+import { checkFindings, cleanReview, nextTaskStatus, readMode, refusalFor } from "../../src/lib/submissionReview.js";
 
 test("AxIS opens PDFs and images itself, reads Word and text files, and refuses the rest", () => {
   assert.deepEqual(readMode("transcript.PDF", null), { kind: "attachment", mediaType: "application/pdf" });
@@ -97,30 +97,13 @@ test("printed figures become facts the counselor reads; missing or garbled ones 
   assert.deepEqual(garbled.facts, []);
 });
 
-test("a hand-in follows the shared per-document AI rule before anything is read", async () => {
-  const { handInAiDecision } = await import("../../src/lib/context/documentAi.js");
-  const { aiRuleSkipReason } = await import("../../src/lib/submissionReview.js");
-  const doc = (over: Partial<{ kind: string; available_to_llm: boolean; ai_access: string; ferpa_waived: boolean }>) => ({
-    kind: "transcript", available_to_llm: true, ai_access: "default", ferpa_waived: false, ...over,
-  });
-  // read: the defaults, plus what a student hands in that nobody categorized
-  for (const kind of ["transcript", "resume", "test-report", "activity-list", "other", "essay", "common-app", "award-letter", "financial", "recommendation-letter"]) {
-    assert.deepEqual(handInAiDecision(doc({ kind }), true), { allowed: true, reason: null }, kind);
-  }
-  // never read
-  assert.equal(handInAiDecision(doc({ available_to_llm: false }), true).reason, "keep-out");
-  assert.equal(handInAiDecision(doc({ kind: "recommendation-letter", ferpa_waived: true, ai_access: "allowed" }), true).reason, "waived");
-  assert.equal(handInAiDecision(doc({}), false).reason, "practice-setting");
-  assert.equal(handInAiDecision(doc({ ai_access: "excluded" }), true).reason, "excluded");
-  assert.equal(handInAiDecision(doc({ kind: "other", ai_access: "excluded" }), true).reason, "excluded");
-  for (const kind of ["iep-504", "counselor-only"]) {
-    assert.equal(handInAiDecision(doc({ kind }), true).allowed, false, kind);
-    // a counselor's explicit allow still opens a restricted kind (never a waived letter)
-    assert.equal(handInAiDecision(doc({ kind, ai_access: "allowed" }), true).allowed, true, kind);
-  }
-  for (const r of ["keep-out", "waived", "practice-setting", "excluded", "kind-excluded"] as const) {
-    assert.ok(aiRuleSkipReason(r).length > 10);
-  }
+test("submission review refuses an unconfirmed file with a reason the student's counselor can act on", () => {
+  assert.equal(refusalFor({ kind: "other", kind_confirmed: false }, true), "Choose a type for this file first, so AxIS knows what it is.");
+  assert.equal(refusalFor({ kind: "other", available_to_llm: false, kind_confirmed: true }, true), "This file is kept out of AI, so AxIS didn't read it.");
+  assert.equal(refusalFor({ kind: "essay", kind_confirmed: true }, true), null);
+  assert.equal(refusalFor({ kind: "essay" }, true), "Choose a type for this file first, so AxIS knows what it is.", "a row without the column fails closed");
+  assert.equal(refusalFor({ kind: "financial", kind_confirmed: true }, true), "This kind of file stays out of AI, so AxIS didn't read it.");
+  assert.equal(refusalFor({ kind: "essay", kind_confirmed: true }, false), "Automatic document reading is off for this practice.");
 });
 
 test("the counselor's Submit email carries at most 60 characters of the student's display name", async () => {

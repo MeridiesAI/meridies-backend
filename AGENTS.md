@@ -55,6 +55,9 @@ src/
 │   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
 │   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
 │   ├── liveDocuments.ts   # live edit times of linked files, for the task tracker
+│   ├── documentGuess.ts   # the type guess for an unconfirmed import: printed phrases, filename, Google type; no model
+│   ├── documentExtraction.ts # confirmed files to text: durable queue, 2-minute leases, recovery, retry
+│   ├── pdfText.ts         # PDF text in a capped worker thread (+ pdfText.extract / .options / .worker); unpdf 1.8.1
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
 │   ├── parentAlertDelivery.ts # carries a queued parent alert; records what happened
 │   ├── massInvite.ts      # Mass invite: deterministic parse first, AxIS sorts second
@@ -611,14 +614,14 @@ the database (`20261010*`):
   and moves the task to `review`. `lib/submissionReview.ts` then answers the
   quick refusals at once and reads the file after the response (PDFs and
   images as attachments, .docx/.txt as text). The refusals come first, in
-  this order: the shared per-document AI rule (`handInAiDecision`:
-  `documentAiDecision`'s keep-out, waived recommendation letter, the
-  practice's document-reading switch and `ai_access = 'excluded'`, with
-  `other`, `essay`, `common-app`, `award-letter`, `financial` and an
-  unwaived `recommendation-letter` read because handing one in is the
-  request to read it, and the restricted kinds, IEP/504 and counselor-only,
-  refused unless the counselor set `allowed`), a link, a format it can't open, over
-  10 MB. **The file is downloaded on the caller's own client**, never the
+  this order: the task rule (`refusalFor`, through `documentReadableForTask`:
+  an unconfirmed type, keep-out, a waived recommendation letter, the
+  practice's document-reading switch and `ai_access = 'excluded'`; `other`,
+  `essay`, `common-app` and the like are read, and the sensitive kinds
+  (`SENSITIVE_DOCUMENT_KINDS`: financial, award letter, recommendation
+  letter, IEP/504, counselor-only) are refused unless the counselor set the
+  file to `allowed`, a product decision of 2026-10-16), a link, a format it
+  can't open, over 10 MB. **The file is downloaded on the caller's own client**, never the
   service role, and only when the row names the documents bucket and a path
   of a safe shape (`lib/storagePath.ts`), so Storage RLS decides and a row's
   path can't reach another object. The same file handed in again while the
@@ -1481,8 +1484,8 @@ refused refresh re-reads the row first — if another replica already rotated it
 that token is used — and only then marks the grant `error` so the card says
 "reconnect".
 
-After connect: `GET /integrations/:provider/files?q=` lists Drive/OneDrive
-files; `POST /integrations/:provider/files/import` copies one into the
+After connect: `GET /integrations/:provider/files?q=` lists OneDrive files (and, for Google, only what the app
+can already reach, below); `POST /integrations/:provider/files/import` copies one into the
 student's folder (Storage upload on the caller's client, `source:
 'integration'`, `external_*` pointer kept). `POST /meetings` (and `PATCH`) with
 `createConference: true` creates the event on the counselor's calendar with a
@@ -1493,14 +1496,28 @@ window makes the task active; none means stalled. Microsoft asks for
 `Files.Read.All` (not `Files.Read`) because the watched file is usually the
 student's, shared with the counselor.
 
-Google also asks for `drive.file` (added in the v10 sync) so
-`POST /application/supplement-docs` can create a student's supplement Doc in
-the counselor's Drive, one per school and cycle, and share it with the
-student (`lib/supplementDocs.ts`). It is the narrow scope on purpose: it
-reaches only files this app created, so it adds no read of anything else.
-The scope must be on the Google consent screen, and a counselor who connected
-before it must reconnect once; until then the route answers 409 with that
-reason and the app files the prompts as plain essay records. These calls go to fixed provider hosts
+**Google is picked files only** (spec `docs/superpowers/specs/2026-10-14-google-connector-design.md`). Connect asks for
+`openid`, `email` and `drive.file`; turning Calendar on (`GET /integrations/google/authorize?add=calendar`) adds
+`calendar.events`, with `login_hint` set to the connected account. The callback keeps only those scopes (plus
+`userinfo.email`): anything else, such as an old `drive.readonly`, is revoked and answered 409 `google_reconnect`;
+a consent signed in as a different Google account than the connected one is refused with 409 `google_other_account`.
+The browser picks files in Google Picker with its own `drive.file`-only token (`include_granted_scopes: false`),
+using `GET /integrations/google/picker-config`; the server imports each pick with the stored grant. Under
+`drive.file`, `GET /integrations/google/files` returns only files the app can already reach (earlier picks and
+supplement Docs). A Google 404 on a picked file is 409 `picked_file_unavailable`. Codes on grant problems:
+`google_disconnected`, `google_reconnect`, `drive_not_granted`, `calendar_not_enabled`.
+Until `GOOGLE_PICKER_API_KEY` and `GOOGLE_PROJECT_NUMBER` (and the client id) are set, `picker-config` answers 503
+`picker_not_configured`. `GET /integrations/providers` carries `calendarEnabled`, `driveGranted` and `pickerReady`
+for the app (it hides the Drive button when `pickerReady` is false). `GOOGLE_PICKER_MAX_FILES` (default 10, 1-50)
+caps a pick. By-hand check of the whole path: `scripts/smoke/google-picker.md` (and `google-picker.ts` for the
+server half).
+
+`POST /application/supplement-docs` creates a student's supplement Doc in
+the counselor's Drive, one per school and cycle, and shares it with the
+student (`lib/supplementDocs.ts`). `drive.file` reaches only files this app created or the
+counselor picked, so it adds no read of anything else. Until a counselor has
+the grant the route answers 409 with that reason and the app files the prompts as plain essay records.
+These calls go to fixed provider hosts
 with provider-issued ids, so they are not the `lib/links.ts` SSRF surface.
 Every route answers 503 with the missing setting when a provider is unset.
 
@@ -1658,6 +1675,42 @@ route answers 403 to anyone else, and the `documents_guard_student_restricted`
 trigger refuses a student's write of either, also through PostgREST. The same
 trigger stops a student filing a document they didn't upload under a restricted kind.
 
+**Unconfirmed files.** A Google import that names no kind is `kind_confirmed = false`, `available_to_llm = false`,
+with the server's guess in `kind_guess` (`lib/documentGuess.ts`: printed phrases, filename, Google file type; no
+model). A OneDrive import that names no kind arrives the same way (the shared `importFields`). `POST
+/files/documents/confirm-types` confirms a list at once (1-50 items, per-item results, deduped by id with the last
+one winning) and queues text extraction for files the AI may read. `PATCH /files/documents/:id` with a `kind`
+confirms and queues only when a counselor sends it; a student's edit changes `kind` only (unchanged behavior).
+Extraction is `lib/documentExtraction.ts`: the stored copy, two at a time, a durable `extraction_requested_at`, a
+2-minute lease per claim with a compare-and-set attempts count, recovery on boot, every minute and at
+`POST /internal/documents/extraction-recover`, and a file `failed` (`parse_error = 'gave-up'`) after 3 attempts;
+`POST /files/documents/extraction-retry` re-queues a failed file. Approval for the work is checked against the
+student's counselor (`profiles.counselor_id`), or the uploader when there is no student; a row that is no longer
+confirmed and AI-allowed when its turn comes has its marker cleared and gets no text. CSV goes to the sheet
+extractor; text is capped at 200,000 characters for every type. A scan is `skipped` / `no-text` (state `empty`),
+never `failed`. PDFs go through `lib/pdfText.ts` (+ `.extract`, `.options`, `.worker`): unpdf 1.8.1 / PDF.js
+6.1.200 pinned, `isEvalSupported: false`, `enableScripting: false`, `verbosity: 0`, a worker thread capped at
+256 MB (`resourceLimits`) with its stdout and stderr drained, terminated at 10 s, two at a time with high-priority
+(import-time guess) work first; 25 MB / 50 pages. **Every reader of documents uses `lib/context/documentAi.ts`:**
+`documentAiDecision` for the context layer and AxIS retrieval, `documentReadableForTask` for the tracker, and
+submission review's `refusalFor`; all three refuse the one shared `SENSITIVE_DOCUMENT_KINDS` (financial, iep-504,
+counselor-only, recommendation-letter, award-letter) and any type not confirmed (`toAiDoc` requires
+`kind_confirmed === true`, so select the column). Text copied out of a document is covered too: essay bodies go
+through `essayBodyReadable` (context layer, Coherence, the tracker's `loadEssayBody`), and
+`POST /application/essays/from-document` answers 409 `document_unconfirmed` for an unconfirmed file, so its text
+never reaches `essays.body`. A new reader must use them. Extraction and submission review download only from the
+`student-documents` bucket (`DOCUMENT_BUCKET`); a row naming another bucket ends `failed` / `bad-bucket`, and
+`POST /files/documents` accepts no other `bucket`. A request still pending after 24 hours is marked `failed` /
+`gave-up` by recovery. The tracker's note appends "N attached file(s) aren't categorized yet…" when attached
+files are unconfirmed (`unconfirmedAttachedNote`, `lib/trackerNote.ts`).
+Do not set `NODE_OPTIONS=--max-old-space-size` on Railway: a process-wide heap flag can override the PDF worker's
+`resourceLimits`.
+
+**Later, not built: text backfill.** Existing documents are never extracted. If wanted, write
+`scripts/backfill-document-text.ts`: dry run by default (counts), `--apply` to run, scoped by `--practice` or
+`--student`, only confirmed, AI-allowed documents without `parsed_data`, by setting `extraction_requested_at` a
+few at a time so the same queue and limits do the work; log counts only.
+
 ### AI context layer
 
 What AxIS may read about a student is decided in one place, `src/lib/context/`.
@@ -1700,18 +1753,22 @@ migration is safe to apply first; the previous code ignores the new columns.
 - **Budgets drop whole sections, never cut one.** A section that doesn't fit is
   left out and listed in `omitted` with reason `budget`.
 - **Documents** (`documentAiDecision` in `documentAi.ts`, in this order):
-  keep-out (`available_to_llm = false`) always wins; then a waived
-  recommendation letter (never); then the practice's document-reading setting;
-  then `ai_access` (`excluded` out, `allowed` in); then the kind defaults
-  (transcript, resume, test-report, activity-list); an `other` file is
-  `not-categorized` so the client can ask the counselor to categorize it, and
-  any other kind is out. An allowed document with no parsed text, or with more
+  an unconfirmed type (`kind_confirmed` not true; a row read without the column
+  fails closed) is `not-categorized` first; then keep-out
+  (`available_to_llm = false`); then a waived recommendation letter (never);
+  then the practice's document-reading setting; then `ai_access` (`excluded`
+  out, `allowed` in); then the sensitive kinds (`SENSITIVE_DOCUMENT_KINDS`) are
+  out; then the kind defaults (transcript, resume, test-report, activity-list)
+  are in; an `other` file is `not-categorized` so the client can ask the
+  counselor to categorize it, and any other kind is out. An allowed document with no parsed text, or with more
   than 12,000 characters of it, is reported in `omitted` (`empty`, `budget`)
   rather than dropped silently.
 - **Essays.** The layer's `essays` section selects and renders a body only for
   a feature that asks for bodies (narrative coherence), and leaves it out when
-  the linked document is kept out of AI or isn't readable by the caller
-  (`essayBodyReadable`); a linked file that didn't come back fails closed. No
+  the linked document is kept out of AI, unconfirmed (`kind_confirmed = false`),
+  or isn't readable by the caller (`essayBodyReadable`); a linked file that
+  didn't come back fails closed. The task tracker's essay draft
+  (`loadEssayBody`) applies the same rule. No
   current consumer reads essay bodies through that section: the Application
   page's Coherence builds its ticked essays through `coherenceMaterial.ts`
   (`usableEssay`), which applies the same `essayBodyReadable` rule.
@@ -2591,6 +2648,9 @@ npm run dev               # http://localhost:4000
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
+| `GOOGLE_PICKER_API_KEY` | Optional; Google Picker (picked files only). Public by nature: restrict it in Google Cloud to the Picker API and the app's origin. `picker-config` answers 503 `picker_not_configured` without it |
+| `GOOGLE_PROJECT_NUMBER` | Optional; the Cloud project number, the Picker's `appId` (it makes `drive.file` reach the picked files) |
+| `GOOGLE_PICKER_MAX_FILES` | Optional; files per pick, 1-50, default 10 |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |
 | `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |

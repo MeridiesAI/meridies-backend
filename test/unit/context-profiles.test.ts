@@ -28,6 +28,8 @@ test("an essay body is read only when unlinked, or linked to a file that came ba
   assert.equal(essayBodyReadable("doc-1", { available_to_llm: true }), true);
   assert.equal(essayBodyReadable("doc-1", { available_to_llm: false }), false);
   assert.equal(essayBodyReadable("doc-1", null), false, "a linked file RLS hid fails closed");
+  assert.equal(essayBodyReadable("doc-1", { available_to_llm: true, kind_confirmed: false }), false, "an unconfirmed linked file keeps the body out");
+  assert.equal(essayBodyReadable("doc-1", { available_to_llm: true, kind_confirmed: true }), true);
 });
 
 test("chat and student-ai both read intake answers", () => {
