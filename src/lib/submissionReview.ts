@@ -302,6 +302,8 @@ export function refusalFor(row: Record<string, unknown>, practiceReadsDocuments:
     case "not-categorized": return "Choose a type for this file first, so AxIS knows what it is.";
     case "keep-out": return "This file is kept out of AI, so AxIS didn't read it.";
     case "practice-setting": return "Automatic document reading is off for this practice.";
+    case "waived": return "AxIS never reads a recommendation letter the student waived the right to see.";
+    case "excluded": return "This file is set to stay out of AI, so AxIS didn't read it.";
     default: return "This kind of file stays out of AI, so AxIS didn't read it.";
   }
 }
