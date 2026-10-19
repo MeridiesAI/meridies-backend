@@ -387,7 +387,7 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 # Not yet applied: everything after `20261022000001`
 
-These thirty-five files are merged ahead of production's database on purpose: the code was written to
+These thirty-six files are merged ahead of production's database on purpose: the code was written to
 run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
 plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
 unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
@@ -441,8 +441,9 @@ set's own section below says what it does and how to check it.
 | 33 | `20261024000081_profile_size_limit.sql` | Security: profile bounds and files by student |
 | 34 | `20261024000082_caseload_transfer_keeps_other_files.sql` | Security: profile bounds and files by student (after file 9) |
 | 35 | `20261024000083_files_one_student_tree.sql` | Security: profile bounds and files by student |
+| 36 | `20261024000091_held_apply_write_check.sql` | Security: held import apply checks the student (after file 3) |
 
-(Thirty-five files: the first thirteen are six feature sets, the other twenty-two are seven sets of security
+(Thirty-six files: the first thirteen are six feature sets, the other twenty-three are eight sets of security
 fixes. `20261022000001_visit_offerings.sql`, the file just before them, is not part of this list.)
 
 Files 21-25, the security fixes for submission review and student reminders, depend on none of the
@@ -465,14 +466,15 @@ would have refused (run it again if it went in first); file 30 replaces `request
 `import_claim_invites` from file 7, file 31 replaces `accept_invitation` (last defined in the applied
 `20261017000001`), file 32 extends the campus photos of file 11, and file 34 replaces
 `transfer_caseload` from file 9 (each with the same signature and grants, built on the latest body), and
-file 25 replaces `private.documents_guard_storage_path` from file 21 (the same set).
+file 25 replaces `private.documents_guard_storage_path` from file 21 (the same set), and file 36
+replaces `request_held_apply` from file 3 (it calls `private.intake_owns_current`, defined there).
 Applying the files in the order above satisfies all of them. Apart from those replacements
 (`request_import_commit` and `import_claim_invites`, files 7 and 30; `transfer_caseload`, files 9 and
-34; `documents_guard_storage_path`, files 21 and 25), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
+34; `documents_guard_storage_path`, files 21 and 25; `request_held_apply`, files 3 and 36), no function, policy or trigger is defined in two of these files; the shared CHECK constraints
 (`ai_runs_module_check`, the `ingest_runs` and `job_heartbeats` labels) are rewritten additively, each
 file reading the current list back.
 
-After all thirty-five:
+After all thirty-six:
 
 ```sql
 select count(*) from public.import_fields;                                            -- 25
@@ -919,4 +921,19 @@ select count(*) from public.documents d
    and private.folder_tree_student(d.folder_id) is distinct from d.student_id
    and private.folder_tree_student(d.folder_id) is not null;
 select count(*) from pg_trigger where tgname like '%one_student_tree%';  -- 5
+```
+
+## Held import apply checks the student: `20261024000091`
+
+`request_held_apply` copied the held item's student's current values (contact email, address,
+birthday, citizenship, GPA, scores) into `import_changes.old_value`, which anyone who can view the
+import reads, after checking only `can_manage_import`. A firm admin keeps viewing a firm import after
+its uploader leaves the firm with their students, so they could read a departed student's live record
+with one RPC call and a select. The function now also requires
+`private.import_can_write_student` (the rule `import_held_queue` and `apply_held_item` already use)
+before it copies anything; a caller without it gets 42501. Apply after
+`20261023010003` (filename order). Either order with the code. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select prosrc like '%import_can_write_student%' from pg_proc where proname = 'request_held_apply';  -- true
 ```

@@ -4,6 +4,7 @@
  * reaches the model only inside `untrusted(...)`.
  */
 import { z } from "zod";
+import { plainName } from "../../context/identity.js";
 import { wrapUntrusted } from "../../context/pack.js";
 
 export const uuid = z.string().uuid();
@@ -24,7 +25,11 @@ export const seg = (id: string) => encodeURIComponent(id);
 
 /** Free text from the database or a person, marked as data for the model. */
 export function untrusted(text: unknown, source = "record"): string {
-  const s = typeof text === "string" ? text : text == null ? "" : String(text);
+  // A person's name ("roster") is profiles.full_name, which the person writes themselves, and some
+  // lookups that show one don't mark the turn as having read outside content. So a name reaches the
+  // model only in a name's shape (lib/context/identity.ts): it can't spell an operation or its input.
+  const raw = typeof text === "string" ? text : text == null ? "" : String(text);
+  const s = source === "roster" ? plainName(raw) : raw;
   return wrapUntrusted(source, s.length > 300 ? `${s.slice(0, 297)}...` : s);
 }
 

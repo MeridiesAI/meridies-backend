@@ -24,6 +24,7 @@ import { runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound, tooManyRequests, unavailable } from "../lib/errors.js";
 import { beat } from "../lib/heartbeat.js";
 import { toInviteDelivery, type InviteDelivery } from "../lib/inviteDelivery.js";
+import { plainName } from "../lib/context/identity.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
@@ -470,7 +471,8 @@ export default async function communicationRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (profileError) throw fromPostgrest(profileError);
       if (!profile) throw notFound("That student isn't on your roster");
-      const family = familyName(String(profile.full_name ?? ""));
+      // The work item's title reaches AxIS as a counselor-written field: only a name's shape of the student's own text.
+      const family = familyName(plainName(profile.full_name)) || "student";
       const title = b.subject || "Family update";
 
       const { data: report, error } = await db
