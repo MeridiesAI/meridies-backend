@@ -43,6 +43,7 @@ import {
   type SuiteProvider,
 } from "../lib/oauth.js";
 import { toDocument, toIntegration } from "../lib/serialize.js";
+import { isActiveContentFile } from "../lib/storagePath.js";
 import { serviceClient } from "../lib/supabase.js";
 import {
   assertFileId,
@@ -321,6 +322,9 @@ export default async function integrationRoutes(app: FastifyInstance) {
         throw err;
       }
       const download = await downloadRemoteFile(request.auth.userId, provider, file, request.log);
+      if (isActiveContentFile(download.filename, download.mimeType)) {
+        throw badRequest("SVG and HTML files can't be added. Save it as a PDF or an image instead.");
+      }
       // The guess reads a little text in memory and drops it; nothing from it is stored but the label.
       const guess = b.kind === undefined
         ? guessKind({

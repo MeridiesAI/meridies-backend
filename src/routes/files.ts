@@ -29,7 +29,7 @@ import { assertAiAllowed } from "../lib/practiceSettings.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
-import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePath } from "../lib/storagePath.js";
+import { DOCUMENTS_BUCKET, isActiveContentFile, isDocumentsBucket, isSafeStoragePath } from "../lib/storagePath.js";
 import { assertPathClaimable, removeDeletedDocumentObject } from "../lib/documentClaim.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
 import { DOCUMENT_BUCKET, extractionState, requestExtraction } from "../lib/documentExtraction.js";
@@ -426,6 +426,9 @@ export default async function fileRoutes(app: FastifyInstance) {
       // the database refuses the same since 20261024000041).
       if (!isDocumentsBucket(b.bucket)) throw badRequest("Files are registered in the documents bucket only");
       if (!isSafeStoragePath(b.storagePath)) throw badRequest("That file path isn't one the app uploads to");
+      if (isActiveContentFile(b.filename, b.mimeType) || isActiveContentFile(b.storagePath, null)) {
+        throw badRequest("SVG and HTML files can't be added. Save it as a PDF or an image instead.");
+      }
       // A row is a key to its object (Storage reads follow documents rows):
       // only where the caller could upload, and never over someone else's
       // object (lib/documentClaim.ts; the database since 20261024000045).

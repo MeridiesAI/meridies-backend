@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isDocumentsBucket, isSafeStoragePath, isSafeStoragePathShape } from "../../src/lib/storagePath.js";
+import { isActiveContentFile, isDocumentsBucket, isSafeStoragePath, isSafeStoragePathShape } from "../../src/lib/storagePath.js";
 
 const SID = "6f1c2b0e-5d3a-4c8e-9b7f-0a1b2c3d4e5f";
 
@@ -48,5 +48,30 @@ test("only the documents bucket is a document's bucket", () => {
   assert.ok(isDocumentsBucket("student-documents"));
   for (const b of ["imports", "axis-attachments", "student-banners", "college-photos", "Student-Documents", ""]) {
     assert.equal(isDocumentsBucket(b), false, b);
+  }
+});
+
+test("SVG and HTML are refused at registration, by declared type or by name", () => {
+  for (const [name, type] of [
+    ["drawing.svg", "image/svg+xml"],
+    ["drawing.png", "image/svg+xml"],
+    ["drawing.SVG", null],
+    ["map.svgz", "application/octet-stream"],
+    ["page.html", "text/html"],
+    ["page.pdf", "text/html; charset=utf-8"],
+    ["page.htm", null],
+    ["page.xhtml", "application/xhtml+xml"],
+  ] as const) {
+    assert.equal(isActiveContentFile(name, type), true, `${name} ${type}`);
+  }
+  for (const [name, type] of [
+    ["transcript.pdf", "application/pdf"],
+    ["scan.jpg", "image/jpeg"],
+    ["essay.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    ["notes.txt", "text/plain"],
+    ["list.csv", "text/csv"],
+    ["svg-notes.pdf", null],
+  ] as const) {
+    assert.equal(isActiveContentFile(name, type), false, `${name} ${type}`);
   }
 });

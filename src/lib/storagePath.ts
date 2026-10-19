@@ -53,3 +53,18 @@ export function isSafeStoragePath(path: unknown): path is string {
 export function isDocumentsBucket(bucket: unknown): boolean {
   return bucket === undefined || bucket === null || bucket === DOCUMENTS_BUCKET;
 }
+
+/**
+ * Files a browser runs script from when it renders them: SVG and HTML/XHTML. The documents bucket
+ * has no type allowlist (task attachments, the Colleges tab and Drive imports take any type, so a
+ * bucket list would refuse files uploaded today), so registration refuses these instead: a
+ * student's crafted SVG never reaches a counselor's file list, the viewer or a signed link.
+ * Decided on the declared type and on the name, since either is what a viewer goes by.
+ */
+const ACTIVE_TYPES = new Set(["image/svg+xml", "text/html", "application/xhtml+xml"]);
+const ACTIVE_EXTENSIONS = /\.(svgz?|html?|xht(ml)?)$/i;
+
+export function isActiveContentFile(filename: string, mimeType: string | null | undefined): boolean {
+  const type = (mimeType ?? "").split(";")[0]!.trim().toLowerCase();
+  return ACTIVE_TYPES.has(type) || ACTIVE_EXTENSIONS.test(filename.trim());
+}
