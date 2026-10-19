@@ -16,7 +16,7 @@ import type { FastifyInstance } from "fastify";
 import { isCounselorApproved } from "./access.js";
 import { GUESS_PAGES, GUESS_TEXT_LIMIT } from "./documentGuess.js";
 import { readDocumentText } from "./documentText.js";
-import { parseSpreadsheet } from "./imports/sheet.js";
+import { parseInWorker } from "./imports/parse.js";
 import { extractPdfText, PDF_LIMITS } from "./pdfText.js";
 import { serializeErr } from "./requestLog.js";
 import { downloadCapped } from "./storageDownload.js";
@@ -134,7 +134,8 @@ async function textOf(kind: "pdf" | "text" | "sheet", bytes: Uint8Array, filenam
     const t = readDocumentText(Buffer.from(bytes), filename, mimeType);
     return { text: t === null ? null : t.slice(0, PDF_LIMITS.maxChars), from: "text" };
   }
-  const parsed = await parseSpreadsheet(bytes, filename, 2_000);
+  // In the capped parse process, as imports are: a crafted workbook must not exhaust this process's heap.
+  const parsed = await parseInWorker(bytes, filename, { maxRows: 2_000 });
   if (!parsed.ok) return { text: null, from: "sheet" };
   const lines = parsed.sheets.flatMap((s) => [s.headers.join(", "), ...s.rows.map((r) => r.join(", "))]);
   return { text: lines.join("\n").slice(0, PDF_LIMITS.maxChars), from: "sheet" };

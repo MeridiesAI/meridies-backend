@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { claimFailure, extractionState, extractorFor, LEASE_MS, leaseVerdict, MAX_ATTEMPTS, storedCopyFollowable } from "../../src/lib/documentExtraction.js";
 
@@ -68,5 +69,17 @@ test("the worker follows only a canonical documents-bucket path with the service
     null,
   ]) {
     assert.equal(storedCopyFollowable({ bucket: "student-documents", storage_path: path }), false, String(path));
+  }
+});
+
+test("spreadsheets are parsed only in the capped parse process, never in the API process", () => {
+  // lib/imports/parse.ts forks the child; sheet.ts defines the parser and parseWorker.ts is the child.
+  const allowed = new Set(["imports/sheet.ts", "imports/parseWorker.ts"]);
+  const root = new URL("../../src/lib/", import.meta.url);
+  const files = readdirSync(root, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts"));
+  for (const f of files) {
+    if (allowed.has(f.replaceAll("\\", "/"))) continue;
+    const src = readFileSync(new URL(f, root), "utf8");
+    assert.ok(!/\bparseSpreadsheet\b/.test(src), `${f} calls parseSpreadsheet in-process; use parseInWorker`);
   }
 });
