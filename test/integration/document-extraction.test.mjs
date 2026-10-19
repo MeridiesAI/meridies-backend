@@ -99,6 +99,14 @@ check("a row in another bucket can still be confirmed", badConfirm.body?.results
 const bad = await until([imp], (st) => st[0]?.state === "failed", 10_000);
 check("a confirmed row in another bucket ends failed with no text", bad[0]?.state === "failed"
   && (await sql(`select coalesce(parse_error, '') || ':' || coalesce(parsed_data->>'text', '') || ':' || (extraction_requested_at is null)::text || ':' || (extraction_lease_until is null)::text from public.documents where id = '${imp}'`)) === "bad-bucket::true:true", JSON.stringify(bad));
+// Round 3: a dot-segment path names another object (or bucket) than the row's own; the queue never follows it.
+const dotted = await upload("d.txt", new TextEncoder().encode("the row's own text"), "text/plain");
+const elsewhere = await sql(`select storage_path from public.documents where id = '${txt}'`);
+await sql(`update public.documents set storage_path = '${s.id}/x/../../${elsewhere}' where id = '${dotted}'`);
+await call(c.token, "POST", "/files/documents/confirm-types", { items: [{ documentId: dotted, kind: "resume", keepOut: false }] });
+const dottedState = await until([dotted], (st) => st[0]?.state === "failed", 10_000);
+check("a confirmed row with a dot-segment path ends failed with no text", dottedState[0]?.state === "failed"
+  && (await sql(`select coalesce(parse_error, '') || ':' || coalesce(parsed_data->>'text', '') from public.documents where id = '${dotted}'`)) === "bad-path:", JSON.stringify(dottedState));
 for (const bucket of ["imports", "axis-attachments", "student-banners"]) {
   const reg = await call(c.token, "POST", "/files/documents", { studentId: s.id, bucket, storagePath: `${s.id}/x-${Date.now()}.pdf`, filename: "x.pdf" });
   check(`POST /files/documents with bucket ${bucket} is refused`, reg.status === 400, `status ${reg.status}`);

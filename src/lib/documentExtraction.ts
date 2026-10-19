@@ -19,6 +19,8 @@ import { readDocumentText } from "./documentText.js";
 import { parseSpreadsheet } from "./imports/sheet.js";
 import { extractPdfText, PDF_LIMITS } from "./pdfText.js";
 import { serializeErr } from "./requestLog.js";
+import { downloadCapped } from "./storageDownload.js";
+import { isSafeStoragePath } from "./storagePath.js";
 import { serviceClient } from "./supabase.js";
 
 type Log = { warn: (obj: object, msg: string) => void; error: (obj: object, msg: string) => void };
@@ -32,6 +34,17 @@ const RECOVERY_WINDOW_HOURS = 24;
 
 /** The only bucket document text is read from. A row naming any other bucket is refused, never downloaded. */
 export const DOCUMENT_BUCKET = "student-documents";
+
+/**
+ * Whether the worker may follow this row to its stored copy. The row's bucket and path are the
+ * client's word (a counselor can write a documents row through PostgREST), and the service role
+ * reads every bucket, so only the documents bucket at a path of the shape the app writes: "a/../x",
+ * "/x" or "x/../../imports/y" would name another object, or another bucket, than the row's own.
+ * A canonical path names exactly the object Storage RLS already lets this row's readers open.
+ */
+export function storedCopyFollowable(row: { bucket?: unknown; storage_path?: unknown }): boolean {
+  return row.bucket === DOCUMENT_BUCKET && isSafeStoragePath(row.storage_path);
+}
 
 /** What recovery does with an expired lease. */
 export function leaseVerdict(row: { extraction_attempts: number }): "retry" | "give-up" {
@@ -218,16 +231,17 @@ export async function runExtraction(id: string, log: Log): Promise<"done" | "emp
   }
 
   // The service role can read every bucket; a row pointing anywhere else must never echo that object back as text.
-  if (row.bucket !== DOCUMENT_BUCKET) {
-    await release({ parse_status: "failed", parse_error: "bad-bucket" });
+  if (!storedCopyFollowable(row)) {
+    await release({ parse_status: "failed", parse_error: row.bucket !== DOCUMENT_BUCKET ? "bad-bucket" : "bad-path" });
     return "failed";
   }
-  const file = await db.storage.from(DOCUMENT_BUCKET).download(String(row.storage_path));
-  if (file.error || !file.data) {
-    await release({ parse_status: "failed", parse_error: "unreadable" });
+  // Read no more than the largest file any extractor accepts; the row's size_bytes is the client's word.
+  const file = await downloadCapped(db, DOCUMENT_BUCKET, String(row.storage_path), PDF_LIMITS.maxBytes);
+  if (file.status !== "ok") {
+    await release({ parse_status: "failed", parse_error: file.status === "too-large" ? "too-large" : "unreadable" });
     return "failed";
   }
-  const bytes = new Uint8Array(await file.data.arrayBuffer());
+  const bytes = new Uint8Array(file.bytes.buffer, file.bytes.byteOffset, file.bytes.byteLength);
   const { text, from } = await textOf(kind, bytes, String(row.filename ?? ""), (row.mime_type as string | null) ?? null);
 
   const outcome = text === null ? "failed" : text.trim() ? "done" : "empty";
