@@ -1493,9 +1493,31 @@ student's folder (Storage upload on the caller's client, `source:
 real Meet/Teams link *before* saving; moves are strict, cancel/delete are best
 effort. `POST /tasks/:id/tracker` asks the provider for each linked file's edit
 time: an edit by someone other than the importing counselor inside the stall
-window makes the task active; none means stalled. Microsoft asks for
-`Files.Read.All` (not `Files.Read`) because the watched file is usually the
-student's, shared with the counselor.
+window makes the task active; none means stalled. A provider 429 is waited out
+per Retry-After (twice, 10 s at most each); past that the check is
+`provider_rate_limited` and the tracker answers 429 instead of a "no activity"
+verdict.
+
+**Microsoft stays off in production** (no `MICROSOFT_*` vars) until browsing
+moves to Microsoft's picker with the narrowest scope that works (PR B, after
+the `Files.ReadWrite.Selected` vs `Files.Read` test). Today Connect asks for
+`openid email offline_access User.Read Files.Read.All`; Calendar
+(`Calendars.ReadWrite`) only with `?add=calendar`; no `Mail.Send`. A refresh
+asks for Calendar only when the grant already has it. Hardening in place:
+a reconnect as another account (Graph `/me` id) is 409
+`microsoft_other_account`, and an unreadable identity is refused; a rotated
+refresh token is saved compare-and-swap on the one it replaced, and the loser
+of a race uses the stored row; the OneDrive search literal is `''`-escaped
+and fully percent-encoded (`graphSearchUrl`); no search words, file names or
+fetch URLs reach a log or an error (`quietFetch`); `/content` redirects are
+followed by hand (`followDownload`: HTTPS, `MICROSOFT_DOWNLOAD_HOSTS` exact or
+dot-boundary suffix, at most 2, no Authorization after Graph); the bytes must
+match the name (`lib/fileSniff.ts`: `%PDF-`, OOXML by `[Content_Types].xml`,
+OLE, images, NUL-free text; macro and mismatched files refused); `DELETE
+/integrations/microsoft` returns `consentUrl` (account.live.com for the
+personal tenant `9188040d-…`, else My Apps, from the tenant kept in
+`integrations.config` at connect). `MICROSOFT_PICKER_MAX_FILES` (default 10)
+is served as `maxFiles` on `/integrations/providers`.
 
 **Google is picked files only** (spec `docs/superpowers/specs/2026-10-14-google-connector-design.md`). Connect asks for
 `openid`, `email` and `drive.file`; turning Calendar on (`GET /integrations/google/authorize?add=calendar`) adds
@@ -2653,6 +2675,7 @@ npm run dev               # http://localhost:4000
 | `GOOGLE_PROJECT_NUMBER` | Optional; the Cloud project number, the Picker's `appId` (it makes `drive.file` reach the picked files) |
 | `GOOGLE_PICKER_MAX_FILES` | Optional; files per pick, 1-50, default 10 |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |
+| `MICROSOFT_PICKER_MAX_FILES` | Optional; files per OneDrive pick, 1-50, default 10 (for the picker in PR B) |
 | `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 | `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |
