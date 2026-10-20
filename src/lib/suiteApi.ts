@@ -11,9 +11,11 @@
 
 import { randomUUID } from "node:crypto";
 import { badRequest, conflict, HttpError, unavailable } from "./errors.js";
+import { detectContentType } from "./fileSniff.js";
 import {
   accessTokenFor,
   GOOGLE_SCOPE,
+  MICROSOFT_SCOPE,
   providerLabel,
   requireScope,
   type LiveToken,
@@ -29,8 +31,8 @@ export const GOOGLE_FILE_SCOPE = GOOGLE_SCOPE.driveFile;
 export const GOOGLE_CALENDAR_SCOPE = GOOGLE_SCOPE.calendarEvents;
 const GOOGLE_FILES = { name: GOOGLE_FILE_SCOPE, what: "reading the files you picked", code: "drive_not_granted" };
 const GOOGLE_CALENDAR = { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar", code: "calendar_not_enabled" };
-const MS_FILES_SCOPE = "Files.Read.All";
-const MS_CALENDAR_SCOPE = "Calendars.ReadWrite";
+const MS_FILES_SCOPE = MICROSOFT_SCOPE.files;
+const MS_CALENDAR_SCOPE = MICROSOFT_SCOPE.calendar;
 
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
 const GRAPH_ID = /^[A-Za-z0-9!_.=-]{1,300}$/;
@@ -43,7 +45,48 @@ export function assertFileId(provider: SuiteProvider, id: string, driveId?: stri
 
 type Log = { warn: (obj: object, msg: string) => void };
 
-/** Authorized fetch against a provider API, with one refresh-and-retry on 401. */
+/** Longest Retry-After a request waits out before giving up with 429. */
+const MAX_RETRY_WAIT_MS = 10_000;
+const RATE_LIMIT_RETRIES = 2;
+
+/**
+ * Milliseconds a 429's Retry-After asks for (seconds or an HTTP date), or null
+ * when absent or unreadable. `now` is injectable for tests.
+ */
+export function retryAfterMs(header: string | null, now = Date.now()): number | null {
+  if (!header) return null;
+  const v = header.trim();
+  if (/^\d{1,6}$/.test(v)) return Number(v) * 1000;
+  const at = Date.parse(v);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, at - now);
+}
+
+/** The wait before retry `attempt` (0-based): Retry-After when given, else 1s, 2s, ... */
+export function backoffMs(attempt: number, retryAfter: number | null): number {
+  return retryAfter ?? 1000 * 2 ** attempt;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+export const __sleep = { fn: sleep };
+
+/**
+ * A fetch that fails (DNS, reset, timeout) never carries its URL into an error
+ * or a log line: a Graph search URL holds the counselor's search words.
+ */
+async function quietFetch(provider: SuiteProvider, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw unavailable(`${providerLabel(provider)} didn't answer. Try again shortly.`);
+  }
+}
+
+/**
+ * Authorized fetch against a provider API, with one refresh-and-retry on 401.
+ * A 429 is waited out per Retry-After (at most `RATE_LIMIT_RETRIES` times,
+ * each wait at most `MAX_RETRY_WAIT_MS`); past that the 429 is returned.
+ */
 async function call(
   ownerId: string,
   provider: SuiteProvider,
@@ -55,7 +98,7 @@ async function call(
   requireScope(token, provider, scope.name, scope.what, scope.code);
 
   const go = (t: LiveToken) =>
-    fetch(url, {
+    quietFetch(provider, url, {
       ...init,
       headers: { ...(init.headers ?? {}), Authorization: `Bearer ${t.accessToken}` },
       signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
@@ -64,6 +107,13 @@ async function call(
   let res = await go(token);
   if (res.status === 401) {
     token = await accessTokenFor(ownerId, provider, { force: true });
+    res = await go(token);
+  }
+  for (let attempt = 0; res.status === 429 && attempt < RATE_LIMIT_RETRIES; attempt++) {
+    const wait = backoffMs(attempt, retryAfterMs(res.headers.get("retry-after")));
+    if (wait > MAX_RETRY_WAIT_MS) break;
+    await res.body?.cancel().catch(() => undefined);
+    await __sleep.fn(wait);
     res = await go(token);
   }
   return { res, token };
@@ -92,7 +142,9 @@ export function providerFailure(provider: SuiteProvider, res: Response, log: Log
     );
   }
   if (res.status === 403) return conflict(`${label} refused access to that ${what}.`);
-  if (res.status === 429) return new HttpError(429, `${label} is rate-limiting requests — try again shortly.`);
+  if (res.status === 429) {
+    return new HttpError(429, `${label} is rate-limiting requests — try again shortly.`, "provider_rate_limited");
+  }
   return unavailable(`${label} didn't answer the ${what} request.`);
 }
 
@@ -202,6 +254,18 @@ function fromGraph(item: GraphItem, accountId: string | null): RemoteFile | null
 const GRAPH_SELECT =
   "id,name,size,webUrl,lastModifiedDateTime,file,folder,package,parentReference,lastModifiedBy,remoteItem";
 
+/**
+ * A OneDrive name search. The words go inside an OData string literal, so a
+ * quote is doubled (`'` -> `''`) and then the whole literal is
+ * percent-encoded, quotes and parentheses included: `o'brien` and `') or (`
+ * stay words to search for, never syntax.
+ */
+export function graphSearchUrl(q: string): string {
+  const literal = q.replace(/'/g, "''");
+  const encoded = encodeURIComponent(literal).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encoded}')?$top=50&$select=${GRAPH_SELECT}`;
+}
+
 function graphItemUrl(fileId: string, driveId: string | null | undefined): string {
   const base = driveId
     ? `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(driveId)}`
@@ -244,9 +308,9 @@ export async function listRemoteFiles(
   }
 
   const scope = { name: MS_FILES_SCOPE, what: "reading OneDrive" };
-  const url = q
-    ? `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encodeURIComponent(q.replace(/'/g, "''"))}')?$top=50&$select=${GRAPH_SELECT}`
-    : `https://graph.microsoft.com/v1.0/me/drive/recent?$top=50`;
+  // Nothing about the search or its results is logged: the words and file
+  // names are the counselor's (and families'). providerFailure logs status only.
+  const url = q ? graphSearchUrl(q) : `https://graph.microsoft.com/v1.0/me/drive/recent?$top=50`;
   let { res, token } = await call(ownerId, provider, url, {}, scope);
   // `recent` is not served for every account type; fall back to the drive root.
   if (!res.ok && !q) {
@@ -343,18 +407,77 @@ export async function downloadRemoteFile(
   }
 
   // Graph answers /content with a redirect to a short-lived pre-authenticated
-  // download URL on Microsoft's own storage; fetch follows it and drops the
-  // Authorization header on the cross-origin hop.
+  // download URL on Microsoft's own storage. The redirect is followed by hand
+  // (followDownload): only to Microsoft download hosts, over HTTPS, at most
+  // twice, and never with the Authorization header.
   const { res } = await call(
     ownerId,
     provider,
     `${graphItemUrl(file.id, file.driveId)}/content`,
-    {},
+    { redirect: "manual" },
     { name: MS_FILES_SCOPE, what: "reading OneDrive" }
   );
-  if (!res.ok) throw providerFailure(provider, res, log, "file download");
-  const bytes = await readCapped(res);
-  return { bytes, mimeType: file.mimeType ?? "application/octet-stream", filename: file.name };
+  const final = await followDownload(res);
+  if (!final.ok) throw providerFailure(provider, final, log, "file download");
+  const bytes = await readCapped(final);
+  const checked = checkMicrosoftContent(bytes, file.name, file.mimeType);
+  return { bytes, mimeType: checked, filename: file.name };
+}
+
+/**
+ * Where a OneDrive / SharePoint download may be fetched from: the host itself
+ * or a subdomain of it (a dot boundary, so `evil-sharepoint.com` is not
+ * `sharepoint.com`). Commercial cloud only; sovereign clouds aren't supported.
+ */
+export const MICROSOFT_DOWNLOAD_HOSTS = ["sharepoint.com", "1drv.com", "livefilestore.com", "onedrive.live.com"] as const;
+export const MAX_DOWNLOAD_REDIRECTS = 2;
+
+export function isMicrosoftDownloadUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.username || u.password || u.port) return false;
+  const host = u.hostname.toLowerCase();
+  if (host.endsWith(".")) return false;
+  return MICROSOFT_DOWNLOAD_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
+/**
+ * Follow a download's redirects by hand. `first` is Graph's answer to the
+ * authorized request; every later request is plain (no Authorization), to an
+ * allowed host, and there are at most `MAX_DOWNLOAD_REDIRECTS` of them.
+ */
+export async function followDownload(first: Response): Promise<Response> {
+  let res = first;
+  for (let hops = 0; res.status >= 300 && res.status < 400; hops++) {
+    const location = res.headers.get("location");
+    await res.body?.cancel().catch(() => undefined);
+    if (hops >= MAX_DOWNLOAD_REDIRECTS) throw unavailable("OneDrive redirected the download too many times.");
+    if (!location || !isMicrosoftDownloadUrl(location)) {
+      throw unavailable("OneDrive sent the download somewhere Meridies doesn't fetch from.");
+    }
+    res = await quietFetch("microsoft", location, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+  }
+  return res;
+}
+
+/**
+ * The file's bytes must be what its name and type say (PDF, Word, Excel,
+ * PowerPoint, images), and bytes that are one of those must not arrive under
+ * another name. Returns the type to store it under.
+ */
+export function checkMicrosoftContent(bytes: Uint8Array, name: string, declaredMime: string | null): string {
+  const verdict = detectContentType(bytes, name, declaredMime);
+  if (!verdict.ok) {
+    throw badRequest("That file's contents don't match its type, so it wasn't imported. Open it in OneDrive, save a fresh copy and try again.");
+  }
+  return verdict.mimeType ?? declaredMime ?? "application/octet-stream";
 }
 
 /**
