@@ -1,9 +1,9 @@
 /**
  * Suite integrations.
  *
- * Microsoft asks once. Google asks in two steps: Connect is identity plus drive.file (only
- * the files the counselor picks), and Calendar is added on request (`?add=calendar`); it no
- * longer lights up Gmail or reads all of Drive. The granular provider
+ * Both suites ask in two steps: Connect is identity plus files (Google: drive.file, only the
+ * files the counselor picks; Microsoft: Files.Read.All until PR B moves it to the picker), and
+ * Calendar is added on request (`?add=calendar`). Neither lights up mail. The granular provider
  * values (`common-app`, `scoir`, `csv`, ...) stay for the imports that really
  * are separate things.
  *
@@ -34,6 +34,8 @@ import {
   completeAuthorization,
   connectedAccountEmail,
   GOOGLE_SCOPE,
+  microsoftConsentUrl,
+  MSA_TENANT_ID,
   hasScope,
   pickerConfigProblem,
   providerLabel,
@@ -161,6 +163,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
           provider === "google" &&
           reason === null &&
           pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null,
+        maxFiles: provider === "google" ? env.GOOGLE_PICKER_MAX_FILES : env.MICROSOFT_PICKER_MAX_FILES,
       };
     });
   });
@@ -180,7 +183,6 @@ export default async function integrationRoutes(app: FastifyInstance) {
     async (request) => {
       const { provider } = suiteParam.parse(request.params);
       const { add } = z.object({ add: z.enum(["calendar"]).optional() }).strict().parse(request.query ?? {});
-      if (add && provider !== "google") throw badRequest("Only Google has add-ons");
       return { url: await beginAuthorization(request.auth.userId, provider, { add: add ?? null }) };
     }
   );
@@ -480,6 +482,19 @@ export default async function integrationRoutes(app: FastifyInstance) {
       const { provider } = providerParam.parse(request.params);
 
       let revokedAtProvider: boolean | null = null;
+      let consentUrl: string | null = null;
+      if (provider === "microsoft") {
+        const { data: grant } = await request.db
+          .from("integrations")
+          .select("config")
+          .eq("owner_id", request.auth.userId)
+          .eq("provider", "microsoft")
+          .maybeSingle();
+        const config = (grant?.config ?? {}) as { microsoftAccount?: unknown; tenantId?: unknown };
+        consentUrl = microsoftConsentUrl(
+          config.microsoftAccount === "personal" ? MSA_TENANT_ID : typeof config.tenantId === "string" ? config.tenantId : null
+        );
+      }
       if (isSuite(provider)) {
         ({ revokedAtProvider } = await revokeAndForget(request.auth.userId, provider, request.log));
       }
@@ -498,6 +513,8 @@ export default async function integrationRoutes(app: FastifyInstance) {
           provider === "microsoft"
             ? "Meridies deleted its Microsoft tokens. Microsoft has no per-app revoke call; remove Meridies under your account's app permissions to withdraw consent there too."
             : null,
+        // Microsoft only: the page where that consent is removed (personal accounts vs work or school).
+        consentUrl,
       };
     }
   );
