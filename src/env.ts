@@ -112,6 +112,7 @@ const envSchema = z.object({
   GOOGLE_PICKER_API_KEY: blankIsUnset(z.string().min(10).optional()),
   GOOGLE_PROJECT_NUMBER: blankIsUnset(z.string().regex(/^\d{6,20}$/, "GOOGLE_PROJECT_NUMBER must be the Cloud project number").optional()),
   GOOGLE_PICKER_MAX_FILES: blankIsUnset(z.coerce.number().int().min(1).max(50).default(10)),
+  MICROSOFT_PICKER_MAX_FILES: blankIsUnset(z.coerce.number().int().min(1).max(50).default(10)),
   MICROSOFT_CLIENT_ID: blankIsUnset(z.string().min(10).optional()),
   MICROSOFT_CLIENT_SECRET: blankIsUnset(z.string().min(10).optional()),
   // "common" (work + personal accounts), "organizations", or a tenant id.

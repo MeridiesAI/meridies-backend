@@ -149,10 +149,17 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   - run `scripts/smoke/google-picker.md` once by hand against the deployed setup
 - [ ] **Do not set `NODE_OPTIONS=--max-old-space-size` on Railway.** The PDF text worker caps its own heap at
   256 MB with `resourceLimits`, and a process-wide heap flag can override that limit.
-- [ ] **Microsoft OAuth**:
-  - set `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET`
+- [ ] **Microsoft OAuth** (keep it off in production, no `MICROSOFT_*` vars, until browsing moves to Microsoft's
+  picker with the narrowest scope that works; `Files.Read.All` reads the whole drive and is not shippable):
+  - register the app in Entra ID as multi-tenant plus personal Microsoft accounts (one prod, one dev)
+  - set `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET`; the secret expires (24 months at most): put the
+    renewal date on the calendar
   - register `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/microsoft`
   - leave `MICROSOFT_TENANT=common`
+  - **publisher verification** (a Microsoft Partner Network ID tied to the meridiesai.com domain). Without it,
+    work and school tenants show the app as unverified and many block user consent outright since Nov 2020.
+  - API permissions match the code: `openid`, `email`, `offline_access`, `User.Read`, the files scope, and
+    `Calendars.ReadWrite` (asked only when a counselor turns Calendar on). No `Mail.Send`.
 - [ ] **Leaked-password protection**: Supabase Auth > Attack Protection. Needs the Supabase Pro plan;
   the project is on Free, which also has no daily backups. The upgrade is pending a team decision.
 

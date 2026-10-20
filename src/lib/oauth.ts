@@ -81,6 +81,19 @@ export function accountMismatch(existingAccountId: string | null, newSub: string
   return newSub !== existingAccountId;
 }
 
+/**
+ * Microsoft's consent parameters. Connect asks for files; `add: "calendar"`
+ * adds Calendars.ReadWrite to the same account (login_hint), which the
+ * completion then checks is the connected one.
+ */
+export function microsoftAuthorizeParams(input: { add: GoogleAddOn | null; loginHint: string | null }): Record<string, string> {
+  return {
+    scope: microsoftScopesFor({ calendar: input.add === "calendar" }).join(" "),
+    response_mode: "query",
+    ...(input.loginHint ? { login_hint: input.loginHint } : { prompt: "select_account" }),
+  };
+}
+
 export function googleAuthorizeParams(input: { add: GoogleAddOn | null; loginHint: string | null }): Record<string, string> {
   return {
     scope: googleScopesFor(input.add).join(" "),
@@ -98,17 +111,40 @@ export function googleAuthorizeParams(input: { add: GoogleAddOn | null; loginHin
  * because the file the tracker watches is usually the student's own Word
  * document shared with the counselor, and `Files.Read` only reaches the
  * counselor's own drive. It is still a delegated, read-only permission a user
- * can consent to without an admin.
+ * can consent to without an admin. It is not shippable as is (it reads every
+ * file in the drive): Microsoft stays off in production until browsing moves
+ * to Microsoft's picker with the narrowest scope that works (PR B).
+ *
+ * Calendar is asked for only when the counselor turns it on
+ * (`?add=calendar`), like Google. `Mail.Send` is gone: nothing sent mail
+ * through Graph (email goes through Resend).
  */
-const MICROSOFT_SCOPES = [
-  "openid",
-  "email",
-  "offline_access",
-  "User.Read",
-  "Files.Read.All",
-  "Mail.Send",
-  "Calendars.ReadWrite",
-];
+export const MICROSOFT_SCOPE = {
+  files: "Files.Read.All",
+  calendar: "Calendars.ReadWrite",
+} as const;
+
+const MICROSOFT_CONNECT_SCOPES = ["openid", "email", "offline_access", "User.Read", MICROSOFT_SCOPE.files];
+const MICROSOFT_ADD_ONS = { calendar: [MICROSOFT_SCOPE.calendar] } as const;
+
+/** What Meridies asks Microsoft for: the connect scopes, plus Calendar when it is on (or being turned on). */
+export function microsoftScopesFor(opts: { calendar: boolean }): string[] {
+  return opts.calendar ? [...MICROSOFT_CONNECT_SCOPES, ...MICROSOFT_ADD_ONS.calendar] : [...MICROSOFT_CONNECT_SCOPES];
+}
+
+/** The tenant id Microsoft gives every personal (MSA) account. */
+export const MSA_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad";
+
+/**
+ * Where a counselor withdraws Meridies' consent at Microsoft, which has no
+ * per-app revoke call: personal accounts manage consent at account.live.com,
+ * work and school accounts at My Apps.
+ */
+export function microsoftConsentUrl(tenantId: string | null): string {
+  return tenantId?.toLowerCase() === MSA_TENANT_ID
+    ? "https://account.live.com/consent/Manage"
+    : "https://myapps.microsoft.com";
+}
 
 type ProviderConfig = {
   label: string;
@@ -142,8 +178,9 @@ function providerConfig(provider: SuiteProvider): ProviderConfig | null {
     tokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
     clientId: env.MICROSOFT_CLIENT_ID,
     clientSecret: env.MICROSOFT_CLIENT_SECRET,
-    scopes: MICROSOFT_SCOPES,
-    extraAuthorizeParams: { response_mode: "query", prompt: "select_account" },
+    scopes: microsoftScopesFor({ calendar: false }),
+    // The Microsoft parameters come from microsoftAuthorizeParams.
+    extraAuthorizeParams: {},
   };
 }
 
@@ -259,7 +296,13 @@ export async function beginAuthorization(
           ...base,
           ...googleAuthorizeParams({ add: opts.add ?? null, loginHint: await connectedAccountEmail(userId, "google") }),
         })
-      : new URLSearchParams({ ...base, scope: config.scopes.join(" "), ...config.extraAuthorizeParams });
+      : new URLSearchParams({
+          ...base,
+          ...microsoftAuthorizeParams({
+            add: opts.add ?? null,
+            loginHint: await connectedAccountEmail(userId, "microsoft"),
+          }),
+        });
   return `${config.authorizeUrl}?${params.toString()}`;
 }
 
@@ -347,6 +390,7 @@ export async function completeAuthorization(
     client_id: config.clientId,
     client_secret: config.clientSecret,
     code_verifier: decryptToken(String(pending.code_verifier_enc)),
+    // The code carries what was consented; the scope here only names the resource (Graph).
     ...(provider === "microsoft" ? { scope: config.scopes.join(" ") } : {}),
   });
   const token = await readTokenResponse(res);
@@ -359,11 +403,37 @@ export async function completeAuthorization(
   const claims = idTokenClaims(token.id_token);
   let accountId = typeof claims.sub === "string" ? claims.sub : null;
   let accountEmail = typeof claims.email === "string" ? claims.email : null;
+  let tenantId: string | null = null;
   if (provider === "microsoft") {
-    // Graph's /me id is what lastModifiedBy.user.id is compared against.
+    // Graph's /me id is what lastModifiedBy.user.id is compared against. No
+    // fallback to the id_token's `sub`: it is a different, per-app id, and a
+    // mismatch with the stored Graph id would read as another account.
     const me = await microsoftIdentity(token.access_token);
-    accountId = me.id ?? accountId;
+    accountId = me.id;
     accountEmail = me.email ?? accountEmail ?? (typeof claims.preferred_username === "string" ? claims.preferred_username : null);
+    tenantId = typeof claims.tid === "string" ? claims.tid : null;
+    if (!accountId) {
+      log.warn({ provider }, "microsoft identity unreadable after code exchange");
+      throw new HttpError(502, "Microsoft didn't say which account signed in. Try connecting again.");
+    }
+
+    const { data: existing } = await db
+      .from("integration_tokens")
+      .select("account_id, account_email")
+      .eq("owner_id", ownerId)
+      .eq("provider", "microsoft")
+      .maybeSingle();
+    const existingId = (existing?.account_id as string | null) ?? null;
+    // An unreadable identity (accountId null) never replaces a connected account.
+    if (accountMismatch(existingId, accountId)) {
+      // Microsoft has no revoke call; nothing from this sign-in is kept.
+      const connected = (existing?.account_email as string | null) ?? "the connected account";
+      throw new HttpError(
+        409,
+        `You signed in as ${accountEmail ?? "another account"}. Use ${connected}, or disconnect Microsoft and connect the other account.`,
+        "microsoft_other_account"
+      );
+    }
   }
 
   if (provider === "google") {
@@ -416,6 +486,10 @@ export async function completeAuthorization(
       status: "connected",
       scopes: granted,
       last_error: null,
+      // Only which consent page applies at disconnect (no token, no secret).
+      ...(provider === "microsoft"
+        ? { config: { microsoftAccount: tenantId?.toLowerCase() === MSA_TENANT_ID ? "personal" : "work-or-school", tenantId } }
+        : {}),
     },
     { onConflict: "owner_id,provider" }
   );
@@ -464,6 +538,14 @@ async function readTokenRow(
   return row as TokenRow;
 }
 
+function rowHasScope(row: TokenRow, scope: string): boolean {
+  const want = scope.toLowerCase();
+  return ((row.scopes as string[] | null) ?? []).some((s) => {
+    const have = s.toLowerCase();
+    return have === want || have.endsWith(`/${want}`);
+  });
+}
+
 function isFresh(row: TokenRow): boolean {
   const expiresAt = row.expires_at ? new Date(String(row.expires_at)).getTime() : 0;
   return expiresAt - REFRESH_MARGIN_MS > Date.now();
@@ -477,6 +559,9 @@ function liveFromRow(row: TokenRow): LiveToken {
     scopes: (row.scopes as string[] | null) ?? [],
   };
 }
+
+// Exposed for unit tests only.
+export const __test = { refreshGrant: (...a: Parameters<typeof refreshGrant>) => refreshGrant(...a) };
 
 /**
  * Refreshes in flight, one per grant. Microsoft rotates the refresh token on
@@ -539,7 +624,10 @@ async function refreshGrant(
     refresh_token: decryptToken(String(row.refresh_token_enc)),
     client_id: config.clientId,
     client_secret: config.clientSecret,
-    ...(provider === "microsoft" ? { scope: config.scopes.join(" ") } : {}),
+    // Keep Calendar on a grant that has it; never widen one that doesn't.
+    ...(provider === "microsoft"
+      ? { scope: microsoftScopesFor({ calendar: rowHasScope(row, MICROSOFT_SCOPE.calendar) }).join(" ") }
+      : {}),
   });
   const token = await readTokenResponse(res);
   if (!res.ok || !token.access_token) {
@@ -571,16 +659,27 @@ async function refreshGrant(
   // Microsoft rotates refresh tokens; Google usually doesn't send a new one.
   if (token.refresh_token) update.refresh_token_enc = encryptToken(token.refresh_token);
   if (token.scope) update.scopes = token.scope.split(/\s+/).filter(Boolean);
-  const { error: saveError } = await db
+  // Compare-and-swap on the refresh token this refresh spent: if another
+  // replica rotated the row meanwhile, its write stands and ours is dropped.
+  let save = db
     .from("integration_tokens")
     .update(update)
     .eq("owner_id", ownerId)
     .eq("provider", provider);
+  if (token.refresh_token) save = save.eq("refresh_token_enc", String(row.refresh_token_enc));
+  const { data: saved, error: saveError } = await save.select("owner_id");
   if (saveError && token.refresh_token) {
     // The old refresh token is now spent and the new one wasn't kept: the
     // next refresh will fail, so say so now rather than later.
     const message = `${label} access was renewed but couldn't be saved. Reconnect ${label}.`;
     await markGrantBroken(ownerId, provider, message);
+  } else if (!saveError && token.refresh_token && (saved ?? []).length === 0) {
+    // Lost the race: the stored row is newer than this refresh. Use it rather
+    // than erroring; if it is somehow not fresh, the access token just issued
+    // is still valid for this call.
+    const latest = await readTokenRow(db, ownerId, provider, label);
+    if (isFresh(latest)) return liveFromRow(latest);
+    return { ...liveFromRow(latest), accessToken: token.access_token };
   }
 
   const live = liveFromRow(row);
