@@ -402,8 +402,13 @@ export async function downloadRemoteFile(
     const { res } = await call(ownerId, provider, url, {}, GOOGLE_FILES);
     if (!res.ok) throw providerFailure(provider, res, log, "file download");
     const bytes = await readCapped(res);
-    const filename = exp && !file.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${file.name}.${exp.ext}` : file.name;
-    return { bytes, mimeType: exp?.mime ?? file.mimeType ?? "application/octet-stream", filename };
+    if (exp) {
+      // A Docs/Sheets/Slides export: Google rendered these bytes itself.
+      const filename = file.name.toLowerCase().endsWith(`.${exp.ext}`) ? file.name : `${file.name}.${exp.ext}`;
+      return { bytes, mimeType: exp.mime, filename };
+    }
+    // An uploaded file (PDF, Word, Excel, ...): its bytes are whatever was uploaded.
+    return { bytes, mimeType: checkImportContent(provider, bytes, file.name, file.mimeType), filename: file.name };
   }
 
   // Graph answers /content with a redirect to a short-lived pre-authenticated
@@ -420,8 +425,7 @@ export async function downloadRemoteFile(
   const final = await followDownload(res);
   if (!final.ok) throw providerFailure(provider, final, log, "file download");
   const bytes = await readCapped(final);
-  const checked = checkMicrosoftContent(bytes, file.name, file.mimeType);
-  return { bytes, mimeType: checked, filename: file.name };
+  return { bytes, mimeType: checkImportContent(provider, bytes, file.name, file.mimeType), filename: file.name };
 }
 
 /**
@@ -472,10 +476,16 @@ export async function followDownload(first: Response): Promise<Response> {
  * PowerPoint, images), and bytes that are one of those must not arrive under
  * another name. Returns the type to store it under.
  */
-export function checkMicrosoftContent(bytes: Uint8Array, name: string, declaredMime: string | null): string {
+export function checkImportContent(
+  provider: SuiteProvider,
+  bytes: Uint8Array,
+  name: string,
+  declaredMime: string | null
+): string {
   const verdict = detectContentType(bytes, name, declaredMime);
   if (!verdict.ok) {
-    throw badRequest("That file's contents don't match its type, so it wasn't imported. Open it in OneDrive, save a fresh copy and try again.");
+    const where = provider === "google" ? "Google Drive" : "OneDrive";
+    throw badRequest(`That file's contents don't match its type, so it wasn't imported. Open it in ${where}, save a fresh copy and try again.`);
   }
   return verdict.mimeType ?? declaredMime ?? "application/octet-stream";
 }

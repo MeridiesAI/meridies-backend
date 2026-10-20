@@ -398,8 +398,8 @@ test("imports must be what they claim: %PDF, DOCX/XLSX zips with the matching co
 });
 
 test("a OneDrive import whose bytes don't match is refused", () => {
-  assert.throws(() => suite.checkMicrosoftContent(strToU8("<script>"), "report.pdf", "application/pdf"), /don't match its type/);
-  assert.equal(suite.checkMicrosoftContent(ooxml(DOCX), "essay.docx", "application/octet-stream"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  assert.throws(() => suite.checkImportContent("microsoft", strToU8("<script>"), "report.pdf", "application/pdf"), /don't match its type/);
+  assert.equal(suite.checkImportContent("microsoft", ooxml(DOCX), "essay.docx", "application/octet-stream"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
 });
 
 // ---- 11. Disconnect link and pick cap ----------------------------------------------
