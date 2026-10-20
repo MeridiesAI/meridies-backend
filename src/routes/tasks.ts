@@ -1098,6 +1098,16 @@ export default async function taskRoutes(app: FastifyInstance) {
             `${held[0]!.provider}_disconnected`
           );
         }
+        // A provider that asked us to slow down hasn't said "no edits": hold the verdict.
+        const limited = live.checks.filter((c) => c.errorCode === "provider_rate_limited");
+        if (limited.length > 0) {
+          const label = limited[0]!.provider === "google" ? "Google" : "Microsoft";
+          throw new HttpError(
+            429,
+            `${label} asked Meridies to slow down, so it couldn't check edits to ${quoteNames(limited)}. Try again in a minute.`,
+            "provider_rate_limited"
+          );
+        }
         const days = daysSince(lastActivity);
         const watched = live.checks.filter((c) => !c.error);
         const base = lastActivity
