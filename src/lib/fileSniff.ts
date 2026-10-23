@@ -9,7 +9,8 @@
  * name that says otherwise. Anything else (an .odt, a .heic) passes as before.
  */
 
-import { strFromU8, unzipSync } from "fflate";
+import { inflateRawSync } from "node:zlib";
+import { strFromU8 } from "fflate";
 
 export type Family =
   | "pdf" | "docx" | "xlsx" | "pptx" | "ole" | "png" | "jpeg" | "gif" | "webp" | "text";
@@ -65,17 +66,49 @@ const BY_MIME: Record<string, Family> = {
 
 const startsWith = (b: Uint8Array, sig: number[], at = 0) => sig.every((x, i) => b[at + i] === x);
 
-/** [Content_Types].xml alone, inflated only when its declared size is small. Null when absent or unreadable. */
+const CT_MAX = 256 * 1024;
+const u16 = (b: Uint8Array, o: number) => b[o] | (b[o + 1] << 8);
+const u32 = (b: Uint8Array, o: number) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16)) + b[o + 3] * 0x1000000;
+
+/**
+ * [Content_Types].xml alone, read by hand from the central directory: every
+ * step is bounded by the bytes themselves (a forged entry count can't loop
+ * past them) and inflation stops at CT_MAX output (a deflate bomb can't spin).
+ * Null when absent, unreadable or larger than CT_MAX.
+ */
 function contentTypes(bytes: Uint8Array): string | null {
-  try {
-    const out = unzipSync(bytes, {
-      filter: (f) => f.name === "[Content_Types].xml" && f.originalSize <= 256 * 1024,
-    });
-    const entry = out["[Content_Types].xml"];
-    return entry ? strFromU8(entry) : null;
-  } catch {
-    return null;
+  const floor = Math.max(0, bytes.length - 22 - 0xffff);
+  let e = bytes.length - 22;
+  while (e >= floor && u32(bytes, e) !== 0x06054b50) e--;
+  if (e < floor) return null;
+  let off = u32(bytes, e + 16);
+  // Zip64: the real directory offset is in the zip64 end record (low 32 bits suffice under 4 GB).
+  if (e >= 20 && u32(bytes, e - 20) === 0x07064b50) {
+    const z = u32(bytes, e - 12);
+    if (z + 56 <= bytes.length && u32(bytes, z) === 0x06064b50) off = u32(bytes, z + 48);
   }
+  while (off + 46 <= e && u32(bytes, off) === 0x02014b50) {
+    const method = u16(bytes, off + 10);
+    const csize = u32(bytes, off + 20);
+    const nlen = u16(bytes, off + 28);
+    const name = strFromU8(bytes.subarray(off + 46, off + 46 + nlen));
+    if (name.toLowerCase() === "[content_types].xml") {
+      const lho = u32(bytes, off + 42);
+      if (lho + 30 > bytes.length || u32(bytes, lho) !== 0x04034b50) return null;
+      const start = lho + 30 + u16(bytes, lho + 26) + u16(bytes, lho + 28);
+      if (csize === 0xffffffff || start + csize > bytes.length) return null;
+      const raw = bytes.subarray(start, start + csize);
+      try {
+        if (method === 0) return csize <= CT_MAX ? strFromU8(raw) : null;
+        if (method === 8) return strFromU8(inflateRawSync(raw, { maxOutputLength: CT_MAX }));
+      } catch {
+        return null;
+      }
+      return null;
+    }
+    off += 46 + nlen + u16(bytes, off + 30) + u16(bytes, off + 32);
+  }
+  return null;
 }
 
 export function sniff(bytes: Uint8Array): Sniffed {
@@ -87,8 +120,12 @@ export function sniff(bytes: Uint8Array): Sniffed {
   if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "gif"; // GIF8
   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes, [0x57, 0x45, 0x42, 0x50], 8)) return "webp";
   if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) {
-    const ct = contentTypes(bytes);
-    if (!ct) return "zip";
+    const xml = contentTypes(bytes);
+    if (!xml) return "zip";
+    // The main part is named by an Override. A Default (by extension) doesn't
+    // make a file macro-enabled: SheetJS writes a .bin Default naming the xlsb
+    // type into every .xlsx it saves.
+    const ct = [...xml.matchAll(/<Override\b[^>]*\bContentType\s*=\s*["']([^"']*)["']/gi)].map((m) => m[1]).join("\n");
     if (/macroEnabled/i.test(ct)) return "ooxml-other";
     if (/wordprocessingml\.document\.main\+xml/i.test(ct)) return "docx";
     if (/spreadsheetml\.sheet\.main\+xml/i.test(ct)) return "xlsx";
