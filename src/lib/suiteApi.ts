@@ -35,7 +35,8 @@ const MS_FILES_SCOPE = MICROSOFT_SCOPE.files;
 const MS_CALENDAR_SCOPE = MICROSOFT_SCOPE.calendar;
 
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
-const GRAPH_ID = /^[A-Za-z0-9!_.=-]{1,300}$/;
+// Not "." or "..": encodeURIComponent keeps dots, and URL parsing would resolve them as path segments.
+const GRAPH_ID = /^(?!\.{1,2}$)[A-Za-z0-9!_.=-]{1,300}$/;
 
 export function assertFileId(provider: SuiteProvider, id: string, driveId?: string | null) {
   const re = provider === "google" ? GOOGLE_ID : GRAPH_ID;
@@ -362,7 +363,7 @@ export async function getRemoteFile(
   return file;
 }
 
-async function readCapped(res: Response): Promise<Buffer> {
+async function readCapped(res: Response, provider: SuiteProvider): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? "0");
   if (declared > MAX_IMPORT_BYTES) throw badRequest("That file is larger than 25 MB");
   if (!res.body) return Buffer.alloc(0);
@@ -370,7 +371,14 @@ async function readCapped(res: Response): Promise<Buffer> {
   let total = 0;
   const reader = res.body.getReader();
   for (;;) {
-    const { done, value } = await reader.read();
+    let step: Awaited<ReturnType<typeof reader.read>>;
+    try {
+      step = await reader.read();
+    } catch {
+      // The body stalled past HTTP_TIMEOUT_MS or the connection dropped mid-file.
+      throw unavailable(`${providerLabel(provider)} stopped sending the file. Try again shortly.`);
+    }
+    const { done, value } = step;
     if (done) break;
     total += value.byteLength;
     if (total > MAX_IMPORT_BYTES) {
@@ -401,7 +409,7 @@ export async function downloadRemoteFile(
       : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`;
     const { res } = await call(ownerId, provider, url, {}, GOOGLE_FILES);
     if (!res.ok) throw providerFailure(provider, res, log, "file download");
-    const bytes = await readCapped(res);
+    const bytes = await readCapped(res, provider);
     if (exp) {
       // A Docs/Sheets/Slides export: Google rendered these bytes itself.
       const filename = file.name.toLowerCase().endsWith(`.${exp.ext}`) ? file.name : `${file.name}.${exp.ext}`;
@@ -424,7 +432,7 @@ export async function downloadRemoteFile(
   );
   const final = await followDownload(res);
   if (!final.ok) throw providerFailure(provider, final, log, "file download");
-  const bytes = await readCapped(final);
+  const bytes = await readCapped(final, provider);
   return { bytes, mimeType: checkImportContent(provider, bytes, file.name, file.mimeType), filename: file.name };
 }
 
@@ -513,7 +521,7 @@ export async function exportGoogleDocText(
     log.warn({ status: res.status }, "google doc text export failed");
     return null;
   }
-  const bytes = await readCapped(res);
+  const bytes = await readCapped(res, "google");
   return bytes.toString("utf8").slice(0, 200_000);
 }
 
