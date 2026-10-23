@@ -37,9 +37,18 @@ const BY_EXTENSION: Record<string, Family> = {
   doc: "ole",
   xls: "ole",
   ppt: "ole",
+  // Other OLE formats a counselor keeps: Outlook mail, Publisher, Office templates and shows.
+  msg: "ole",
+  pub: "ole",
+  dot: "ole",
+  xlt: "ole",
+  pps: "ole",
+  pot: "ole",
   png: "png",
   jpg: "jpeg",
   jpeg: "jpeg",
+  jfif: "jpeg",
+  jpe: "jpeg",
   gif: "gif",
   webp: "webp",
   txt: "text",
@@ -113,7 +122,10 @@ function contentTypes(bytes: Uint8Array): string | null {
 
 export function sniff(bytes: Uint8Array): Sniffed {
   if (bytes.length === 0) return "empty";
-  if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return "pdf"; // %PDF-
+  // %PDF- may follow a BOM or blank lines some scanners write first.
+  let lead = 0;
+  while (lead < 1024 && lead < bytes.length && [0x00, 0x09, 0x0a, 0x0d, 0x20, 0xef, 0xbb, 0xbf].includes(bytes[lead])) lead++;
+  if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d], lead)) return "pdf"; // %PDF-
   if (startsWith(bytes, [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1])) return "ole";
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "png";
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "jpeg";
@@ -132,19 +144,34 @@ export function sniff(bytes: Uint8Array): Sniffed {
     if (/presentationml\.presentation\.main\+xml/i.test(ct)) return "pptx";
     return "ooxml-other";
   }
+  // UTF-16 text (Excel's "Unicode Text", some SIS exports) is full of NULs.
+  if (startsWith(bytes, [0xff, 0xfe]) || startsWith(bytes, [0xfe, 0xff])) return "text";
   const head = bytes.subarray(0, Math.min(bytes.length, 65536));
   return head.includes(0) ? "binary" : "text";
 }
 
 function declaredFamily(name: string, mime: string | null): Family | null {
-  const dot = name.lastIndexOf(".");
-  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+  // Only a short run of letters/digits after the last dot is an extension:
+  // "Rec - Mr. Jones" or "Transcript 10.15.24" (Drive names) have none.
+  const ext = hasExtension(name) ? name.trim().slice(name.trim().lastIndexOf(".") + 1).toLowerCase() : "";
   if (ext && Object.hasOwn(BY_EXTENSION, ext)) return BY_EXTENSION[ext];
-  // An extension we don't know (.odt, .heic) speaks for the file: the declared type doesn't.
-  if (ext) return null;
   const m = (mime ?? "").toLowerCase().split(";")[0].trim();
+  // An extension we don't know (.odt, .heic) speaks for the file, unless the declared type is one we do.
   return Object.hasOwn(BY_MIME, m) ? BY_MIME[m] : null;
 }
+
+function hasExtension(name: string): boolean {
+  const match = /\.([a-z0-9]{1,5})$/i.exec(name.trim());
+  return Boolean(match && /[a-z]/i.test(match[1]));
+}
+
+const IMAGES = new Set<Sniffed>(["png", "jpeg", "gif", "webp"]);
+const OOXML = new Set<Sniffed>(["docx", "xlsx", "pptx"]);
+const LEGACY: Record<string, string> = {
+  docx: "application/msword",
+  xlsx: "application/vnd.ms-excel",
+  pptx: "application/vnd.ms-powerpoint",
+};
 
 /** Bytes that are certainly one of the families (text excluded: any NUL-free bytes read as text). */
 const STRICT = new Set<Sniffed>(["pdf", "docx", "xlsx", "pptx", "ole", "png", "jpeg", "gif", "webp", "ooxml-other"]);
@@ -161,9 +188,30 @@ export function detectContentType(
   const found = sniff(bytes);
   const declared = declaredFamily(name, declaredMime);
   if (declared === null) {
-    return STRICT.has(found) ? { ok: false, declared, found } : { ok: true, mimeType: null };
+    if (!STRICT.has(found)) return { ok: true, mimeType: null };
+    const m = (declaredMime ?? "").toLowerCase().split(";")[0].trim();
+    const known = found !== "ole" && found !== "ooxml-other" ? CANONICAL[found as Exclude<Family, "ole" | "text">] : null;
+    // A photo with no name to go by ("IMG_0001", octet-stream), or a .heic that is
+    // really a JPEG: an image is an image. Same for a nameless PDF or Office file.
+    if (known && (IMAGES.has(found) ? m.startsWith("image/") || !hasExtension(name) : !hasExtension(name))) {
+      return { ok: true, mimeType: known };
+    }
+    return { ok: false, declared, found };
   }
-  if (found !== declared) return { ok: false, declared, found };
+  if (found !== declared) {
+    // A photo saved under the wrong image extension, or an old/new Office
+    // format swapped (.xls that is really .xlsx): same kind of file, store it as what it is.
+    if ((IMAGES.has(declared) && IMAGES.has(found)) || (declared === "ole" && OOXML.has(found))) {
+      return { ok: true, mimeType: CANONICAL[found as Exclude<Family, "ole" | "text">] };
+    }
+    if (OOXML.has(declared) && found === "ole") return { ok: true, mimeType: LEGACY[declared] };
+    // An empty .txt/.csv, or a legacy .doc/.xls that is really HTML, XML, RTF or
+    // tab-separated text (SIS and web exports): what Drive held before, kept as declared.
+    if ((declared === "text" && found === "empty") || (declared === "ole" && found === "text")) {
+      return { ok: true, mimeType: null };
+    }
+    return { ok: false, declared, found };
+  }
   if (declared === "ole" || declared === "text") return { ok: true, mimeType: null };
   return { ok: true, mimeType: CANONICAL[declared] };
 }
