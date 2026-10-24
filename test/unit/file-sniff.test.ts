@@ -103,3 +103,53 @@ test("an old/new Office swap gets the extension of the type it's stored under", 
   // Nothing to correct: no extension, or one that already fits.
   assert.deepEqual(detectContentType(JPEG, "IMG_1.jpeg", "image/png"), { ok: true, mimeType: "image/jpeg" });
 });
+
+/** A one-entry stored zip holding [Content_Types].xml, built by hand. */
+function storedZip(xml: string, o: { zip64?: boolean; comment?: Uint8Array } = {}) {
+  const name = Buffer.from("[Content_Types].xml");
+  const data = Buffer.from(xml);
+  const lh = Buffer.alloc(30);
+  lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26);
+  // Streaming writers put 0xFFFFFFFF in the directory and the real sizes and offset in a zip64 extra field.
+  const extra = Buffer.alloc(o.zip64 ? 28 : 0);
+  if (o.zip64) {
+    extra.writeUInt16LE(0x0001, 0); extra.writeUInt16LE(24, 2);
+    extra.writeUInt32LE(data.length, 4); extra.writeUInt32LE(data.length, 12); extra.writeUInt32LE(0, 20);
+  }
+  const big = (n: number) => (o.zip64 ? 0xffffffff : n);
+  const cd = Buffer.alloc(46);
+  cd.writeUInt32LE(0x02014b50, 0); cd.writeUInt32LE(big(data.length), 20); cd.writeUInt32LE(big(data.length), 24);
+  cd.writeUInt16LE(name.length, 28); cd.writeUInt16LE(extra.length, 30); cd.writeUInt32LE(big(0), 42);
+  const cdOff = 30 + name.length + data.length;
+  const comment = Buffer.from(o.comment ?? new Uint8Array());
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(46 + name.length + extra.length, 12); end.writeUInt32LE(cdOff, 16); end.writeUInt16LE(comment.length, 20);
+  return Buffer.concat([lh, name, data, cd, name, extra, end, comment]);
+}
+
+test("a zip64 directory entry (sizes in the extra field) is read", () => {
+  assert.equal(sniff(storedZip(types(DOCX))), "docx");
+  assert.equal(sniff(storedZip(types(DOCX), { zip64: true })), "docx");
+  assert.equal(detectContentType(storedZip(types(DOCX), { zip64: true }), "essay.docx", DOCX).ok, true);
+});
+
+test("a second end record planted in the zip comment makes the zip unreadable", () => {
+  const fake = Buffer.alloc(22);
+  fake.writeUInt32LE(0x06054b50, 0);
+  // The fake's own comment length is 0, so it also "runs to the end of the file".
+  assert.equal(sniff(storedZip(types(DOCX), { comment: fake })), "zip");
+  assert.equal(sniff(storedZip(types(DOCX), { comment: Buffer.from("made by a tool") })), "docx");
+});
+
+test("nameless legacy Office, and unknown extensions under a type we know", () => {
+  const OLE = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0]);
+  assert.deepEqual(detectContentType(OLE, "Transcript 10.15.24", "application/octet-stream"), { ok: true, mimeType: null });
+  const HEIC = new Uint8Array([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63]);
+  assert.deepEqual(detectContentType(HEIC, "IMG_1.heic", "image/jpeg"), { ok: true, mimeType: "application/octet-stream" });
+  assert.deepEqual(detectContentType(zipSync({ "a.txt": strToU8("x") }), "Essay.pages", "application/pdf"), { ok: true, mimeType: "application/octet-stream" });
+  // A known extension still has to match.
+  assert.equal(detectContentType(HEIC, "IMG_1.jpg", "image/jpeg").ok, false);
+  // An unknown extension doesn't excuse bytes that are one of ours under another label.
+  assert.equal(detectContentType(PDF, "notes.odt", "text/plain").ok, false);
+});
