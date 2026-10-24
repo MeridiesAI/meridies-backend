@@ -416,7 +416,7 @@ export async function downloadRemoteFile(
       return { bytes, mimeType: exp.mime, filename };
     }
     // An uploaded file (PDF, Word, Excel, ...): its bytes are whatever was uploaded.
-    return { bytes, mimeType: checkImportContent(provider, bytes, file.name, file.mimeType), filename: file.name };
+    return checkImportContent(provider, bytes, file.name, file.mimeType);
   }
 
   // Graph answers /content with a redirect to a short-lived pre-authenticated
@@ -433,7 +433,7 @@ export async function downloadRemoteFile(
   const final = await followDownload(res);
   if (!final.ok) throw providerFailure(provider, final, log, "file download");
   const bytes = await readCapped(final, provider);
-  return { bytes, mimeType: checkImportContent(provider, bytes, file.name, file.mimeType), filename: file.name };
+  return checkImportContent(provider, bytes, file.name, file.mimeType);
 }
 
 /**
@@ -482,20 +482,32 @@ export async function followDownload(first: Response): Promise<Response> {
 /**
  * The file's bytes must be what its name and type say (PDF, Word, Excel,
  * PowerPoint, images), and bytes that are one of those must not arrive under
- * another name. Returns the type to store it under.
+ * another name. Returns what to store: the type, the name (its extension
+ * corrected when the type was) and the bytes (UTF-16 text re-encoded as UTF-8,
+ * which every reader downstream expects).
  */
 export function checkImportContent(
   provider: SuiteProvider,
   bytes: Uint8Array,
   name: string,
   declaredMime: string | null
-): string {
+): { bytes: Buffer; mimeType: string; filename: string } {
   const verdict = detectContentType(bytes, name, declaredMime);
   if (!verdict.ok) {
     const where = provider === "google" ? "Google Drive" : "OneDrive";
     throw badRequest(`That file's contents don't match its type, so it wasn't imported. Open it in ${where}, save a fresh copy and try again.`);
   }
-  return verdict.mimeType ?? declaredMime ?? "application/octet-stream";
+  const trimmed = name.trim();
+  const filename = verdict.extension ? `${trimmed.slice(0, trimmed.lastIndexOf("."))}.${verdict.extension}` : name;
+  return { bytes: utf16ToUtf8(bytes), mimeType: verdict.mimeType ?? declaredMime ?? "application/octet-stream", filename };
+}
+
+/** UTF-16 text (by its BOM) as UTF-8 bytes; anything else unchanged. */
+function utf16ToUtf8(bytes: Uint8Array): Buffer {
+  const le = bytes[0] === 0xff && bytes[1] === 0xfe;
+  const be = bytes[0] === 0xfe && bytes[1] === 0xff;
+  if (!le && !be) return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return Buffer.from(new TextDecoder(le ? "utf-16le" : "utf-16be").decode(bytes), "utf8");
 }
 
 /**

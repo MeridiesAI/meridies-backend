@@ -26,9 +26,9 @@ test("a dot in a Drive name isn't an extension: the declared type decides", () =
 });
 
 test("same kind under the wrong label is stored as what the bytes are", () => {
-  assert.deepEqual(detectContentType(PNG, "photo.jpg", "image/jpeg"), { ok: true, mimeType: "image/png" });
+  assert.deepEqual(detectContentType(PNG, "photo.jpg", "image/jpeg"), { ok: true, mimeType: "image/png", extension: "png" });
   assert.deepEqual(detectContentType(JPEG, "IMG_1.HEIC", "image/heic"), { ok: true, mimeType: "image/jpeg" });
-  assert.deepEqual(detectContentType(ooxml(types(XLSX)), "grades.xls", "application/vnd.ms-excel"), { ok: true, mimeType: XLSX });
+  assert.deepEqual(detectContentType(ooxml(types(XLSX)), "grades.xls", "application/vnd.ms-excel"), { ok: true, mimeType: XLSX, extension: "xlsx" });
   assert.deepEqual(detectContentType(JPEG, "IMG_0001", "application/octet-stream"), { ok: true, mimeType: "image/jpeg" });
 });
 
@@ -85,4 +85,21 @@ test("a deflate bomb in [Content_Types].xml stops at the output cap", () => {
   const t = performance.now();
   assert.equal(sniff(bytes), "zip");
   assert.ok(performance.now() - t < 200, `took ${performance.now() - t}ms`);
+});
+
+test("a macro main part typed by a Default, or a VBA project, is refused", () => {
+  const byDefault = types(DOCX, '<Default Extension="xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/>');
+  assert.equal(detectContentType(ooxml(byDefault), "essay.docx", DOCX).ok, false);
+  const vba = types(DOCX, '<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>');
+  assert.equal(detectContentType(ooxml(vba), "essay.docx", DOCX).ok, false);
+});
+
+test("an old/new Office swap gets the extension of the type it's stored under", () => {
+  const OLE = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0]);
+  assert.deepEqual(detectContentType(OLE, "essay.docx", DOCX), { ok: true, mimeType: "application/msword", extension: "doc" });
+  assert.deepEqual(detectContentType(OLE, "grades.xlsx", XLSX), { ok: true, mimeType: "application/vnd.ms-excel", extension: "xls" });
+  assert.deepEqual(detectContentType(ooxml(types(XLSX)), "grades.xls", "application/vnd.ms-excel"), { ok: true, mimeType: XLSX, extension: "xlsx" });
+  assert.deepEqual(detectContentType(PNG, "photo.jpg", "image/jpeg"), { ok: true, mimeType: "image/png", extension: "png" });
+  // Nothing to correct: no extension, or one that already fits.
+  assert.deepEqual(detectContentType(JPEG, "IMG_1.jpeg", "image/png"), { ok: true, mimeType: "image/jpeg" });
 });

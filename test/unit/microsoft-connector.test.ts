@@ -399,7 +399,13 @@ test("imports must be what they claim: %PDF, DOCX/XLSX zips with the matching co
 
 test("a OneDrive import whose bytes don't match is refused", () => {
   assert.throws(() => suite.checkImportContent("microsoft", strToU8("<script>"), "report.pdf", "application/pdf"), /don't match its type/);
-  assert.equal(suite.checkImportContent("microsoft", ooxml(DOCX), "essay.docx", "application/octet-stream"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  assert.equal(suite.checkImportContent("microsoft", ooxml(DOCX), "essay.docx", "application/octet-stream").mimeType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  const legacy = suite.checkImportContent("microsoft", new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]), "essay.docx", null);
+  assert.equal(legacy.filename, "essay.doc", "a legacy .doc named .docx is stored as .doc");
+  assert.equal(legacy.mimeType, "application/msword");
+  const utf16 = suite.checkImportContent("microsoft", new Uint8Array([0xff, 0xfe, 0x4a, 0, 0xe9, 0, 0x2c, 0, 0x31, 0]), "roster.csv", "text/csv");
+  assert.equal(utf16.bytes.toString("utf8"), "Jé,1", "UTF-16 text is stored as UTF-8");
+  assert.equal(utf16.filename, "roster.csv");
 });
 
 // ---- 11. Disconnect link and pick cap ----------------------------------------------
