@@ -6,7 +6,8 @@
  *
  * A file whose name (or, without an extension, its declared type) claims one
  * of these must carry it; a file that is one of these must not arrive under a
- * name that says otherwise. Anything else (an .odt, a .heic) passes as before.
+ * name that says otherwise. Anything else (an .odt, a .heic) passes; under a
+ * declared type of ours that its bytes don't match, it's kept only as a download.
  */
 
 import { inflateRawSync } from "node:zlib";
@@ -86,10 +87,17 @@ const u32 = (b: Uint8Array, o: number) => (b[o] | (b[o + 1] << 8) | (b[o + 2] <<
  * Null when absent, unreadable or larger than CT_MAX.
  */
 function contentTypes(bytes: Uint8Array): string | null {
+  // The end record is the one whose comment runs exactly to the end of the
+  // file. A second one that also fits (a fake planted in the comment) makes the
+  // zip ambiguous: readers disagree on which directory is real, so read none.
   const floor = Math.max(0, bytes.length - 22 - 0xffff);
-  let e = bytes.length - 22;
-  while (e >= floor && u32(bytes, e) !== 0x06054b50) e--;
-  if (e < floor) return null;
+  let e = -1;
+  for (let at = bytes.length - 22; at >= floor; at--) {
+    if (u32(bytes, at) !== 0x06054b50 || at + 22 + u16(bytes, at + 20) !== bytes.length) continue;
+    if (e !== -1) return null;
+    e = at;
+  }
+  if (e === -1) return null;
   let off = u32(bytes, e + 16);
   // Zip64: the real directory offset is in the zip64 end record (low 32 bits suffice under 4 GB).
   if (e >= 20 && u32(bytes, e - 20) === 0x07064b50) {
@@ -98,14 +106,15 @@ function contentTypes(bytes: Uint8Array): string | null {
   }
   while (off + 46 <= e && u32(bytes, off) === 0x02014b50) {
     const method = u16(bytes, off + 10);
-    const csize = u32(bytes, off + 20);
     const nlen = u16(bytes, off + 28);
     const name = strFromU8(bytes.subarray(off + 46, off + 46 + nlen));
     if (name.toLowerCase() === "[content_types].xml") {
-      const lho = u32(bytes, off + 42);
+      const sizes = zip64Sizes(bytes, off, nlen);
+      if (!sizes) return null;
+      const { csize, lho } = sizes;
       if (lho + 30 > bytes.length || u32(bytes, lho) !== 0x04034b50) return null;
       const start = lho + 30 + u16(bytes, lho + 26) + u16(bytes, lho + 28);
-      if (csize === 0xffffffff || start + csize > bytes.length) return null;
+      if (start + csize > bytes.length) return null;
       const raw = bytes.subarray(start, start + csize);
       try {
         if (method === 0) return csize <= CT_MAX ? strFromU8(raw) : null;
@@ -120,6 +129,62 @@ function contentTypes(bytes: Uint8Array): string | null {
   return null;
 }
 
+/**
+ * A central-directory entry's compressed size and local-header offset. Either
+ * may be 0xFFFFFFFF with the real value in the zip64 extra field (id 0x0001),
+ * which streaming zip writers always use. Null when that field is missing or
+ * the value is past 4 GB (no import is that large).
+ */
+function zip64Sizes(bytes: Uint8Array, off: number, nlen: number): { csize: number; lho: number } | null {
+  let csize = u32(bytes, off + 20);
+  let lho = u32(bytes, off + 42);
+  const usize = u32(bytes, off + 24);
+  if (csize !== 0xffffffff && lho !== 0xffffffff && usize !== 0xffffffff) return { csize, lho };
+  let x = off + 46 + nlen;
+  const end = Math.min(bytes.length, x + u16(bytes, off + 30));
+  while (x + 4 <= end) {
+    const id = u16(bytes, x);
+    const len = u16(bytes, x + 2);
+    if (id === 0x0001) {
+      // Values appear in this order, each only when its 32-bit field is 0xFFFFFFFF.
+      let v = x + 4;
+      const next = () => {
+        if (v + 8 > x + 4 + len || v + 8 > end || u32(bytes, v + 4) !== 0) return null;
+        const n = u32(bytes, v);
+        v += 8;
+        return n;
+      };
+      if (usize === 0xffffffff && next() === null) return null;
+      if (csize === 0xffffffff) { const n = next(); if (n === null) return null; csize = n; }
+      if (lho === 0xffffffff) { const n = next(); if (n === null) return null; lho = n; }
+      return { csize, lho };
+    }
+    x += 4 + len;
+  }
+  return null;
+}
+
+/** What an OOXML zip's [Content_Types].xml declares; null when it isn't a readable OOXML zip. */
+export type OfficeKind = "docx" | "xlsx" | "pptx" | "macro" | "other";
+
+export function officeKind(bytes: Uint8Array): OfficeKind | null {
+  const xml = contentTypes(bytes);
+  if (!xml) return null;
+  // The main part is usually named by an Override, but a Default can type it
+  // too (every .xml part). So any macro-enabled main part (…macroEnabled.main+xml)
+  // or a VBA project, in either, is a macro file. The xlsb Default SheetJS writes
+  // into every .xlsx it saves (…binary.macroEnabled.main, no +xml) is not.
+  const typed = (tag: string) =>
+    [...xml.matchAll(new RegExp(`<${tag}\\b[^>]*\\bContentType\\s*=\\s*["']([^"']*)["']`, "gi"))].map((m) => m[1]);
+  const ct = typed("Override").join("\n");
+  const all = [...typed("Override"), ...typed("Default")].join("\n");
+  if (/macroEnabled/i.test(ct) || /macroEnabled\.main\+xml|vbaProject/i.test(all)) return "macro";
+  if (/wordprocessingml\.document\.main\+xml/i.test(ct)) return "docx";
+  if (/spreadsheetml\.sheet\.main\+xml/i.test(ct)) return "xlsx";
+  if (/presentationml\.presentation\.main\+xml/i.test(ct)) return "pptx";
+  return "other";
+}
+
 export function sniff(bytes: Uint8Array): Sniffed {
   if (bytes.length === 0) return "empty";
   // %PDF- may follow a BOM or blank lines some scanners write first.
@@ -132,21 +197,9 @@ export function sniff(bytes: Uint8Array): Sniffed {
   if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "gif"; // GIF8
   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && startsWith(bytes, [0x57, 0x45, 0x42, 0x50], 8)) return "webp";
   if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) {
-    const xml = contentTypes(bytes);
-    if (!xml) return "zip";
-    // The main part is usually named by an Override, but a Default can type it
-    // too (every .xml part). So any macro-enabled main part (…macroEnabled.main+xml)
-    // or a VBA project, in either, is a macro file. The xlsb Default SheetJS writes
-    // into every .xlsx it saves (…binary.macroEnabled.main, no +xml) is not.
-    const typed = (tag: string) =>
-      [...xml.matchAll(new RegExp(`<${tag}\\b[^>]*\\bContentType\\s*=\\s*["']([^"']*)["']`, "gi"))].map((m) => m[1]);
-    const ct = typed("Override").join("\n");
-    const all = [...typed("Override"), ...typed("Default")].join("\n");
-    if (/macroEnabled/i.test(ct) || /macroEnabled\.main\+xml|vbaProject/i.test(all)) return "ooxml-other";
-    if (/wordprocessingml\.document\.main\+xml/i.test(ct)) return "docx";
-    if (/spreadsheetml\.sheet\.main\+xml/i.test(ct)) return "xlsx";
-    if (/presentationml\.presentation\.main\+xml/i.test(ct)) return "pptx";
-    return "ooxml-other";
+    const kind = officeKind(bytes);
+    if (kind === null) return "zip";
+    return kind === "macro" || kind === "other" ? "ooxml-other" : kind;
   }
   // UTF-16 text (Excel's "Unicode Text", some SIS exports) is full of NULs.
   if (startsWith(bytes, [0xff, 0xfe]) || startsWith(bytes, [0xfe, 0xff])) return "text";
@@ -154,19 +207,22 @@ export function sniff(bytes: Uint8Array): Sniffed {
   return head.includes(0) ? "binary" : "text";
 }
 
-function declaredFamily(name: string, mime: string | null): Family | null {
-  // Only a short run of letters/digits after the last dot is an extension:
-  // "Rec - Mr. Jones" or "Transcript 10.15.24" (Drive names) have none.
-  const ext = hasExtension(name) ? name.trim().slice(name.trim().lastIndexOf(".") + 1).toLowerCase() : "";
-  if (ext && Object.hasOwn(BY_EXTENSION, ext)) return BY_EXTENSION[ext];
-  const m = (mime ?? "").toLowerCase().split(";")[0].trim();
-  // An extension we don't know (.odt, .heic) speaks for the file, unless the declared type is one we do.
-  return Object.hasOwn(BY_MIME, m) ? BY_MIME[m] : null;
+/**
+ * The name's extension, lower-cased, or null. Only a short run of letters and
+ * digits (with at least one letter) after the last dot counts: "Rec - Mr. Jones"
+ * or "Transcript 10.15.24" (Drive names) have none.
+ */
+export function extensionOf(name: string): string | null {
+  const match = /\.([a-z0-9]{1,5})$/i.exec(name.trim());
+  return match && /[a-z]/i.test(match[1]) ? match[1].toLowerCase() : null;
 }
 
-function hasExtension(name: string): boolean {
-  const match = /\.([a-z0-9]{1,5})$/i.exec(name.trim());
-  return Boolean(match && /[a-z]/i.test(match[1]));
+const normalizeMime = (mime: string | null) => (mime ?? "").toLowerCase().split(";")[0].trim();
+
+/** The family the file claims, by its extension or else its declared type. */
+function declaredFamily(ext: string | null, mime: string): Family | null {
+  if (ext && Object.hasOwn(BY_EXTENSION, ext)) return BY_EXTENSION[ext];
+  return Object.hasOwn(BY_MIME, mime) ? BY_MIME[mime] : null;
 }
 
 const IMAGES = new Set<Sniffed>(["png", "jpeg", "gif", "webp"]);
@@ -181,10 +237,9 @@ const LEGACY_EXT: Record<string, string> = { docx: "doc", xlsx: "xls", pptx: "pp
 const EXT_FOR: Record<string, string> = { docx: "docx", xlsx: "xlsx", pptx: "pptx", png: "png", jpeg: "jpg", gif: "gif", webp: "webp" };
 
 /** `{ extension }` when the name has one and it doesn't already say `to` (a family or a legacy extension). */
-function renamed(name: string, to: string): { extension?: string } {
-  if (!hasExtension(name)) return {};
+function renamed(current: string | null, to: string): { extension?: string } {
+  if (!current) return {};
   const ext = EXT_FOR[to] ?? to;
-  const current = name.trim().slice(name.trim().lastIndexOf(".") + 1).toLowerCase();
   if (current === ext || BY_EXTENSION[current] === to) return {};
   return { extension: ext };
 }
@@ -202,27 +257,37 @@ export function detectContentType(
   declaredMime: string | null
 ): { ok: true; mimeType: string | null; extension?: string } | { ok: false; declared: Family | null; found: string } {
   const found = sniff(bytes);
-  const declared = declaredFamily(name, declaredMime);
+  const ext = extensionOf(name);
+  const m = normalizeMime(declaredMime);
+  const declared = declaredFamily(ext, m);
   if (declared === null) {
     if (!STRICT.has(found)) return { ok: true, mimeType: null };
-    const m = (declaredMime ?? "").toLowerCase().split(";")[0].trim();
+    // A legacy Office file with no name to go by ("Transcript 10.15.24", octet-stream):
+    // which one it is (.doc, .xls) isn't in the header, so keep the declared type.
+    if (found === "ole" && !ext) return { ok: true, mimeType: null };
     const known = found !== "ole" && found !== "ooxml-other" ? CANONICAL[found as Exclude<Family, "ole" | "text">] : null;
     // A photo with no name to go by ("IMG_0001", octet-stream), or a .heic that is
     // really a JPEG: an image is an image. Same for a nameless PDF or Office file.
-    if (known && (IMAGES.has(found) ? m.startsWith("image/") || !hasExtension(name) : !hasExtension(name))) {
+    if (known && (IMAGES.has(found) ? m.startsWith("image/") || !ext : !ext)) {
       return { ok: true, mimeType: known };
     }
     return { ok: false, declared, found };
   }
   if (found !== declared) {
+    // An extension we don't know (.heic, .pages) under a declared type we do
+    // (Drive and Graph label HEIC photos image/jpeg): the bytes aren't one of
+    // ours, so neither label is trusted. Kept, but only as a download.
+    if (ext && !Object.hasOwn(BY_EXTENSION, ext) && !STRICT.has(found)) {
+      return { ok: true, mimeType: "application/octet-stream" };
+    }
     // A photo saved under the wrong image extension, or an old/new Office
     // format swapped (.xls that is really .xlsx): same kind of file, store it as what it is.
     // The extension follows the stored type: text extraction picks its reader
     // from the name, and a .docx holding a legacy .doc would be read as a zip.
     if ((IMAGES.has(declared) && IMAGES.has(found)) || (declared === "ole" && OOXML.has(found))) {
-      return { ok: true, mimeType: CANONICAL[found as Exclude<Family, "ole" | "text">], ...renamed(name, found) };
+      return { ok: true, mimeType: CANONICAL[found as Exclude<Family, "ole" | "text">], ...renamed(ext, found) };
     }
-    if (OOXML.has(declared) && found === "ole") return { ok: true, mimeType: LEGACY[declared], ...renamed(name, LEGACY_EXT[declared]) };
+    if (OOXML.has(declared) && found === "ole") return { ok: true, mimeType: LEGACY[declared], ...renamed(ext, LEGACY_EXT[declared]) };
     // An empty .txt/.csv, or a legacy .doc/.xls that is really HTML, XML, RTF or
     // tab-separated text (SIS and web exports): what Drive held before, kept as declared.
     if ((declared === "text" && found === "empty") || (declared === "ole" && found === "text")) {

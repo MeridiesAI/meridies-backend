@@ -28,6 +28,12 @@ test("xlsm, legacy xls, PDF, PNG, plain zip and empty files are refused", () => 
   assert.deepEqual(detectType(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0])), { type: "refused", reason: "not-spreadsheet" });
   assert.deepEqual(detectType(zipSync({ "a.txt": strToU8("hello") })), { type: "refused", reason: "not-spreadsheet" });
   assert.deepEqual(detectType(new Uint8Array()), { type: "refused", reason: "not-spreadsheet" });
+  // The same macro rule as Drive imports: SheetJS's xlsb Default is not a macro; a macro main part typed by a Default is.
+  const withDefault = (d: string) => zipSync({
+    "[Content_Types].xml": strToU8(`<Types>${d}<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>`),
+  });
+  assert.deepEqual(detectType(withDefault('<Default Extension="bin" ContentType="application/vnd.ms-excel.sheet.binary.macroEnabled.main"/>')), { type: "xlsx" });
+  assert.deepEqual(detectType(withDefault('<Default Extension="xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/>')), { type: "refused", reason: "macro" });
 });
 
 // --- the zip guard -------------------------------------------------------------

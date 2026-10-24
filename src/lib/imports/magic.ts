@@ -3,7 +3,7 @@
  * name or the type the browser declared.
  */
 
-import { unzipSync, strFromU8 } from "fflate";
+import { officeKind } from "../fileSniff.js";
 
 export type Detected =
   | { type: "xlsx" }
@@ -12,24 +12,6 @@ export type Detected =
 
 const startsWith = (b: Uint8Array, sig: number[]) => sig.every((x, i) => b[i] === x);
 
-/**
- * The zip's [Content_Types].xml, read on its own: a small entry, inflated
- * only when its declared size is small. Null when the zip has none.
- */
-function contentTypes(bytes: Uint8Array): string | null {
-  let found: string | null = null;
-  try {
-    const out = unzipSync(bytes, {
-      filter: (f) => f.name === "[Content_Types].xml" && f.originalSize <= 256 * 1024,
-    });
-    const entry = out["[Content_Types].xml"];
-    if (entry) found = strFromU8(entry);
-  } catch {
-    return null;
-  }
-  return found;
-}
-
 export function detectType(bytes: Uint8Array): Detected {
   if (bytes.length === 0) return { type: "refused", reason: "not-spreadsheet" };
   // Legacy .xls (OLE compound file).
@@ -37,10 +19,10 @@ export function detectType(bytes: Uint8Array): Detected {
     return { type: "refused", reason: "legacy-xls" };
   }
   if (startsWith(bytes, [0x50, 0x4b, 0x03, 0x04])) {
-    const ct = contentTypes(bytes);
-    if (!ct) return { type: "refused", reason: "not-spreadsheet" };
-    if (/macroEnabled/i.test(ct)) return { type: "refused", reason: "macro" };
-    if (/spreadsheetml\.sheet\.main\+xml/i.test(ct)) return { type: "xlsx" };
+    // The same bounded [Content_Types].xml reader and macro rule as Drive and OneDrive imports.
+    const kind = officeKind(bytes);
+    if (kind === "macro") return { type: "refused", reason: "macro" };
+    if (kind === "xlsx") return { type: "xlsx" };
     return { type: "refused", reason: "not-spreadsheet" };
   }
   // Anything else must be text. A NUL byte means binary (PDF, image, UTF-16).
