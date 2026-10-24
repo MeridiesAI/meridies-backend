@@ -19,6 +19,7 @@
  * syncs for them.
  */
 
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
@@ -342,7 +343,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
       const fields = importFields({ kind: b.kind, availableToLlm: b.availableToLlm, guess });
 
       const safeName = download.filename.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 180);
-      const storagePath = `${studentId}/${Date.now()}-${safeName}`;
+      const storagePath = `${studentId}/${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
       const { error: storageError } = await request.db.storage
         .from(BUCKET)
         .upload(storagePath, download.bytes, { contentType: download.mimeType, upsert: false });

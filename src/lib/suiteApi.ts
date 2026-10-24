@@ -35,7 +35,8 @@ const MS_FILES_SCOPE = MICROSOFT_SCOPE.files;
 const MS_CALENDAR_SCOPE = MICROSOFT_SCOPE.calendar;
 
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
-const GRAPH_ID = /^[A-Za-z0-9!_.=-]{1,300}$/;
+// Not "." or "..": encodeURIComponent keeps dots, and URL parsing would resolve them as path segments.
+const GRAPH_ID = /^(?!\.{1,2}$)[A-Za-z0-9!_.=-]{1,300}$/;
 
 export function assertFileId(provider: SuiteProvider, id: string, driveId?: string | null) {
   const re = provider === "google" ? GOOGLE_ID : GRAPH_ID;
@@ -362,7 +363,7 @@ export async function getRemoteFile(
   return file;
 }
 
-async function readCapped(res: Response): Promise<Buffer> {
+async function readCapped(res: Response, provider: SuiteProvider): Promise<Buffer> {
   const declared = Number(res.headers.get("content-length") ?? "0");
   if (declared > MAX_IMPORT_BYTES) throw badRequest("That file is larger than 25 MB");
   if (!res.body) return Buffer.alloc(0);
@@ -370,7 +371,14 @@ async function readCapped(res: Response): Promise<Buffer> {
   let total = 0;
   const reader = res.body.getReader();
   for (;;) {
-    const { done, value } = await reader.read();
+    let step: Awaited<ReturnType<typeof reader.read>>;
+    try {
+      step = await reader.read();
+    } catch {
+      // The body stalled past HTTP_TIMEOUT_MS or the connection dropped mid-file.
+      throw unavailable(`${providerLabel(provider)} stopped sending the file. Try again shortly.`);
+    }
+    const { done, value } = step;
     if (done) break;
     total += value.byteLength;
     if (total > MAX_IMPORT_BYTES) {
@@ -401,9 +409,14 @@ export async function downloadRemoteFile(
       : `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.id)}?alt=media&supportsAllDrives=true`;
     const { res } = await call(ownerId, provider, url, {}, GOOGLE_FILES);
     if (!res.ok) throw providerFailure(provider, res, log, "file download");
-    const bytes = await readCapped(res);
-    const filename = exp && !file.name.toLowerCase().endsWith(`.${exp.ext}`) ? `${file.name}.${exp.ext}` : file.name;
-    return { bytes, mimeType: exp?.mime ?? file.mimeType ?? "application/octet-stream", filename };
+    const bytes = await readCapped(res, provider);
+    if (exp) {
+      // A Docs/Sheets/Slides export: Google rendered these bytes itself.
+      const filename = file.name.toLowerCase().endsWith(`.${exp.ext}`) ? file.name : `${file.name}.${exp.ext}`;
+      return { bytes, mimeType: exp.mime, filename };
+    }
+    // An uploaded file (PDF, Word, Excel, ...): its bytes are whatever was uploaded.
+    return checkImportContent(provider, bytes, file.name, file.mimeType);
   }
 
   // Graph answers /content with a redirect to a short-lived pre-authenticated
@@ -419,9 +432,8 @@ export async function downloadRemoteFile(
   );
   const final = await followDownload(res);
   if (!final.ok) throw providerFailure(provider, final, log, "file download");
-  const bytes = await readCapped(final);
-  const checked = checkMicrosoftContent(bytes, file.name, file.mimeType);
-  return { bytes, mimeType: checked, filename: file.name };
+  const bytes = await readCapped(final, provider);
+  return checkImportContent(provider, bytes, file.name, file.mimeType);
 }
 
 /**
@@ -470,14 +482,32 @@ export async function followDownload(first: Response): Promise<Response> {
 /**
  * The file's bytes must be what its name and type say (PDF, Word, Excel,
  * PowerPoint, images), and bytes that are one of those must not arrive under
- * another name. Returns the type to store it under.
+ * another name. Returns what to store: the type, the name (its extension
+ * corrected when the type was) and the bytes (UTF-16 text re-encoded as UTF-8,
+ * which every reader downstream expects).
  */
-export function checkMicrosoftContent(bytes: Uint8Array, name: string, declaredMime: string | null): string {
+export function checkImportContent(
+  provider: SuiteProvider,
+  bytes: Uint8Array,
+  name: string,
+  declaredMime: string | null
+): { bytes: Buffer; mimeType: string; filename: string } {
   const verdict = detectContentType(bytes, name, declaredMime);
   if (!verdict.ok) {
-    throw badRequest("That file's contents don't match its type, so it wasn't imported. Open it in OneDrive, save a fresh copy and try again.");
+    const where = provider === "google" ? "Google Drive" : "OneDrive";
+    throw badRequest(`That file's contents don't match its type, so it wasn't imported. Open it in ${where}, save a fresh copy and try again.`);
   }
-  return verdict.mimeType ?? declaredMime ?? "application/octet-stream";
+  const trimmed = name.trim();
+  const filename = verdict.extension ? `${trimmed.slice(0, trimmed.lastIndexOf("."))}.${verdict.extension}` : name;
+  return { bytes: utf16ToUtf8(bytes), mimeType: verdict.mimeType ?? declaredMime ?? "application/octet-stream", filename };
+}
+
+/** UTF-16 text (by its BOM) as UTF-8 bytes; anything else unchanged. */
+function utf16ToUtf8(bytes: Uint8Array): Buffer {
+  const le = bytes[0] === 0xff && bytes[1] === 0xfe;
+  const be = bytes[0] === 0xfe && bytes[1] === 0xff;
+  if (!le && !be) return Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return Buffer.from(new TextDecoder(le ? "utf-16le" : "utf-16be").decode(bytes), "utf8");
 }
 
 /**
@@ -503,7 +533,7 @@ export async function exportGoogleDocText(
     log.warn({ status: res.status }, "google doc text export failed");
     return null;
   }
-  const bytes = await readCapped(res);
+  const bytes = await readCapped(res, "google");
   return bytes.toString("utf8").slice(0, 200_000);
 }
 

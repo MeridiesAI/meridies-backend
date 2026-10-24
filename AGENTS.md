@@ -1513,7 +1513,9 @@ fetch URLs reach a log or an error (`quietFetch`); `/content` redirects are
 followed by hand (`followDownload`: HTTPS, `MICROSOFT_DOWNLOAD_HOSTS` exact or
 dot-boundary suffix, at most 2, no Authorization after Graph); the bytes must
 match the name (`lib/fileSniff.ts`: `%PDF-`, OOXML by `[Content_Types].xml`,
-OLE, images, NUL-free text; macro and mismatched files refused); `DELETE
+OLE, images, NUL-free text; macro and mismatched files refused;
+`checkImportContent`, also run on Google Drive uploads, never on a
+Docs/Sheets/Slides export); `DELETE
 /integrations/microsoft` returns `consentUrl` (account.live.com for the
 personal tenant `9188040d-…`, else My Apps, from the tenant kept in
 `integrations.config` at connect). `MICROSOFT_PICKER_MAX_FILES` (default 10)
