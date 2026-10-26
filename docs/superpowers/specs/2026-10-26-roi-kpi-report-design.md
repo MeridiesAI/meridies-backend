@@ -1,6 +1,6 @@
 # Monthly ROI report ("time Meridies saved you") — design
 
-Date: 2026-10-26 · Status: draft — Elvin's decisions applied, awaiting approval · Repos: meridies-backend, meridies-app
+Date: 2026-10-26 · Status: approved by Elvin 2026-10-26 · Repos: meridies-backend, meridies-app
 
 ## Why
 
@@ -75,9 +75,14 @@ Added to counselor onboarding (`meridies-app/app/onboarding/counselor`), one scr
 
 Primary: **active time**, from the item's start to its completion, **excluding idle gaps of 10+ minutes with no activity**.
 
-- The app sends lightweight activity pings while the consultant is on a page tied to a trackable item (student + task
-  type + item id): on start, then about every 60s while there's input/focus, and on completion. Server stores sessions;
-  a gap of ≥10 min between pings is not counted.
+- The app sends lightweight heartbeats while the consultant is on a page tied to a trackable item (student + task
+  type + item id): on start, then periodically while there's input/focus, and on completion.
+- **Heartbeats carry no durations (decided).** The server computes each increment from its own receive timestamps:
+  it adds the gap since that task's last heartbeat only if the gap is under the 10-minute idle limit.
+- **One last-heartbeat timestamp per task (decided)**, so several open tabs can't double count.
+- **The heartbeat endpoint** checks that the task belongs to the signed-in consultant and is rate-limited to about
+  one per 30 seconds per task.
+- **Abandoned tasks (decided):** an in-progress task with no activity for 14 days is deleted and never counted.
 - Re-runs/edits of the same item in the same month add their active time to that one completion (honest cost of
   re-running). *(Claude's call — see "Calls made".)*
 - **Retention (decided):** store only the computed per-task duration. Raw pings and idle-detection signals are rolled
@@ -168,6 +173,10 @@ Scheduling: a monthly job behind the existing `/internal` cron-secret pattern, r
 - A 2-consultant firm's admin gets no firm totals (the "appear once 3 or more" message).
 - Undo before the month is finalized removes that task's time; undo after the report is sent changes nothing.
 - Raw activity rows are purged after their duration is computed (none older than 24 hours remain).
+- Two tabs heartbeating the same task over the same 5 minutes count 5 minutes.
+- A 2-hour gap between heartbeats adds nothing.
+- A heartbeat for another consultant's task is rejected.
+- An in-progress task with no activity for 14 days is purged and never counted.
 - Plus builder's usual coverage: RLS (consultant can't read others; admin can't read rates), idle-gap exclusion,
   cap/fallback switching at 5 completions, negative totals render as "no time saved yet", email has no student names,
   first email held until 2 weeks of use, job re-run doesn't double-send.
@@ -200,6 +209,8 @@ pings behind a flag that stays off until then).
 - Raw activity purged within 24 hours; only per-task duration kept.
 - "Notes sent" on a meeting is a manual mark (no email sent by Meridies).
 - Privacy policy update merges before tracking ships.
+- Heartbeats carry no durations; one last-heartbeat timestamp per task; 1 per ~30s per task; ownership checked;
+  in-progress tasks idle 14 days are deleted.
 
 ## Left to the builder
 
