@@ -458,7 +458,8 @@ const HANDLED = new Set([
   "consultant_student_pins.consultant_id", "student_collaborators.counselor_id",
 ]);
 // Deliberately stays with the counselor (spec §6.7): personal working notes and notices.
-const STAYS = new Set(["ai_conversations.owner_id", "axis_actions.owner_id", "notifications.recipient_id"]);
+// kpi_completions: Time saved credits the counselor who did the work, so a transfer never moves it.
+const STAYS = new Set(["ai_conversations.owner_id", "axis_actions.owner_id", "notifications.recipient_id", "kpi_completions.counselor_id"]);
 const fks = (await sql(`
   select c.conrelid::regclass::text || '.' || a.attname
     from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)
