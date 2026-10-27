@@ -44,8 +44,11 @@ export default async function kpiRoutes(app: FastifyInstance) {
   const schemaError = (error: { code?: string; message?: string }) =>
     KPI_SCHEMA_MISSING.has(error.code ?? "") ? kpiUnavailable() : fromPostgrest(error);
 
-  app.get("/baselines", { preHandler: [...counselor, limit("kpi:baselines", 120, 60)] }, async (request) => {
-    const { data, error } = await request.db
+  // Signup figures are asked during onboarding, while the account may still be
+  // pending review, so these two routes are open to a pending counselor for their
+  // own row only (read and written on the service client, keyed by the caller).
+  app.get("/baselines", { preHandler: [...counselor, limit("kpi:baselines", 120, 60)], config: { allowPending: true } }, async (request) => {
+    const { data, error } = await (serviceClient() ?? request.db)
       .from("kpi_baselines")
       .select(BASELINE_COLUMNS)
       .eq("counselor_id", request.auth.userId)
@@ -59,7 +62,7 @@ export default async function kpiRoutes(app: FastifyInstance) {
    * the caller's own row on the service client. A figure counts as edited once the
    * client says the consultant touched it; it stays edited.
    */
-  app.put("/baselines", { preHandler: [...counselor, limit("kpi:baselines:write", 30, 60)] }, async (request) => {
+  app.put("/baselines", { preHandler: [...counselor, limit("kpi:baselines:write", 30, 60)], config: { allowPending: true } }, async (request) => {
     const body = baselinesBody.parse(request.body);
     const svc = serviceClient();
     if (!svc) throw unavailable("Saving needs the service role key");

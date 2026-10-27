@@ -41,3 +41,12 @@ check("a write collaborator can't mark someone else's meeting", r2.status === 40
 const r3 = await call(c.token, "DELETE", `/meetings/${held}/notes-sent`);
 check("un-marking clears it", r3.status === 200 && r3.body.notesSentAt === null, JSON.stringify(r3.body));
 check("...and removes the completion", (await sql(`select count(*) from public.kpi_completions where dedupe_key='${held}'`)) === "0");
+
+// ---- A pending counselor fills these in during signup ------------------------------
+const pend = await user("kpi-api-pending", "counselor", { approved: false });
+const pp = await call(pend.token, "PUT", "/kpi/baselines", { hourlyRate: 175, rateEdited: true });
+check("a pending counselor can save their own signup figures", pp.status === 200 && pp.body.hourlyRate === 175, `status ${pp.status} ${JSON.stringify(pp.body).slice(0, 120)}`);
+const pg = await call(pend.token, "GET", "/kpi/baselines");
+check("...and read them back", pg.status === 200 && pg.body.hourlyRate === 175, `status ${pg.status}`);
+const ph = await call(pend.token, "GET", "/kpi/report");
+check("...but nothing else in Time saved", ph.status === 403, `status ${ph.status}`);
