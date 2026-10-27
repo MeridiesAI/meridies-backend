@@ -127,6 +127,15 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 
 ## P1: features that are built but off until configured
 
+- [ ] **Time saved (monthly ROI report)** (spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`):
+  - apply `20261027000001`-`05` (either order with the code; nothing is in `REQUIRED_SCHEMA`, the routes say
+    `kpi_unavailable` until then).
+  - add two Railway crons on `POST /internal/kpi/monthly` with the `CRON_SECRET` bearer: daily
+    `?purgeOnly=1` at `0 7 * * *` (clears activity signals older than 24 hours, drops tasks idle 14 days),
+    and the full run at `0 14 2 * *` (finalizes last month, sends the emails once).
+  - `KPI_TRACKING_ENABLED=true` on Railway **only after** the privacy policy's "Time Saved Reports" section is
+    live on meridiesai.com/privacy. Until then heartbeats are accepted and ignored (`tracked: false`), and
+    completions still count with the signup figures.
 - [ ] **Twilio SMS**: set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and either `TWILIO_FROM_NUMBER`
   or `TWILIO_MESSAGING_SERVICE_SID`. Until then, texts stay `queued`. A US number also needs A2P
   10DLC registration before carriers deliver its texts.

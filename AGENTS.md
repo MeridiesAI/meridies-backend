@@ -1092,6 +1092,33 @@ there).
 Dated library rows (Common App, UC, Cal State Apply, FAFSA, CSS Profile, Cal
 Grant, Dream Act) carry the current cycle; roll them forward each August.
 
+## Time saved (monthly ROI report)
+
+Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
+`docs/superpowers/plans/2026-10-26-roi-kpi-report.md`. Migrations
+`20261027000001`-`05`, `src/lib/kpi/`, `routes/kpi.ts`, `routes/kpiUnsubscribe.ts`.
+
+- **The database counts.** Triggers on `family_reports` (sent), `meetings.notes_sent_at` ("Notes sent", a
+  mark only), `college_list_variants` (AI lists), `recommendations` (once `accepted_as` links what was
+  created) and `essay_marks` (a review round decided) call `private.kpi_record`, which snapshots the
+  consultant's figures onto one `kpi_completions` row per finished item (re-runs add their time, never a
+  second row). Undoing the source before the month is finalized (`kpi_months`) removes it; after, nothing
+  changes. Each trigger traps its own errors: the ledger never blocks a save.
+- **Time is the server's.** `POST /kpi/heartbeat` carries no duration; `kpi_heartbeat` (service role only,
+  after `assertOwnsSubject`) keeps one last-heartbeat time per task, ignores beats under 30 s apart and adds a
+  gap only under 10 minutes. Off unless `KPI_TRACKING_ENABLED=true`. Only the per-task total is kept: the
+  monthly job's daily purge clears heartbeat times after 24 hours and deletes tasks idle 14 days.
+- **Fallback.** No measured time: the consultant's median once they have 5 measured completions of the type
+  (and a measured value is capped at 3x it), else their signup figure. `measure_method` says which.
+- **Who sees what.** A consultant reads only their own rows (RLS). Firm totals (`kpi_firm_month`, owners and
+  admins) only with 3+ consultants that month, never per person. Prospect averages
+  (`GET /internal/kpi/prospect-averages`) only from edited figures, and nothing below 10 consultants from 5 firms.
+- `GET`/`PUT /kpi/baselines` are open to a pending counselor (own row, service client): onboarding asks them.
+- Monthly emails (`kpi-monthly`, `kpi-firm-monthly`): no student names, "estimated" kept, one-click
+  unsubscribe (a fresh token per email, hash stored), first one 14+ days after the first completion,
+  recorded in `kpi_email_sends` only once the provider accepted it.
+- Tests: `test/integration/kpi-*.test.mjs`, `test/unit/kpi-*.test.ts`.
+
 ## Scheduled jobs
 
 The escalation sweep (`runEscalationSweep` in `lib/accountability.ts`) turns red
