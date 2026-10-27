@@ -5,7 +5,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
-import { fromPostgrest, unavailable, HttpError } from "../lib/errors.js";
+import { forbidden, fromPostgrest, notFound, unavailable, HttpError } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -144,6 +144,25 @@ export default async function kpiRoutes(app: FastifyInstance) {
 
     const baselines = toBaselinesDto((baseRes.data as BaselinesRow | null) ?? null);
     return buildReport(rows, (yearRes.data ?? []) as CompletionRow[], baselines.hoursPerStudentYear, activity, month, names);
+  });
+
+  /** Firm totals for the caller's firm (owners and admins), only with 3+ active consultants. */
+  app.get("/firm", { preHandler: [...counselor, limit("kpi:firm", 60, 60)] }, async (request) => {
+    const q = monthQuery.parse(request.query);
+    const { data: profile, error: pErr } = await request.db
+      .from("profiles")
+      .select("firm_id, timezone")
+      .eq("id", request.auth.userId)
+      .maybeSingle();
+    if (pErr) throw fromPostgrest(pErr);
+    if (!profile?.firm_id) throw notFound("You're not in a firm");
+    const month = q.month ?? monthIn((profile.timezone as string | null) ?? null);
+    const { data, error } = await request.db.rpc("kpi_firm_month", { p_firm: profile.firm_id, p_month: `${month}-01` });
+    if (error) {
+      if (error.code === "42501") throw forbidden("Only the firm's owners and admins see firm totals");
+      throw schemaError(error);
+    }
+    return { month, ...(data as Record<string, unknown>) };
   });
 
   app.post("/heartbeat", { preHandler: [...counselor, limit("kpi:heartbeat", 120, 60)] }, async (request, reply) => {
