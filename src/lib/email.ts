@@ -88,6 +88,8 @@ type SendEmailArgs = DeliveryColumns & {
    * leaves something wrong, like a calendar update that never arrives.
    */
   retryOn429?: boolean;
+  /** Extra message headers (e.g. List-Unsubscribe on a recurring email). */
+  headers?: Record<string, string>;
   logger?: Logger;
 };
 
@@ -115,7 +117,7 @@ async function recordDelivery(
 /** Mailpit's send API (local development only, see `DEV_MAIL_URL`). */
 async function sendToDevMail(
   base: string,
-  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string }
+  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string> }
 ): Promise<{ providerId: string | null; sent: boolean; errorText: string | null }> {
   const from = /^(.*?)\s*<([^>]+)>$/.exec(env.INVITE_FROM_EMAIL);
   try {
@@ -129,6 +131,7 @@ async function sendToDevMail(
         HTML: m.html,
         Text: m.text,
         ...(m.replyTo ? { ReplyTo: [{ Email: m.replyTo }] } : {}),
+        ...(m.headers ? { Headers: m.headers } : {}),
         ...(m.attachments?.length
           ? { Attachments: m.attachments.map((a) => ({ Content: a.content, Filename: a.filename, ContentType: a.contentType })) }
           : {}),
@@ -168,6 +171,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       text,
       attachments,
       replyTo: args.replyTo,
+      headers: args.headers,
     }));
     if (!sent) logger?.error({ template, err: errorText }, "dev mail send failed");
   } else if (!hasResend) {
@@ -182,6 +186,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
         html,
         text,
         ...(args.replyTo ? { reply_to: args.replyTo } : {}),
+        ...(args.headers ? { headers: args.headers } : {}),
         ...(attachments
           ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content, content_type: a.contentType })) }
           : {}),

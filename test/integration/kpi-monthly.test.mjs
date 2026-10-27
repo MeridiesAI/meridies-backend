@@ -1,0 +1,107 @@
+// Time saved: the monthly job (finalize, emails, purge) and unsubscribe.
+// Needs the API with DEV_MAIL_URL pointing at the local Mailpit (supabase start).
+import { check, call, sql, user, API, CRON_SECRET, CLIENT } from "./harness.mjs";
+import { firmWith, studentOf } from "./imports-helpers.mjs";
+
+const MAILPIT = process.env.MAILPIT_URL ?? "http://127.0.0.1:54324";
+const job = (q = "") => fetch(`${API}/internal/kpi/monthly${q}`, { method: "POST", headers: { ...CLIENT, Authorization: `Bearer ${CRON_SECRET}` } }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
+const mailsTo = async (email) => {
+  const r = await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${email}"`)}`);
+  return ((await r.json()).messages ?? []);
+};
+const sends = (u, kind = "consultant") => sql(`select count(*) from public.kpi_email_sends where recipient_id='${u.id}' and kind='${kind}'`);
+const MONTH = "2026-09";
+const record = (who, student, at) =>
+  sql(`with r as (insert into public.family_reports (student_id, counselor_id, title) values ('${student.id}', '${who.id}', 'P') returning id)
+       select private.kpi_record_at('${who.id}', 'family_report', '${student.id}', '${student.id}', id::text, 'family_reports', id, '${at}') from r`);
+const reportOf = (who) => sql(`select (select id from public.family_reports where counselor_id='${who.id}' order by created_at limit 1)`);
+
+const unauth = await fetch(`${API}/internal/kpi/monthly`, { method: "POST", headers: CLIENT });
+check("the job needs the cron secret", unauth.status === 401, `status ${unauth.status}`);
+
+// ---- Consultants -------------------------------------------------------------------
+const veteran = await user("kpi-mo-vet");          // first completion 40 days ago
+const fresh = await user("kpi-mo-fresh");          // first completion 3 days ago
+const idle = await user("kpi-mo-idle");            // nothing this month
+const quiet = await user("kpi-mo-quiet");          // unsubscribed
+const sv = await studentOf(veteran, "kpi-mo-sv");
+await sql(`update public.profiles set full_name = 'Philippa Snodgrass' where id = '${sv.id}'`);
+const sf = await studentOf(fresh, "kpi-mo-sf");
+const sq = await studentOf(quiet, "kpi-mo-sq");
+await record(veteran, sv, "2026-09-10 12:00:00+00");
+await sql(`update public.kpi_completions set completed_at = now() - interval '40 days' where counselor_id = '${veteran.id}'`);
+await sql(`update public.family_reports set status = 'sent' where counselor_id = '${veteran.id}'`); // as if sent; trigger ignores (source recorded)
+await record(fresh, sf, "2026-09-28 12:00:00+00");
+await sql(`update public.kpi_completions set completed_at = now() - interval '3 days' where counselor_id = '${fresh.id}'`);
+await record(quiet, sq, "2026-09-05 12:00:00+00");
+await sql(`update public.kpi_completions set completed_at = now() - interval '50 days' where counselor_id = '${quiet.id}'`);
+await sql(`insert into public.kpi_baselines (counselor_id, monthly_email) values ('${quiet.id}', false)`);
+
+// ---- Firms -----------------------------------------------------------------------------
+const owner3 = await user("kpi-mo-own3");
+const m3a = await user("kpi-mo-m3a");
+const m3b = await user("kpi-mo-m3b");
+const firm3 = await firmWith(owner3, [m3a, m3b]);
+for (const u of [owner3, m3a, m3b]) {
+  const s = await studentOf(u, "kpi-mo-fs");
+  await record(u, s, "2026-09-15 12:00:00+00");
+}
+const owner2 = await user("kpi-mo-own2");
+const m2 = await user("kpi-mo-m2");
+await firmWith(owner2, [m2]);
+for (const u of [owner2, m2]) {
+  const s = await studentOf(u, "kpi-mo-fs2");
+  await record(u, s, "2026-09-15 12:00:00+00");
+}
+
+// ---- Purge fixtures ------------------------------------------------------------------
+await sql(`insert into public.kpi_task_sessions (counselor_id, task_type, subject_id, active_seconds, last_heartbeat_at, last_active_on)
+           values ('${veteran.id}', 'meeting', gen_random_uuid(), 120, now() - interval '25 hours', current_date - 1),
+                  ('${veteran.id}', 'college_list', '${sv.id}', 900, now() - interval '15 days', current_date - 15)`);
+
+// ---- Purge only ----------------------------------------------------------------------
+const p = await job("?purgeOnly=1");
+check("purge-only run", p.status === 200 && p.body.purged !== undefined, JSON.stringify(p.body));
+check("raw activity older than 24 hours is cleared", (await sql(`select count(*) from public.kpi_task_sessions where last_heartbeat_at < now() - interval '24 hours'`)) === "0");
+check("...the running total stays", (await sql(`select active_seconds from public.kpi_task_sessions where counselor_id='${veteran.id}' and task_type='meeting'`)) === "120");
+check("an abandoned task is purged after 14 days", (await sql(`select count(*) from public.kpi_task_sessions where counselor_id='${veteran.id}' and task_type='college_list'`)) === "0");
+check("purge-only finalizes nothing", (await sql(`select count(*) from public.kpi_months where counselor_id='${veteran.id}'`)) === "0");
+
+// ---- Full run --------------------------------------------------------------------------
+const run1 = await job(`?month=${MONTH}`);
+check("full run", run1.status === 200, JSON.stringify(run1.body));
+check("months with completions are finalized", (await sql(`select count(*) from public.kpi_months where month = '${MONTH}-01' and counselor_id in ('${veteran.id}', '${fresh.id}')`)) === "2");
+check("the veteran gets the email", (await sends(veteran)) === "1");
+check("first email held under 14 days of use", (await sends(fresh)) === "0");
+check("zero completions → no email", (await sends(idle)) === "0" && (await sql(`select count(*) from public.kpi_months where counselor_id='${idle.id}'`)) === "0");
+check("unsubscribed → no email", (await sends(quiet)) === "0");
+check("3-consultant firm owner gets the firm email", (await sends(owner3, "firm")) === "1");
+check("2-consultant firm owner gets none", (await sends(owner2, "firm")) === "0");
+
+const mail = (await mailsTo(veteran.email))[0];
+check("the email reached the inbox", !!mail, JSON.stringify(mail ?? {}).slice(0, 200));
+if (mail) {
+  const full = await (await fetch(`${MAILPIT}/api/v1/message/${mail.ID}`)).json();
+  const body = `${full.Subject}\n${full.Text}\n${full.HTML}`;
+  check("no student name in the email", !body.includes("Snodgrass") && !body.includes("Philippa"));
+  check("it says estimated (defaults in use)", /estimated/.test(body));
+  const unsub = /\/kpi\/unsubscribe\/([A-Za-z0-9_-]+)/.exec(full.Text)?.[1];
+  check("it carries an unsubscribe link", !!unsub);
+  if (unsub) {
+    const page = await fetch(`${API}/kpi/unsubscribe/${unsub}`, { headers: CLIENT });
+    check("opening the link changes nothing", page.status === 200 && (await sql(`select coalesce((select monthly_email::text from public.kpi_baselines where counselor_id='${veteran.id}'), 'none')`)) !== "false");
+    const post = await fetch(`${API}/kpi/unsubscribe/${unsub}`, { method: "POST", headers: { ...CLIENT, "Content-Type": "application/x-www-form-urlencoded" }, body: "List-Unsubscribe=One-Click" });
+    check("posting it unsubscribes", post.status === 200 && (await sql(`select monthly_email::text from public.kpi_baselines where counselor_id='${veteran.id}'`)) === "false", `status ${post.status}`);
+  }
+  const bogus = await fetch(`${API}/kpi/unsubscribe/not-a-real-token-000000000000000000000`, { method: "POST", headers: CLIENT });
+  check("an unknown token is a 404", bogus.status === 404, `status ${bogus.status}`);
+}
+
+// ---- Idempotent, and the month is locked ---------------------------------------------
+const run2 = await job(`?month=${MONTH}`);
+check("job run twice sends once", run2.status === 200 && (await sends(owner3, "firm")) === "1" && (await sends(veteran)) === "1");
+const rid = await reportOf(fresh);
+await sql(`update public.family_reports set status = 'sent' where id = '${rid}'`);
+await sql(`update public.family_reports set status = 'draft' where id = '${rid}'`);
+check("undo after finalize changes nothing", (await sql(`select count(*) from public.kpi_completions where counselor_id='${fresh.id}' and month='${MONTH}-01'`)) === "1");
+check("the job beats its heartbeat", (await sql(`select (last_ok_at is not null)::text from public.job_heartbeats where job='kpi-monthly'`)) === "true");
