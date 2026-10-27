@@ -12,6 +12,7 @@ import { serviceClient } from "../lib/supabase.js";
 import { assertOwnsSubject } from "../lib/kpi/subjects.js";
 import { KPI_SCHEMA_MISSING, TASK_TYPES, type TaskType } from "../lib/kpi/types.js";
 import { toBaselinesDto, type BaselinesRow } from "../lib/kpi/defaults.js";
+import { buildReport, monthIn, monthsBack, type ActivityCounts, type CompletionRow } from "../lib/kpi/report.js";
 
 const heartbeatBody = z.object({ taskType: z.enum(TASK_TYPES), subjectId: z.string().uuid() }).strict();
 
@@ -30,6 +31,10 @@ const baselinesBody = z
     dismissPrompt: z.literal(true).optional(),
   })
   .strict();
+
+const monthQuery = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Use YYYY-MM").optional() }).strict();
+const COMPLETION_COLUMNS =
+  "task_type, student_id, month, manual_minutes, manual_is_estimate, meridies_minutes, measure_method, saved_minutes, hourly_rate, rate_is_estimate";
 
 const BASELINE_COLUMNS =
   "manual, meridies, manual_edited, meridies_edited, hourly_rate, rate_edited, hours_per_student_year, hours_edited, monthly_email, prompt_dismissed_at";
@@ -102,6 +107,43 @@ export default async function kpiRoutes(app: FastifyInstance) {
       .single();
     if (error) throw schemaError(error);
     return toBaselinesDto(data as BaselinesRow);
+  });
+
+  /** The caller's own month: per-task lines with their arithmetic, value or extra students, raw activity. */
+  app.get("/report", { preHandler: [...counselor, limit("kpi:report", 60, 60)] }, async (request) => {
+    const q = monthQuery.parse(request.query);
+    const me = request.auth.userId;
+    const { data: profile } = await request.db.from("profiles").select("timezone").eq("id", me).maybeSingle();
+    const month = q.month ?? monthIn((profile?.timezone as string | null) ?? null);
+    const first = `${month}-01`;
+    const next = monthsBack(month, -1);
+
+    const [rowsRes, yearRes, baseRes] = await Promise.all([
+      request.db.from("kpi_completions").select(COMPLETION_COLUMNS).eq("counselor_id", me).eq("month", first).order("completed_at").limit(5000),
+      request.db.from("kpi_completions").select(COMPLETION_COLUMNS).eq("counselor_id", me).gte("month", monthsBack(month, 11)).lte("month", first).limit(20000),
+      request.db.from("kpi_baselines").select(BASELINE_COLUMNS).eq("counselor_id", me).maybeSingle(),
+    ]);
+    for (const r of [rowsRes, yearRes, baseRes]) if (r.error) throw schemaError(r.error);
+    const rows = (rowsRes.data ?? []) as CompletionRow[];
+
+    const ids = [...new Set(rows.map((r) => r.student_id).filter((x): x is string => !!x))];
+    const names: Record<string, string> = {};
+    if (ids.length) {
+      const { data } = await request.db.from("profiles").select("id, full_name").in("id", ids.slice(0, 500));
+      for (const p of data ?? []) if (p.full_name) names[String(p.id)] = String(p.full_name);
+    }
+
+    // Raw usage, shown separately from savings. Unreadable → empty, never an error.
+    const activity: ActivityCounts = { aiRuns: {}, researchRuns: {} };
+    const [ai, research] = await Promise.all([
+      request.db.from("ai_runs").select("module").eq("actor_id", me).gte("created_at", first).lt("created_at", next).limit(10000),
+      request.db.from("research_runs").select("feature").eq("counselor_id", me).gte("created_at", first).lt("created_at", next).limit(10000),
+    ]);
+    for (const r of ai.data ?? []) activity.aiRuns[String(r.module)] = (activity.aiRuns[String(r.module)] ?? 0) + 1;
+    for (const r of research.data ?? []) activity.researchRuns[String(r.feature)] = (activity.researchRuns[String(r.feature)] ?? 0) + 1;
+
+    const baselines = toBaselinesDto((baseRes.data as BaselinesRow | null) ?? null);
+    return buildReport(rows, (yearRes.data ?? []) as CompletionRow[], baselines.hoursPerStudentYear, activity, month, names);
   });
 
   app.post("/heartbeat", { preHandler: [...counselor, limit("kpi:heartbeat", 120, 60)] }, async (request, reply) => {
