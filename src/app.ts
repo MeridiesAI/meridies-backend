@@ -50,6 +50,7 @@ import taskRoutes from "./routes/tasks.js";
 // v10 sync imports: overview
 import workItemRoutes from "./routes/workItems.js";
 import pinRoutes from "./routes/pins.js";
+import kpiRoutes from "./routes/kpi.js";
 import outcomeRoutes, { alumniRoutes } from "./routes/outcomes.js";
 import referralRoutes from "./routes/referrals.js";
 import overviewSummaryRoutes from "./routes/overviewSummaries.js";
@@ -177,6 +178,7 @@ export function buildApp() {
   // v10 sync routes: overview
   app.register(workItemRoutes, { prefix: "/work-items" });
   app.register(pinRoutes, { prefix: "/pins" });
+  app.register(kpiRoutes, { prefix: "/kpi" });
   app.register(outcomeRoutes, { prefix: "/outcomes" });
   app.register(alumniRoutes, { prefix: "/alumni" });
   app.register(referralRoutes, { prefix: "/referrals" });

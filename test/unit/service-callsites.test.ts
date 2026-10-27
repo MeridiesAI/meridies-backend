@@ -33,13 +33,15 @@ const REVIEWED = [
   // lib/myInvitations.ts: inside a student's own request, after authenticate + requireRole("student"): finds pending
   // invitations to that account's confirmed address (never returns a token) and accepts one by running
   // accept_invitation as the student; asks approvedCounselorIds first.
+  // routes/kpi.ts: inside an approved counselor's own request (authenticate + requireRole), after
+  // assertOwnsSubject on the caller's RLS client; calls kpi_heartbeat with p_counselor = the caller only.
   "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "routes/kpi.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

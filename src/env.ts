@@ -35,6 +35,9 @@ const envSchema = z.object({
   // Kill switch for the AI column mapping. "off" leaves header presets,
   // saved templates and the counselor's own mapping.
   IMPORTS_AI: blankIsUnset(z.enum(["on", "off"]).default("on")),
+  // Time saved: activity heartbeats are recorded only when "true". Stays off in
+  // production until the privacy policy line about time tracking is live.
+  KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
   // Test double for research (no model, no web). Works only with NODE_ENV
