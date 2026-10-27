@@ -740,6 +740,8 @@ export const toMeeting = (r: Row) => ({
   calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | null,
   /** Emailed calendar invites on (lib/meetingInvites.ts). False before 20261023090001. */
   sendInvites: r.send_invites === true,
+  /** "Notes sent" mark (Time saved). Null before 20261027000001, or when unmarked. */
+  notesSentAt: nstr(r.notes_sent_at),
   createdAt: nstr(r.created_at),
 });
 

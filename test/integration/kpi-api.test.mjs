@@ -50,3 +50,14 @@ const pg = await call(pend.token, "GET", "/kpi/baselines");
 check("...and read them back", pg.status === 200 && pg.body.hourlyRate === 175, `status ${pg.status}`);
 const ph = await call(pend.token, "GET", "/kpi/report");
 check("...but nothing else in Time saved", ph.status === 403, `status ${ph.status}`);
+
+// ---- The meeting DTO carries the mark ------------------------------------------------
+{
+  const s2 = await studentOf(c, "kpi-api-dto");
+  const mid = await sql(`with m as (insert into public.meetings (student_id, counselor_id, title, starts_at, status) values ('${s2.id}', '${c.id}', 'Dto', now() - interval '1 day', 'held') returning id) select id from m`);
+  const before = await call(c.token, "GET", `/meetings/${mid}`);
+  check("a meeting reads notesSentAt null before the mark", before.status === 200 && before.body.notesSentAt === null, JSON.stringify(before.body).slice(0, 200));
+  await call(c.token, "POST", `/meetings/${mid}/notes-sent`);
+  const after = await call(c.token, "GET", `/meetings/${mid}`);
+  check("...and the time after it", typeof after.body.notesSentAt === "string");
+}
