@@ -1127,7 +1127,8 @@ Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
   role only; never the token), and every token stays valid, so a link from any past email works. GET shows a
   button; a POST (the button, or a mail client's one-click `List-Unsubscribe=One-Click`, urlencoded or multipart,
   no cookies or auth) switches off that type at once (`monthly_email` or `firm_email`). No email goes out without
-  `PUBLIC_API_URL` and `COMPANY_POSTAL_ADDRESS` (footer); either missing counts as a failed step.
+  `PUBLIC_API_URL` (a failed step). Footer: `COMPANY_POSTAL_ADDRESS` when set, else `COMPANY_CONTACT_EMAIL`
+  (default team@meridiesai.com); keep these emails free of promotion, or set a postal address first.
 - Tests: `test/integration/kpi-*.test.mjs`, `test/unit/kpi-*.test.ts`.
 
 ## Scheduled jobs

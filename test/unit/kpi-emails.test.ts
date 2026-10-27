@@ -12,7 +12,7 @@ const report = (o: Partial<CompletionRow> = {}) =>
   buildReport([row(o), row({ student_id: "s2", ...o })], [row(o)], 1, { aiRuns: {}, researchRuns: {} }, "2026-10", names);
 const LINK = "https://app.example/dashboard/counselor/time-saved?month=2026-10";
 const UNSUB = "https://api.example/kpi/unsubscribe/tok";
-const ADDR = "1 Test Way, Testville, NY 10001";
+const ADDR = "Meridies · 1 Test Way, Testville, NY 10001";
 
 test("consultant email never names a student", () => {
   const e = renderConsultantEmail(report(), LINK, UNSUB, ADDR);
@@ -56,8 +56,8 @@ test("html escapes the firm name", () => {
   assert.ok(!e.html.includes("<b>Evil</b>"));
 });
 
-test("both footers carry the company's postal address", () => {
-  const addr = "1 Test Way, Testville, NY 10001";
+test("both footers carry the footer line they are given", () => {
+  const addr = "Meridies · Questions? team@meridiesai.com";
   const c = renderConsultantEmail(report(), LINK, UNSUB, addr);
   const f = renderFirmEmail({ month: "2026-10", hoursSaved: 1, valueOfTime: null, completions: 1, students: 1 }, "Acme", LINK, UNSUB, addr);
   for (const e of [c, f]) assert.ok(e.text.includes(addr) && e.html.includes(addr));

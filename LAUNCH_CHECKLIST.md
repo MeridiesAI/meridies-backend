@@ -135,8 +135,9 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
     and the full run at `0 14 2-7 * *` (finalizes last month and sends its emails; it runs daily on the 2nd to
     the 7th so a send that failed, e.g. over Resend's daily cap, goes out the next day; each email goes once).
     A missed month can be re-run by hand with `?month=YYYY-MM`.
-  - `COMPANY_POSTAL_ADDRESS` on Railway: the company's postal address, printed in both email footers. Without
-    it months are still finalized but no Time saved email goes out (the job's heartbeat reports the failed step).
+  - Email footer: the contact email (`COMPANY_CONTACT_EMAIL`, default team@meridiesai.com). These are
+    relationship emails about the customer's own account, so no postal address is required while they stay
+    free of promotion; set `COMPANY_POSTAL_ADDRESS` (a PO box or virtual mailbox is fine) before adding any.
   - `KPI_TRACKING_ENABLED=true` on Railway **only after** the privacy policy's "Time Saved Reports" section is
     live on meridiesai.com/privacy. Until then heartbeats are accepted and ignored (`tracked: false`), and
     completions still count with the signup figures.

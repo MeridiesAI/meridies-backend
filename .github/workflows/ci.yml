@@ -133,10 +133,10 @@ jobs:
           # The Import page for every test counselor, with presets only (no model calls).
           IMPORTS_ROLLOUT: all
           IMPORTS_AI: "off"
-          # Time saved: heartbeats on, emails to the local mail catcher, a test footer address.
+          # Time saved: heartbeats on, emails to the local mail catcher. No postal address,
+          # as in production: the footer carries the contact email.
           KPI_TRACKING_ENABLED: "true"
           DEV_MAIL_URL: http://127.0.0.1:54324
-          COMPANY_POSTAL_ADDRESS: "1 Test Way, Testville, NY 10001"
         run: |
           npx tsx src/index.ts > api.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done

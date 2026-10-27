@@ -59,11 +59,10 @@ export function unsubscribeBaseUrl(publicApiUrl: string | undefined): string {
   return publicApiUrl.replace(/\/+$/, "");
 }
 
-/** The company's postal address for the email footer. Without it no Time saved email goes out. */
-export function companyPostalAddress(value: string | undefined): string {
-  const v = value?.trim();
-  if (!v) throw new Error("COMPANY_POSTAL_ADDRESS is required for the email footer; no Time saved email was sent");
-  return v;
+/** The footer line: the postal address when one is set, else the contact email. Never blocks sending. */
+export function emailFooter(postalAddress: string | undefined, contactEmail: string): string {
+  const a = postalAddress?.trim();
+  return a ? `Meridies · ${a}` : `Meridies · Questions? ${contactEmail}`;
 }
 
 export const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
@@ -122,14 +121,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
   result.month = month;
   const first = `${month}-01`;
   const link = `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/time-saved?month=${month}`;
-  // Months are still finalized without it; only the emails wait (a failed step, so the heartbeat says so).
-  let address: string | null = null;
-  try {
-    address = companyPostalAddress(env.COMPANY_POSTAL_ADDRESS);
-  } catch (err) {
-    result.errors++;
-    log.error({ err: err instanceof Error ? err.message : "unknown" }, "kpi monthly: emails held");
-  }
+  const address = emailFooter(env.COMPANY_POSTAL_ADDRESS, env.COMPANY_CONTACT_EMAIL);
   const zones = new Map<string, string | null>(); // one time zone lookup per consultant per run
 
   const { data: rows, error } = await svc.from("kpi_completions").select("counselor_id, firm_id").eq("month", first).limit(50000);
@@ -144,7 +136,6 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
       if (finErr) throw new Error(`finalize: ${finErr.code}`);
       result.finalized++;
 
-      if (!address) continue;
       if (!(await wantsEmail(svc, counselorId, "consultant")) || (await alreadySent(svc, counselorId, month, "consultant", null))) continue;
       const { data: firstRow } = await svc
         .from("kpi_completions")
@@ -170,8 +161,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
     }
   }
 
-  const footer = address; // narrowed for the firm loop
-  for (const firmId of footer ? distinct(rows, "firm_id") : []) {
+  for (const firmId of distinct(rows, "firm_id")) {
     try {
       const { data: totals, error: tErr } = await svc.rpc("kpi_firm_totals", { p_firm: firmId, p_month: first });
       if (tErr) throw new Error(`firm totals: ${tErr.code}`);
@@ -184,7 +174,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
         if (!(await wantsEmail(svc, adminId, "firm")) || (await alreadySent(svc, adminId, month, "firm", firmId))) continue;
         const to = await emailOf(svc, adminId);
         if (!to) continue;
-        const mail = renderFirmEmail({ month, ...(totals as Omit<FirmTotals, "month">) }, String(firm.name), link, await unsubscribeUrl(svc, adminId, "firm"), footer as string);
+        const mail = renderFirmEmail({ month, ...(totals as Omit<FirmTotals, "month">) }, String(firm.name), link, await unsubscribeUrl(svc, adminId, "firm"), address);
         const sent = await sendEmail({ to, ...mail, template: "kpi-firm-monthly", idempotencyKey: `kpi-firm:${firmId}:${adminId}:${month}`, logger: log });
         if (!sent.sent) continue;
         await svc.from("kpi_email_sends").insert({ recipient_id: adminId, month: first, kind: "firm", firm_id: firmId });

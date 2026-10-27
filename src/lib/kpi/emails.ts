@@ -25,9 +25,9 @@ function layout(title: string, lines: string[], link: string, unsubscribe: strin
 ${lines.map((l) => `<p style="font-size:15px;line-height:1.5">${esc(l)}</p>`).join("\n")}
 <p><a href="${esc(link)}" style="color:#4338ca">See how each number was calculated</a></p>
 <p style="font-size:12px;color:#6b7280"><a href="${esc(unsubscribe)}" style="color:#6b7280">Unsubscribe from these monthly emails</a></p>
-<p style="font-size:12px;color:#6b7280">Meridies · ${esc(address)}</p>
+<p style="font-size:12px;color:#6b7280">${esc(address)}</p>
 </body></html>`;
-  const text = [title, "", ...lines, "", `See how each number was calculated: ${link}`, "", `Unsubscribe: ${unsubscribe}`, "", `Meridies · ${address}`].join("\n");
+  const text = [title, "", ...lines, "", `See how each number was calculated: ${link}`, "", `Unsubscribe: ${unsubscribe}`, "", address].join("\n");
   return { html, text };
 }
 

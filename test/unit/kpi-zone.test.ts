@@ -21,8 +21,8 @@ test("unsubscribe links need the API's public address and fail loudly without it
   assert.throws(() => unsubscribeBaseUrl(undefined), /PUBLIC_API_URL/);
 });
 
-test("emails need the company's postal address and fail loudly without it", async () => {
-  const { companyPostalAddress } = await import("../../src/lib/kpi/monthly.js");
-  assert.equal(companyPostalAddress(" 1 Test Way, Testville, NY 10001 "), "1 Test Way, Testville, NY 10001");
-  assert.throws(() => companyPostalAddress(undefined), /COMPANY_POSTAL_ADDRESS/);
+test("the footer uses the postal address when set, else the contact email (never blocks sending)", async () => {
+  const { emailFooter } = await import("../../src/lib/kpi/monthly.js");
+  assert.equal(emailFooter(" 1 Test Way, Testville, NY 10001 ", "team@meridiesai.com"), "Meridies · 1 Test Way, Testville, NY 10001");
+  assert.equal(emailFooter(undefined, "team@meridiesai.com"), "Meridies · Questions? team@meridiesai.com");
 });
