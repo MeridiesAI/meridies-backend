@@ -12,7 +12,7 @@ import { serviceClient } from "../lib/supabase.js";
 import { assertOwnsSubject } from "../lib/kpi/subjects.js";
 import { KPI_SCHEMA_MISSING, TASK_TYPES, type TaskType } from "../lib/kpi/types.js";
 import { toBaselinesDto, type BaselinesRow } from "../lib/kpi/defaults.js";
-import { monthIn } from "../lib/kpi/report.js";
+import { monthIn, monthsBack } from "../lib/kpi/report.js";
 import { BASELINE_COLUMNS, KpiReadError, loadReport } from "../lib/kpi/load.js";
 
 const heartbeatBody = z.object({ taskType: z.enum(TASK_TYPES), subjectId: z.string().uuid() }).strict();
@@ -59,50 +59,37 @@ export default async function kpiRoutes(app: FastifyInstance) {
 
   /**
    * Save signup / Settings figures. The table isn't client-writable, so this writes
-   * the caller's own row on the service client. A figure counts as edited once the
-   * client says the consultant touched it; it stays edited.
+   * the caller's own row on the service client, merged in one statement
+   * (kpi_save_baselines). A figure counts as edited once the client says the
+   * consultant touched it; it stays edited.
    */
   app.put("/baselines", { preHandler: [...counselor, limit("kpi:baselines:write", 30, 60)], config: { allowPending: true } }, async (request) => {
     const body = baselinesBody.parse(request.body);
     const svc = serviceClient();
     if (!svc) throw unavailable("Saving needs the service role key");
-    const { data: current, error: readError } = await svc
+    const pick = (field: "manual" | "meridies") =>
+      Object.fromEntries(TASK_TYPES.flatMap((t) => (body.tasks?.[t]?.[field] !== undefined ? [[t, body.tasks[t]![field]]] : [])));
+    const flags = (field: "manualEdited" | "meridiesEdited") =>
+      Object.fromEntries(TASK_TYPES.flatMap((t) => (body.tasks?.[t]?.[field] ? [[t, true]] : [])));
+    // One atomic merge in the database: overlapping saves from separate fields keep every figure.
+    const { error: saveError } = await svc.rpc("kpi_save_baselines", {
+      p_counselor: request.auth.userId,
+      p_manual: pick("manual"),
+      p_meridies: pick("meridies"),
+      p_manual_edited: flags("manualEdited"),
+      p_meridies_edited: flags("meridiesEdited"),
+      p_rate: body.hourlyRate ?? null,
+      p_rate_edited: body.rateEdited === true,
+      p_hours: body.hoursPerStudentYear ?? null,
+      p_hours_edited: body.hoursEdited === true,
+      p_monthly_email: body.monthlyEmail ?? null,
+      p_dismiss: body.dismissPrompt === true,
+    });
+    if (saveError) throw schemaError(saveError);
+    const { data, error } = await svc
       .from("kpi_baselines")
       .select(BASELINE_COLUMNS)
       .eq("counselor_id", request.auth.userId)
-      .maybeSingle();
-    if (readError) throw schemaError(readError);
-    const row = (current as BaselinesRow | null) ?? null;
-    const manual = { ...(row?.manual ?? {}) };
-    const meridies = { ...(row?.meridies ?? {}) };
-    const manualEdited = { ...(row?.manual_edited ?? {}) };
-    const meridiesEdited = { ...(row?.meridies_edited ?? {}) };
-    for (const t of TASK_TYPES) {
-      const p = body.tasks?.[t];
-      if (!p) continue;
-      if (p.manual !== undefined) manual[t] = p.manual;
-      if (p.meridies !== undefined) meridies[t] = p.meridies;
-      if (p.manualEdited) manualEdited[t] = true;
-      if (p.meridiesEdited) meridiesEdited[t] = true;
-    }
-    const next = {
-      counselor_id: request.auth.userId,
-      manual,
-      meridies,
-      manual_edited: manualEdited,
-      meridies_edited: meridiesEdited,
-      hourly_rate: body.hourlyRate ?? row?.hourly_rate ?? null,
-      rate_edited: (row?.rate_edited ?? false) || body.rateEdited === true,
-      hours_per_student_year: body.hoursPerStudentYear ?? row?.hours_per_student_year ?? null,
-      hours_edited: (row?.hours_edited ?? false) || body.hoursEdited === true,
-      monthly_email: body.monthlyEmail ?? row?.monthly_email ?? true,
-      prompt_dismissed_at: body.dismissPrompt ? new Date().toISOString() : (row?.prompt_dismissed_at ?? null),
-      updated_at: new Date().toISOString(),
-    };
-    const { data, error } = await svc
-      .from("kpi_baselines")
-      .upsert(next, { onConflict: "counselor_id" })
-      .select(BASELINE_COLUMNS)
       .single();
     if (error) throw schemaError(error);
     return toBaselinesDto(data as BaselinesRow);
@@ -131,7 +118,8 @@ export default async function kpiRoutes(app: FastifyInstance) {
       .maybeSingle();
     if (pErr) throw fromPostgrest(pErr);
     if (!profile?.firm_id) throw notFound("You're not in a firm");
-    const month = q.month ?? monthIn((profile.timezone as string | null) ?? null);
+    // Firm totals cover ended months only, so the default is last month.
+    const month = q.month ?? monthsBack(monthIn((profile.timezone as string | null) ?? null), 1).slice(0, 7);
     const { data, error } = await request.db.rpc("kpi_firm_month", { p_firm: profile.firm_id, p_month: `${month}-01` });
     if (error) {
       if (error.code === "42501") throw forbidden("Only the firm's owners and admins see firm totals");

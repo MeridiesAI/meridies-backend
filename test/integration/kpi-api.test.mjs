@@ -61,3 +61,18 @@ check("...but nothing else in Time saved", ph.status === 403, `status ${ph.statu
   const after = await call(c.token, "GET", `/meetings/${mid}`);
   check("...and the time after it", typeof after.body.notesSentAt === "string");
 }
+
+// ---- Saves that overlap keep every figure ---------------------------------------------
+{
+  const z = await user("kpi-api-race");
+  const tasks = ["college_list", "essay_feedback", "meeting", "family_report", "activity_list"];
+  await Promise.all(
+    tasks.flatMap((t, i) => [
+      call(z.token, "PUT", "/kpi/baselines", { tasks: { [t]: { manual: 100 + i, manualEdited: true } } }),
+      call(z.token, "PUT", "/kpi/baselines", { tasks: { [t]: { meridies: 10 + i, meridiesEdited: true } } }),
+    ])
+  );
+  const g = await call(z.token, "GET", "/kpi/baselines");
+  const ok = tasks.every((t, i) => g.body.tasks[t].manual === 100 + i && g.body.tasks[t].meridies === 10 + i && g.body.tasks[t].manualEdited && g.body.tasks[t].meridiesEdited);
+  check("ten overlapping saves keep every figure and flag", ok, JSON.stringify(g.body.tasks));
+}

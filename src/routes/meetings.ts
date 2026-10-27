@@ -361,7 +361,11 @@ export default async function meetingRoutes(app: FastifyInstance) {
       .eq("id", id)
       .select("id, notes_sent_at")
       .single();
-    if (error) throw fromPostgrest(error);
+    if (error) {
+      // Before the Time saved migration there is no column to mark.
+      if (["42703", "PGRST204"].includes(error.code ?? "")) throw new HttpError(503, "Time saved isn't switched on yet", "kpi_unavailable");
+      throw fromPostgrest(error);
+    }
     return { id: String(data.id), notesSentAt: (data.notes_sent_at as string | null) ?? null };
   };
   const notesSentPre = { preHandler: [app.authenticate, requireRole("counselor"), limit("meetings:notes-sent", 60, 60)] };

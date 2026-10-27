@@ -3,7 +3,8 @@
 --
 -- Only from figures consultants edited themselves (an unedited default is
 -- left out), and nothing at all unless the pool holds 10+ consultants from 5+
--- firms (a solo consultant counts as their own firm). Medians only; no ids,
+-- firms (a solo consultant counts as their own firm), and that floor holds for
+-- every figure on its own (a task type, the value). Medians only; no ids,
 -- no names, no students. Service role only (the internal route).
 --
 -- Deploy order: after 20261027000001; either order with the code. Not in REQUIRED_SCHEMA.
@@ -31,6 +32,8 @@ as $$
              round(percentile_cont(0.5) within group (order by saved_minutes)::numeric, 1) as median_saved,
              round(percentile_cont(0.5) within group (order by meridies_minutes)::numeric, 1) as median_meridies
       from pool group by task_type
+      -- the floor applies to every figure on its own, not just the pool
+      having count(distinct counselor_id) >= 10 and count(distinct coalesce(firm_id, counselor_id)) >= 5
     ) t
   ),
   hours as (
@@ -38,8 +41,10 @@ as $$
     from (select sum(saved_minutes) / 60.0 as h from pool group by counselor_id, month) m
   ),
   value as (
-    select round(percentile_cont(0.5) within group (order by v)::numeric) as v
-    from (select sum(saved_minutes / 60.0 * hourly_rate) as v from pool where rate_is_estimate = false group by counselor_id, month) x
+    select case when count(distinct counselor_id) >= 10 and count(distinct firm_key) >= 5
+                then round(percentile_cont(0.5) within group (order by v)::numeric) end as v
+    from (select counselor_id, coalesce(firm_id, counselor_id) as firm_key, sum(saved_minutes / 60.0 * hourly_rate) as v
+          from pool where rate_is_estimate = false group by counselor_id, coalesce(firm_id, counselor_id), month) x
   )
   select case
     when size.people < 10 or size.firms < 5 then jsonb_build_object('available', false)

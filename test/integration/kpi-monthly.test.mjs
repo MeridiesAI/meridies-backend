@@ -97,6 +97,18 @@ if (mail) {
   check("an unknown token is a 404", bogus.status === 404, `status ${bogus.status}`);
 }
 
+// ---- An owner who gets both emails in one run: both unsubscribe links work -------------
+{
+  const mails = await mailsTo(owner3.email);
+  check("the firm owner got two emails (their own and the firm's)", mails.length === 2, String(mails.length));
+  for (const m of mails) {
+    const full = await (await fetch(`${MAILPIT}/api/v1/message/${m.ID}`)).json();
+    const tok = /\/kpi\/unsubscribe\/([A-Za-z0-9_-]+)/.exec(full.Text)?.[1];
+    const page = await fetch(`${API}/kpi/unsubscribe/${tok}`, { headers: CLIENT });
+    check(`unsubscribe link works in "${full.Subject}"`, page.status === 200, `status ${page.status}`);
+  }
+}
+
 // ---- Idempotent, and the month is locked ---------------------------------------------
 const run2 = await job(`?month=${MONTH}`);
 check("job run twice sends once", run2.status === 200 && (await sends(owner3, "firm")) === "1" && (await sends(veteran)) === "1");

@@ -34,3 +34,13 @@ test("a saved row overrides only what it holds", () => {
   assert.equal(dto.hoursPerStudentYear, 40);
   assert.equal(dto.monthlyEmail, false);
 });
+
+test("a row nobody answered (e.g. made for an unsubscribe token) still asks", () => {
+  const blank = {
+    manual: {}, meridies: {}, manual_edited: {}, meridies_edited: {}, hourly_rate: null, rate_edited: false,
+    hours_per_student_year: null, hours_edited: false, monthly_email: true, prompt_dismissed_at: null,
+  };
+  assert.equal(toBaselinesDto(blank).needsPrompt, true);
+  assert.equal(toBaselinesDto({ ...blank, prompt_dismissed_at: "2026-10-01T00:00:00Z" }).needsPrompt, false);
+  assert.equal(toBaselinesDto({ ...blank, rate_edited: true }).needsPrompt, false);
+});

@@ -52,15 +52,23 @@ export async function purgeSignals(svc: SupabaseClient, now = new Date()): Promi
   return { cleared: cleared.data?.length ?? 0, abandoned: abandoned.data?.length ?? 0 };
 }
 
-/** A fresh unsubscribe token for this email; only its hash is stored (older links stop working). */
-async function unsubscribeUrl(svc: SupabaseClient, profileId: string): Promise<string> {
+/**
+ * An unsubscribe link for this run; only its hash is stored. One token per
+ * recipient per run (`cache`), so an owner's own email and firm email share a
+ * working link; an earlier month's link stops working.
+ */
+async function unsubscribeUrl(svc: SupabaseClient, profileId: string, cache: Map<string, string>): Promise<string> {
+  const cached = cache.get(profileId);
+  if (cached) return cached;
   const token = randomBytes(32).toString("base64url");
   const { error } = await svc
     .from("kpi_baselines")
     .upsert({ counselor_id: profileId, unsubscribe_token_hash: hashToken(token) }, { onConflict: "counselor_id" });
   if (error) throw new Error(`unsubscribe token: ${error.code}`);
   const base = env.PUBLIC_API_URL ?? env.APP_URL;
-  return `${base.replace(/\/+$/, "")}/kpi/unsubscribe/${token}`;
+  const url = `${base.replace(/\/+$/, "")}/kpi/unsubscribe/${token}`;
+  cache.set(profileId, url);
+  return url;
 }
 
 async function wantsEmail(svc: SupabaseClient, profileId: string): Promise<boolean> {
@@ -94,6 +102,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
   result.month = month;
   const first = `${month}-01`;
   const link = `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/time-saved?month=${month}`;
+  const tokens = new Map<string, string>();
 
   const { data: rows, error } = await svc.from("kpi_completions").select("counselor_id, firm_id").eq("month", first).limit(50000);
   if (error) throw new Error(`completions: ${error.code}`);
@@ -121,7 +130,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
 
       const report = await loadReport(svc, counselorId, month);
       if (report.empty) continue;
-      const mail = renderConsultantEmail(report, link, await unsubscribeUrl(svc, counselorId));
+      const mail = renderConsultantEmail(report, link, await unsubscribeUrl(svc, counselorId, tokens));
       const sent = await sendEmail({ to, ...mail, template: "kpi-monthly", idempotencyKey: `kpi-monthly:${counselorId}:${month}`, logger: log });
       if (!sent.sent) continue;
       await svc.from("kpi_email_sends").insert({ recipient_id: counselorId, month: first, kind: "consultant" });
@@ -145,7 +154,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
         if (!(await wantsEmail(svc, adminId)) || (await alreadySent(svc, adminId, month, "firm", firmId))) continue;
         const to = await emailOf(svc, adminId);
         if (!to) continue;
-        const mail = renderFirmEmail({ month, ...(totals as Omit<FirmTotals, "month">) }, String(firm.name), link, await unsubscribeUrl(svc, adminId));
+        const mail = renderFirmEmail({ month, ...(totals as Omit<FirmTotals, "month">) }, String(firm.name), link, await unsubscribeUrl(svc, adminId, tokens));
         const sent = await sendEmail({ to, ...mail, template: "kpi-firm-monthly", idempotencyKey: `kpi-firm:${firmId}:${adminId}:${month}`, logger: log });
         if (!sent.sent) continue;
         await svc.from("kpi_email_sends").insert({ recipient_id: adminId, month: first, kind: "firm", firm_id: firmId });

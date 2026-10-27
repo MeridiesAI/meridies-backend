@@ -1,7 +1,8 @@
 -- Time saved, step 4: firm totals for owners and admins.
 -- Spec: docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md
 --
--- Totals only, and only when 3+ consultants contributed that month, so an admin
+-- Totals only, only for months that have ended, and only when 3+ consultants
+-- contributed that month, so an admin
 -- can't subtract their own figures to read a colleague's. Never a per-person field.
 -- Rows count under the firm snapshotted when the work was done.
 --
@@ -57,6 +58,12 @@ begin
     or exists (select 1 from public.firm_members m where m.firm_id = p_firm and m.profile_id = v_me and m.seat_role in ('owner','admin'))
   ) then
     raise exception 'Only the firm''s owners and admins see firm totals' using errcode = '42501';
+  end if;
+
+  -- A month still open is never shown: polling it, the change between two reads
+  -- would be one colleague's work, and value ÷ hours their rate.
+  if p_month >= date_trunc('month', now())::date then
+    return jsonb_build_object('available', false, 'reason', 'month-open');
   end if;
 
   return public.kpi_firm_totals(p_firm, p_month);

@@ -265,5 +265,5 @@
 **Files:** Modify the privacy page in PR landing #38 (or a follow-up PR off `main` if #38 has merged). Modify `LAUNCH_CHECKLIST.md` in meridies-backend.
 
 - [ ] **Step 1:** Add this text: "Meridies measures time spent on tasks in the app to calculate the time it saves you. We show this only to you and, as firm-wide totals, to your organization's administrators. In our marketing we use only anonymized averages across many consultants."
-- [ ] **Step 2:** In `LAUNCH_CHECKLIST.md`: "`KPI_TRACKING_ENABLED=true` on Railway only after the privacy line is live on the landing site; add the two Railway crons for `/internal/kpi/monthly` (daily `?purgeOnly=1` at `0 7 * * *`; full run `0 14 2 * *`)."
+- [ ] **Step 2:** In `LAUNCH_CHECKLIST.md`: "`KPI_TRACKING_ENABLED=true` on Railway only after the privacy line is live on the landing site; add the two Railway crons for `/internal/kpi/monthly` (daily `?purgeOnly=1` at `0 7 * * *`; full run `0 14 2-7 * *`)."
 - [ ] **Step 3:** Commit, then open the PRs (backend, app, landing). Elvin merges backend; landing and app wait for bcha.

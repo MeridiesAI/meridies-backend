@@ -56,6 +56,14 @@ export function toBaselinesDto(row: BaselinesRow | null): BaselinesDto {
     hoursPerStudentYear: num(row?.hours_per_student_year, DEFAULT_HOURS_PER_STUDENT),
     hoursEdited: row?.hours_edited === true,
     monthlyEmail: row ? row.monthly_email !== false : true,
-    needsPrompt: row === null,
+    // Asked until the consultant answers anything or says Not now (a row can exist
+    // without either: the monthly job stores an unsubscribe token on it).
+    needsPrompt:
+      row === null ||
+      (!row.prompt_dismissed_at &&
+        !row.rate_edited &&
+        !row.hours_edited &&
+        !Object.values(row.manual_edited ?? {}).some((v) => v === true) &&
+        !Object.values(row.meridies_edited ?? {}).some((v) => v === true)),
   };
 }
