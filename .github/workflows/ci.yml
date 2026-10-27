@@ -69,7 +69,8 @@ jobs:
           supabase init --force
           mkdir -p supabase/migrations
           cp "$GITHUB_WORKSPACE"/supabase/migrations/*.sql supabase/migrations/
-          supabase start -x studio,imgproxy,inbucket,edge-runtime,logflare,vector,supavisor
+          # Mail (inbucket/Mailpit, :54324) stays on: the Time saved email suite reads what was sent.
+          supabase start -x studio,imgproxy,edge-runtime,logflare,vector,supavisor
           supabase status -o env \
             | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|DB_URL)=' \
             | sed -e 's/^API_URL=/SUPABASE_URL=/' -e 's/^ANON_KEY=/SUPABASE_ANON_KEY=/' -e 's/^SERVICE_ROLE_KEY=/SUPABASE_SERVICE_ROLE_KEY=/' \
@@ -132,6 +133,10 @@ jobs:
           # The Import page for every test counselor, with presets only (no model calls).
           IMPORTS_ROLLOUT: all
           IMPORTS_AI: "off"
+          # Time saved: heartbeats on, emails to the local mail catcher, a test footer address.
+          KPI_TRACKING_ENABLED: "true"
+          DEV_MAIL_URL: http://127.0.0.1:54324
+          COMPANY_POSTAL_ADDRESS: "1 Test Way, Testville, NY 10001"
         run: |
           npx tsx src/index.ts > api.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done

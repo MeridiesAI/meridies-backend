@@ -38,6 +38,9 @@ const envSchema = z.object({
   // Time saved: activity heartbeats are recorded only when "true". Stays off in
   // production until the privacy policy line about time tracking is live.
   KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // The company's postal address, printed in the footer of the monthly Time saved
+  // emails (commercial email must carry one). Unset: those emails are not sent.
+  COMPANY_POSTAL_ADDRESS: blankIsUnset(z.string().min(5).max(300).optional()),
 
   ANTHROPIC_API_KEY: z.string().min(10).optional(),
   // Test double for research (no model, no web). Works only with NODE_ENV

@@ -8,7 +8,7 @@
  */
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { unavailable } from "../lib/errors.js";
-import { UNSUBSCRIBE_TOKEN } from "../lib/kpi/monthly.js";
+import { hashToken, UNSUBSCRIBE_TOKEN } from "../lib/kpi/monthly.js";
 import { serviceClient } from "../lib/supabase.js";
 
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
@@ -28,14 +28,17 @@ function page(reply: FastifyReply, status: number, body: string) {
 const INVALID = "<h1>This link isn't valid</h1><p>Use the link in one of your Time saved emails, or turn these emails off in Meridies Settings.</p>";
 
 export default async function kpiUnsubscribeRoutes(app: FastifyInstance) {
+  // RFC 8058: mail clients POST `List-Unsubscribe=One-Click` as a form (urlencoded or
+  // multipart), with no cookies or auth. The body is accepted and ignored: the token is the request.
   app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string", bodyLimit: 1024 }, (_r, _b, done) => done(null, {}));
+  app.addContentTypeParser("multipart/form-data", { parseAs: "string", bodyLimit: 4096 }, (_r, _b, done) => done(null, {}));
   const config = { rateLimit: { max: 20, timeWindow: "1 minute" } };
 
   async function lookup(token: string) {
     const svc = serviceClient();
     if (!svc) throw unavailable("Unsubscribe is unavailable on this server");
     if (!UNSUBSCRIBE_TOKEN.test(token)) return { svc, id: null, kind: null };
-    const { data, error } = await svc.from("kpi_unsubscribe_tokens").select("recipient_id, kind").eq("token", token).maybeSingle();
+    const { data, error } = await svc.from("kpi_unsubscribe_tokens").select("recipient_id, kind").eq("token_hash", hashToken(token)).maybeSingle();
     if (error) throw unavailable("Unsubscribe is unavailable right now");
     return {
       svc,

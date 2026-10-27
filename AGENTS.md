@@ -1100,7 +1100,7 @@ Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
 
 - **The database counts.** Triggers on `family_reports` (sent), `meetings.notes_sent_at` ("Notes sent", a
   mark only), `college_list_variants` (AI lists), `recommendations` (once `accepted_as` links what was
-  created) and `essay_marks` (a review round decided) call `private.kpi_record`, which snapshots the
+  created, and only with an `accepted_by`; otherwise it shows under Activity only) and `essay_marks` (a review round decided) call `private.kpi_record`, which snapshots the
   consultant's figures onto one `kpi_completions` row per finished item (re-runs add their time, never a
   second row). Undoing the source before the month is finalized (`kpi_months`) removes it; after, nothing
   changes. Each trigger traps its own errors: the ledger never blocks a save.
@@ -1123,9 +1123,11 @@ Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
 - Monthly emails (`kpi-monthly`, `kpi-firm-monthly`): no student names, "estimated" kept, first one 14+ days
   after the first completion, recorded in `kpi_email_sends` only once the provider accepted it. Unsubscribe
   (RFC 8058: `List-Unsubscribe` + `List-Unsubscribe-Post: List-Unsubscribe=One-Click`): one token per recipient
-  and email type (`kpi_unsubscribe_tokens`, service role only), reused in every email so a link never expires;
-  GET shows a button, POST switches off that type only (`monthly_email` or `firm_email`). No email goes out
-  without `PUBLIC_API_URL` (the job counts it as a failed step).
+  and email type: each email gets a fresh random token whose sha256 is stored (`kpi_unsubscribe_tokens`, service
+  role only; never the token), and every token stays valid, so a link from any past email works. GET shows a
+  button; a POST (the button, or a mail client's one-click `List-Unsubscribe=One-Click`, urlencoded or multipart,
+  no cookies or auth) switches off that type at once (`monthly_email` or `firm_email`). No email goes out without
+  `PUBLIC_API_URL` and `COMPANY_POSTAL_ADDRESS` (footer); either missing counts as a failed step.
 - Tests: `test/integration/kpi-*.test.mjs`, `test/unit/kpi-*.test.ts`.
 
 ## Scheduled jobs

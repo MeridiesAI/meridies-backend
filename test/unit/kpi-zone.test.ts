@@ -20,3 +20,9 @@ test("unsubscribe links need the API's public address and fail loudly without it
   assert.equal(unsubscribeBaseUrl("https://api.example/"), "https://api.example");
   assert.throws(() => unsubscribeBaseUrl(undefined), /PUBLIC_API_URL/);
 });
+
+test("emails need the company's postal address and fail loudly without it", async () => {
+  const { companyPostalAddress } = await import("../../src/lib/kpi/monthly.js");
+  assert.equal(companyPostalAddress(" 1 Test Way, Testville, NY 10001 "), "1 Test Way, Testville, NY 10001");
+  assert.throws(() => companyPostalAddress(undefined), /COMPANY_POSTAL_ADDRESS/);
+});

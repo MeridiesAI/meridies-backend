@@ -8,7 +8,7 @@
  *  - A consultant's first email waits until their first completion is 14+ days old.
  *  - kpi_email_sends makes a re-run send nothing twice.
  */
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -59,30 +59,26 @@ export function unsubscribeBaseUrl(publicApiUrl: string | undefined): string {
   return publicApiUrl.replace(/\/+$/, "");
 }
 
+/** The company's postal address for the email footer. Without it no Time saved email goes out. */
+export function companyPostalAddress(value: string | undefined): string {
+  const v = value?.trim();
+  if (!v) throw new Error("COMPANY_POSTAL_ADDRESS is required for the email footer; no Time saved email was sent");
+  return v;
+}
+
+export const hashToken = (t: string) => createHash("sha256").update(t).digest("hex");
+
 /**
- * The recipient's unsubscribe link for one email type. Made once and reused in
- * every email after, so a link from any past email keeps working; it switches off
- * only that type (`kind`). Cached per run.
+ * A fresh unsubscribe link for one email: a random token whose sha256 is stored
+ * (never the token). Every stored token stays valid, so a link from any past email
+ * keeps working; it switches off only that recipient's email of this type.
  */
-async function unsubscribeUrl(svc: SupabaseClient, profileId: string, kind: EmailKind, cache: Map<string, string>): Promise<string> {
+async function unsubscribeUrl(svc: SupabaseClient, profileId: string, kind: EmailKind): Promise<string> {
   const base = unsubscribeBaseUrl(env.PUBLIC_API_URL);
-  const key = `${profileId}:${kind}`;
-  const cached = cache.get(key);
-  if (cached) return cached;
-  const read = () => svc.from("kpi_unsubscribe_tokens").select("token").eq("recipient_id", profileId).eq("kind", kind).maybeSingle();
-  let { data, error } = await read();
+  const token = randomBytes(32).toString("base64url");
+  const { error } = await svc.from("kpi_unsubscribe_tokens").insert({ token_hash: hashToken(token), recipient_id: profileId, kind });
   if (error) throw new Error(`unsubscribe token: ${error.code}`);
-  if (!data) {
-    const made = await svc
-      .from("kpi_unsubscribe_tokens")
-      .upsert({ token: randomBytes(32).toString("base64url"), recipient_id: profileId, kind }, { onConflict: "recipient_id,kind", ignoreDuplicates: true });
-    if (made.error) throw new Error(`unsubscribe token: ${made.error.code}`);
-    ({ data, error } = await read()); // whichever insert won
-    if (error || !data) throw new Error(`unsubscribe token: ${error?.code ?? "missing"}`);
-  }
-  const url = `${base}/kpi/unsubscribe/${String(data.token)}`;
-  cache.set(key, url);
-  return url;
+  return `${base}/kpi/unsubscribe/${token}`;
 }
 
 /** Whether the recipient still wants this email type. An unreadable preference sends nothing. */
@@ -126,7 +122,14 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
   result.month = month;
   const first = `${month}-01`;
   const link = `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/time-saved?month=${month}`;
-  const tokens = new Map<string, string>();
+  // Months are still finalized without it; only the emails wait (a failed step, so the heartbeat says so).
+  let address: string | null = null;
+  try {
+    address = companyPostalAddress(env.COMPANY_POSTAL_ADDRESS);
+  } catch (err) {
+    result.errors++;
+    log.error({ err: err instanceof Error ? err.message : "unknown" }, "kpi monthly: emails held");
+  }
   const zones = new Map<string, string | null>(); // one time zone lookup per consultant per run
 
   const { data: rows, error } = await svc.from("kpi_completions").select("counselor_id, firm_id").eq("month", first).limit(50000);
@@ -141,6 +144,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
       if (finErr) throw new Error(`finalize: ${finErr.code}`);
       result.finalized++;
 
+      if (!address) continue;
       if (!(await wantsEmail(svc, counselorId, "consultant")) || (await alreadySent(svc, counselorId, month, "consultant", null))) continue;
       const { data: firstRow } = await svc
         .from("kpi_completions")
@@ -155,7 +159,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
 
       const report = await loadReport(svc, counselorId, month, await timeZoneOf(svc, counselorId, zones));
       if (report.empty) continue;
-      const mail = renderConsultantEmail(report, link, await unsubscribeUrl(svc, counselorId, "consultant", tokens));
+      const mail = renderConsultantEmail(report, link, await unsubscribeUrl(svc, counselorId, "consultant"), address);
       const sent = await sendEmail({ to, ...mail, template: "kpi-monthly", idempotencyKey: `kpi-monthly:${counselorId}:${month}`, logger: log });
       if (!sent.sent) continue;
       await svc.from("kpi_email_sends").insert({ recipient_id: counselorId, month: first, kind: "consultant" });
@@ -166,7 +170,8 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
     }
   }
 
-  for (const firmId of distinct(rows, "firm_id")) {
+  const footer = address; // narrowed for the firm loop
+  for (const firmId of footer ? distinct(rows, "firm_id") : []) {
     try {
       const { data: totals, error: tErr } = await svc.rpc("kpi_firm_totals", { p_firm: firmId, p_month: first });
       if (tErr) throw new Error(`firm totals: ${tErr.code}`);
@@ -179,7 +184,7 @@ export async function runMonthly(svc: SupabaseClient, log: Log, opts: { month?: 
         if (!(await wantsEmail(svc, adminId, "firm")) || (await alreadySent(svc, adminId, month, "firm", firmId))) continue;
         const to = await emailOf(svc, adminId);
         if (!to) continue;
-        const mail = renderFirmEmail({ month, ...(totals as Omit<FirmTotals, "month">) }, String(firm.name), link, await unsubscribeUrl(svc, adminId, "firm", tokens));
+        const mail = renderFirmEmail({ month, ...(totals as Omit<FirmTotals, "month">) }, String(firm.name), link, await unsubscribeUrl(svc, adminId, "firm"), footer as string);
         const sent = await sendEmail({ to, ...mail, template: "kpi-firm-monthly", idempotencyKey: `kpi-firm:${firmId}:${adminId}:${month}`, logger: log });
         if (!sent.sent) continue;
         await svc.from("kpi_email_sends").insert({ recipient_id: adminId, month: first, kind: "firm", firm_id: firmId });

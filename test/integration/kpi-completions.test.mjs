@@ -181,7 +181,7 @@ const session = (type, subject, secs) =>
   check("re-marking keeps the meeting's measured time", (await sql(`select measured_seconds::text || ' ' || measure_method from public.kpi_completions where dedupe_key='${mid}'`)) === "600 active");
 }
 
-// ---- Edge case: an accepted recommendation with no accepted_by credits the student's counselor ----
+// ---- Edge case: an accepted recommendation with no accepted_by records no completion ----
 {
   const u = await user("kpi-noactor");
   const s = await studentOf(u, "kpi-noactor-s");
@@ -189,5 +189,5 @@ const session = (type, subject, secs) =>
   const rec = await sql(`with r as (insert into public.recommendations (run_id, student_id, feature, title, why) values ('${run}', '${s.id}', 'activities', 'Camp', 'Fits.') returning id) select id from r`);
   const task = await sql(`with d as (insert into public.deliverables (student_id, kind, title, status, source, created_by, visible_to_student) values ('${s.id}', 'custom', 'Camp', 'not-started', 'counselor', '${u.id}', false) returning id) select id from d`);
   await sql(`update public.recommendations set status = 'accepted', accepted_as = '{"type":"task","id":"${task}"}' where id = '${rec}'`);
-  check("no accepted_by → the student's counselor is credited", (await sql(`select count(*) from public.kpi_completions where counselor_id='${u.id}' and task_type='activity_list'`)) === "1");
+  check("no accepted_by → no completion for anyone", (await sql(`select count(*) from public.kpi_completions where task_type='activity_list' and student_id='${s.id}'`)) === "0");
 }

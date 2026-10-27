@@ -335,14 +335,15 @@ declare
   v_id    uuid;
 begin
   begin
-    if new.status = 'accepted' and new.accepted_as is not null and old.accepted_as is null then
+    -- Only an acceptance with a counselor who accepted it counts (accept.ts always
+    -- sets accepted_by). Without one there is no one to credit: the research run
+    -- still shows under Activity, but no completion is recorded.
+    if new.status = 'accepted' and new.accepted_as is not null and old.accepted_as is null and new.accepted_by is not null then
       v_table := case new.accepted_as ->> 'type' when 'task' then 'deliverables' when 'student_college' then 'student_colleges' end;
       v_id := (new.accepted_as ->> 'id')::uuid;
       if v_table is not null and v_id is not null then
-        -- accept.ts always sets accepted_by; any other writer falls back like every
-        -- other trigger (the signed-in counselor, else the student's counselor).
         perform private.kpi_record(
-          coalesce(new.accepted_by, private.kpi_actor((select counselor_id from public.profiles where id = new.student_id))),
+          new.accepted_by,
           case new.feature when 'activities' then 'activity_list' else 'college_list' end,
           new.student_id, new.student_id, new.student_id::text, v_table, v_id);
       end if;

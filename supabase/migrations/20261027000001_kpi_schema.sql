@@ -95,16 +95,17 @@ create table if not exists public.kpi_email_sends (
 create unique index if not exists kpi_email_sends_once
   on public.kpi_email_sends (recipient_id, month, kind, coalesce(firm_id, '00000000-0000-0000-0000-000000000000'::uuid));
 
--- One-click unsubscribe links: one per recipient and email type, made once and
--- reused in every email, so a link from any past email keeps working. The token
--- is a random capability that only switches that email type off; service role only.
+-- One-click unsubscribe links (RFC 8058). Each email carries a fresh random
+-- token; only its sha256 is stored, and every token stays valid, so a link from
+-- any past email keeps working. A token switches off only its recipient's email
+-- of that type (`kind`). Service role only.
 create table if not exists public.kpi_unsubscribe_tokens (
-  token         text primary key check (token ~ '^[A-Za-z0-9_-]{43}$'),
+  token_hash    text primary key check (token_hash ~ '^[0-9a-f]{64}$'),
   recipient_id  uuid not null references public.profiles(id) on delete cascade,
   kind          text not null check (kind in ('consultant','firm')),
-  created_at    timestamptz not null default now(),
-  unique (recipient_id, kind)
+  created_at    timestamptz not null default now()
 );
+create index if not exists kpi_unsubscribe_tokens_recipient on public.kpi_unsubscribe_tokens (recipient_id, kind);
 
 alter table public.meetings add column if not exists notes_sent_at timestamptz;
 

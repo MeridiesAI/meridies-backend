@@ -12,16 +12,17 @@ const report = (o: Partial<CompletionRow> = {}) =>
   buildReport([row(o), row({ student_id: "s2", ...o })], [row(o)], 1, { aiRuns: {}, researchRuns: {} }, "2026-10", names);
 const LINK = "https://app.example/dashboard/counselor/time-saved?month=2026-10";
 const UNSUB = "https://api.example/kpi/unsubscribe/tok";
+const ADDR = "1 Test Way, Testville, NY 10001";
 
 test("consultant email never names a student", () => {
-  const e = renderConsultantEmail(report(), LINK, UNSUB);
+  const e = renderConsultantEmail(report(), LINK, UNSUB, ADDR);
   for (const part of [e.subject, e.html, e.text]) {
     assert.ok(!part.includes("Zelda") && !part.includes("Quartermaine") && !part.includes("Plumtree"), part);
   }
 });
 
 test("consultant email has the headline totals, the link and an unsubscribe link", () => {
-  const e = renderConsultantEmail(report(), LINK, UNSUB);
+  const e = renderConsultantEmail(report(), LINK, UNSUB, ADDR);
   assert.match(e.subject, /October 2026/);
   assert.match(e.text, /7 hours saved/);
   assert.match(e.text, /2 students/);
@@ -32,18 +33,18 @@ test("consultant email has the headline totals, the link and an unsubscribe link
 });
 
 test("value and extra students are offered as either/or", () => {
-  const e = renderConsultantEmail(report(), LINK, UNSUB);
+  const e = renderConsultantEmail(report(), LINK, UNSUB, ADDR);
   assert.match(e.text, /\$1,050 of your time, or room for/);
 });
 
 test("a default rate or figure keeps its estimated label", () => {
-  const e = renderConsultantEmail(report({ rate_is_estimate: true, manual_is_estimate: true }), LINK, UNSUB);
+  const e = renderConsultantEmail(report({ rate_is_estimate: true, manual_is_estimate: true }), LINK, UNSUB, ADDR);
   assert.match(e.text, /estimated/);
   assert.match(e.html, /estimated/);
 });
 
 test("firm email shows totals only", () => {
-  const e = renderFirmEmail({ month: "2026-10", hoursSaved: 12.5, valueOfTime: 1875, completions: 9, students: 6 }, "Acme Counseling", LINK, UNSUB);
+  const e = renderFirmEmail({ month: "2026-10", hoursSaved: 12.5, valueOfTime: 1875, completions: 9, students: 6 }, "Acme Counseling", LINK, UNSUB, ADDR);
   assert.match(e.subject, /Acme Counseling/);
   assert.match(e.text, /12\.5 hours saved/);
   assert.match(e.text, /\$1,875/);
@@ -51,6 +52,13 @@ test("firm email shows totals only", () => {
 });
 
 test("html escapes the firm name", () => {
-  const e = renderFirmEmail({ month: "2026-10", hoursSaved: 1, valueOfTime: null, completions: 1, students: 1 }, "<b>Evil</b>", LINK, UNSUB);
+  const e = renderFirmEmail({ month: "2026-10", hoursSaved: 1, valueOfTime: null, completions: 1, students: 1 }, "<b>Evil</b>", LINK, UNSUB, ADDR);
   assert.ok(!e.html.includes("<b>Evil</b>"));
+});
+
+test("both footers carry the company's postal address", () => {
+  const addr = "1 Test Way, Testville, NY 10001";
+  const c = renderConsultantEmail(report(), LINK, UNSUB, addr);
+  const f = renderFirmEmail({ month: "2026-10", hoursSaved: 1, valueOfTime: null, completions: 1, students: 1 }, "Acme", LINK, UNSUB, addr);
+  for (const e of [c, f]) assert.ok(e.text.includes(addr) && e.html.includes(addr));
 });

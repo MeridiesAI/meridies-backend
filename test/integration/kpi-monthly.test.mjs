@@ -147,3 +147,23 @@ check("the job beats its heartbeat", (await sql(`select (last_ok_at is not null)
   check("an old firm link still unsubscribes", p.status === 200 && (await pref("firm_email")) === "false", `status ${p.status}`);
   check("...from the firm email only", (await pref("monthly_email")) !== "false");
 }
+
+// ---- RFC 8058 one-click, hashed tokens, postal address in the footer ----------------
+{
+  const { createHash } = await import("node:crypto");
+  const full = async (m) => (await fetch(`${MAILPIT}/api/v1/message/${m.ID}`)).json();
+  const mails = await Promise.all((await mailsTo(m3a.email)).map(full));
+  const mine = mails.find((m) => m.Subject.startsWith("Your time saved"));
+  check("a consultant email reached m3a", !!mine, String(mails.length));
+  const T = /\/kpi\/unsubscribe\/([A-Za-z0-9_-]+)/.exec(mine?.Text ?? "")?.[1] ?? "";
+  check("the footer carries the postal address", (mine?.Text ?? "").includes("1 Test Way, Testville, NY 10001") && (mine?.HTML ?? "").includes("1 Test Way, Testville, NY 10001"));
+  check("the database keeps only a sha256 of the token", (await sql(`select count(*) from public.kpi_unsubscribe_tokens where token_hash = '${createHash("sha256").update(T).digest("hex")}'`)) === "1"
+    && (await sql(`select count(*) from information_schema.columns where table_name='kpi_unsubscribe_tokens' and column_name='token'`)) === "0");
+  const pref = () => sql(`select coalesce((select monthly_email::text from public.kpi_baselines where counselor_id='${m3a.id}'), 'none')`);
+  await fetch(`${API}/kpi/unsubscribe/${T}`, { headers: CLIENT });
+  check("a GET of the link does not unsubscribe", (await pref()) !== "false");
+  const fd = new FormData();
+  fd.append("List-Unsubscribe", "One-Click");
+  const one = await fetch(`${API}/kpi/unsubscribe/${T}`, { method: "POST", headers: CLIENT, body: fd });
+  check("a one-click POST (multipart, no cookies or auth) unsubscribes at once", one.status === 200 && (await pref()) === "false", `status ${one.status}`);
+}
