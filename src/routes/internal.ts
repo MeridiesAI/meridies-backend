@@ -224,6 +224,21 @@ export default async function internalRoutes(app: FastifyInstance) {
     }
   );
 
+  /** Anonymized averages for marketing (kpi_prospect_averages): nothing below 10 consultants from 5 firms. */
+  app.get(
+    "/kpi/prospect-averages",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request) => {
+      const ym = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+      const q = z.object({ from: ym, to: ym }).strict().parse(request.query);
+      const svc = serviceClient();
+      if (!svc) throw unavailable("This needs the service role key");
+      const { data, error } = await svc.rpc("kpi_prospect_averages", { p_from: `${q.from}-01`, p_to: `${q.to}-01` });
+      if (error) throw unavailable("Averages are unavailable right now");
+      return { from: q.from, to: q.to, ...(data as Record<string, unknown>) };
+    }
+  );
+
   app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (_request, reply) => {
     const svc = serviceClient();
     if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });
