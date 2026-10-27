@@ -375,6 +375,20 @@ export const meetings: OpGroup = {
       },
       warning: "The meeting is deleted, not cancelled, along with any event on your connected calendar. Invitees with an emailed invite get a cancellation.",
     }),
+    op({
+      name: "meetings.mark_notes_sent",
+      kind: "write",
+      risk: "auto",
+      title: "Mark that a held meeting's notes were sent (a record only; Meridies sends nothing), or clear the mark.",
+      doc: "{ meeting_id, sent: boolean }",
+      input: z.object({ meeting_id: uuid, sent: z.boolean() }).strict(),
+      request: (i) => ({ method: i.sent ? "POST" : "DELETE", url: `/meetings/${seg(i.meeting_id)}/notes-sent` }),
+      describe: async (i, h) => {
+        const m = await findMeeting(h, i.meeting_id);
+        return `${i.sent ? "Mark notes sent for" : "Clear notes sent on"} ${meetingLabel(m)}${m?.studentId ? ` with ${h.studentName(m.studentId)}` : ""}`;
+      },
+      undo: (i) => ({ op: "meetings.mark_notes_sent", input: { meeting_id: i.meeting_id, sent: !i.sent } }),
+    }),
   ],
 };
 

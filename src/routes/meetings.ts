@@ -27,7 +27,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
@@ -344,6 +344,29 @@ export default async function meetingRoutes(app: FastifyInstance) {
       return { ...(await withAttendees(request, [saved]))[0], invites };
     }
   );
+
+  /**
+   * "Notes sent": a record-only mark that the counselor sent the meeting's notes
+   * (Meridies sends nothing). It is what counts the meeting in Time saved; clearing
+   * it undoes that until the month's report is finalized. Owner only, held meetings.
+   */
+  const notesSent = (sent: boolean) => async (request: FastifyRequest) => {
+    const { id } = idParam.parse(request.params);
+    const existing = await loadMeeting(request, id);
+    if (existing.counselor_id !== request.auth.userId) throw forbidden("Only the meeting's owner can mark its notes sent");
+    if (sent && existing.status !== "held") throw new HttpError(409, "Mark the meeting held first", "meeting_not_held");
+    const { data, error } = await request.db
+      .from("meetings")
+      .update({ notes_sent_at: sent ? new Date().toISOString() : null })
+      .eq("id", id)
+      .select("id, notes_sent_at")
+      .single();
+    if (error) throw fromPostgrest(error);
+    return { id: String(data.id), notesSentAt: (data.notes_sent_at as string | null) ?? null };
+  };
+  const notesSentPre = { preHandler: [app.authenticate, requireRole("counselor"), limit("meetings:notes-sent", 60, 60)] };
+  app.post("/:id/notes-sent", notesSentPre, notesSent(true));
+  app.delete("/:id/notes-sent", notesSentPre, notesSent(false));
 
   /**
    * Deleting a meeting that happened loses the record that it happened, so the
