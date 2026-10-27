@@ -117,3 +117,33 @@ await sql(`update public.family_reports set status = 'sent' where id = '${rid}'`
 await sql(`update public.family_reports set status = 'draft' where id = '${rid}'`);
 check("undo after finalize changes nothing", (await sql(`select count(*) from public.kpi_completions where counselor_id='${fresh.id}' and month='${MONTH}-01'`)) === "1");
 check("the job beats its heartbeat", (await sql(`select (last_ok_at is not null)::text from public.job_heartbeats where job='kpi-monthly'`)) === "true");
+
+// ---- Unsubscribe links never expire, are per recipient and email type, and carry RFC 8058 headers ----
+{
+  const linkOf = (full) => /\/kpi\/unsubscribe\/([A-Za-z0-9_-]+)/.exec(full.Text)?.[1];
+  const full = async (m) => (await fetch(`${MAILPIT}/api/v1/message/${m.ID}`)).json();
+  const first = await Promise.all((await mailsTo(owner3.email)).map(full));
+  const firmMail = first.find((m) => m.Subject.includes("Test firm"));
+  const ownMail = first.find((m) => m.Subject.startsWith("Your time saved"));
+  const F1 = linkOf(firmMail), O1 = linkOf(ownMail);
+  check("the two email types carry different links", !!F1 && !!O1 && F1 !== O1);
+
+  const hdrs = await (await fetch(`${MAILPIT}/api/v1/message/${firmMail.ID}/headers`)).json();
+  check("List-Unsubscribe header points at the link", (hdrs["List-Unsubscribe"] ?? []).some((h) => h.includes(`/kpi/unsubscribe/${F1}`)), JSON.stringify(hdrs["List-Unsubscribe"]));
+  check("List-Unsubscribe-Post is One-Click", (hdrs["List-Unsubscribe-Post"] ?? []).includes("List-Unsubscribe=One-Click"), JSON.stringify(hdrs["List-Unsubscribe-Post"]));
+
+  // A later month's run sends new emails; the earlier links keep working.
+  for (const u of [owner3, m3a, m3b]) {
+    const s = await studentOf(u, "kpi-mo-later");
+    await record(u, s, "2026-08-15 12:00:00+00");
+  }
+  const later = await job("?month=2026-08");
+  check("a later month's run", later.status === 200 && later.body.firmEmails >= 1, JSON.stringify(later.body));
+  const pref = (col) => sql(`select coalesce((select ${col}::text from public.kpi_baselines where counselor_id='${owner3.id}'), 'none')`);
+  const g = await fetch(`${API}/kpi/unsubscribe/${O1}`, { headers: CLIENT });
+  check("a link from an old email still opens", g.status === 200, `status ${g.status}`);
+  check("a GET alone unsubscribes no one", (await pref("monthly_email")) !== "false" && (await pref("firm_email")) !== "false");
+  const p = await fetch(`${API}/kpi/unsubscribe/${F1}`, { method: "POST", headers: { ...CLIENT, "Content-Type": "application/x-www-form-urlencoded" }, body: "List-Unsubscribe=One-Click" });
+  check("an old firm link still unsubscribes", p.status === 200 && (await pref("firm_email")) === "false", `status ${p.status}`);
+  check("...from the firm email only", (await pref("monthly_email")) !== "false");
+}

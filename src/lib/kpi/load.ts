@@ -5,7 +5,7 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { toBaselinesDto, type BaselinesRow } from "./defaults.js";
-import { buildReport, monthsBack, type ActivityCounts, type CompletionRow, type KpiReport } from "./report.js";
+import { buildReport, monthsBack, zonedMonthStart, type ActivityCounts, type CompletionRow, type KpiReport } from "./report.js";
 
 export const COMPLETION_COLUMNS =
   "task_type, student_id, month, manual_minutes, manual_is_estimate, meridies_minutes, measure_method, saved_minutes, hourly_rate, rate_is_estimate";
@@ -18,9 +18,11 @@ export class KpiReadError extends Error {
   }
 }
 
-export async function loadReport(db: SupabaseClient, counselorId: string, month: string): Promise<KpiReport> {
+export async function loadReport(db: SupabaseClient, counselorId: string, month: string, timeZone: string | null): Promise<KpiReport> {
   const first = `${month}-01`;
-  const next = monthsBack(month, -1);
+  // Activity is counted within the consultant's own month, like the ledger.
+  const from = zonedMonthStart(month, timeZone).toISOString();
+  const to = zonedMonthStart(monthsBack(month, -1).slice(0, 7), timeZone).toISOString();
   const [rowsRes, yearRes, baseRes] = await Promise.all([
     db.from("kpi_completions").select(COMPLETION_COLUMNS).eq("counselor_id", counselorId).eq("month", first).order("completed_at").limit(5000),
     db.from("kpi_completions").select(COMPLETION_COLUMNS).eq("counselor_id", counselorId).gte("month", monthsBack(month, 11)).lte("month", first).limit(20000),
@@ -39,8 +41,8 @@ export async function loadReport(db: SupabaseClient, counselorId: string, month:
   // Raw usage, shown apart from savings. Unreadable → empty, never an error.
   const activity: ActivityCounts = { aiRuns: {}, researchRuns: {} };
   const [ai, research] = await Promise.all([
-    db.from("ai_runs").select("module").eq("actor_id", counselorId).gte("created_at", first).lt("created_at", next).limit(10000),
-    db.from("research_runs").select("feature").eq("counselor_id", counselorId).gte("created_at", first).lt("created_at", next).limit(10000),
+    db.from("ai_runs").select("module").eq("actor_id", counselorId).gte("created_at", from).lt("created_at", to).limit(10000),
+    db.from("research_runs").select("feature").eq("counselor_id", counselorId).gte("created_at", from).lt("created_at", to).limit(10000),
   ]);
   for (const r of ai.data ?? []) activity.aiRuns[String(r.module)] = (activity.aiRuns[String(r.module)] ?? 0) + 1;
   for (const r of research.data ?? []) activity.researchRuns[String(r.feature)] = (activity.researchRuns[String(r.feature)] ?? 0) + 1;

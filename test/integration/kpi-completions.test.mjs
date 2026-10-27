@@ -153,3 +153,41 @@ const session = (type, subject, secs) =>
     check("draft_quality_checks fixture insert", false, "could not create a quality check; adjust the fixture");
   }
 }
+
+// ---- Interrupted tracking uses the fallback, and never makes savings look bigger ----
+{
+  const u = await user("kpi-int");
+  const s = await studentOf(u, "kpi-int-s");
+  const send = async (title) => {
+    const id = await sql(`with r as (insert into public.family_reports (student_id, counselor_id, title) values ('${s.id}', '${u.id}', '${title}') returning id) select id from r`);
+    await call(u.token, "POST", `/reports/family/${id}/sent`);
+    return sql(`select measure_method || ' ' || meridies_minutes::text || ' ' || saved_minutes::text from public.kpi_completions where dedupe_key = '${id}'`);
+  };
+  await sql(`insert into public.kpi_task_sessions (counselor_id, task_type, subject_id, active_seconds, interrupted) values ('${u.id}', 'family_report', '${s.id}', 120, true)`);
+  check("an interrupted task uses the fallback figure (2 min measured, 10 signup)", (await send("A")) === "fallback 10.00 50.00");
+  await sql(`insert into public.kpi_task_sessions (counselor_id, task_type, subject_id, active_seconds, interrupted) values ('${u.id}', 'family_report', '${s.id}', 3600, true)`);
+  check("...but never less than what was measured (60 min measured)", (await send("B")) === "fallback 60.00 0.00");
+}
+
+// ---- Un-marking and re-marking Notes sent keeps the measured time -------------------
+{
+  const u = await user("kpi-remark");
+  const s = await studentOf(u, "kpi-remark-s");
+  const mid = await sql(`with m as (insert into public.meetings (student_id, counselor_id, title, starts_at, status) values ('${s.id}', '${u.id}', 'R', now() - interval '1 hour', 'held') returning id) select id from m`);
+  await sql(`insert into public.kpi_task_sessions (counselor_id, task_type, subject_id, active_seconds) values ('${u.id}', 'meeting', '${mid}', 600)`);
+  await call(u.token, "POST", `/meetings/${mid}/notes-sent`);
+  await call(u.token, "DELETE", `/meetings/${mid}/notes-sent`);
+  await call(u.token, "POST", `/meetings/${mid}/notes-sent`);
+  check("re-marking keeps the meeting's measured time", (await sql(`select measured_seconds::text || ' ' || measure_method from public.kpi_completions where dedupe_key='${mid}'`)) === "600 active");
+}
+
+// ---- Edge case: an accepted recommendation with no accepted_by credits the student's counselor ----
+{
+  const u = await user("kpi-noactor");
+  const s = await studentOf(u, "kpi-noactor-s");
+  const run = await sql(`with r as (insert into public.research_runs (student_id, counselor_id, feature, inputs_hash, brief, status, expires_at) values ('${s.id}', '${u.id}', 'activities', 'h-${Date.now()}', '{}', 'succeeded', now() + interval '7 days') returning id) select id from r`);
+  const rec = await sql(`with r as (insert into public.recommendations (run_id, student_id, feature, title, why) values ('${run}', '${s.id}', 'activities', 'Camp', 'Fits.') returning id) select id from r`);
+  const task = await sql(`with d as (insert into public.deliverables (student_id, kind, title, status, source, created_by, visible_to_student) values ('${s.id}', 'custom', 'Camp', 'not-started', 'counselor', '${u.id}', false) returning id) select id from d`);
+  await sql(`update public.recommendations set status = 'accepted', accepted_as = '{"type":"task","id":"${task}"}' where id = '${rec}'`);
+  check("no accepted_by → the student's counselor is credited", (await sql(`select count(*) from public.kpi_completions where counselor_id='${u.id}' and task_type='activity_list'`)) === "1");
+}

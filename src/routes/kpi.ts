@@ -5,7 +5,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
-import { forbidden, fromPostgrest, notFound, unavailable, HttpError } from "../lib/errors.js";
+import { badRequest, forbidden, fromPostgrest, notFound, unavailable, HttpError } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -15,9 +15,14 @@ import { toBaselinesDto, type BaselinesRow } from "../lib/kpi/defaults.js";
 import { monthIn, monthsBack } from "../lib/kpi/report.js";
 import { BASELINE_COLUMNS, KpiReadError, loadReport } from "../lib/kpi/load.js";
 
-const heartbeatBody = z.object({ taskType: z.enum(TASK_TYPES), subjectId: z.string().uuid() }).strict();
+// `interrupted`: the client lost heartbeats while the consultant was working; the
+// task's completion then uses the fallback figure. Still no durations.
+const heartbeatBody = z
+  .object({ taskType: z.enum(TASK_TYPES), subjectId: z.string().uuid(), interrupted: z.boolean().optional() })
+  .strict();
 
-const minutes = z.number().int().min(1).max(1440);
+const MINUTES_RULE = "Enter a whole number of minutes from 1 to 1440";
+const minutes = z.number({ invalid_type_error: MINUTES_RULE }).int(MINUTES_RULE).min(1, MINUTES_RULE).max(1440, MINUTES_RULE);
 const taskPatch = z
   .object({ manual: minutes.optional(), meridies: minutes.optional(), manualEdited: z.boolean().optional(), meridiesEdited: z.boolean().optional() })
   .strict();
@@ -64,7 +69,10 @@ export default async function kpiRoutes(app: FastifyInstance) {
    * consultant touched it; it stays edited.
    */
   app.put("/baselines", { preHandler: [...counselor, limit("kpi:baselines:write", 30, 60)], config: { allowPending: true } }, async (request) => {
-    const body = baselinesBody.parse(request.body);
+    // A refusal says what's wrong in words (e.g. whole minutes only), not a schema dump.
+    const parsed = baselinesBody.safeParse(request.body);
+    if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "Invalid request");
+    const body = parsed.data;
     const svc = serviceClient();
     if (!svc) throw unavailable("Saving needs the service role key");
     const pick = (field: "manual" | "meridies") =>
@@ -99,9 +107,10 @@ export default async function kpiRoutes(app: FastifyInstance) {
   app.get("/report", { preHandler: [...counselor, limit("kpi:report", 60, 60)] }, async (request) => {
     const q = monthQuery.parse(request.query);
     const { data: profile } = await request.db.from("profiles").select("timezone").eq("id", request.auth.userId).maybeSingle();
-    const month = q.month ?? monthIn((profile?.timezone as string | null) ?? null);
+    const tz = (profile?.timezone as string | null) ?? null; // read once per request
+    const month = q.month ?? monthIn(tz);
     try {
-      return await loadReport(request.db, request.auth.userId, month);
+      return await loadReport(request.db, request.auth.userId, month, tz);
     } catch (err) {
       if (err instanceof KpiReadError) throw schemaError(err.pg);
       throw err;
@@ -129,7 +138,7 @@ export default async function kpiRoutes(app: FastifyInstance) {
   });
 
   app.post("/heartbeat", { preHandler: [...counselor, limit("kpi:heartbeat", 120, 60)] }, async (request, reply) => {
-    const { taskType, subjectId } = heartbeatBody.parse(request.body);
+    const { taskType, subjectId, interrupted } = heartbeatBody.parse(request.body);
     reply.code(202);
     if (env.KPI_TRACKING_ENABLED !== "true") return { tracked: false };
     await assertOwnsSubject(request, taskType, subjectId);
@@ -139,6 +148,7 @@ export default async function kpiRoutes(app: FastifyInstance) {
       p_counselor: request.auth.userId,
       p_task_type: taskType,
       p_subject: subjectId,
+      p_interrupted: interrupted === true,
     });
     if (error) {
       if (KPI_SCHEMA_MISSING.has(error.code ?? "")) throw kpiUnavailable();

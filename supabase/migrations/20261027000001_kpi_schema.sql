@@ -18,8 +18,8 @@ create table if not exists public.kpi_baselines (
   rate_edited             boolean not null default false,
   hours_per_student_year  numeric(6,1) check (hours_per_student_year is null or hours_per_student_year between 1 and 500),
   hours_edited            boolean not null default false,
-  monthly_email           boolean not null default true,
-  unsubscribe_token_hash  text unique check (unsubscribe_token_hash is null or length(unsubscribe_token_hash) = 64),
+  monthly_email           boolean not null default true,   -- the consultant's own monthly email
+  firm_email              boolean not null default true,   -- the firm summary (owners/admins)
   prompt_dismissed_at     timestamptz,
   updated_at              timestamptz not null default now()
 );
@@ -32,6 +32,8 @@ create table if not exists public.kpi_task_sessions (
   task_type          text not null check (task_type in ('college_list','essay_feedback','meeting','family_report','activity_list')),
   subject_id         uuid not null,
   active_seconds     integer not null default 0 check (active_seconds >= 0),
+  -- The client lost heartbeats during active use: the completion uses the fallback.
+  interrupted        boolean not null default false,
   last_heartbeat_at  timestamptz,
   last_active_on     date not null default current_date,
   primary key (counselor_id, task_type, subject_id)
@@ -45,6 +47,8 @@ create table if not exists public.kpi_completions (
   firm_id             uuid references public.firms(id) on delete set null,
   student_id          uuid references public.profiles(id) on delete set null,
   task_type           text not null check (task_type in ('college_list','essay_feedback','meeting','family_report','activity_list')),
+  -- What the time was measured on (student, essay or meeting), so an undo can give the time back.
+  subject_id          uuid,
   dedupe_key          text not null check (length(dedupe_key) between 1 and 200),
   month               date not null check (extract(day from month) = 1),
   completed_at        timestamptz not null default now(),
@@ -52,7 +56,9 @@ create table if not exists public.kpi_completions (
   manual_is_estimate  boolean not null,
   measured_seconds    integer not null default 0 check (measured_seconds >= 0),
   meridies_minutes    numeric(10,2) not null check (meridies_minutes >= 0),
-  measure_method      text not null check (measure_method in ('active','capped','median','signup')),
+  -- The consultant's signup "with Meridies" figure at the time (the fallback's floor).
+  signup_minutes      integer not null default 0,
+  measure_method      text not null check (measure_method in ('active','capped','median','signup','fallback')),
   saved_minutes       numeric(10,2) not null,
   hourly_rate         numeric(8,2) not null,
   rate_is_estimate    boolean not null,
@@ -89,6 +95,17 @@ create table if not exists public.kpi_email_sends (
 create unique index if not exists kpi_email_sends_once
   on public.kpi_email_sends (recipient_id, month, kind, coalesce(firm_id, '00000000-0000-0000-0000-000000000000'::uuid));
 
+-- One-click unsubscribe links: one per recipient and email type, made once and
+-- reused in every email, so a link from any past email keeps working. The token
+-- is a random capability that only switches that email type off; service role only.
+create table if not exists public.kpi_unsubscribe_tokens (
+  token         text primary key check (token ~ '^[A-Za-z0-9_-]{43}$'),
+  recipient_id  uuid not null references public.profiles(id) on delete cascade,
+  kind          text not null check (kind in ('consultant','firm')),
+  created_at    timestamptz not null default now(),
+  unique (recipient_id, kind)
+);
+
 alter table public.meetings add column if not exists notes_sent_at timestamptz;
 
 -- RLS: the consultant reads their own baselines, completions and months.
@@ -100,9 +117,10 @@ alter table public.kpi_completions        enable row level security;
 alter table public.kpi_completion_sources enable row level security;
 alter table public.kpi_months             enable row level security;
 alter table public.kpi_email_sends        enable row level security;
+alter table public.kpi_unsubscribe_tokens enable row level security;
 
 revoke all on public.kpi_baselines, public.kpi_task_sessions, public.kpi_completions,
-  public.kpi_completion_sources, public.kpi_months, public.kpi_email_sends from anon, authenticated;
+  public.kpi_completion_sources, public.kpi_months, public.kpi_email_sends, public.kpi_unsubscribe_tokens from anon, authenticated;
 grant select on public.kpi_baselines, public.kpi_completions, public.kpi_months to authenticated;
 
 drop policy if exists kpi_baselines_select_own on public.kpi_baselines;
@@ -121,6 +139,7 @@ select private.attach_approval_gate('public.kpi_completions');
 select private.attach_approval_gate('public.kpi_completion_sources');
 select private.attach_approval_gate('public.kpi_months');
 select private.attach_approval_gate('public.kpi_email_sends');
+select private.attach_approval_gate('public.kpi_unsubscribe_tokens');
 
 -- The monthly job's heartbeat. Read the current CHECK back and add the label,
 -- so another migration's label is never dropped (as 20261023070001 does).

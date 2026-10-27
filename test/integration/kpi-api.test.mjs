@@ -76,3 +76,12 @@ check("...but nothing else in Time saved", ph.status === 403, `status ${ph.statu
   const ok = tasks.every((t, i) => g.body.tasks[t].manual === 100 + i && g.body.tasks[t].meridies === 10 + i && g.body.tasks[t].manualEdited && g.body.tasks[t].meridiesEdited);
   check("ten overlapping saves keep every figure and flag", ok, JSON.stringify(g.body.tasks));
 }
+
+// ---- Whole minutes only, with a clear message; agreeing with a default is an explicit edit ----
+{
+  const w = await user("kpi-api-whole");
+  const r = await call(w.token, "PUT", "/kpi/baselines", { tasks: { meeting: { manual: 37.5, manualEdited: true } } });
+  check("fractional minutes are refused with a clear message", r.status === 400 && /whole number of minutes/i.test(r.body?.error ?? r.body?.message ?? ""), JSON.stringify(r.body));
+  const k = await call(w.token, "PUT", "/kpi/baselines", { tasks: { meeting: { manualEdited: true } } });
+  check("keeping a default as your own clears 'estimated' and keeps the value", k.status === 200 && k.body.tasks.meeting.manual === 45 && k.body.tasks.meeting.manualEdited === true, JSON.stringify(k.body?.tasks?.meeting));
+}

@@ -117,3 +117,28 @@ export function monthsBack(month: string, back: number): string {
   const d = new Date(Date.UTC(y, m - 1 - back, 1));
   return d.toISOString().slice(0, 10);
 }
+
+/** Minutes east of UTC that `timeZone` reads at instant `at` (throws on an unknown zone). */
+function offsetMinutes(at: Date, timeZone: string): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      .formatToParts(at)
+      .map((p) => [p.type, p.value])
+  );
+  const wall = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return Math.round((wall - at.getTime()) / 60000);
+}
+
+/** The instant a month ("YYYY-MM") begins at local midnight in `timeZone` (UTC when unknown or unset). */
+export function zonedMonthStart(month: string, timeZone: string | null | undefined): Date {
+  const [y, m] = month.split("-").map(Number);
+  const utc = Date.UTC(y, m - 1, 1);
+  if (!timeZone) return new Date(utc);
+  try {
+    let at = utc - offsetMinutes(new Date(utc), timeZone) * 60000;
+    at = utc - offsetMinutes(new Date(at), timeZone) * 60000; // settle across a DST change
+    return new Date(at);
+  } catch {
+    return new Date(utc);
+  }
+}

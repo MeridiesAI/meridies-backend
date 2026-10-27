@@ -10,16 +10,27 @@
 -- REQUIRED_SCHEMA.
 
 -- The consultant's month for a moment, in their own time zone (UTC when unset or unknown).
+-- An unknown zone is caught rather than looked up in pg_timezone_names, which is slow.
 create or replace function private.kpi_month_of(p_counselor uuid, p_at timestamptz)
 returns date
-language sql
+language plpgsql
 stable
 security definer
 set search_path = public, pg_temp
 as $$
-  select date_trunc('month', p_at at time zone coalesce(
-    (select tz.name from public.profiles p join pg_timezone_names tz on tz.name = p.timezone where p.id = p_counselor),
-    'UTC'))::date
+declare
+  v_tz text;
+begin
+  select timezone into v_tz from public.profiles where id = p_counselor;
+  if v_tz is null or v_tz = '' then
+    return date_trunc('month', p_at at time zone 'UTC')::date;
+  end if;
+  begin
+    return date_trunc('month', p_at at time zone v_tz)::date;
+  exception when invalid_parameter_value then
+    return date_trunc('month', p_at at time zone 'UTC')::date;
+  end;
+end;
 $$;
 
 -- Who is credited: the signed-in approved counselor, else the row's own counselor.
@@ -47,7 +58,11 @@ $$;
 -- Minutes in Meridies and how they were decided:
 --   5+ measured completions of the type: cap at 3× their median; no time → the median.
 --   fewer: measured time as is; no time → the signup figure.
+--   tracking interrupted (the client lost heartbeats): the fallback (median, or the
+--   signup figure), but never less than what was measured, so lost tracking can only
+--   make savings smaller, never bigger. Method "fallback".
 create or replace function private.kpi_measure(p_counselor uuid, p_type text, p_seconds integer, p_signup integer,
+                                               p_interrupted boolean,
                                                out minutes numeric, out method text)
 language plpgsql
 stable
@@ -64,7 +79,10 @@ begin
   from public.kpi_completions
   where counselor_id = p_counselor and task_type = p_type and measure_method in ('active','capped') and measured_seconds > 0;
 
-  if v_n >= 5 then
+  if p_interrupted then
+    minutes := round(greatest(v_mins, case when v_n >= 5 then v_median else p_signup end), 2);
+    method := 'fallback';
+  elsif v_n >= 5 then
     if p_seconds > 0 then
       if v_mins > 3 * v_median then minutes := round(3 * v_median, 2); method := 'capped';
       else minutes := round(v_mins, 2); method := 'active'; end if;
@@ -92,6 +110,7 @@ declare
   v_month    date;
   v_key      text;
   v_secs     integer := 0;
+  v_int      boolean := false;
   v_existing public.kpi_completions%rowtype;
   b          public.kpi_baselines%rowtype;
   v_manual   integer;
@@ -121,12 +140,15 @@ begin
 
   delete from public.kpi_task_sessions
   where counselor_id = p_counselor and task_type = p_type and subject_id = p_subject
-  returning active_seconds into v_secs;
+  returning active_seconds, interrupted into v_secs, v_int;
   v_secs := coalesce(v_secs, 0);
+  v_int := coalesce(v_int, false);
 
   if v_existing.id is not null then
-    if v_secs > 0 then
-      select * into v_measure from private.kpi_measure(p_counselor, p_type, v_existing.measured_seconds + v_secs, null);
+    if v_secs > 0 or v_int then
+      v_int := v_int or v_existing.measure_method = 'fallback';
+      select * into v_measure
+      from private.kpi_measure(p_counselor, p_type, v_existing.measured_seconds + v_secs, v_existing.signup_minutes, v_int);
       update public.kpi_completions
       set measured_seconds = measured_seconds + v_secs,
           meridies_minutes = v_measure.minutes,
@@ -142,15 +164,15 @@ begin
   select * into b from public.kpi_baselines where counselor_id = p_counselor;
   v_manual := coalesce((b.manual ->> p_type)::integer, private.kpi_default_manual(p_type));
   v_signup := coalesce((b.meridies ->> p_type)::integer, private.kpi_default_meridies(p_type));
-  select * into v_measure from private.kpi_measure(p_counselor, p_type, v_secs, v_signup);
+  select * into v_measure from private.kpi_measure(p_counselor, p_type, v_secs, v_signup, v_int);
 
   insert into public.kpi_completions (
-    counselor_id, firm_id, student_id, task_type, dedupe_key, month, completed_at,
-    manual_minutes, manual_is_estimate, measured_seconds, meridies_minutes, measure_method,
+    counselor_id, firm_id, student_id, task_type, subject_id, dedupe_key, month, completed_at,
+    manual_minutes, manual_is_estimate, measured_seconds, meridies_minutes, signup_minutes, measure_method,
     saved_minutes, hourly_rate, rate_is_estimate)
   values (
-    p_counselor, (select firm_id from public.profiles where id = p_counselor), p_student, p_type, v_key, v_month, p_now,
-    v_manual, not coalesce((b.manual_edited ->> p_type)::boolean, false), v_secs, v_measure.minutes, v_measure.method,
+    p_counselor, (select firm_id from public.profiles where id = p_counselor), p_student, p_type, p_subject, v_key, v_month, p_now,
+    v_manual, not coalesce((b.manual_edited ->> p_type)::boolean, false), v_secs, v_measure.minutes, v_signup, v_measure.method,
     v_manual - v_measure.minutes, coalesce(b.hourly_rate, 150), not coalesce(b.rate_edited, false))
   returning id into v_id;
 
@@ -167,7 +189,9 @@ security definer
 set search_path = public, pg_temp
 as $$ select private.kpi_record_at(p_counselor, p_type, p_subject, p_student, p_dedupe, p_source_table, p_source_id, now()) $$;
 
--- Undo one source. The completion goes when its last source does, unless its month is locked.
+-- Undo one source. The completion goes when its last source does, unless its month
+-- is locked; its measured time goes back to the task, so marking it done again
+-- (re-marking "Notes sent", say) keeps that time.
 create or replace function private.kpi_unrecord(p_source_table text, p_source_id uuid)
 returns void
 language plpgsql
@@ -175,21 +199,30 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
-  v_completion uuid;
-  v_locked     boolean;
+  c        public.kpi_completions%rowtype;
+  v_locked boolean;
 begin
-  select s.completion_id,
-         exists (select 1 from public.kpi_months m where m.counselor_id = c.counselor_id and m.month = c.month)
-    into v_completion, v_locked
-  from public.kpi_completion_sources s join public.kpi_completions c on c.id = s.completion_id
+  select k.* into c
+  from public.kpi_completion_sources s join public.kpi_completions k on k.id = s.completion_id
   where s.source_table = p_source_table and s.source_id = p_source_id;
-
-  if v_completion is null or v_locked then
+  if c.id is null then
+    return;
+  end if;
+  select exists (select 1 from public.kpi_months m where m.counselor_id = c.counselor_id and m.month = c.month) into v_locked;
+  if v_locked then
     return;
   end if;
   delete from public.kpi_completion_sources where source_table = p_source_table and source_id = p_source_id;
-  if not exists (select 1 from public.kpi_completion_sources where completion_id = v_completion) then
-    delete from public.kpi_completions where id = v_completion;
+  if not exists (select 1 from public.kpi_completion_sources where completion_id = c.id) then
+    delete from public.kpi_completions where id = c.id;
+    if c.subject_id is not null and (c.measured_seconds > 0 or c.measure_method = 'fallback') then
+      insert into public.kpi_task_sessions (counselor_id, task_type, subject_id, active_seconds, interrupted, last_active_on)
+      values (c.counselor_id, c.task_type, c.subject_id, c.measured_seconds, c.measure_method = 'fallback', current_date)
+      on conflict (counselor_id, task_type, subject_id) do update
+        set active_seconds = public.kpi_task_sessions.active_seconds + excluded.active_seconds,
+            interrupted = public.kpi_task_sessions.interrupted or excluded.interrupted,
+            last_active_on = current_date;
+    end if;
   end if;
 end;
 $$;
@@ -197,7 +230,7 @@ $$;
 revoke all on function private.kpi_record_at(uuid, text, uuid, uuid, text, text, uuid, timestamptz) from public, anon, authenticated;
 revoke all on function private.kpi_record(uuid, text, uuid, uuid, text, text, uuid) from public, anon, authenticated;
 revoke all on function private.kpi_unrecord(text, uuid) from public, anon, authenticated;
-revoke all on function private.kpi_measure(uuid, text, integer, integer) from public, anon, authenticated;
+revoke all on function private.kpi_measure(uuid, text, integer, integer, boolean) from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Triggers. Each traps its own errors: the ledger must never block a save.
@@ -306,8 +339,10 @@ begin
       v_table := case new.accepted_as ->> 'type' when 'task' then 'deliverables' when 'student_college' then 'student_colleges' end;
       v_id := (new.accepted_as ->> 'id')::uuid;
       if v_table is not null and v_id is not null then
+        -- accept.ts always sets accepted_by; any other writer falls back like every
+        -- other trigger (the signed-in counselor, else the student's counselor).
         perform private.kpi_record(
-          coalesce(new.accepted_by, private.kpi_actor(null)),
+          coalesce(new.accepted_by, private.kpi_actor((select counselor_id from public.profiles where id = new.student_id))),
           case new.feature when 'activities' then 'activity_list' else 'college_list' end,
           new.student_id, new.student_id, new.student_id::text, v_table, v_id);
       end if;

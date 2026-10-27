@@ -1,7 +1,7 @@
 // Time-saved ledger: tables exist, carry the approval gate, and only the owner reads them.
 import { check, sql, user, rest } from "./harness.mjs";
 
-const TABLES = ["kpi_baselines", "kpi_task_sessions", "kpi_completions", "kpi_completion_sources", "kpi_months", "kpi_email_sends"];
+const TABLES = ["kpi_baselines", "kpi_task_sessions", "kpi_completions", "kpi_completion_sources", "kpi_months", "kpi_email_sends", "kpi_unsubscribe_tokens"];
 
 for (const t of TABLES) {
   check(`${t} exists`, (await sql(`select to_regclass('public.${t}') is not null`)) === "t");
@@ -29,3 +29,5 @@ const sessRead = await rest(a.token, "GET", `/rest/v1/kpi_task_sessions?select=*
 check("a client reads no sessions", sessRead.status >= 400 || sessRead.body.length === 0, JSON.stringify(sessRead.body));
 const base = await rest(a.token, "POST", "/rest/v1/kpi_baselines", { counselor_id: a.id, hourly_rate: 1 });
 check("a client cannot write baselines directly", base.status >= 400, `status ${base.status}`);
+const tok = await rest(a.token, "GET", `/rest/v1/kpi_unsubscribe_tokens?select=token`);
+check("a client can't read unsubscribe tokens", tok.status >= 400 || tok.body.length === 0, JSON.stringify(tok.body).slice(0, 120));

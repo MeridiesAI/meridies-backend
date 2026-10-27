@@ -67,3 +67,14 @@ const backdate = (u, type, subject, secs) =>
   const r3 = await call(s.token, "POST", "/kpi/heartbeat", { taskType: "college_list", subjectId: s.id });
   check("a student gets 403", r3.status === 403, `status ${r3.status}`);
 }
+
+// ---- A client that lost heartbeats says so; the server remembers it for the task ----
+{
+  const s2 = await studentOf(a, "kpi-hb-int");
+  await hb(a, "college_list", s2.id);
+  const r = await call(a.token, "POST", "/kpi/heartbeat", { taskType: "college_list", subjectId: s2.id, interrupted: true });
+  check("a heartbeat can report an interruption", r.status === 202 && r.body.tracked === true, JSON.stringify(r.body));
+  check("...and the task is flagged", (await sql(`select interrupted::text from public.kpi_task_sessions where counselor_id='${a.id}' and subject_id='${s2.id}'`)) === "true");
+  const bad = await call(a.token, "POST", "/kpi/heartbeat", { taskType: "college_list", subjectId: s2.id, interrupted: "yes" });
+  check("interrupted must be a boolean", bad.status === 400, `status ${bad.status}`);
+}
