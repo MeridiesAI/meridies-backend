@@ -1111,9 +1111,12 @@ Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
 - **Fallback.** No measured time: the consultant's median once they have 5 measured completions of the type
   (and a measured value is capped at 3x it), else their signup figure. `measure_method` says which.
 - **Who sees what.** A consultant reads only their own rows (RLS). Firm totals (`kpi_firm_month`, owners and
-  admins) only with 3+ consultants that month, never per person. Prospect averages
-  (`GET /internal/kpi/prospect-averages`) only from edited figures, and nothing below 10 consultants from 5 firms.
+  admins) only for months that have ended (`reason: "month-open"` otherwise: polling an open month would show
+  one colleague's work between reads) and only with 3+ consultants that month, never per person. Prospect averages
+  (`GET /internal/kpi/prospect-averages`) only from edited figures, and nothing below 10 consultants from 5 firms,
+  a floor every figure (each task type, the value) meets on its own.
 - `GET`/`PUT /kpi/baselines` are open to a pending counselor (own row, service client): onboarding asks them.
+  A save is one atomic merge (`kpi_save_baselines`), since each field in the app saves itself.
 - Monthly emails (`kpi-monthly`, `kpi-firm-monthly`): no student names, "estimated" kept, one-click
   unsubscribe (a fresh token per email, hash stored), first one 14+ days after the first completion,
   recorded in `kpi_email_sends` only once the provider accepted it.
