@@ -419,6 +419,8 @@ type BrandedEmail = {
   bullets?: string[];
   cta?: { label: string; url: string };
   footnote?: string;
+  /** A link under the footnote (an unsubscribe link). */
+  footnoteLink?: { label: string; url: string };
 };
 
 /**
@@ -452,11 +454,16 @@ export function brandedEmail(t: BrandedEmail): string {
           </td></tr>`
     : "";
 
-  const footnote = t.footnote
+  const footnoteLink = t.footnoteLink
+    ? `<p style="margin:8px 0 0;font-size:13px;line-height:1.6;"><a href="${escapeAttr(
+        t.footnoteLink.url
+      )}" style="color:#64736a;">${escapeHtml(t.footnoteLink.label)}</a></p>`
+    : "";
+  const footnote = t.footnote || footnoteLink
     ? `<tr><td style="padding:16px 32px 32px;">
             <p style="margin:0;font-size:13px;line-height:1.6;color:#64736a;">${escapeHtml(
-              t.footnote
-            )}</p>
+              t.footnote ?? ""
+            )}</p>${footnoteLink}
           </td></tr>`
     : `<tr><td style="padding:16px 32px 32px;"></td></tr>`;
 
@@ -494,6 +501,7 @@ export function brandedText(t: BrandedEmail): string {
     ...(t.bullets?.length ? ["", ...t.bullets.map((b) => `- ${b}`)] : []),
     ...(t.cta ? ["", t.cta.label + ":", t.cta.url] : []),
     ...(t.footnote ? ["", t.footnote] : []),
+    ...(t.footnoteLink ? ["", `${t.footnoteLink.label}: ${t.footnoteLink.url}`] : []),
   ].join("\n");
 }
 
