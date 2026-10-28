@@ -217,8 +217,12 @@ invitation review and the same-student rule for held data (`20261024000061`-`62`
 (`20261024000071`), the profile column bounds (`20261024000081`), the
 caseload transfer's file rule (`20261024000082`, which replaces
 `transfer_caseload` from `20261023030002`), the one-student folder tree
-triggers (`20261024000083`) and the held import apply's student check
-(`20261024000091`). They go in later, in filename order
+triggers (`20261024000083`), the held import apply's student check
+(`20261024000091`) and the sheet rows' idempotency key (`20261028000002`:
+`client_request_id` on `activities` and `awards`; without it
+`POST /application/activities` and `/honors` insert as before, with no
+key, and `lib/collection.ts` remembers the column is missing for five
+minutes). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
