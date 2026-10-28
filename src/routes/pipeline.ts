@@ -23,11 +23,20 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
-import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { createInvitation } from "../lib/invites.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { deriveAccount, formatUsd, PAYMENT_METHODS, totals, type AccountDTO } from "../lib/payments.js";
+import {
+  CONTACT_EXTRA_COLUMNS,
+  extrasUnavailable,
+  FOLLOWUP_COLUMNS,
+  NO_FOLLOWUPS,
+  pipelineExtrasReady,
+  summarizeFollowups,
+  type FollowupSummary,
+} from "../lib/pipelineExtras.js";
 
 type Row = Record<string, unknown>;
 
@@ -79,12 +88,26 @@ const contactFields = {
   nextStep: shortText(300),
   ownerId: uuid.nullable(),
   info: contactInfo,
+  source: shortText(80),
 };
 
-const CONTACT_COLUMNS =
+/** Won, lost or still open; a reason goes with "lost" only. */
+const CONTACT_STATUSES = ["open", "won", "lost"] as const;
+type ContactStatus = (typeof CONTACT_STATUSES)[number];
+const statusFields = {
+  status: z.enum(CONTACT_STATUSES),
+  lostReason: shortText(300),
+};
+
+const CONTACT_COLUMNS_BASE =
   "id, firm_id, counselor_id, stage_id, position, student_name, grad_year, student_email, student_phone, " +
   "parent_name, parent_email, parent_phone, next_step, owner_id, info, stage_entered_at, invitation_id, " +
   "invited_at, student_id, created_at, updated_at";
+
+/** The extra columns only once the history migration is in (20261028000003). */
+async function contactColumns(request: FastifyRequest): Promise<string> {
+  return (await pipelineExtrasReady(request)) ? `${CONTACT_COLUMNS_BASE}, ${CONTACT_EXTRA_COLUMNS}` : CONTACT_COLUMNS_BASE;
+}
 
 const STAGE_COLUMNS = "id, name, position, lifecycle_group";
 
@@ -120,10 +143,20 @@ function todayAt(d: Date, timezone: string | null): string {
   }
 }
 
-export function toContact(r: Row, ctx: { today: string; timezone: string | null; groups: Map<string, LifecycleGroup> }) {
+export function toContact(
+  r: Row,
+  ctx: {
+    today: string;
+    timezone: string | null;
+    groups: Map<string, LifecycleGroup>;
+    /** Open follow-ups per contact; absent before the history migration. */
+    followups?: Map<string, FollowupSummary>;
+  }
+) {
   const stageId = String(r.stage_id);
   const studentId = (r.student_id as string | null) ?? null;
   const invitationId = (r.invitation_id as string | null) ?? null;
+  const followups = ctx.followups?.get(String(r.id)) ?? NO_FOLLOWUPS;
   return {
     id: String(r.id),
     stageId,
@@ -145,6 +178,12 @@ export function toContact(r: Row, ctx: { today: string; timezone: string | null;
     invitationId,
     invitedAt: (r.invited_at as string | null) ?? null,
     studentId,
+    source: String(r.source ?? ""),
+    status: ((r.status as ContactStatus | undefined) ?? "open") as ContactStatus,
+    lostReason: String(r.lost_reason ?? ""),
+    lastContactedAt: (r.last_contacted_at as string | null | undefined) ?? null,
+    openFollowups: followups.openFollowups,
+    nextFollowup: followups.nextFollowup,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
   };
@@ -163,34 +202,67 @@ async function workspaceStages(request: FastifyRequest, ws: Workspace): Promise<
 }
 
 async function loadContactRow(request: FastifyRequest, id: string): Promise<Row> {
-  const { data, error } = await request.db.from("pipeline_contacts").select(CONTACT_COLUMNS).eq("id", id).maybeSingle();
+  const { data, error } = await request.db
+    .from("pipeline_contacts")
+    .select(await contactColumns(request))
+    .eq("id", id)
+    .maybeSingle();
   if (error) throw crmError(error);
   if (!data) throw notFound("That contact isn't in your pipeline");
   return data as unknown as Row;
 }
 
-async function contactContext(request: FastifyRequest, ws: Workspace) {
-  const stages = await workspaceStages(request, ws);
+/**
+ * Open follow-ups, summarised per contact: the whole workspace's for the board,
+ * or one contact's after a single-card write. Empty before the migration.
+ */
+async function openFollowupSummaries(
+  request: FastifyRequest,
+  ws: Workspace,
+  today: string,
+  contactId?: string
+): Promise<Map<string, FollowupSummary> | undefined> {
+  if (!(await pipelineExtrasReady(request))) return undefined;
+  let q = request.db.from("pipeline_followups").select(FOLLOWUP_COLUMNS).eq("done", false);
+  if (contactId) q = q.eq("contact_id", contactId);
+  else q = ws.firmId ? q.eq("firm_id", ws.firmId) : q.is("firm_id", null).eq("counselor_id", request.auth.userId);
+  const { data, error } = await q.order("due_on", { ascending: true, nullsFirst: false }).limit(5000);
+  if (error) throw crmError(error);
+  return summarizeFollowups((data ?? []) as unknown as Row[], today);
+}
+
+async function contactContext(request: FastifyRequest, ws: Workspace, contactId?: string) {
+  const today = todayIn(request.profile.timezone);
+  const [stages, followups] = await Promise.all([
+    workspaceStages(request, ws),
+    openFollowupSummaries(request, ws, today, contactId),
+  ]);
   return {
-    today: todayIn(request.profile.timezone),
+    today,
     timezone: request.profile.timezone,
     groups: new Map(stages.map((s) => [String(s.id), String(s.lifecycle_group) as LifecycleGroup])),
+    followups,
   };
 }
 
 async function serializeOne(request: FastifyRequest, ws: Workspace, row: Row) {
-  return toContact(row, await contactContext(request, ws));
+  return toContact(row, await contactContext(request, ws, String(row.id)));
 }
 
 /** The workspace's consultants (for the Owner picker), names only. */
-async function consultants(request: FastifyRequest): Promise<{ id: string; name: string }[]> {
+export async function consultants(request: FastifyRequest): Promise<{ id: string; name: string }[]> {
   const { data, error } = await request.db.rpc("firm_consultants");
   if (error) throw crmError(error);
   return ((data ?? []) as Row[]).map((r) => ({ id: String(r.profile_id), name: String(r.full_name ?? "") }));
 }
 
-function contactPatchToRow(b: Partial<z.infer<z.ZodObject<typeof contactFields>>>): Row {
+function contactPatchToRow(
+  b: Partial<z.infer<z.ZodObject<typeof contactFields>>> & { status?: ContactStatus; lostReason?: string }
+): Row {
   const row: Row = {};
+  if (b.source !== undefined) row.source = b.source;
+  if (b.status !== undefined) row.status = b.status;
+  if (b.lostReason !== undefined) row.lost_reason = b.lostReason;
   if (b.studentName !== undefined) row.student_name = b.studentName;
   if (b.gradYear !== undefined) row.grad_year = b.gradYear;
   if (b.studentEmail !== undefined) row.student_email = b.studentEmail;
@@ -201,6 +273,28 @@ function contactPatchToRow(b: Partial<z.infer<z.ZodObject<typeof contactFields>>
   if (b.nextStep !== undefined) row.next_step = b.nextStep;
   if (b.ownerId !== undefined) row.owner_id = b.ownerId;
   return row;
+}
+
+/**
+ * A contact in the workspace (lost ones too) whose student or parent email is
+ * one of these, other than `exceptId` (the card being edited).
+ */
+async function findContactByEmail(
+  request: FastifyRequest,
+  ws: Workspace,
+  emails: string[],
+  exceptId?: string
+): Promise<Row | null> {
+  for (const column of ["student_email", "parent_email"] as const) {
+    let q = request.db.from("pipeline_contacts").select("id, student_name").in(column, emails);
+    if (exceptId) q = q.neq("id", exceptId);
+    q = ws.firmId ? q.eq("firm_id", ws.firmId) : q.is("firm_id", null).eq("counselor_id", request.auth.userId);
+    const { data, error } = await q.limit(1);
+    if (error) throw crmError(error);
+    const hit = (data ?? [])[0] as Row | undefined;
+    if (hit) return hit;
+  }
+  return null;
 }
 
 async function nextPosition(request: FastifyRequest, stageId: string): Promise<number> {
@@ -254,11 +348,14 @@ export default async function pipelineRoutes(app: FastifyInstance) {
   /** The whole board: stages (seeded on first open), contacts, consultants. */
   app.get("/", { preHandler: read("pipeline:board") }, async (request) => {
     const ws = await loadWorkspace(request);
+    const history = await pipelineExtrasReady(request);
+    const today = todayIn(request.profile.timezone);
     // The stages wait for the seed; the contacts and the consultants don't, so
-    // they go out alongside it.
-    let q = request.db.from("pipeline_contacts").select(CONTACT_COLUMNS);
+    // they go out alongside it. A lost contact leaves the board (GET /lost).
+    let q = request.db.from("pipeline_contacts").select(await contactColumns(request));
     q = ws.firmId ? q.eq("firm_id", ws.firmId) : q.is("firm_id", null).eq("counselor_id", request.auth.userId);
-    const [stages, { data, error }, people] = await Promise.all([
+    if (history) q = q.neq("status", "lost");
+    const [stages, { data, error }, people, followups] = await Promise.all([
       (async () => {
         const seeded = await request.db.rpc("ensure_pipeline_stages");
         if (seeded.error) throw crmError(seeded.error);
@@ -266,20 +363,36 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       })(),
       q.order("position").order("created_at").limit(2000),
       consultants(request),
+      openFollowupSummaries(request, ws, today),
     ]);
     if (error) throw crmError(error);
 
     const ctx = {
-      today: todayIn(request.profile.timezone),
+      today,
       timezone: request.profile.timezone,
       groups: new Map(stages.map((s) => [String(s.id), String(s.lifecycle_group) as LifecycleGroup])),
+      followups,
     };
     return {
       workspace: { firmId: ws.firmId, isAdmin: ws.isAdmin },
+      // False until the history migration is applied; the app hides the timeline and follow-ups.
+      historyEnabled: history,
       stages: stages.map(toStage),
       contacts: ((data ?? []) as unknown as Row[]).map((r) => toContact(r, ctx)),
       consultants: people,
     };
+  });
+
+  /** Contacts marked lost, newest first, so one can be reopened (`PATCH` status "open"). */
+  app.get("/lost", { preHandler: read("pipeline:lost") }, async (request) => {
+    if (!(await pipelineExtrasReady(request))) throw extrasUnavailable();
+    const ws = await loadWorkspace(request);
+    let q = request.db.from("pipeline_contacts").select(await contactColumns(request)).eq("status", "lost");
+    q = ws.firmId ? q.eq("firm_id", ws.firmId) : q.is("firm_id", null).eq("counselor_id", request.auth.userId);
+    const { data, error } = await q.order("updated_at", { ascending: false }).limit(500);
+    if (error) throw crmError(error);
+    const ctx = await contactContext(request, ws);
+    return { contacts: ((data ?? []) as unknown as Row[]).map((r) => toContact(r, ctx)) };
   });
 
   /** Write a dragged layout back: { stageId: [contactId, ...] } in order. */
@@ -370,24 +483,42 @@ export default async function pipelineRoutes(app: FastifyInstance) {
 
   app.post("/contacts", { preHandler: write("pipeline:contacts") }, async (request, reply) => {
     const b = z
-      .object({ stageId: uuid, ...contactFields })
+      .object({ stageId: uuid, ...contactFields, allowDuplicate: z.boolean() })
       .partial()
       .required({ stageId: true, studentName: true })
       .strict()
       .parse(request.body);
     const ws = await loadWorkspace(request);
 
+    // The same family twice is the usual way a pipeline goes wrong. The email
+    // is the match; "Add anyway" sends allowDuplicate.
+    const emails = [...new Set([b.studentEmail, b.parentEmail].filter((e): e is string => !!e))];
+    if (emails.length > 0 && !b.allowDuplicate) {
+      const existing = await findContactByEmail(request, ws, emails);
+      if (existing) {
+        throw new HttpError(
+          409,
+          `${String(existing.student_name) || "A contact"} is already in your pipeline with that email`,
+          "duplicate_contact"
+        );
+      }
+    }
+
+    const row = contactPatchToRow(b);
+    // A source can only be saved once the history migration is in.
+    if (!(await pipelineExtrasReady(request))) delete row.source;
+
     const { data, error } = await request.db
       .from("pipeline_contacts")
       .insert({
-        ...contactPatchToRow(b),
+        ...row,
         info: b.info ?? {},
         firm_id: ws.firmId,
         counselor_id: request.auth.userId,
         stage_id: b.stageId,
         position: await nextPosition(request, b.stageId),
       })
-      .select(CONTACT_COLUMNS)
+      .select(await contactColumns(request))
       .single();
     if (error) throw crmError(error);
     return reply.code(201).send(await serializeOne(request, ws, data as unknown as Row));
@@ -401,14 +532,37 @@ export default async function pipelineRoutes(app: FastifyInstance) {
   app.patch("/contacts/:id", { preHandler: write("pipeline:contacts", 240) }, async (request) => {
     const { id } = idParam.parse(request.params);
     const b = z
-      .object({ stageId: uuid, ...contactFields })
+      .object({ stageId: uuid, ...contactFields, ...statusFields, allowDuplicate: z.boolean() })
       .partial()
       .strict()
       .parse(request.body);
     const ws = await loadWorkspace(request);
     const current = await loadContactRow(request, id);
 
+    // A new address that another card already has: say so, once. Re-saving the
+    // address a card already holds never asks.
+    const newEmails = [
+      b.studentEmail && b.studentEmail !== String(current.student_email ?? "").toLowerCase() ? b.studentEmail : "",
+      b.parentEmail && b.parentEmail !== String(current.parent_email ?? "").toLowerCase() ? b.parentEmail : "",
+    ].filter(Boolean);
+    if (newEmails.length > 0 && !b.allowDuplicate) {
+      const existing = await findContactByEmail(request, ws, [...new Set(newEmails)], id);
+      if (existing) {
+        throw new HttpError(
+          409,
+          `${String(existing.student_name) || "A contact"} is already in your pipeline with that email`,
+          "duplicate_contact"
+        );
+      }
+    }
+
     const update = contactPatchToRow(b);
+    if (
+      (b.source !== undefined || b.status !== undefined || b.lostReason !== undefined) &&
+      !(await pipelineExtrasReady(request))
+    ) {
+      throw extrasUnavailable();
+    }
     if (b.info) {
       const merged: Record<string, string> = { ...((current.info as Record<string, string> | null) ?? {}) };
       for (const [k, v] of Object.entries(b.info)) {
@@ -438,7 +592,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       .from("pipeline_contacts")
       .update(update)
       .eq("id", id)
-      .select(CONTACT_COLUMNS)
+      .select(await contactColumns(request))
       .maybeSingle();
     if (error) throw crmError(error);
     if (!data) throw notFound("That contact isn't in your pipeline");
@@ -494,7 +648,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         .from("pipeline_contacts")
         .update({ invitation_id: row.id })
         .eq("id", id)
-        .select(CONTACT_COLUMNS)
+        .select(await contactColumns(request))
         .maybeSingle();
       if (error) throw crmError(error);
       if (!data) throw notFound("That contact isn't in your pipeline");
@@ -570,7 +724,18 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         });
         results.push({ to: t.who, email: t.email, sent: sent.sent, error: sent.sent ? null : "Not delivered" });
       }
-      return { results, sentCount: results.filter((r) => r.sent).length };
+      const delivered = results.filter((r) => r.sent);
+      // The timeline records what went out. The email already left, so a
+      // failure to log it is reported, never raised.
+      if (delivered.length > 0 && (await pipelineExtrasReady(request))) {
+        const { error: logError } = await request.db.from("pipeline_activities").insert({
+          contact_id: id,
+          kind: "email",
+          body: `Emailed the ${delivered.map((r) => r.to).join(" and ")}: ${b.subject}`.slice(0, 4000),
+        });
+        if (logError) request.log.warn({ err: logError }, "pipeline: could not log the email to the timeline");
+      }
+      return { results, sentCount: delivered.length };
     }
   );
 
