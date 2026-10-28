@@ -71,6 +71,8 @@ import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
+import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
+import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 // SV Demo v2: the student view
@@ -201,6 +203,8 @@ export function buildApp() {
   // v10 sync routes: management-pipeline
   app.register(pipelineRoutes, { prefix: "/pipeline" });
   app.register(pipelineActivityRoutes, { prefix: "/pipeline" });
+  app.register(pipelineSequenceRoutes, { prefix: "/pipeline" });
+  app.register(pipelineUnsubscribeRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis

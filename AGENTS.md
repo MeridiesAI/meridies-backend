@@ -452,11 +452,19 @@ forget it.
   (a zero-row probe, ready kept for the process, missing for 30 s) makes the
   board fall back to the older columns with `historyEnabled: false`, and the
   history, follow-up, lost and status/source routes answer `503
-  pipeline_extras_unavailable`. Not yet done: the student's info and owner are
-  not copied onto the student at conversion, a parent-only lead can't be
-  invited, and follow-ups aren't in the Calendar feed, the Work Queue or the
-  cron yet. Tests: `test/unit/pipeline-extras.test.ts`,
-  `test/integration/pipeline-history.test.mjs`.
+  pipeline_extras_unavailable`. My Work Queue (`GET /work-items?includeDerived=true`) carries a
+  derived `pipeline-followup` row (with `pipelineContactId`) for each of the
+  caller's open follow-ups that is overdue or due within seven days, never one
+  that is undated, finished or further off, and none on a student's own queue
+  (a family isn't a student). The counselor's data export carries
+  `contactActivities` and `contactFollowups` beside `contacts`. Not done: the
+  contact's info and parents are not copied onto the student at conversion
+  (an invitation carries only name, grade, class year and note, so a copy would
+  have to write into the student's tables through the import machinery), and
+  follow-ups aren't in the Calendar feed (its kinds are a fixed set with
+  seeded types) or on a cron-driven notification. An invitation always goes to
+  the student's own address: a parent-only lead is not invitable. Tests:
+  `test/unit/pipeline-extras.test.ts`, `test/integration/pipeline-history.test.mjs`.
 - **`consultant_tasks` (Management) are visible to the assignee, the assigner
   and the firm's owners/admins, and nobody else.** Anyone may assign
   themselves a task; only an owner or admin assigns to another firm member,

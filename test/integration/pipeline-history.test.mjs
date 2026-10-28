@@ -334,6 +334,51 @@ const c3 = await newContact(S, stageNamed(await board(S), "Active student").id, 
 check("a contact created in Current logs only its creation", kinds(await timeline(S, c3.id)).join() === "created");
 
 // ---------------------------------------------------------------------------
+// My Work Queue
+// ---------------------------------------------------------------------------
+const wq = await newContact(S, inquiry.id, { studentName: "Queue Family", studentEmail: email("queue") });
+const late = await call(S.token, "POST", `/pipeline/contacts/${wq.id}/followups`, { title: "Chase the intake form", dueOn: day(-3) });
+await call(S.token, "POST", `/pipeline/contacts/${wq.id}/followups`, { title: "Call before the visit", dueOn: day(3) });
+await call(S.token, "POST", `/pipeline/contacts/${wq.id}/followups`, { title: "Next semester check-in", dueOn: day(40) });
+await call(S.token, "POST", `/pipeline/contacts/${wq.id}/followups`, { title: "Whenever it suits" });
+const doneOne = await call(S.token, "POST", `/pipeline/contacts/${wq.id}/followups`, { title: "Already sent", dueOn: day(-1) });
+await call(S.token, "PATCH", `/pipeline/followups/${doneOne.body.id}`, { done: true });
+
+const queue = await call(S.token, "GET", "/work-items?includeDerived=true");
+const queued = queue.body.filter((i) => i.origin === "pipeline-followup");
+const titles = queued.map((i) => i.title);
+check("an overdue and a due-this-week follow-up are on the queue", titles.includes("Chase the intake form") && titles.includes("Call before the visit"), titles.join());
+check("a far-off, an undated and a finished one are not", !titles.includes("Next semester check-in") && !titles.includes("Whenever it suits") && !titles.includes("Already sent"), titles.join());
+const row = queued.find((i) => i.title === "Chase the intake form");
+check("the row names the family and points at the contact", row?.studentName === "Queue Family" && row?.pipelineContactId === wq.id && row?.dueDate === day(-3) && row?.source === "Contact Pipeline" && row?.studentId === null, JSON.stringify(row));
+const asStudentFilter = await call(S.token, "GET", `/work-items?includeDerived=true&studentId=${Stu.id}`);
+check("a student's own queue has none of them", asStudentFilter.status !== 200 || !asStudentFilter.body.some((i) => i.origin === "pipeline-followup"), String(asStudentFilter.status));
+const xQueue = await call(X.token, "GET", "/work-items?includeDerived=true");
+check("another practice's queue never carries them", !xQueue.body.some((i) => i.origin === "pipeline-followup" && i.pipelineContactId === wq.id));
+const fb = await call(A.token, "POST", `/pipeline/contacts/${f1.id}/followups`, { title: "Send B the welcome packet", dueOn: day(1), assigneeId: B.id });
+const aQ = (await call(A.token, "GET", "/work-items?includeDerived=true")).body;
+const bQ = (await call(B.token, "GET", "/work-items?includeDerived=true")).body;
+check("a follow-up lands on its assignee's queue only", bQ.some((i) => i.title === "Send B the welcome packet") && !aQ.some((i) => i.title === "Send B the welcome packet"), `${fb.status}`);
+await call(S.token, "PATCH", `/pipeline/followups/${late.body.id}`, { done: true });
+const wq_after = (await call(S.token, "GET", "/work-items?includeDerived=true")).body;
+check("ticking one off takes it off the queue", !wq_after.some((i) => i.title === "Chase the intake form"));
+const plain = (await call(S.token, "GET", "/work-items")).body;
+check("the plain list (no derived rows) is unchanged", !plain.some((i) => i.origin === "pipeline-followup"));
+
+// ---------------------------------------------------------------------------
+// The data export
+// ---------------------------------------------------------------------------
+const exported = await call(S.token, "GET", "/account/export");
+const practice = exported.body?.practice ?? {};
+check("a counselor's export carries the timeline and the follow-ups", exported.status === 200
+  && Array.isArray(practice.contactActivities) && practice.contactActivities.some((a) => a.contact_id === c1.id)
+  && Array.isArray(practice.contactFollowups) && practice.contactFollowups.some((f) => f.contact_id === wq.id),
+  `${exported.status} ${Object.keys(practice).join()}`);
+const ownerExport = (await call(A.token, "GET", "/account/export")).body.practice ?? {};
+check("the owner's export has the billing entries; another practice's has none of this one's", ownerExport.contactActivities?.some((a) => a.kind === "invoice")
+  && !(practice.contactActivities ?? []).some((a) => a.contact_id === f1.id));
+
+// ---------------------------------------------------------------------------
 // Deleting a contact takes its history and follow-ups with it
 // ---------------------------------------------------------------------------
 const c4 = await newContact(S, inquiry.id, { studentName: "Temporary", studentEmail: email("temp") });
