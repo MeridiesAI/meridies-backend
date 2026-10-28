@@ -28,6 +28,7 @@ import {
   NO_PROSE_SYSTEM,
   runStructured,
 } from "../lib/anthropic.js";
+import { alignActivities } from "../lib/activityAlignment.js";
 import { buildStudentContext } from "../lib/context/index.js";
 import { columns } from "../lib/context/ai-allowlist.js";
 import { buildCoherenceMaterial, usableEssay } from "../lib/context/coherenceMaterial.js";
@@ -336,10 +337,33 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         .order("created_at", { ascending: false })
         .limit(3);
 
+      // How the activity list spans research, service and competitions, and how
+      // much of it connects to the declared major. Read live from the sheets,
+      // no model, nothing stored; a read that fails leaves the rest of the popup.
+      const [acts, honors, details] = await Promise.all([
+        request.db
+          .from("activities")
+          .select("organization, position, category, uc_category, description, uc_description, hours_per_week, weeks_per_year")
+          .eq("student_id", studentId)
+          .order("sort_order")
+          .limit(50),
+        request.db.from("awards").select("name").eq("student_id", studentId).order("sort_order").limit(50),
+        request.db.from("student_personal_details").select("intended_majors").eq("student_id", studentId).maybeSingle(),
+      ]);
+      const alignment =
+        acts.error || honors.error
+          ? null
+          : alignActivities({
+              activities: (acts.data ?? []) as Row[],
+              honors: (honors.data ?? []) as Row[],
+              majors: Array.isArray(details.data?.intended_majors) ? (details.data.intended_majors as unknown[]).map(String) : [],
+            });
+
       return {
         docs,
         report: report ? toCoherenceReport(report as Row, flags) : null,
         programs: (programs ?? []).map((r) => toProgram(r as Row)),
+        alignment,
       };
     }
   );

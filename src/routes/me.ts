@@ -26,9 +26,10 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { HttpError, badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { hiddenByCounselor, visibilityOf } from "../lib/polygonVisibility.js";
 import {
   applyInfoPatch,
   infoPatchSchema,
@@ -79,6 +80,13 @@ async function counselorOf(request: FastifyRequest) {
   return data ? { id: String(data.id), name: String(data.full_name ?? "") } : null;
 }
 
+/** A counselor who hid the strength profile keeps it from the data too, not only the screen. */
+async function assertCounselorShowsPolygon(request: FastifyRequest): Promise<void> {
+  if (await hiddenByCounselor(request.db, request.auth.userId)) {
+    throw new HttpError(403, "Your counselor has hidden your strength profile", "polygon_hidden");
+  }
+}
+
 async function overview(request: FastifyRequest, info?: StudentInfo) {
   const me = request.auth.userId;
   const [card, counselor, preferences] = await Promise.all([
@@ -95,6 +103,9 @@ async function overview(request: FastifyRequest, info?: StudentInfo) {
     // The same DTO the counselor's info card reads (GET /student-page/:id/info).
     info: card,
     preferences,
+    // Whether the strength profile shows on the student's dashboard: their own
+    // switch and their counselor's (20261028000005).
+    strengthProfile: visibilityOf(await hiddenByCounselor(request.db, me), preferences.showStrengthProfile),
   };
 }
 
@@ -179,7 +190,10 @@ export default async function meRoutes(app: FastifyInstance) {
   app.get(
     "/polygon",
     { preHandler: [...student, limit("me:polygon", 240, 60)] },
-    async (request) => loadPolygon(request.db, request.auth.userId, { persist: false })
+    async (request) => {
+      await assertCounselorShowsPolygon(request);
+      return loadPolygon(request.db, request.auth.userId, { persist: false });
+    }
   );
 
   /**
@@ -218,7 +232,10 @@ export default async function meRoutes(app: FastifyInstance) {
   app.get(
     "/polygon/years",
     { preHandler: [...student, limit("me:polygon-years", 120, 60)] },
-    async (request) => loadPolygonYears(request.db, request.auth.userId)
+    async (request) => {
+      await assertCounselorShowsPolygon(request);
+      return loadPolygonYears(request.db, request.auth.userId);
+    }
   );
 
   // New-student onboarding (20261015000001): the red-outlined request card.

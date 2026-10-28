@@ -24,7 +24,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { loadTransferredFrom } from "../lib/caseloadTransfer.js";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { HttpError, badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { hiddenByCounselor, setHiddenByCounselor } from "../lib/polygonVisibility.js";
 import { assertCanEditStudent, assertCanViewStudent, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import {
@@ -143,7 +144,27 @@ export default async function studentPageRoutes(app: FastifyInstance) {
       // The student reads their own strength profile and never writes it
       // (RLS refuses a student's axis writes since 20261010000002), so their
       // read derives today's scores in memory instead of storing them.
-      return loadPolygon(request.db, student, { persist: request.profile.role === "counselor" });
+      const counselor = request.profile.role === "counselor";
+      const hidden = await hiddenByCounselor(request.db, student);
+      // A student whose counselor hid it gets none of the data, not just no card.
+      if (!counselor && hidden) {
+        throw new HttpError(403, "Your counselor has hidden your strength profile", "polygon_hidden");
+      }
+      const polygon = await loadPolygon(request.db, student, { persist: counselor });
+      return counselor ? { ...polygon, hiddenFromStudent: hidden } : polygon;
+    }
+  );
+
+  /** Hide the strength profile from the student (or show it again). The counselor's own view is unchanged. */
+  app.put(
+    "/:id/polygon/visibility",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("student-page:polygon-write", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const { hidden } = z.object({ hidden: z.boolean() }).strict().parse(request.body);
+      const student = await resolveStudentId(request, id, "edit");
+      await setHiddenByCounselor(request.db, student, hidden);
+      return { hiddenFromStudent: hidden };
     }
   );
 

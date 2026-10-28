@@ -77,6 +77,7 @@ import calendarRoutes from "./routes/calendar.js";
 import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
+import resumeRoutes from "./routes/resume.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -201,6 +202,7 @@ export function buildApp() {
   // v10 sync routes: management-pipeline
   app.register(pipelineRoutes, { prefix: "/pipeline" });
   app.register(pipelineActivityRoutes, { prefix: "/pipeline" });
+  app.register(resumeRoutes, { prefix: "/resume" });
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis

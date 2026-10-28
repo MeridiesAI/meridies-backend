@@ -84,6 +84,9 @@ src/
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
+│   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
+│   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
+│   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -132,6 +135,7 @@ src/
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
+│   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
@@ -734,6 +738,36 @@ the database (`20261010*`):
   of the student's first name. `GET /me/messages` lists what was sent to the student; RLS
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
+
+### The strength profile is optional, and the resume builder (`20261028000005`-`06`)
+
+- **Hiding the strength profile** (`lib/polygonVisibility.ts`). Two switches, either hides it from the student:
+  their own (`student_preferences.show_strength_profile`, `PATCH /me/preferences { showStrengthProfile }`) and their
+  counselor's (`student_polygon_settings.hidden_by_counselor`, `PUT /student-page/:id/polygon/visibility { hidden }`,
+  counselor with edit access only). The counselor's lives in its own table because `student_preferences` is
+  student-writable and a student must not undo it; RLS and the route both refuse a student's write. `/me/overview`
+  carries `strengthProfile: { visible, hiddenBy: "counselor" | "student" | null }` (the counselor's wins). **A
+  counselor's hide keeps the data back too**: `/me/polygon`, `/me/polygon/years` and the student's own read of
+  `/student-page/:id/polygon` answer 403 `polygon_hidden`; a student's own hide is a screen preference and blocks
+  nothing. The counselor's polygon and its history are never touched, and `GET /student-page/:id/polygon` tells
+  the counselor `hiddenFromStudent`. Without the migration nothing is hidden (a missing table or column reads as
+  shown) and a write answers 503 `polygon_visibility_unavailable`. Not in `REQUIRED_SCHEMA`.
+- **Resume builder** (`routes/resume.ts`, `lib/resume.ts`). `student_resumes` holds one resume per student: a
+  template (`classic` | `compact`) and bounded, strict JSON content (header, education, activities with bullets,
+  honors, skills). The student saves it (`PUT /resume`) and reads it (`GET /resume`); the counselor who can see the
+  student reads it with `?studentId=`. **`POST /resume/draft`** (student only, 20 a minute, `ai_runs` module
+  `resume`, Haiku, under the practice's "AI summaries" switch) turns up to 8 of the student's own activity rows into
+  1-3 bullets each. The model sees only rows loaded from the student's record by id (never text the client typed),
+  each wrapped as untrusted data, and the answer is checked in code: an id the request didn't name is dropped, and a
+  bullet is dropped unless it is 8-160 characters, has no first-person word and states no figure the row did not.
+  It drafts bullets only, no summary or story, so the essay rule holds; nothing is stored until the student saves.
+  Without the migration the routes answer 503 `resume_unavailable`. Tests: `test/unit/resume-draft.test.ts`.
+- **Coherence's activity alignment** (`lib/activityAlignment.ts`). `GET /application/coherence` adds `alignment`:
+  the Activities and Honors sheets sorted into Research, Service and Competitions (by category and by the row's own
+  words; hours per year from hours per week x weeks per year), the declared majors, which entries connect to a major
+  (its own words plus a small table of each field's usual ones) and plain notes for the counselor ("Nothing listed
+  under research"). Deterministic, no model, nothing stored, no migration; null when the sheets can't be read.
+  Tests: `test/unit/activity-alignment.test.ts`, `test/integration/student-view-extras.test.mjs` (all three).
 
 ### College results and scholarship tracking (`20261028000001`)
 
