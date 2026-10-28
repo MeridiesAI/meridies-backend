@@ -70,6 +70,7 @@ import eventRoutes from "./routes/events.js";
 import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
 import pipelineRoutes from "./routes/pipeline.js";
+import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 // SV Demo v2: the student view
@@ -199,6 +200,7 @@ export function buildApp() {
   app.register(eventRoutes, { prefix: "/events" });
   // v10 sync routes: management-pipeline
   app.register(pipelineRoutes, { prefix: "/pipeline" });
+  app.register(pipelineActivityRoutes, { prefix: "/pipeline" });
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis

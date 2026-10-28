@@ -83,6 +83,7 @@ src/
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
+│   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -130,6 +131,7 @@ src/
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
+│   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
@@ -420,6 +422,39 @@ forget it.
   history can't be deleted. Billing rights: a solo counselor, or in a firm its
   owners/admins and the contact's owner (`private.crm_can_bill`). The tables
   are `pipeline_*` because `public.invoices` is subscription billing.
+- **The Contact Pipeline's timeline is written by the database, never tidied**
+  (`20261028000002`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
+  `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
+  `note`, `call`, `meeting` and `email` (insert grant on `contact_id, kind,
+  body`; the guard trigger pins `firm_id`, `counselor_id` and `actor_id`, so a
+  forged workspace or actor is refused). Everything the system can see itself
+  is a trigger: `created`, `stage_change` (only when the stage really changes,
+  so a layout redraw logs nothing), `status`, `invite`, `converted`, `task`
+  (follow-up added/done), and `invoice` / `payment`. Those last two are shown
+  only to whoever may bill the contact (`private.crm_can_bill` in the select
+  policy), so the timeline never tells a colleague what the Payment Tracker
+  wouldn't. `last_contacted_at` is set by trigger on a call, meeting or email,
+  not a note, and isn't client-writable. Follow-ups are their own table
+  (`pipeline_followups`), readable like the contact, not `consultant_tasks`
+  (whose rows are the assignee's, assigner's and admins' only); the assignee
+  must be a consultant in the workspace. A contact's `status` is open, won or
+  lost: lost leaves the board (`GET /pipeline/lost` lists them; `PATCH` status
+  `open` reopens) and keeps its history, and a reason is kept only while lost
+  (a trigger clears it). Accepting the contact's invitation now also marks it
+  won and moves it to the first stage of the Current group in its workspace
+  (the bottom of that column), or leaves it where it is when the practice has
+  no such stage. `POST /pipeline/contacts` refuses a student or parent email
+  already on the workspace's board (lost contacts count) with 409
+  `duplicate_contact`; `allowDuplicate: true` adds it anyway.
+  **Deploy order:** either; not in `REQUIRED_SCHEMA`. `pipelineExtrasReady`
+  (a zero-row probe, ready kept for the process, missing for 30 s) makes the
+  board fall back to the older columns with `historyEnabled: false`, and the
+  history, follow-up, lost and status/source routes answer `503
+  pipeline_extras_unavailable`. Not yet done: the student's info and owner are
+  not copied onto the student at conversion, a parent-only lead can't be
+  invited, and follow-ups aren't in the Calendar feed, the Work Queue or the
+  cron yet. Tests: `test/unit/pipeline-extras.test.ts`,
+  `test/integration/pipeline-history.test.mjs`.
 - **`consultant_tasks` (Management) are visible to the assignee, the assigner
   and the firm's owners/admins, and nobody else.** Anyone may assign
   themselves a task; only an owner or admin assigns to another firm member,
