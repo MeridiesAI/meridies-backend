@@ -91,7 +91,11 @@ async function main() {
   const nextMonth = new Date(`${monthStart}T00:00:00Z`);
   nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
   const from = shiftDate(monthStart, -7);
-  const to = shiftDate(nextMonth.toISOString().slice(0, 10), 6);
+  // The window must reach the seeded Events Hub listings (seedHubEvents: today +12 and +20 days),
+  // or late in a month the hub read is empty and "returns the seeded rows" fails on the date alone.
+  const calendarEnd = shiftDate(nextMonth.toISOString().slice(0, 10), 6);
+  const seededEnd = shiftDate(todayInSeedZone(), 21);
+  const to = calendarEnd > seededEnd ? calendarEnd : seededEnd;
   const tz = encodeURIComponent(SEED_TIME_ZONE);
 
   // [name, path, DB limiter key and max, or null for a point lookup]

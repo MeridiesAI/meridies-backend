@@ -15,6 +15,7 @@ import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
 import accessReviewRoutes from "./routes/accessReview.js";
+import kpiUnsubscribeRoutes from "./routes/kpiUnsubscribe.js";
 import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
 import chatRoutes from "./routes/chat.js";
@@ -50,6 +51,7 @@ import taskRoutes from "./routes/tasks.js";
 // v10 sync imports: overview
 import workItemRoutes from "./routes/workItems.js";
 import pinRoutes from "./routes/pins.js";
+import kpiRoutes from "./routes/kpi.js";
 import outcomeRoutes, { alumniRoutes } from "./routes/outcomes.js";
 import referralRoutes from "./routes/referrals.js";
 import overviewSummaryRoutes from "./routes/overviewSummaries.js";
@@ -146,6 +148,7 @@ export function buildApp() {
   app.register(authRoutes, { prefix: "/auth" });
   // Absolute paths (/access-review/:token): no prefix.
   app.register(accessReviewRoutes);
+  app.register(kpiUnsubscribeRoutes);
   app.register(inviteRoutes, { prefix: "/invites" });
   app.register(studentRoutes, { prefix: "/students" });
   app.register(aiContextRoutes, { prefix: "/students" });
@@ -177,6 +180,7 @@ export function buildApp() {
   // v10 sync routes: overview
   app.register(workItemRoutes, { prefix: "/work-items" });
   app.register(pinRoutes, { prefix: "/pins" });
+  app.register(kpiRoutes, { prefix: "/kpi" });
   app.register(outcomeRoutes, { prefix: "/outcomes" });
   app.register(alumniRoutes, { prefix: "/alumni" });
   app.register(referralRoutes, { prefix: "/referrals" });

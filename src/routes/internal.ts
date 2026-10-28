@@ -30,6 +30,8 @@ import { startLinkCheck } from "../lib/ingest/linkCheck.js";
 import { serviceClient } from "../lib/supabase.js";
 import { startCollegePhotoIngest, startScorecardIngest } from "../lib/ingest/run.js";
 import { runScheduledSweep } from "../lib/sweepSchedule.js";
+import { runMonthlyJob } from "../lib/kpi/monthly.js";
+import { z } from "zod";
 
 /**
  * Hash both sides first so the comparison is fixed-length: timingSafeEqual
@@ -200,6 +202,43 @@ export default async function internalRoutes(app: FastifyInstance) {
    * often is failing (lib/heartbeat.ts failingAlerts), so a plain status-code
    * monitor alerts too.
    */
+  /**
+   * Time saved (lib/kpi/monthly.ts). Daily with ?purgeOnly=1: clear stale activity
+   * signals. Monthly (the 2nd): also finalize last month and send its emails, once.
+   * ?month=YYYY-MM picks the month (default: last month, UTC).
+   */
+  app.post(
+    "/kpi/monthly",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const q = z
+        .object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional(), purgeOnly: z.enum(["1", "true"]).optional() })
+        .strict()
+        .parse(request.query);
+      const r = await runMonthlyJob(serviceClient(), request.log, { month: q.month, purgeOnly: q.purgeOnly !== undefined });
+      if (!r.ran) {
+        if (r.reason === "locked") return reply.code(409).send({ ran: false, reason: "The time-saved job is already running" });
+        return reply.code(503).send({ ran: false, reason: r.reason === "no-service-role" ? "The job needs the service role key" : "The time-saved job failed" });
+      }
+      return r.result;
+    }
+  );
+
+  /** Anonymized averages for marketing (kpi_prospect_averages): nothing below 10 consultants from 5 firms. */
+  app.get(
+    "/kpi/prospect-averages",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request) => {
+      const ym = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
+      const q = z.object({ from: ym, to: ym }).strict().parse(request.query);
+      const svc = serviceClient();
+      if (!svc) throw unavailable("This needs the service role key");
+      const { data, error } = await svc.rpc("kpi_prospect_averages", { p_from: `${q.from}-01`, p_to: `${q.to}-01` });
+      if (error) throw unavailable("Averages are unavailable right now");
+      return { from: q.from, to: q.to, ...(data as Record<string, unknown>) };
+    }
+  );
+
   app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (_request, reply) => {
     const svc = serviceClient();
     if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });

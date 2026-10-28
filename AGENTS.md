@@ -1092,6 +1092,45 @@ there).
 Dated library rows (Common App, UC, Cal State Apply, FAFSA, CSS Profile, Cal
 Grant, Dream Act) carry the current cycle; roll them forward each August.
 
+## Time saved (monthly ROI report)
+
+Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
+`docs/superpowers/plans/2026-10-26-roi-kpi-report.md`. Migrations
+`20261027000001`-`05`, `src/lib/kpi/`, `routes/kpi.ts`, `routes/kpiUnsubscribe.ts`.
+
+- **The database counts.** Triggers on `family_reports` (sent), `meetings.notes_sent_at` ("Notes sent", a
+  mark only), `college_list_variants` (AI lists), `recommendations` (once `accepted_as` links what was
+  created, and only with an `accepted_by`; otherwise it shows under Activity only) and `essay_marks` (a review round decided) call `private.kpi_record`, which snapshots the
+  consultant's figures onto one `kpi_completions` row per finished item (re-runs add their time, never a
+  second row). Undoing the source before the month is finalized (`kpi_months`) removes it; after, nothing
+  changes. Each trigger traps its own errors: the ledger never blocks a save.
+- **Time is the server's.** `POST /kpi/heartbeat` carries no duration; `kpi_heartbeat` (service role only,
+  after `assertOwnsSubject`) keeps one last-heartbeat time per task, ignores beats under 30 s apart and adds a
+  gap only under 10 minutes. Off unless `KPI_TRACKING_ENABLED=true`. Only the per-task total is kept: the
+  monthly job's daily purge clears heartbeat times after 24 hours and deletes tasks idle 14 days.
+- **Fallback.** No measured time: the consultant's median once they have 5 measured completions of the type
+  (and a measured value is capped at 3x it), else their signup figure. A task whose heartbeats were lost while
+  the consultant worked (the app sends `interrupted: true`, sticky on the session) uses that fallback but never
+  less than what was measured (`measure_method = 'fallback'`): lost tracking can only shrink savings. Undoing a
+  completion before finalization gives its measured time back to the task (`subject_id`), so re-marking keeps it.
+- **Who sees what.** A consultant reads only their own rows (RLS). Firm totals (`kpi_firm_month`, owners and
+  admins) only for months that have ended (`reason: "month-open"` otherwise: polling an open month would show
+  one colleague's work between reads) and only with 3+ consultants that month, never per person. Prospect averages
+  (`GET /internal/kpi/prospect-averages`) only from edited figures, and nothing below 10 consultants from 5 firms,
+  a floor every figure (each task type, the value) meets on its own.
+- `GET`/`PUT /kpi/baselines` are open to a pending counselor (own row, service client): onboarding asks them.
+  A save is one atomic merge (`kpi_save_baselines`), since each field in the app saves itself.
+- Monthly emails (`kpi-monthly`, `kpi-firm-monthly`): no student names, "estimated" kept, first one 14+ days
+  after the first completion, recorded in `kpi_email_sends` only once the provider accepted it. Unsubscribe
+  (RFC 8058: `List-Unsubscribe` + `List-Unsubscribe-Post: List-Unsubscribe=One-Click`): one token per recipient
+  and email type: each email gets a fresh random token whose sha256 is stored (`kpi_unsubscribe_tokens`, service
+  role only; never the token), and every token stays valid, so a link from any past email works. GET shows a
+  button; a POST (the button, or a mail client's one-click `List-Unsubscribe=One-Click`, urlencoded or multipart,
+  no cookies or auth) switches off that type at once (`monthly_email` or `firm_email`). No email goes out without
+  `PUBLIC_API_URL` (a failed step). Footer: `COMPANY_POSTAL_ADDRESS` when set, else `COMPANY_CONTACT_EMAIL`
+  (default team@meridiesai.com); keep these emails free of promotion, or set a postal address first.
+- Tests: `test/integration/kpi-*.test.mjs`, `test/unit/kpi-*.test.ts`.
+
 ## Scheduled jobs
 
 The escalation sweep (`runEscalationSweep` in `lib/accountability.ts`) turns red
