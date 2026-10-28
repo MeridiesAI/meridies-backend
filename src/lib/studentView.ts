@@ -12,6 +12,8 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { badRequest, fromPostgrest } from "./errors.js";
+import { visibilityUnavailable } from "./polygonVisibility.js";
+import { isResultsNotApplied } from "./resultsAvailability.js";
 
 type Row = Record<string, unknown>;
 
@@ -35,6 +37,8 @@ export type StudentPreferences = {
   /** A one-hour signed URL for that image; null when there is none or it can't be read. */
   bannerImageUrl: string | null;
   theme: Theme;
+  /** The student's own switch for their strength profile (20261028000005); true until saved. */
+  showStrengthProfile: boolean;
   notifications: {
     smsEnabled: boolean;
     smsPhone: string | null;
@@ -64,6 +68,7 @@ export const preferencesPatch = z
     bannerPreset: z.enum(BANNER_PRESETS),
     bannerImagePath: z.string().trim().max(300).nullable(),
     theme: z.enum(THEMES),
+    showStrengthProfile: z.boolean(),
     smsEnabled: z.boolean(),
     smsPhone: e164.nullable(),
     emailEnabled: z.boolean(),
@@ -78,6 +83,7 @@ const DEFAULTS = {
   banner_preset: "pattern",
   banner_image_path: null,
   theme: "light",
+  show_strength_profile: true,
   sms_enabled: false,
   sms_phone: null,
   email_enabled: false,
@@ -111,6 +117,8 @@ async function toDto(db: SupabaseClient, r: Row): Promise<StudentPreferences> {
     bannerImagePath: path,
     bannerImageUrl: await signedBannerUrl(db, path),
     theme: (THEMES as readonly string[]).includes(String(r.theme)) ? (r.theme as Theme) : "light",
+    // A row from before the migration has no column: shown.
+    showStrengthProfile: r.show_strength_profile !== false,
     notifications: {
       smsEnabled: r.sms_enabled === true,
       smsPhone: typeof r.sms_phone === "string" ? r.sms_phone : null,
@@ -147,6 +155,7 @@ export async function savePreferences(
   const next: Row = { ...current };
   if (patch.bannerPreset !== undefined) next.banner_preset = patch.bannerPreset;
   if (patch.theme !== undefined) next.theme = patch.theme;
+  if (patch.showStrengthProfile !== undefined) next.show_strength_profile = patch.showStrengthProfile;
   if (patch.smsEnabled !== undefined) next.sms_enabled = patch.smsEnabled;
   if (patch.smsPhone !== undefined) next.sms_phone = patch.smsPhone;
   if (patch.emailEnabled !== undefined) next.email_enabled = patch.emailEnabled;
@@ -181,6 +190,9 @@ export async function savePreferences(
         banner_preset: next.banner_preset,
         banner_image_path: next.banner_image_path ?? null,
         theme: next.theme,
+        // Named only when the student changed it, so a database without the
+        // column keeps saving everything else.
+        ...(patch.showStrengthProfile !== undefined ? { show_strength_profile: patch.showStrengthProfile } : {}),
         sms_enabled: next.sms_enabled,
         sms_phone: next.sms_phone ?? null,
         email_enabled: next.email_enabled,
@@ -190,7 +202,10 @@ export async function savePreferences(
     )
     .select("*")
     .single();
-  if (error) throw fromPostgrest(error);
+  if (error) {
+    if (patch.showStrengthProfile !== undefined && isResultsNotApplied(error)) throw visibilityUnavailable();
+    throw fromPostgrest(error);
+  }
 
   // A replaced or cleared upload goes, best effort: the row no longer points
   // at it, and a stray object is only storage, never shown.

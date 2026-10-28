@@ -88,7 +88,9 @@ export type AiModule =
   // Events Hub: finding a college's upcoming events on its own site (lib/eventsDiscovery.ts).
   | "events-discovery"
   // Import pipeline step 2: the column mapping (lib/imports/aiPlan.ts); cell cleanup is deferred.
-  | "import-mapping" | "import-cleanup";
+  | "import-mapping" | "import-cleanup"
+  // Resume builder: bullets drafted from a student's own activity rows (lib/resume.ts).
+  | "resume";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
