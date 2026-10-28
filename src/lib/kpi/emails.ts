@@ -33,7 +33,12 @@ ${lines.map((l) => `<p style="font-size:15px;line-height:1.5">${esc(l)}</p>`).jo
 
 export function renderConsultantEmail(r: KpiReport, link: string, unsubscribeUrl: string, address: string): RenderedEmail {
   const title = `Your time saved in ${monthName(r.month)}`;
-  const lines = [`${hours(r.hoursSaved)} saved across ${plural(r.students, "student", "students")}.`];
+  // A month that netted nothing (or lost time) says so; it never shows a negative number.
+  const lines = [
+    r.hoursSaved > 0
+      ? `${hours(r.hoursSaved)} saved across ${plural(r.students, "student", "students")}.`
+      : `No time saved this month yet, across ${plural(r.students, "student", "students")}. The page shows each task's numbers.`,
+  ];
   const value = r.valueOfTime !== null ? `${money(r.valueOfTime)} of your time${r.valueIsEstimate ? " (estimated)" : ""}` : null;
   const extra = r.extraStudents
     ? `room for up to ${plural(r.extraStudents.upTo, "more student", "more students")} (based on ${plural(r.extraStudents.basedOnMonths, "month", "months")})`
@@ -49,8 +54,10 @@ export function renderConsultantEmail(r: KpiReport, link: string, unsubscribeUrl
 export function renderFirmEmail(t: FirmTotals, firmName: string, link: string, unsubscribeUrl: string, address: string): RenderedEmail {
   const title = `${firmName}: time saved in ${monthName(t.month)}`;
   const lines = [
-    `${hours(t.hoursSaved)} saved across ${plural(t.students, "student", "students")} by your consultants (${plural(t.completions, "finished task", "finished tasks")}).`,
+    t.hoursSaved > 0
+      ? `${hours(t.hoursSaved)} saved across ${plural(t.students, "student", "students")} by your consultants (${plural(t.completions, "finished task", "finished tasks")}).`
+      : `No time saved by your consultants this month yet (${plural(t.completions, "finished task", "finished tasks")}).`,
   ];
-  if (t.valueOfTime !== null) lines.push(`That's ${money(t.valueOfTime)} of their time, at each consultant's own rate.`);
+  if (t.valueOfTime !== null && t.hoursSaved > 0) lines.push(`That's ${money(t.valueOfTime)} of their time, at each consultant's own rate.`);
   return { subject: title, ...layout(title, lines, link, unsubscribeUrl, address), headers: unsubscribeHeaders(unsubscribeUrl) };
 }

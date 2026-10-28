@@ -62,3 +62,17 @@ test("both footers carry the footer line they are given", () => {
   const f = renderFirmEmail({ month: "2026-10", hoursSaved: 1, valueOfTime: null, completions: 1, students: 1 }, "Acme", LINK, UNSUB, addr);
   for (const e of [c, f]) assert.ok(e.text.includes(addr) && e.html.includes(addr));
 });
+
+test("a month that saved nothing says so instead of a negative number", () => {
+  const losing = buildReport([row({ saved_minutes: -30 })], [row({ saved_minutes: -30 })], 1, { aiRuns: {}, researchRuns: {} }, "2026-10", names);
+  const e = renderConsultantEmail(losing, LINK, UNSUB, ADDR);
+  assert.match(e.text, /No time saved this month yet/);
+  assert.ok(!/-\d/.test(e.text.split("See how")[0]), e.text);
+  assert.ok(!/of your time|room for/.test(e.text));
+});
+
+test("a firm month that saved nothing says so instead of a negative number", () => {
+  const e = renderFirmEmail({ month: "2026-10", hoursSaved: -2, valueOfTime: null, completions: 4, students: 3 }, "Acme", LINK, UNSUB, ADDR);
+  assert.match(e.text, /No time saved by your consultants this month yet/);
+  assert.ok(!/-2 hours/.test(e.text));
+});
