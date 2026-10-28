@@ -9,7 +9,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { resultsUnavailable } from "../lib/resultsAvailability.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
@@ -271,34 +272,106 @@ export default async function aidRoutes(app: FastifyInstance) {
     return data ?? [];
   });
 
+  // Scholarship tracking (migration 20261028000001): a hand-entered award, and the
+  // amount, deadline, outcome and requirements checklist on any of them.
+  const requirement = z
+    .object({ id: z.string().trim().min(1).max(64), label: z.string().trim().min(1).max(200), done: z.boolean() })
+    .strict();
+  const awardMoney = z.number().int().min(0).max(100_000_000);
+  const SCHOLARSHIP_STATUSES = ["suggested", "saved", "applying", "applied", "awarded", "not-awarded", "dismissed"] as const;
+
+  const createScholarshipBody = z
+    .object({
+      studentId: z.string().uuid().optional(),
+      name: z.string().trim().min(1).max(200),
+      sponsor: z.string().trim().max(200).optional(),
+      url: z.string().trim().url().max(2000).optional(),
+      amountCents: awardMoney.optional(),
+      deadline: z.string().date().nullable().optional(),
+      requirements: z.array(requirement).max(30).optional(),
+    })
+    .strict();
+
+  app.post(
+    "/scholarships",
+    { preHandler: [app.authenticate, limit("aid:scholarship-create", 60, 60)] },
+    async (request, reply) => {
+      const b = createScholarshipBody.parse(request.body);
+      const student = await resolveStudentId(request, b.studentId, "edit");
+      const { data, error } = await request.db
+        .from("scholarship_matches")
+        .insert({
+          student_id: student,
+          name: b.name,
+          sponsor: b.sponsor ?? null,
+          url: b.url ?? null,
+          amount_cents: b.amountCents ?? null,
+          deadline: b.deadline ?? null,
+          status: "saved",
+          requirements: b.requirements ?? [],
+        })
+        .select("*")
+        .single();
+      if (error) throw resultsUnavailable(error) ?? fromPostgrest(error);
+      return reply.code(201).send(data);
+    }
+  );
+
+  const patchScholarshipBody = z
+    .object({
+      status: z.enum(SCHOLARSHIP_STATUSES),
+      amountCents: awardMoney.nullable(),
+      awardedCents: awardMoney.nullable(),
+      deadline: z.string().date().nullable(),
+      requirements: z.array(requirement).max(30),
+    })
+    .partial()
+    .strict();
+
   app.patch(
     "/scholarships/:id",
     { preHandler: [app.authenticate, limit("aid:scholarship-status", 240, 60)] },
     async (request) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-      const b = z
-        .object({
-          status: z.enum(["suggested", "saved", "applying", "applied", "awarded", "dismissed"]),
-        })
-        .strict()
-        .parse(request.body);
+      const b = patchScholarshipBody.parse(request.body);
+      if (Object.keys(b).length === 0) throw badRequest("Nothing to change");
 
       const { data: existing } = await request.db
         .from("scholarship_matches")
-        .select("student_id")
+        .select("student_id, status, amount_cents, awarded_cents")
         .eq("id", id)
         .maybeSingle();
       if (!existing) throw notFound();
       await resolveStudentId(request, existing.student_id as string, "edit");
 
+      const update: Record<string, unknown> = {};
+      if (b.status !== undefined) update.status = b.status;
+      if (b.amountCents !== undefined) update.amount_cents = b.amountCents;
+      if (b.deadline !== undefined) update.deadline = b.deadline;
+      if (b.requirements !== undefined) update.requirements = b.requirements;
+
+      // The amount won only means something on an awarded scholarship: winning
+      // one with no figure yet assumes the amount applied for, and any other
+      // outcome carries no winnings.
+      const status = (b.status ?? existing.status) as string;
+      const amount = (b.amountCents !== undefined ? b.amountCents : existing.amount_cents) as number | null;
+      const won = (b.awardedCents !== undefined ? b.awardedCents : existing.awarded_cents) as number | null;
+      if (b.awardedCents !== undefined || b.status !== undefined || b.amountCents !== undefined) {
+        update.awarded_cents = status === "awarded" ? (won ?? amount ?? null) : null;
+      }
+
       const { data, error } = await request.db
         .from("scholarship_matches")
-        .update({ status: b.status })
+        .update(update)
         .eq("id", id)
         .select("*")
         .maybeSingle();
 
-      if (error) throw fromPostgrest(error);
+      if (error) {
+        const touchesNew =
+          b.awardedCents !== undefined || b.requirements !== undefined || b.status === "not-awarded" || "awarded_cents" in update;
+        throw (touchesNew ? resultsUnavailable(error) : null) ?? fromPostgrest(error);
+      }
       if (!data) throw notFound();
       return data;
     }

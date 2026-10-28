@@ -25,6 +25,7 @@ import { serializeErr } from "../lib/requestLog.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
+import { resultsUnavailable } from "../lib/resultsAvailability.js";
 import { getRemoteFile, exportGoogleDocText } from "../lib/suiteApi.js";
 import {
   catalogDeadline,
@@ -241,6 +242,8 @@ const patchCollegeBody = z
     status: z.enum(STATUSES),
     stage: z.enum(STAGES),
     deadline: z.string().date().nullable(),
+    /** The day a decision came (accepted, waitlisted, denied...). */
+    decisionDate: z.string().date().nullable(),
     customDeadline: z.string().date().nullable(),
     intendedMajor: trimmed(200).nullable(),
     recsRequired: z.number().int().min(0).max(10).nullable(),
@@ -463,6 +466,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         }
       }
       if (b.deadline !== undefined) update.deadline = b.deadline;
+      if (b.decisionDate !== undefined) update.decision_date = b.decisionDate;
       if (b.customDeadline !== undefined) update.custom_deadline = b.customDeadline;
       if (b.intendedMajor !== undefined) update.intended_major = b.intendedMajor;
       if (b.recsRequired !== undefined) update.recs_required = b.recsRequired;
@@ -472,6 +476,10 @@ export default async function applicationRoutes(app: FastifyInstance) {
       if (b.binding !== undefined) update.binding = b.binding;
       if (b.notes !== undefined) update.notes = b.notes;
       if (b.sortOrder !== undefined) update.sort_order = b.sortOrder;
+      // The final choice is one of the schools that said yes.
+      if (update.status === "enrolled" && !["accepted", "enrolled"].includes(String(current.status))) {
+        throw conflict("Only a school that accepted you can be your final choice");
+      }
       // "1 of 2 in hand" can't outlive a requirement lowered under it.
       const required = (update.recs_required ?? current.recs_required) as number | null;
       const inHand = (update.recs_in_hand ?? current.recs_in_hand) as number | null;
@@ -487,7 +495,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         .eq("id", id)
         .select(LIST_SELECT)
         .maybeSingle();
-      if (error) throw fromPostgrest(error);
+      if (error) throw (b.decisionDate !== undefined ? resultsUnavailable(error) : null) ?? fromPostgrest(error);
       if (!data) throw notFound("That school isn't on the list");
       return serializeOne(request, data as Row);
     }

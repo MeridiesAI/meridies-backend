@@ -102,6 +102,8 @@ export function toListCollege(
     stage: stageOf(status),
     binding: Boolean(r.binding),
     deadline: nstr(r.deadline),
+    /** The day a decision came; null until one is recorded (or before the migration). */
+    decisionDate: nstr(r.decision_date),
     customDeadline: nstr(r.custom_deadline),
     intendedMajor: nstr(r.intended_major),
     recsRequired: nnum(r.recs_required),

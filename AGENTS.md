@@ -686,6 +686,21 @@ the database (`20261010*`):
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
+### College results and scholarship tracking (`20261028000001`)
+
+Nothing new is stored in a new table. A school's decision is `student_colleges.status` (`denied` is the
+rejected the app shows; `enrolled` is the student's one final choice, kept one per student by a trigger) with
+`decision_date`; student and counselor both edit it through `PATCH /application/college-list/:id`
+(`decisionDate`; `enrolled` only on an accepted school, 409 otherwise). When the **student** records a decision
+a trigger writes a `college-result` notification for their primary counselor (approved only). A tracked
+scholarship is a `scholarship_matches` row: `POST /aid/scholarships` adds one by hand, `PATCH` takes status
+(`saved` = to apply, `applied` = submitted, plus `not-awarded`), `amountCents`, `awardedCents` (only meaningful
+once awarded: winning with no figure assumes the amount applied for, any other outcome clears it), `deadline`
+and `requirements` (`[{ id, label, done }]`). "Applying to N" is `student_personal_details.colleges_planned`
+(`collegesPlanned` on the info routes). `GET /overview/student-summaries` adds `gradYear`, `collegesPlanned`,
+`applying`, `results` and `scholarships` per student. `lib/resultsAvailability.ts` turns a missing column into
+`503 college_results_unavailable`; the summaries read the new columns separately so they degrade, never fail.
+
 ### Aid generosity is three ratings, not one
 
 v5 settled this and it should not be relitigated: `college_aid_ratings` is keyed
