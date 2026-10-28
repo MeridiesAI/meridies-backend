@@ -14,6 +14,7 @@ import { startSweepInterval } from "./lib/sweepSchedule.js";
 import accountabilityRoutes from "./routes/accountability.js";
 import aidRoutes from "./routes/aid.js";
 import aiRoutes from "./routes/ai.js";
+import meetingSummaryRoutes from "./routes/meetingSummary.js";
 import accessReviewRoutes from "./routes/accessReview.js";
 import kpiUnsubscribeRoutes from "./routes/kpiUnsubscribe.js";
 import authRoutes from "./routes/auth.js";
@@ -197,6 +198,7 @@ export function buildApp() {
   app.register(collegeV10Routes, { prefix: "/colleges" });
   app.register(collegeIntelRoutes, { prefix: "/colleges" });
   app.register(collegeAiRoutes, { prefix: "/ai" });
+  app.register(meetingSummaryRoutes, { prefix: "/ai" });
   app.register(eventRoutes, { prefix: "/events" });
   // v10 sync routes: management-pipeline
   app.register(pipelineRoutes, { prefix: "/pipeline" });

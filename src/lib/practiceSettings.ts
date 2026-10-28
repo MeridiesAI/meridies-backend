@@ -55,6 +55,7 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   "family-report",
   "aid-report",
   "link-digest",
+  "meeting-summary",
 ]);
 
 /**

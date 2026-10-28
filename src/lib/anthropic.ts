@@ -88,7 +88,9 @@ export type AiModule =
   // Events Hub: finding a college's upcoming events on its own site (lib/eventsDiscovery.ts).
   | "events-discovery"
   // Import pipeline step 2: the column mapping (lib/imports/aiPlan.ts); cell cleanup is deferred.
-  | "import-mapping" | "import-cleanup";
+  | "import-mapping" | "import-cleanup"
+  // A counselor's pasted meeting notes drafted into a summary and action items (lib/meetingSummary.ts).
+  | "meeting-summary";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
