@@ -445,7 +445,9 @@ forget it.
   (the bottom of that column), or leaves it where it is when the practice has
   no such stage. `POST /pipeline/contacts` refuses a student or parent email
   already on the workspace's board (lost contacts count) with 409
-  `duplicate_contact`; `allowDuplicate: true` adds it anyway.
+  `duplicate_contact`, and so does a `PATCH` that changes an address into
+  one another card has (re-saving a card's own address never asks);
+  `allowDuplicate: true` goes ahead anyway.
   **Deploy order:** either; not in `REQUIRED_SCHEMA`. `pipelineExtrasReady`
   (a zero-row probe, ready kept for the process, missing for 30 s) makes the
   board fall back to the older columns with `historyEnabled: false`, and the

@@ -281,6 +281,18 @@ await call(S.token, "PATCH", `/pipeline/contacts/${c1.id}`, { status: "open" });
 // ---------------------------------------------------------------------------
 // Conversion
 // ---------------------------------------------------------------------------
+// Editing an address into one another card already has asks once.
+const other = await newContact(S, inquiry.id, { studentName: "Other Family", studentEmail: email("other") });
+const clash = await call(S.token, "PATCH", `/pipeline/contacts/${other.id}`, { studentEmail: email("ada") });
+check("typing another card's email into this one is flagged", clash.status === 409 && clash.body.code === "duplicate_contact", JSON.stringify(clash.body));
+const clashParent = await call(S.token, "PATCH", `/pipeline/contacts/${other.id}`, { parentEmail: email("ada") });
+check("so is a parent address that matches a student's", clashParent.status === 409, JSON.stringify(clashParent.body));
+const resave = await call(S.token, "PATCH", `/pipeline/contacts/${other.id}`, { studentEmail: email("other"), nextStep: "Call" });
+check("saving the address a card already has never asks", resave.status === 200, JSON.stringify(resave.body));
+const clashOk = await call(S.token, "PATCH", `/pipeline/contacts/${other.id}`, { studentEmail: email("ada"), allowDuplicate: true });
+check("'keep anyway' saves it", clashOk.status === 200 && clashOk.body.studentEmail === email("ada"), JSON.stringify(clashOk.body));
+await call(S.token, "PATCH", `/pipeline/contacts/${other.id}`, { studentEmail: email("other") });
+
 const convStage = stageNamed(aBoard, "Booked");
 const conv = await newContact(A, convStage.id, { studentName: "Student Stu", studentEmail: Stu.email });
 const invited = await call(A.token, "POST", `/pipeline/contacts/${conv.id}/invite`);

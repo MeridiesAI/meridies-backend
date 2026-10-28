@@ -275,10 +275,19 @@ function contactPatchToRow(
   return row;
 }
 
-/** A contact in the workspace (lost ones too) whose student or parent email is one of these. */
-async function findContactByEmail(request: FastifyRequest, ws: Workspace, emails: string[]): Promise<Row | null> {
+/**
+ * A contact in the workspace (lost ones too) whose student or parent email is
+ * one of these, other than `exceptId` (the card being edited).
+ */
+async function findContactByEmail(
+  request: FastifyRequest,
+  ws: Workspace,
+  emails: string[],
+  exceptId?: string
+): Promise<Row | null> {
   for (const column of ["student_email", "parent_email"] as const) {
     let q = request.db.from("pipeline_contacts").select("id, student_name").in(column, emails);
+    if (exceptId) q = q.neq("id", exceptId);
     q = ws.firmId ? q.eq("firm_id", ws.firmId) : q.is("firm_id", null).eq("counselor_id", request.auth.userId);
     const { data, error } = await q.limit(1);
     if (error) throw crmError(error);
@@ -523,12 +532,29 @@ export default async function pipelineRoutes(app: FastifyInstance) {
   app.patch("/contacts/:id", { preHandler: write("pipeline:contacts", 240) }, async (request) => {
     const { id } = idParam.parse(request.params);
     const b = z
-      .object({ stageId: uuid, ...contactFields, ...statusFields })
+      .object({ stageId: uuid, ...contactFields, ...statusFields, allowDuplicate: z.boolean() })
       .partial()
       .strict()
       .parse(request.body);
     const ws = await loadWorkspace(request);
     const current = await loadContactRow(request, id);
+
+    // A new address that another card already has: say so, once. Re-saving the
+    // address a card already holds never asks.
+    const newEmails = [
+      b.studentEmail && b.studentEmail !== String(current.student_email ?? "").toLowerCase() ? b.studentEmail : "",
+      b.parentEmail && b.parentEmail !== String(current.parent_email ?? "").toLowerCase() ? b.parentEmail : "",
+    ].filter(Boolean);
+    if (newEmails.length > 0 && !b.allowDuplicate) {
+      const existing = await findContactByEmail(request, ws, [...new Set(newEmails)], id);
+      if (existing) {
+        throw new HttpError(
+          409,
+          `${String(existing.student_name) || "A contact"} is already in your pipeline with that email`,
+          "duplicate_contact"
+        );
+      }
+    }
 
     const update = contactPatchToRow(b);
     if (
