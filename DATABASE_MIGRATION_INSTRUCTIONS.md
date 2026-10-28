@@ -937,3 +937,24 @@ before it copies anything; a caller without it gets 42501. Apply after
 ```sql
 select prosrc like '%import_can_write_student%' from pg_proc where proname = 'request_held_apply';  -- true
 ```
+
+## College results and scholarship tracking: `20261028000001`
+
+Extends existing tables; creates none. `student_colleges.decision_date`; a trigger that stamps it when a
+school first becomes a decision; a trigger that keeps one `enrolled` school per student (the student's
+final choice) by putting the previous one back to `accepted`, done by trigger and not a unique index so a
+student who already has two enrolled rows can't make the migration fail; a trigger that, when a
+**student** records a decision, writes one `college-result` notification for their primary counselor
+(only while approved; a counselor's, the service role's or a demotion's change tells nobody);
+`notifications.kind` gains `college-result`. `scholarship_matches` gains `awarded_cents` and `requirements`
+(jsonb) and the status `not-awarded`. `student_personal_details.colleges_planned` is "applying to N".
+
+Either order with the code. Code first: a write naming a new column, or `not-awarded`, answers
+`503 college_results_unavailable`; the Overview summaries read the new columns separately and degrade to
+zeros and nulls; nothing else changes. Migration first: nothing the previous build reads changes shape.
+Not in `REQUIRED_SCHEMA`.
+
+```sql
+select count(*) = 3 from pg_trigger
+ where tgname in ('student_colleges_stamp_decision_date', 'student_colleges_one_enrolled', 'student_colleges_notify_counselor');  -- true
+```

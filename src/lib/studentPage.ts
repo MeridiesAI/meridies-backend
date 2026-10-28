@@ -19,6 +19,7 @@ import { z } from "zod";
 import { rankPercentile, type RankRead } from "./classRank.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "./errors.js";
 import { fourPointGpa } from "./gpa.js";
+import { resultsUnavailable } from "./resultsAvailability.js";
 import { loadIntakeFills, questionnaireFields, type QuestionnaireField } from "./intakeFills.js";
 import { toRankBand } from "./serialize.js";
 
@@ -62,6 +63,8 @@ export type StudentInfo = {
   firstGen: boolean | null;
   livingWithParent: boolean | null;
   maritalStatus: MaritalStatus | null;
+  /** How many colleges the student says they are applying to; null until they say. */
+  collegesPlanned: number | null;
   highSchool: string | null;
   highSchoolId: string | null;
   gradYear: string | null;
@@ -149,6 +152,7 @@ export async function loadStudentInfo(
     firstGen: typeof d.first_gen === "boolean" ? d.first_gen : null,
     livingWithParent: typeof d.living_with_parent === "boolean" ? d.living_with_parent : null,
     maritalStatus: s(d.marital_status) as MaritalStatus | null,
+    collegesPlanned: n(d.colleges_planned),
     highSchool: s(p.high_school),
     highSchoolId: s(p.high_school_id),
     gradYear: s(p.grad_year),
@@ -233,6 +237,7 @@ export const infoPatchSchema = z
     firstGen: z.boolean().nullable(),
     livingWithParent: z.boolean().nullable(),
     maritalStatus: z.enum(["single", "married"]).nullable(),
+    collegesPlanned: z.number().int().min(0).max(99).nullable(),
     highSchool: optionalText(200),
     gradYear: z
       .string()
@@ -287,6 +292,7 @@ export async function applyInfoPatch(
   if (patch.firstGen !== undefined) details.first_gen = patch.firstGen;
   if (patch.livingWithParent !== undefined) details.living_with_parent = patch.livingWithParent;
   if (patch.maritalStatus !== undefined) details.marital_status = patch.maritalStatus;
+  if (patch.collegesPlanned !== undefined) details.colleges_planned = patch.collegesPlanned;
   if (patch.intendedMajors !== undefined) details.intended_majors = patch.intendedMajors;
   if (Object.keys(details).length > 0) {
     const { error } = await db
@@ -295,7 +301,7 @@ export async function applyInfoPatch(
         { ...details, student_id: student, updated_by: request.auth.userId },
         { onConflict: "student_id" }
       );
-    if (error) throw fromPostgrest(error);
+    if (error) throw (patch.collegesPlanned !== undefined ? resultsUnavailable(error) : null) ?? fromPostgrest(error);
   }
 
   // Academics.
