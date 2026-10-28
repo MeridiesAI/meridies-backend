@@ -16,12 +16,11 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { sendInviteEmail } from "../lib/email.js";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { step2UsableFor } from "../lib/imports/availability.js";
 import { assertAddressFreeFor } from "../lib/imports/heldAddresses.js";
 import { requireRole } from "../lib/guards.js";
-import { appJoinUrl, newInviteToken } from "../lib/invites.js";
+import { addressStatuses, createInvitation } from "../lib/invites.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { toRosterImport, toRosterImportRow } from "../lib/serialize.js";
 
@@ -135,12 +134,29 @@ export default async function rosterRoutes(app: FastifyInstance) {
       });
       if (createError) throw fromPostgrest(createError);
 
+      // A file that lists one address twice, or a student who is already on
+      // the roster, is a row the counselor should see skipped with the reason:
+      // inviting it again would cancel the earlier invitation or re-invite
+      // someone who joined.
+      const statuses = await addressStatuses(
+        request,
+        body.rows.map((r) => r.email ?? "").filter(Boolean)
+      );
+      const firstRowFor = new Map<string, number>();
       const staged = body.rows.map((r) => {
-        const skipReason = !r.email
+        const email = r.email ?? null;
+        const earlier = email ? firstRowFor.get(email) : undefined;
+        if (email && earlier === undefined) firstRowFor.set(email, r.rowNumber);
+        const status = email ? statuses.get(email) : undefined;
+        const skipReason = !email
           ? "No email address in this row"
           : !r.fullName
             ? "No name in this row"
-            : null;
+            : earlier !== undefined
+              ? `Same email as row ${earlier}`
+              : status === "joined" || status === "accepted"
+                ? "Already on your roster"
+                : null;
         return {
           import_id: importId,
           counselor_id: request.auth.userId,
@@ -194,7 +210,7 @@ export default async function rosterRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate, requireRole("counselor"), limit("roster:send", 10, 3600)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
-      await loadImport(request, id);
+      const record = await loadImport(request, id);
       // A practice with the Import page sends rosters through it, where
       // Meridies' per-counselor invitation review applies (lib/imports/
       // invitations.ts). This old path would be a way around it.
@@ -231,35 +247,39 @@ export default async function rosterRoutes(app: FastifyInstance) {
 
       let invited = 0;
       let failed = 0;
+      let skippedNow = 0;
+
+      // Checked again at send time: someone may have joined since staging.
+      const sendStatuses = await addressStatuses(request, rows.map((r) => String(r.email)));
 
       for (const row of rows) {
         const email = String(row.email);
-        try {
-          // Never at an address whose invitation carries another student's
-          // held import data (lib/imports/heldAddresses.ts).
-          await assertAddressFreeFor(request, email, (row.full_name as string | null) ?? null);
-          // Same rule as a single invite: the newest link is the one that works.
+        const already = sendStatuses.get(email.toLowerCase());
+        if (already === "joined" || already === "accepted") {
           await request.db
-            .from("invitations")
-            .update({ status: "revoked" })
-            .eq("counselor_id", request.auth.userId)
-            .eq("email", email)
-            .eq("status", "pending");
-
-          const token = newInviteToken();
-          const { data: invitation, error: inviteError } = await request.db
-            .from("invitations")
-            .insert({ counselor_id: request.auth.userId, email, token })
-            .select("id")
-            .single();
-          if (inviteError) throw new Error(inviteError.message);
-
-          await sendInviteEmail({
-            to: email,
-            counselorName: request.profile.full_name ?? null,
-            acceptUrl: appJoinUrl(token),
-            invitationId: String(invitation.id),
-            logger: request.log,
+            .from("roster_import_rows")
+            .update({ status: "skipped", skip_reason: "Already on your roster", error: null })
+            .eq("id", row.id as string);
+          skippedNow += 1;
+          continue;
+        }
+        try {
+          // The shared invitation path: it supersedes a pending invitation to
+          // the same address (the newest link is the one that works), refuses
+          // an address holding another student's held import data, and keeps
+          // the row's name, grade and class year on the invitation so the
+          // roster card shows who it is before they join.
+          const gradYear = typeof row.grad_year === "number" && row.grad_year >= 2000 && row.grad_year <= 2100
+            ? row.grad_year
+            : null;
+          const fullName = typeof row.full_name === "string" && row.full_name.trim() ? row.full_name.trim() : null;
+          const gradeLevel = typeof row.grade_level === "string" && row.grade_level.trim() ? row.grade_level.trim() : null;
+          const { row: invitation } = await createInvitation(request, {
+            email,
+            fullName,
+            gradeLevel,
+            gradYear,
+            source: "roster",
           });
 
           await request.db
@@ -282,9 +302,10 @@ export default async function rosterRoutes(app: FastifyInstance) {
       const { data: finished, error: finishError } = await request.db
         .from("roster_imports")
         .update({
-          status: failed === rows.length ? "failed" : "complete",
+          status: failed > 0 && invited === 0 ? "failed" : "complete",
           rows_imported: invited,
           rows_failed: failed,
+          rows_skipped: Number(record.rows_skipped ?? 0) + skippedNow,
           completed_at: new Date().toISOString(),
         })
         .eq("id", id)

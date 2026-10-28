@@ -1133,6 +1133,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
     body: activityBody,
     toDto: toSheetActivity,
     beforeWrite: capRows("activities"),
+    idempotent: true,
   });
   registerCollection(app, {
     path: "honors",
@@ -1140,5 +1141,6 @@ export default async function applicationRoutes(app: FastifyInstance) {
     body: honorBody,
     toDto: toSheetHonor,
     beforeWrite: capRows("awards"),
+    idempotent: true,
   });
 }
