@@ -153,6 +153,7 @@ export const toNote = (r: Row) => ({
   body: str(r.body),
   tags: (r.tags as string[]) ?? [],
   visibility: str(r.visibility),
+  updatedAt: str(r.updated_at),
 });
 
 export const toNarrativeFlag = (r: Row) => ({
