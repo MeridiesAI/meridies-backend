@@ -1,4 +1,4 @@
-// Contact Pipeline history and follow-ups (migration 20261028000002), as real
+// Contact Pipeline history and follow-ups (migration 20261028000003), as real
 // accounts on a local Supabase against a running API (see harness.mjs).
 //
 //   S   a solo counselor (their own workspace)

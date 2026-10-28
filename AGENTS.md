@@ -423,7 +423,7 @@ forget it.
   owners/admins and the contact's owner (`private.crm_can_bill`). The tables
   are `pipeline_*` because `public.invoices` is subscription billing.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
-  (`20261028000002`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
+  (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
   `note`, `call`, `meeting` and `email` (insert grant on `contact_id, kind,
   body`; the guard trigger pins `firm_id`, `counselor_id` and `actor_id`, so a

@@ -1,5 +1,5 @@
 /**
- * The Contact Pipeline's history and follow-ups (migration 20261028000002):
+ * The Contact Pipeline's history and follow-ups (migration 20261028000003):
  * `pipeline_activities`, `pipeline_followups`, and the contact's `source`,
  * `status`, `lost_reason` and `last_contacted_at`.
  *

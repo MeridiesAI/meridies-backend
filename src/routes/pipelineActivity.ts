@@ -1,5 +1,5 @@
 /**
- * Contact Pipeline history and follow-ups (migration 20261028000002).
+ * Contact Pipeline history and follow-ups (migration 20261028000003).
  *
  * A contact's timeline: the notes, calls, meetings and emails a counselor
  * logs, beside everything the database itself saw (created, stage moves,

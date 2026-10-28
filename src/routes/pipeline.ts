@@ -104,7 +104,7 @@ const CONTACT_COLUMNS_BASE =
   "parent_name, parent_email, parent_phone, next_step, owner_id, info, stage_entered_at, invitation_id, " +
   "invited_at, student_id, created_at, updated_at";
 
-/** The extra columns only once the history migration is in (20261028000002). */
+/** The extra columns only once the history migration is in (20261028000003). */
 async function contactColumns(request: FastifyRequest): Promise<string> {
   return (await pipelineExtrasReady(request)) ? `${CONTACT_COLUMNS_BASE}, ${CONTACT_EXTRA_COLUMNS}` : CONTACT_COLUMNS_BASE;
 }
