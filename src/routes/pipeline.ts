@@ -27,7 +27,7 @@ import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/err
 import { requireRole } from "../lib/guards.js";
 import { createInvitation } from "../lib/invites.js";
 import { enforceQuota, limit } from "../lib/limits.js";
-import { deriveAccount, formatUsd, PAYMENT_METHODS, totals, type AccountDTO } from "../lib/payments.js";
+import { deriveAccount, formatUsd, PAYMENT_METHODS, planInvoice, planPayment, totals, type AccountDTO } from "../lib/payments.js";
 import {
   CONTACT_EXTRA_COLUMNS,
   extrasUnavailable,
@@ -37,6 +37,7 @@ import {
   summarizeFollowups,
   type FollowupSummary,
 } from "../lib/pipelineExtras.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 
 type Row = Record<string, unknown>;
 
@@ -310,22 +311,106 @@ async function nextPosition(request: FastifyRequest, stageId: string): Promise<n
 }
 
 /** Billing is for the firm's owners/admins and the contact's owner (RLS: crm_can_bill). */
+// ---- Payment credits (20261028000004) ----------------------------------------
+// A zero-row probe; ready is kept for the process, missing for 30 s. Until the
+// migration is applied an overpayment and a refund are refused (409
+// payment_credits_unavailable) and invoices apply no credit.
+
+const CREDITS_RECHECK_MS = 30_000;
+let creditsReady = false;
+let creditsMissingAt = 0;
+
+export async function paymentCreditsReady(request: FastifyRequest): Promise<boolean> {
+  if (creditsReady) return true;
+  if (Date.now() - creditsMissingAt < CREDITS_RECHECK_MS) return false;
+  const [pay, inv, ref] = await Promise.all([
+    request.db.from("pipeline_payments").select("credit_cents").limit(0),
+    request.db.from("pipeline_invoices").select("credit_applied_cents").limit(0),
+    request.db.from("pipeline_credit_refunds").select("id").limit(0),
+  ]);
+  const error = pay.error ?? inv.error ?? ref.error;
+  if (!error) {
+    creditsReady = true;
+    return true;
+  }
+  if (isResultsNotApplied(error)) {
+    creditsMissingAt = Date.now();
+    return false;
+  }
+  throw crmError(error);
+}
+
+const creditsUnavailable = () =>
+  new HttpError(409, "Recording credit isn't switched on yet. Record the payment for what's left on the package.", "payment_credits_unavailable");
+
+/** The database refused spending more credit than the family holds (a race, or a forged row). */
+function isCreditGuard(error: { code?: string; message?: string } | null): boolean {
+  return error?.code === "23514" && /credit than this family holds|pipeline_credit/.test(error.message ?? "");
+}
+
 async function loadAccount(request: FastifyRequest, contactId: string): Promise<AccountDTO | null> {
-  const [pkg, invoices, payments] = await Promise.all([
+  const credits = await paymentCreditsReady(request);
+  const [pkg, invoices, payments, refunds] = await Promise.all([
     request.db.from("pipeline_packages").select("*").eq("contact_id", contactId).maybeSingle(),
     request.db.from("pipeline_invoices").select("*").eq("contact_id", contactId).limit(500),
     request.db.from("pipeline_payments").select("*").eq("contact_id", contactId).limit(500),
+    credits
+      ? request.db.from("pipeline_credit_refunds").select("*").eq("contact_id", contactId).limit(500)
+      : Promise.resolve({ data: [], error: null }),
   ]);
   if (pkg.error) throw crmError(pkg.error);
   if (invoices.error) throw crmError(invoices.error);
   if (payments.error) throw crmError(payments.error);
+  if (refunds.error) throw crmError(refunds.error);
   if (!pkg.data) return null;
   return deriveAccount(
     pkg.data as Row,
     (invoices.data ?? []) as Row[],
     (payments.data ?? []) as Row[],
-    todayIn(request.profile.timezone)
+    todayIn(request.profile.timezone),
+    (refunds.data ?? []) as Row[]
   );
+}
+
+type InvoiceDraft = { label: string; grossCents: number; creditAppliedCents: number; alreadyPaidCents: number; amountDueCents: number; dueOn: string };
+
+/** The invoice email, the same for the preview and the send. */
+function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null) {
+  const to = String(contact.parent_email || contact.student_email || "");
+  const name = String(contact.student_name ?? "").trim();
+  const lines = [`${draft.label}${name ? ` for ${name}` : ""}: ${formatUsd(draft.grossCents)}.`];
+  if (draft.creditAppliedCents > 0) lines.push(`Credit applied: −${formatUsd(draft.creditAppliedCents)}.`);
+  if (draft.alreadyPaidCents > 0) lines.push(`Already paid: −${formatUsd(draft.alreadyPaidCents)}.`);
+  lines.push(`Amount due: ${formatUsd(draft.amountDueCents)}, by ${draft.dueOn}.`);
+  if (draft.amountDueCents === 0) lines.push("Your credit covers this invoice in full. There's nothing to pay.");
+  lines.push("Reply to this email with any questions about the invoice.");
+  const template = {
+    heading: number ? `Invoice ${number}` : "Invoice",
+    paragraphs: lines,
+    footnote: senderName ? `Sent by ${senderName} through Meridies.` : "Sent through Meridies.",
+  };
+  return {
+    to,
+    recipientKind: contact.parent_email ? ("guardian" as const) : ("student" as const),
+    subject: `Invoice${number ? ` ${number}` : ""}: ${formatUsd(draft.amountDueCents)} due ${draft.dueOn}`,
+    html: brandedEmail(template),
+    text: brandedText(template),
+  };
+}
+
+/** Plan an invoice for this account, or the 409 that says why it can't be sent. */
+function draftInvoice(account: AccountDTO, credits: boolean, b: { label: string; amountCents: number; dueOn: string }): InvoiceDraft {
+  // Without the migration no credit can be recorded against an invoice.
+  const plan = planInvoice(credits ? account : { ...account, creditCents: 0 }, b.amountCents);
+  if (!plan.ok) throw new HttpError(409, plan.reason, plan.code);
+  return {
+    label: b.label,
+    grossCents: plan.grossCents,
+    creditAppliedCents: plan.creditAppliedCents,
+    alreadyPaidCents: plan.alreadyPaidCents,
+    amountDueCents: plan.amountDueCents,
+    dueOn: b.dueOn,
+  };
 }
 
 async function requireAccount(request: FastifyRequest, contactId: string): Promise<AccountDTO> {
@@ -815,6 +900,40 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     return account;
   });
 
+  const invoiceBody = z.object({
+    label: z.string().trim().min(1).max(120),
+    amountCents: z.number().int().min(1).max(100_000_000),
+    dueOn: isoDate,
+  });
+
+  /**
+   * What "Send to parent" would send, without sending it or numbering it: the
+   * recipient, subject and text, and the amount, credit applied and amount due.
+   * Refused the same way the send is (409 nothing_to_invoice / over_billable).
+   */
+  app.post(
+    "/contacts/:id/invoices/preview",
+    { preHandler: [...counselor, limit("pipeline:invoice-preview", 60, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const b = invoiceBody.strict().parse(request.body);
+      const contact = await loadContactRow(request, id);
+      const account = await requireAccount(request, id);
+      if (b.dueOn < todayIn(request.profile.timezone)) throw badRequest("The due date has already passed");
+      const draft = draftInvoice(account, await paymentCreditsReady(request), b);
+      const mail = invoiceEmail(contact, draft, null, request.profile.full_name ?? null);
+      return {
+        to: mail.to || null,
+        subject: mail.subject,
+        text: mail.text,
+        grossCents: draft.grossCents,
+        creditAppliedCents: draft.creditAppliedCents,
+        alreadyPaidCents: draft.alreadyPaidCents,
+        amountDueCents: draft.amountDueCents,
+      };
+    }
+  );
+
   /**
    * Send an invoice. With `send`, it is emailed to the parent (or the student
    * when no parent address is on the card). There is no payment provider, so
@@ -825,56 +944,42 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     { preHandler: [...counselor, limit("pipeline:invoices", 30, 3600)] },
     async (request, reply) => {
       const { id } = idParam.parse(request.params);
-      const b = z
-        .object({
-          label: z.string().trim().min(1).max(120),
-          amountCents: z.number().int().min(1).max(100_000_000),
-          dueOn: isoDate,
-          send: z.boolean().default(true),
-        })
-        .strict()
-        .parse(request.body);
+      const b = invoiceBody.extend({ send: z.boolean().default(true) }).strict().parse(request.body);
       const contact = await loadContactRow(request, id);
-      await requireAccount(request, id);
+      const account = await requireAccount(request, id);
       const today = todayIn(request.profile.timezone);
       if (b.dueOn < today) throw badRequest("The due date has already passed");
+      const credits = await paymentCreditsReady(request);
+      const draft = draftInvoice(account, credits, b);
 
       const { data, error } = await request.db
         .from("pipeline_invoices")
         .insert({
           contact_id: id,
           label: b.label,
-          amount_cents: b.amountCents,
+          amount_cents: draft.grossCents,
+          ...(credits && draft.creditAppliedCents > 0 ? { credit_applied_cents: draft.creditAppliedCents } : {}),
           issued_on: today,
           due_on: b.dueOn,
           created_by: request.auth.userId,
         })
         .select("*")
         .single();
+      if (isCreditGuard(error)) throw new HttpError(409, "The family's credit changed. Open the invoice again to see what's due.", "credit_changed");
       if (error) throw crmError(error);
       const invoice = data as Row;
 
       let emailSent = false;
-      const to = String(contact.parent_email || contact.student_email || "");
+      const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null);
+      const to = mail.to;
       if (b.send && to) {
-        const name = String(contact.student_name ?? "").trim();
-        const template = {
-          heading: `Invoice ${String(invoice.number)}`,
-          paragraphs: [
-            `${b.label}${name ? ` for ${name}` : ""}: ${formatUsd(b.amountCents)}, due ${b.dueOn}.`,
-            "Reply to this email with any questions about the invoice.",
-          ],
-          footnote: request.profile.full_name
-            ? `Sent by ${request.profile.full_name} through Meridies.`
-            : "Sent through Meridies.",
-        };
         const sent = await sendEmail({
           to,
-          subject: `Invoice ${String(invoice.number)}: ${formatUsd(b.amountCents)} due ${b.dueOn}`,
-          html: brandedEmail(template),
-          text: brandedText(template),
+          subject: mail.subject,
+          html: mail.html,
+          text: mail.text,
           template: "pipeline-invoice",
-          recipient_kind: contact.parent_email ? "guardian" : "student",
+          recipient_kind: mail.recipientKind,
           logger: request.log,
         });
         emailSent = sent.sent;
@@ -888,9 +993,8 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           .eq("id", String(invoice.id));
       }
 
-      const account = await requireAccount(request, id);
       return reply.code(201).send({
-        account,
+        account: await requireAccount(request, id),
         invoiceNumber: String(invoice.number),
         sentTo: b.send && to ? to : null,
         emailSent,
@@ -921,15 +1025,30 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         receivedOn: isoDate,
         method: z.enum(PAYMENT_METHODS as [string, ...string[]]),
         note: z.string().trim().max(300).optional(),
+        // The counselor's answer to the overpayment warning: hold the extra as credit.
+        overpayment: z.literal("credit").optional(),
       })
       .strict()
       .parse(request.body);
-    await requireAccount(request, id);
+    const account = await requireAccount(request, id);
     if (b.receivedOn > todayIn(request.profile.timezone)) throw badRequest("That date is in the future");
+
+    const { overpaymentCents } = planPayment(account, b.amountCents);
+    if (overpaymentCents > 0 && b.overpayment !== "credit") {
+      return reply.code(409).send({
+        error: `That's ${formatUsd(overpaymentCents)} more than the ${formatUsd(account.remainingCents)} left on this package.`,
+        code: "overpayment",
+        remainingCents: account.remainingCents,
+        overpaymentCents,
+      });
+    }
+    const credits = await paymentCreditsReady(request);
+    if (overpaymentCents > 0 && !credits) throw creditsUnavailable();
 
     const { error } = await request.db.from("pipeline_payments").insert({
       contact_id: id,
       amount_cents: b.amountCents,
+      ...(overpaymentCents > 0 ? { credit_cents: overpaymentCents } : {}),
       received_on: b.receivedOn,
       method: b.method,
       note: b.note || null,
@@ -939,9 +1058,52 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     return reply.code(201).send(await requireAccount(request, id));
   });
 
+  /**
+   * "Mark refunded": the held credit went back to the family. Records all of
+   * it; nothing is ever refunded automatically.
+   */
+  app.post("/contacts/:id/credit/refund", { preHandler: write("pipeline:billing", 60) }, async (request, reply) => {
+    const { id } = idParam.parse(request.params);
+    const b = z
+      .object({ refundedOn: isoDate, note: z.string().trim().max(300).optional() })
+      .strict()
+      .parse(request.body);
+    const account = await requireAccount(request, id);
+    if (!(await paymentCreditsReady(request))) throw creditsUnavailable();
+    if (b.refundedOn > todayIn(request.profile.timezone)) throw badRequest("That date is in the future");
+    if (account.creditCents <= 0) throw new HttpError(409, "This family has no credit to refund", "no_credit");
+
+    const { error } = await request.db.from("pipeline_credit_refunds").insert({
+      contact_id: id,
+      amount_cents: account.creditCents,
+      refunded_on: b.refundedOn,
+      note: b.note || null,
+      created_by: request.auth.userId,
+    });
+    if (isCreditGuard(error)) throw new HttpError(409, "The family's credit changed. Check it and try again.", "credit_changed");
+    if (error) {
+      if (error.code === "42501") throw forbidden("Only a firm admin or this family's owner can bill them");
+      throw crmError(error);
+    }
+    return reply.code(201).send(await requireAccount(request, id));
+  });
+
   /** Remove a payment recorded by mistake. */
   app.delete("/payments/:id", { preHandler: write("pipeline:billing", 60) }, async (request) => {
     const { id } = idParam.parse(request.params);
+    // A payment whose credit was applied to an invoice or refunded can't go
+    // first: that would leave the family owing a credit they never had.
+    if (await paymentCreditsReady(request)) {
+      const held = await request.db.from("pipeline_payments").select("contact_id, credit_cents").eq("id", id).maybeSingle();
+      if (held.error) throw crmError(held.error);
+      const row = held.data as Row | null;
+      if (row && Number(row.credit_cents ?? 0) > 0) {
+        const account = await loadAccount(request, String(row.contact_id));
+        if (account && account.creditCents < Number(row.credit_cents)) {
+          throw new HttpError(409, "Part of this payment's credit is already on an invoice or refunded. Void that invoice first.", "credit_in_use");
+        }
+      }
+    }
     const { data, error } = await request.db
       .from("pipeline_payments")
       .delete()
