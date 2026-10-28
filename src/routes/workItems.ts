@@ -6,10 +6,11 @@
  * item from Management (v9), who keeps sight of what they assigned.
  *
  * `GET` can append *derived*, read-only rows (`origin` other than
- * "work-item"): family reports waiting on approval and meetings in the next
- * seven days. They are computed, not copied, so they cannot drift from the
- * report or meeting they point at; the UI opens their source instead of
- * ticking them.
+ * "work-item"): family reports waiting on approval, meetings in the next
+ * seven days, and the Contact Pipeline follow-ups assigned to the caller that
+ * are overdue or due within seven days. They are computed, not copied, so they
+ * cannot drift from the report, meeting or follow-up they point at; the UI
+ * opens their source instead of ticking them.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -17,6 +18,7 @@ import { z } from "zod";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { assertCanViewStudent, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { COUNSELOR_STEPS, confirmedStudents, openSteps, setupFacts, type SetupLink } from "../lib/studentSetup.js";
 
 type Row = Record<string, unknown>;
@@ -77,7 +79,7 @@ const nameOf = (v: unknown): string | null => {
 export function toWorkItem(r: Row, me: string) {
   return {
     id: String(r.id),
-    origin: "work-item" as "work-item" | "family-report" | "meeting" | "setup",
+    origin: "work-item" as "work-item" | "family-report" | "meeting" | "setup" | "pipeline-followup",
     kind: String(r.kind) as (typeof KINDS)[number],
     title: String(r.title),
     detail: r.detail ? String(r.detail) : null,
@@ -101,6 +103,8 @@ export function toWorkItem(r: Row, me: string) {
     meetingId: r.meeting_id ? String(r.meeting_id) : null,
     /** A setup row: where the step is done ("college-list", "calendar"…). */
     setupLink: null as SetupLink | null,
+    /** A Contact Pipeline follow-up row: the family it is about. */
+    pipelineContactId: null as string | null,
     createdAt: String(r.created_at),
   };
 }
@@ -176,11 +180,34 @@ export default async function workItemRoutes(app: FastifyInstance) {
       reports = reports.eq("student_id", q.studentId);
       meetings = meetings.eq("student_id", q.studentId);
     }
-    const [o, r, m, confirmed] = await Promise.all([
+    // Follow-ups from the Contact Pipeline that are mine and due within the
+    // week (or late). They hang off a family, not a student, so a student's
+    // own queue has none. Before the history migration there are none.
+    const followups = async () => {
+      if (q.studentId) return [] as Row[];
+      const { data, error } = await request.db
+        .from("pipeline_followups")
+        .select(
+          "id, title, due_on, contact_id, created_at, contact:pipeline_contacts!pipeline_followups_contact_id_fkey(student_name)"
+        )
+        .eq("assignee_id", me)
+        .eq("done", false)
+        .not("due_on", "is", null)
+        .lte("due_on", week.toISOString().slice(0, 10))
+        .order("due_on")
+        .limit(100);
+      if (error) {
+        if (isResultsNotApplied(error)) return [] as Row[];
+        throw fromPostgrest(error);
+      }
+      return (data ?? []) as unknown as Row[];
+    };
+    const [o, r, m, confirmed, due] = await Promise.all([
       own,
       reports.limit(100),
       meetings.order("starts_at").limit(100),
       confirmedStudents(request),
+      followups(),
     ]);
     if (o.error) throw fromPostgrest(o.error);
     if (r.error) throw fromPostgrest(r.error);
@@ -209,6 +236,18 @@ export default async function workItemRoutes(app: FastifyInstance) {
         dueTime: null,
         source: "Calendar",
         meetingId: String(row.id),
+      });
+    }
+    for (const row of due) {
+      const family = (row.contact as { student_name?: unknown } | null)?.student_name;
+      derived.push({
+        ...base(row, "pipeline-followup", "task"),
+        title: String(row.title),
+        // The family's name rides where a student's would; it is not a student.
+        studentName: typeof family === "string" && family ? family : null,
+        dueDate: String(row.due_on),
+        source: "Contact Pipeline",
+        pipelineContactId: String(row.contact_id),
       });
     }
     // Setup rows: what is left on a student confirmed from New student. Each
@@ -288,7 +327,7 @@ export default async function workItemRoutes(app: FastifyInstance) {
 
 function base(
   row: Row,
-  origin: "family-report" | "meeting" | "setup",
+  origin: "family-report" | "meeting" | "setup" | "pipeline-followup",
   kind: "report" | "meeting" | "task"
 ): WorkItemDto {
   return {
@@ -311,6 +350,7 @@ function base(
     familyReportId: null,
     meetingId: null,
     setupLink: null,
+    pipelineContactId: null,
     createdAt: String(row.created_at),
   };
 }

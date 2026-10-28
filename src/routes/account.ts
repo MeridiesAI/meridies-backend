@@ -70,11 +70,15 @@ export default async function accountRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from(table).select("*").eq(column, me).limit(MAX_ROWS_PER_TABLE);
       return error ? null : (data as Row[]);
     };
-    const [profile, roster, workItems, contacts, templates, resources, invitations] = await Promise.all([
+    const [profile, roster, workItems, contacts, activities, followups, templates, resources, invitations] = await Promise.all([
       request.db.from("profiles").select("*").eq("id", me).maybeSingle(),
       request.db.from("profiles").select("id, full_name, email, profile, archived_at, created_at").eq("counselor_id", me).limit(MAX_ROWS_PER_TABLE),
       own("counselor_work_items"),
       own("pipeline_contacts"),
+      // The contacts' timeline and follow-ups (null before the history migration; RLS leaves out
+      // billing entries the caller may not see).
+      own("pipeline_activities"),
+      own("pipeline_followups"),
       own("email_templates"),
       own("library_resources"),
       own("invitations"),
@@ -86,7 +90,15 @@ export default async function accountRoutes(app: FastifyInstance) {
       kind: "counselor",
       profile: profile.data,
       roster: roster.data,
-      practice: { workItems, contacts, emailTemplates: templates, resources, invitations },
+      practice: {
+        workItems,
+        contacts,
+        contactActivities: activities,
+        contactFollowups: followups,
+        emailTemplates: templates,
+        resources,
+        invitations,
+      },
       // A student's full record is its own export: GET /account/students/:id/export.
     };
   });
