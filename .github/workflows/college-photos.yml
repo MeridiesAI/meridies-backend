@@ -1,0 +1,100 @@
+# Loads campus photos into production (scripts/ingest/college-photos.ts; rules in
+# src/lib/ingest/collegePhotos.ts): Wikimedia Commons through Wikidata, copied into
+# the public college-photos bucket. Monthly, and by hand (dry run on by default).
+#
+# Behind the production-db environment, so it has the apply job's approval and its
+# SUPABASE_ACCESS_TOKEN. The API keys are read from the Management API at run time
+# and masked; no key is stored as a secret of its own. The Railway cron on
+# POST /internal/ingest/college-photos does the same job and takes the same lease,
+# so running both is safe (the second answers that a run is in progress).
+name: College photos
+
+on:
+  schedule:
+    - cron: "17 4 3 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: write nothing, upload the log with the CSV of what it would attach"
+        type: boolean
+        default: true
+      only:
+        description: "Optional: six-digit IPEDS unitids, comma-separated"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: college-photos-production
+  cancel-in-progress: false
+
+env:
+  SUPABASE_CLI_VERSION: "2.121.0"
+  SUPABASE_PROJECT_REF: kerstlpuvpmstiavxblv
+
+jobs:
+  ingest:
+    name: Ingest
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: production-db
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      # Before npm ci, so no package script runs while the token is in reach.
+      - name: Read the project's keys
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          keys=$(supabase projects api-keys --project-ref "$SUPABASE_PROJECT_REF" --agent no -o json)
+          anon=$(jq -r '[.[] | select(.name == "anon")][0].api_key // empty' <<<"$keys")
+          service=$(jq -r '[.[] | select(.name == "service_role")][0].api_key // empty' <<<"$keys")
+          if [ -z "$anon" ] || [ -z "$service" ]; then
+            echo "::error::The Management API returned no anon or service_role key."
+            exit 1
+          fi
+          echo "::add-mask::$anon"
+          echo "::add-mask::$service"
+          {
+            echo "SUPABASE_URL=https://$SUPABASE_PROJECT_REF.supabase.co"
+            echo "SUPABASE_ANON_KEY=$anon"
+            echo "SUPABASE_SERVICE_ROLE_KEY=$service"
+          } > "$RUNNER_TEMP/photos.env"
+
+      - run: npm ci --ignore-scripts
+
+      - name: Run the ingest
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
+          if [ "$DRY_RUN" = "true" ]; then
+            set -o pipefail
+            npx tsx --env-file="$RUNNER_TEMP/photos.env" scripts/ingest/college-photos.ts "${args[@]}" | tee "$RUNNER_TEMP/college-photos-dry-run.txt"
+          else
+            npx tsx --env-file="$RUNNER_TEMP/photos.env" scripts/ingest/college-photos.ts "${args[@]}"
+          fi
+
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/photos.env"
+
+      - if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: college-photos-dry-run
+          path: ${{ runner.temp }}/college-photos-dry-run.txt
