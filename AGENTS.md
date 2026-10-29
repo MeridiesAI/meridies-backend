@@ -105,6 +105,7 @@ src/
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
+│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items)
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
 │   │   └── ops/           # what AxIS can change: the operation catalog, run through this API as the counselor
@@ -132,6 +133,7 @@ src/
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
 │   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
 │   ├── collegeAi.ts       # /ai           college research, Build College Lists bar
+│   ├── meetingSummary.ts  # /ai/meeting-summary   a counselor's pasted notes -> a draft summary + action items (stores nothing)
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
@@ -1568,6 +1570,21 @@ reaches a registered route, that inputs are strict, that no essay request
 carries prose, and that the catalog stays under its size budget.
 `test/integration/axis-operations.test.mjs` confirms, refuses and undoes real
 changes against a local Supabase.
+
+### AI meeting-note summaries (`POST /ai/meeting-summary`)
+
+A draft only, counselor only (`requireRole("counselor")`, `resolveStudentId(..., "edit")`, 10 a
+minute). The counselor pastes raw notes (20 to 20,000 characters, strict body); `lib/meetingSummary.ts`
+sends them to `FAST_MODEL` as one escaped `<data>` block with **no student name**, and the model never
+reads a stored note (`meeting_notes.body` stays off the AI allowlist). `cleanSummary` is the code-level
+check: it drops any summary sentence that states a figure the notes never did, drops an action item that
+shares no word with the notes, de-duplicates, caps at 10 items and 4,000 characters, and throws on a
+malformed or empty answer. Nothing is stored: the counselor files the summary through `/notes` and
+turns action items into tasks through `POST /tasks`, so RLS, limits and notifications apply. The
+practice's "AI summaries" switch gates it (`"meeting-summary"` is in `SUMMARY_MODULES`). The essay
+shape test is deliberately not applied: a counselor's meeting record is first person ("I told Maya").
+**Deploy order:** either. `20261028000007` adds the `ai_runs` label; before it, only the audit row is skipped.
+Tests: `test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
 
 ### The essay restriction is a hard product constraint
 

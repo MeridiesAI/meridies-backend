@@ -90,7 +90,9 @@ export type AiModule =
   // Import pipeline step 2: the column mapping (lib/imports/aiPlan.ts); cell cleanup is deferred.
   | "import-mapping" | "import-cleanup"
   // Resume builder: bullets drafted from a student's own activity rows (lib/resume.ts).
-  | "resume";
+  | "resume"
+  // A counselor's pasted meeting notes drafted into a summary and action items (lib/meetingSummary.ts).
+  | "meeting-summary";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an

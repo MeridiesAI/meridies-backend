@@ -57,6 +57,7 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   "link-digest",
   // Resume bullets are drafted from the student's record, so the practice's AI summaries switch governs them.
   "resume",
+  "meeting-summary",
 ]);
 
 /**
