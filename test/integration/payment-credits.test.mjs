@@ -1,4 +1,4 @@
-// Payment Tracker credits (migration 20261028000004, bug hunt S2-M1), as real
+// Payment Tracker credits (migration 20261029000001, bug hunt S2-M1), as real
 // accounts on a local Supabase against a running API (see harness.mjs).
 //
 // Checks: a payment above what's left on the package warns (409 overpayment)

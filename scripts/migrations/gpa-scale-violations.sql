@@ -1,5 +1,5 @@
 -- Read-only: GPAs on file above their scale (student_academics_gpa_within_scale,
--- 20261028000005). Fix these, then VALIDATE the constraint in a later migration.
+-- 20261029000002). Fix these, then VALIDATE the constraint in a later migration.
 -- Run in the Supabase SQL editor; it changes nothing.
 select a.student_id,
        p.full_name,

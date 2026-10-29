@@ -1,7 +1,7 @@
 /**
  * The GPA-within-scale rule at the routes (bug hunt 2026-10-28, S2-M2): a save
  * that would put a GPA above its scale is a 400 in words, before the database
- * constraint (`student_academics_gpa_within_scale`, 20261028000005) refuses it
+ * constraint (`student_academics_gpa_within_scale`, 20261029000002) refuses it
  * with a generic error. The scale is the one in the same save, else the one on
  * record.
  */

@@ -55,7 +55,7 @@ export function gpaScaleNumber(scale: string | null | undefined): number | null 
  * Why a GPA doesn't fit its scale, or null when it does (or there is no scale
  * to check against). Unweighted up to the scale, weighted up to the scale plus
  * one (bug hunt 2026-10-28, S2-M2). The same rule is the database's
- * `student_academics_gpa_within_scale` (20261028000005).
+ * `student_academics_gpa_within_scale` (20261029000002).
  */
 export function gpaOverScale(value: number | null | undefined, scale: string | null | undefined, kind: "weighted" | "unweighted"): string | null {
   if (value === null || value === undefined || !Number.isFinite(value)) return null;

@@ -311,7 +311,7 @@ async function nextPosition(request: FastifyRequest, stageId: string): Promise<n
 }
 
 /** Billing is for the firm's owners/admins and the contact's owner (RLS: crm_can_bill). */
-// ---- Payment credits (20261028000004) ----------------------------------------
+// ---- Payment credits (20261029000001) ----------------------------------------
 // A zero-row probe; ready is kept for the process, missing for 30 s. Until the
 // migration is applied an overpayment and a refund are refused (409
 // payment_credits_unavailable) and invoices apply no credit.

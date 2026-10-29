@@ -6,7 +6,7 @@
  * the oldest invoice first, and an invoice past its due date with money still
  * owed is overdue. All amounts are integer cents.
  *
- * Credits (20261028000004): a payment above what is left on the package is
+ * Credits (20261029000001): a payment above what is left on the package is
  * recorded only when the counselor says so, and the extra is held on the
  * payment as `credit_cents`. A held credit comes off the next invoice as its
  * `credit_applied_cents` (a voided invoice gives it back), and "Mark refunded"

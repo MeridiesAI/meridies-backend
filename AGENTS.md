@@ -231,10 +231,10 @@ triggers (`20261024000083`), the held import apply's student check
 `client_request_id` on `activities` and `awards`; without it
 `POST /application/activities` and `/honors` insert as before, with no
 key, and `lib/collection.ts` remembers the column is missing for five
-minutes), Payment Tracker credits (`20261028000004`: without it an
+minutes), Payment Tracker credits (`20261029000001`: without it an
 overpayment and Mark refunded answer 409 `payment_credits_unavailable` and
 invoices apply no credit, `paymentCreditsReady`) and the GPA-within-scale
-check (`20261028000005`, NOT VALID: new writes only; list what breaks it
+check (`20261029000002`, NOT VALID: new writes only; list what breaks it
 with `scripts/migrations/gpa-scale-violations.sql`, fix those rows, then
 VALIDATE it in a later migration; the routes apply the same rule in code
 either way). They go in later, in filename order
@@ -439,7 +439,7 @@ forget it.
   history can't be deleted. Billing rights: a solo counselor, or in a firm its
   owners/admins and the contact's owner (`private.crm_can_bill`). The tables
   are `pipeline_*` because `public.invoices` is subscription billing.
-  **Credits and invoices** (`20261028000004`, bug hunt 2026-10-28): a payment
+  **Credits and invoices** (`20261029000001`, bug hunt 2026-10-28): a payment
   above what is left on the package (total minus paid) answers 409
   `overpayment` with the amounts, and is recorded only with `overpayment:
   "credit"`, the extra held on the payment (`credit_cents`). An invoice bills
@@ -458,7 +458,7 @@ forget it.
   PostgREST, under a lock on the package. `balanceCents` stays billed minus
   paid and Outstanding stays what open invoices ask for.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
-  `lib/gpaCheck.ts`, `20261028000005`): unweighted up to the number the scale
+  `lib/gpaCheck.ts`, `20261029000002`): unweighted up to the number the scale
   names, weighted up to it plus one; a scale with no number is checked by the
   older 0-10 / 0-110 range only. `PATCH /student-page/:id/info` and `PUT
   /academics` answer 400 in words; the import marks an over-scale GPA

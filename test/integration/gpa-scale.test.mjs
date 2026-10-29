@@ -1,4 +1,4 @@
-// GPA within its scale (migration 20261028000005, bug hunt S2-M2): unweighted up
+// GPA within its scale (migration 20261029000002, bug hunt S2-M2): unweighted up
 // to the scale, weighted up to the scale plus one, in the profile editor
 // (PATCH /student-page/:id/info), the records route (PUT /academics) and the
 // database (PostgREST included). The import's "Needs a fix" is unit tested.
