@@ -827,6 +827,18 @@ the database (`20261010*`):
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
+### CSV import extras (`20261029000003`)
+
+`POST /invites/bulk` recipients take optional `extras` (label -> value; at most 30 entries, labels to 80 characters,
+values to 500), the other columns of a counselor's CSV from another platform. `createInvitation` keeps them in
+`invitations.import_data` (jsonb, an object, 20 kB at most) and `GET /invites/building` returns them as `importData`
+(read apart from `INVITATION_COLUMNS` by `importDataByInvitation`). They are shown on the Building profile card and
+never copied into a student record, so a student's own answers always win; the client UPDATE grant is not widened, so
+the counselor cannot edit them afterwards. The invitation is an ordinary `mass` one: same invite email, accept,
+onboarding forms, requests and Confirm. **Deploy order:** either. Before the migration an insert that names the
+column retries without it (`MISSING_COLUMN`), so the student is invited and only the extras are lost, and the cards
+read `importData: null`. Not in `REQUIRED_SCHEMA`. Test: `test/integration/overview-invites.test.mjs`.
+
 ### The strength profile is optional, and the resume builder (`20261028000005`-`06`)
 
 - **Hiding the strength profile** (`lib/polygonVisibility.ts`). Two switches, either hides it from the student:

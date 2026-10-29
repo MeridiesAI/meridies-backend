@@ -18,6 +18,7 @@ import {
   INVITATION_COLUMNS,
   addressStatuses,
   createInvitation,
+  importDataByInvitation,
   toInvitationDetail,
   type ReferredBy,
 } from "../lib/invites.js";
@@ -174,6 +175,8 @@ const sortSchema = z.object({ text: z.string().max(20_000) }).strict();
 const checkSchema = z
   .object({ emails: z.array(z.string().max(400)).min(1).max(200) })
   .strict();
+/** At most 30 columns of a CSV row; labels to 80 characters, values to 500. */
+const extrasShape = z.record(z.string().trim().min(1).max(80), z.string().trim().max(500)).refine((o) => Object.keys(o).length <= 30, "Too many columns").optional();
 const bulkSchema = z
   .object({
     recipients: z
@@ -186,6 +189,8 @@ const bulkSchema = z
             gradeLevel: basicsShape.gradeLevel,
             gradYear: basicsShape.gradYear,
             timezone: basicsShape.timezone,
+            /** A CSV row's other columns: label -> value. */
+            extras: extrasShape,
           })
           .strict()
       )
@@ -341,11 +346,15 @@ export default async function inviteRoutes(app: FastifyInstance) {
         rows.map((r) => (r.accepted_by ? String(r.accepted_by) : "")).filter(Boolean)
       );
 
+      const imported = await importDataByInvitation(request, rows.map((r) => String(r.id)));
+
       return rows.map((r) => {
         const detail = toInvitationDetail(r);
         const byRequest = items.get(detail.id);
         return {
           ...detail,
+          // The CSV columns this student came in with; null for anyone else.
+          importData: imported.get(detail.id) ?? null,
           studentId: r.accepted_by ? String(r.accepted_by) : null,
           profileStatus: r.accepted_by ? profileStatus.get(String(r.accepted_by)) ?? null : null,
           delivery: deliveries.get(detail.id) ?? null,
@@ -562,6 +571,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
             source: "mass",
             intakeRequests: requests,
             requestedAt: sendRequests ? new Date().toISOString() : null,
+            importData: r.extras ?? null,
           });
           results.push({
             email: r.email,

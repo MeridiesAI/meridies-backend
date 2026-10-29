@@ -44,11 +44,16 @@ export type CreateInvitationInput = {
   source?: InvitationSource;
   intakeRequests?: IntakeRequest[];
   requestedAt?: string | null;
+  /** Extra columns from a CSV import, label -> value (20261029000003). */
+  importData?: Record<string, string> | null;
   /** The import item this invitation is for (lib/imports/invitations.ts): it never blocks itself. */
   importItemId?: string;
   /** The invitation this one sends again (POST /invites/:id/resend): its own held data never blocks it. */
   resendOf?: string;
 };
+
+/** PostgREST's "no such column" answers. */
+const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
 
 export const INVITATION_COLUMNS =
   "id, email, status, created_at, expires_at, accepted_at, accepted_by, full_name, grade_level, " +
@@ -95,24 +100,30 @@ export async function insertInvitation(
   if (supersedeError) throw fromPostgrest(supersedeError);
 
   const token = newInviteToken();
-  const { data, error } = await request.db
-    .from("invitations")
-    .insert({
-      counselor_id: request.auth.userId,
-      email,
-      token,
-      full_name: input.fullName ?? null,
-      grade_level: input.gradeLevel ?? null,
-      grad_year: input.gradYear ?? null,
-      timezone: input.timezone ?? null,
-      note: input.note ?? null,
-      audience: input.audience ?? "student",
-      source: input.source ?? "single",
-      intake_requests: input.intakeRequests ?? [],
-      requested_at: input.requestedAt ?? null,
-    })
-    .select(INVITATION_COLUMNS)
-    .single();
+  const base = {
+    counselor_id: request.auth.userId,
+    email,
+    token,
+    full_name: input.fullName ?? null,
+    grade_level: input.gradeLevel ?? null,
+    grad_year: input.gradYear ?? null,
+    timezone: input.timezone ?? null,
+    note: input.note ?? null,
+    audience: input.audience ?? "student",
+    source: input.source ?? "single",
+    intake_requests: input.intakeRequests ?? [],
+    requested_at: input.requestedAt ?? null,
+  };
+  const extras = input.importData && Object.keys(input.importData).length > 0 ? input.importData : null;
+  const insert = (row: Record<string, unknown>) =>
+    request.db.from("invitations").insert(row).select(INVITATION_COLUMNS).single();
+
+  let { data, error } = await insert(extras ? { ...base, import_data: extras } : base);
+  // Before 20261029000003 the column is missing: save the invitation without
+  // the extras rather than losing the student.
+  if (error && extras && MISSING_COLUMN.has(error.code ?? "")) {
+    ({ data, error } = await insert(base));
+  }
   if (error) throw fromPostgrest(error);
   return { row: data as unknown as Row, token };
 }
@@ -220,3 +231,31 @@ export function toInvitationDetail(r: Row, referredBy: ReferredBy | null = null)
   };
 }
 export type InvitationDetail = ReturnType<typeof toInvitationDetail>;
+
+/**
+ * The CSV columns kept on these invitations (20261029000003). Read apart from
+ * INVITATION_COLUMNS so a database without the column still lists its cards:
+ * any error here is "none".
+ */
+export async function importDataByInvitation(
+  request: FastifyRequest,
+  ids: string[]
+): Promise<Map<string, Record<string, string>>> {
+  const out = new Map<string, Record<string, string>>();
+  if (ids.length === 0) return out;
+  const { data, error } = await request.db
+    .from("invitations")
+    .select("id, import_data")
+    .eq("counselor_id", request.auth.userId)
+    .in("id", ids)
+    .not("import_data", "is", null);
+  if (error) return out;
+  for (const r of (data ?? []) as unknown as { id: string; import_data: unknown }[]) {
+    const d = r.import_data;
+    if (!d || typeof d !== "object" || Array.isArray(d)) continue;
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(d as Record<string, unknown>)) if (typeof v === "string") clean[k] = v;
+    if (Object.keys(clean).length > 0) out.set(r.id, clean);
+  }
+  return out;
+}

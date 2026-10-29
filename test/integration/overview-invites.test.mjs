@@ -31,6 +31,19 @@ const rowA = (manyRows.body ?? []).find((r) => r.email === `bulk-a-${tag}@test.l
 check("bulk row keeps grade, year and time zone", rowA?.grade_level === "11th" && rowA?.grad_year === 2028 && rowA?.timezone === "PT · Pacific", JSON.stringify(rowA));
 check("bulk row carries the shared requests", rowA?.intake_requests?.length === 2 && rowA?.source === "mass", JSON.stringify(rowA));
 check("bulk note lists what to send", String(rowA?.note ?? "").includes("transcript, resume"), JSON.stringify(rowA?.note));
+// CSV import: the sheet's other columns ride on the invitation and show on the
+// Building profile card; a row without them is unchanged.
+const csvEmail = `csv-${tag}@test.local`;
+const csv = await call(c.token, "POST", "/invites/bulk", {
+  recipients: [{ email: csvEmail, name: "Csv Student", extras: { "High school": "Lincoln High", GPA: "3.9" } }],
+});
+check("bulk with CSV extras sends", csv.status === 200 && csv.body.results?.length === 1, `status ${csv.status} ${JSON.stringify(csv.body).slice(0, 160)}`);
+const csvCard = (await call(c.token, "GET", "/invites/building")).body?.find((i) => i.email === csvEmail);
+check("the card carries the CSV columns", csvCard?.importData?.GPA === "3.9" && csvCard?.importData?.["High school"] === "Lincoln High", JSON.stringify(csvCard?.importData));
+const tooMany = await call(c.token, "POST", "/invites/bulk", {
+  recipients: [{ email: `csv2-${tag}@test.local`, extras: Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`c${i}`, "x"])) }],
+});
+check("more than 30 CSV columns is refused", tooMany.status === 400, `status ${tooMany.status}`);
 const again = await call(c.token, "POST", "/invites/bulk", { recipients: [{ email: `bulk-a-${tag}@test.local`, name: "Ada Lane" }] });
 check("a pending address is skipped, not resent", again.body?.skipped === 1 && again.body?.sent + again.body?.queued === 0, JSON.stringify(again.body).slice(0, 160));
 
