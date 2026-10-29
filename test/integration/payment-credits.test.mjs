@@ -61,6 +61,8 @@ check("voiding the invoice gives the credit back", (await account()).creditCents
 const refund = await call(S.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(-1), note: "Check returned" });
 check("Mark refunded clears the credit", refund.status === 201 && refund.body.creditCents === 0 && refund.body.refunds.length === 1, JSON.stringify(refund.body));
 check("and takes it out of what was collected", refund.body.collectedCents === 50000, JSON.stringify(refund.body));
+const listed = await account();
+check("the Payment Tracker list shows it refunded too", listed.creditCents === 0 && listed.refunds?.length === 1, JSON.stringify({ credit: listed.creditCents, refunds: listed.refunds }));
 const again = await call(S.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(-1) });
 check("there's nothing left to refund", again.status === 409 && again.body.code === "no_credit", JSON.stringify(again.body));
 const forgedRefund = await rest(S.token, "POST", "/rest/v1/pipeline_credit_refunds", { contact_id: id, amount_cents: 100, refunded_on: day(0), created_by: S.id });

@@ -841,14 +841,19 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       return { today: todayIn(request.profile.timezone), accounts: [], totals: totals([]), unbilled: [], canBillAll: ws.isAdmin };
     }
 
-    const [pkgs, invoices, payments] = await Promise.all([
+    const credits = await paymentCreditsReady(request);
+    const [pkgs, invoices, payments, refunds] = await Promise.all([
       request.db.from("pipeline_packages").select("*").in("contact_id", ids).limit(2000),
       request.db.from("pipeline_invoices").select("*").in("contact_id", ids).limit(10000),
       request.db.from("pipeline_payments").select("*").in("contact_id", ids).limit(10000),
+      credits
+        ? request.db.from("pipeline_credit_refunds").select("*").in("contact_id", ids).limit(10000)
+        : Promise.resolve({ data: [], error: null }),
     ]);
     if (pkgs.error) throw crmError(pkgs.error);
     if (invoices.error) throw crmError(invoices.error);
     if (payments.error) throw crmError(payments.error);
+    if (refunds.error) throw crmError(refunds.error);
 
     const today = todayIn(request.profile.timezone);
     const group = (rows: Row[]) => {
@@ -861,8 +866,9 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     };
     const inv = group((invoices.data ?? []) as Row[]);
     const pay = group((payments.data ?? []) as Row[]);
+    const ref = group((refunds.data ?? []) as Row[]);
     const accounts = ((pkgs.data ?? []) as Row[]).map((p) =>
-      deriveAccount(p, inv.get(String(p.contact_id)) ?? [], pay.get(String(p.contact_id)) ?? [], today)
+      deriveAccount(p, inv.get(String(p.contact_id)) ?? [], pay.get(String(p.contact_id)) ?? [], today, ref.get(String(p.contact_id)) ?? [])
     );
     const billed = new Set(accounts.map((a) => a.contactId));
     const unbilled = ((contacts.data ?? []) as Row[])
