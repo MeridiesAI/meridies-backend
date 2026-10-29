@@ -84,6 +84,10 @@ src/
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
+│   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
+│   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
+│   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
+│   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -134,6 +138,9 @@ src/
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
+│   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
+│   ├── pipelineSequences.ts # /pipeline   email sequences and enrollments
+│   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
@@ -471,6 +478,51 @@ forget it.
   seeded types) or on a cron-driven notification. An invitation always goes to
   the student's own address: a parent-only lead is not invitable. Tests:
   `test/unit/pipeline-extras.test.ts`, `test/integration/pipeline-history.test.mjs`.
+- **Pipeline email sequences are pre-scheduled drips** (`20261028000004`,
+  `routes/pipelineSequences.ts`, `lib/pipelineSequences.ts`,
+  `routes/pipelineUnsubscribe.ts`). A sequence is up to 20 emails, each a number
+  of days after the one before (at least 1; the first is days after the start
+  date), sent at an hour of the day (`send_hour`) in the counselor's own time
+  zone. Subject and body are copied into the step when written, so editing a
+  saved template never changes a sequence already running. Enrolling takes an
+  optional `startOn` (today to a year ahead), which is how peak season is lined
+  up in advance. Workspace rules are the contact's own (`crm_can_access`); a
+  student reads none of it. The client writes sequences, steps and the
+  enrollment itself (`contact_id`, `sequence_id`, `next_send_at`) and can pause,
+  resume or stop; **progress is the cron's alone** (`next_position`,
+  `last_sent_at`, `claimed_at`, `failures` are not client-writable).
+  **The cron** is `POST /internal/pipeline-sequences/dispatch` (`CRON_SECRET`,
+  every 10-15 minutes; heartbeat `pipeline-sequences`). Like
+  `dispatchDueMessages` it claims an enrollment (`claimed_at`, reclaimed after
+  10 minutes) before sending and gives Resend a stable idempotency key
+  (`pseq:<enrollment>:<step>:<who>`), so overlapping runs and a crash between
+  the send and the bookkeeping send nothing twice. **Who may be emailed is
+  decided again at send time from the contact's card**, never from the
+  enrollment: the contact must still be open, not converted, not unsubscribed,
+  and have an address (student, parent or both, as the step says); the
+  counselor must still be approved (`approvedCounselorIds`); a counselor sends
+  at most 100 sequence emails a day (`SEQUENCE_DAILY_CAP`, an hour's wait when
+  over). Each send is a `message_deliveries` row (template `pipeline-sequence`)
+  and an `email` entry on the contact's timeline. Three failed attempts stop the
+  enrollment (`send-failed`). **Stopping:** a trigger ends a contact's running
+  enrollments when it becomes won (or is converted), lost, or opts out, and the
+  dispatcher checks again; a card with no address ends with `no-address`.
+  A sequence made shorter than a contact's place in it finishes them without a send.
+  **Unsubscribe:** every email carries a link (and `List-Unsubscribe` one-click
+  headers) with a fresh random token whose sha256 is stored in
+  `pipeline_unsubscribe_tokens` (service role only), the KPI emails' pattern;
+  GET shows a button, POST stamps `pipeline_contacts.email_opted_out_at`, which
+  no client can write, and no sequence emails them again. Not built: reply
+  detection (there is no inbound mail, so a family that replies keeps getting
+  the next email until the counselor pauses or stops it), and a per-address
+  rather than per-contact opt-out.
+  **Deploy order:** after `20261028000003`; not in `REQUIRED_SCHEMA`.
+  `sequencesReady` (a zero-row probe) makes the routes answer `503
+  pipeline_sequences_unavailable`, and the cron answers `ran: false` instead of
+  failing, until it is applied. Then add the Railway cron service
+  (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET"
+  "$API_URL/internal/pipeline-sequences/dispatch"`, every 10-15 minutes).
+  Test: `test/integration/pipeline-sequences.test.mjs`.
 - **`consultant_tasks` (Management) are visible to the assignee, the assigner
   and the firm's owners/admins, and nobody else.** Anyone may assign
   themselves a task; only an owner or admin assigns to another firm member,
@@ -736,6 +788,36 @@ the database (`20261010*`):
   of the student's first name. `GET /me/messages` lists what was sent to the student; RLS
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
+
+### The strength profile is optional, and the resume builder (`20261028000005`-`06`)
+
+- **Hiding the strength profile** (`lib/polygonVisibility.ts`). Two switches, either hides it from the student:
+  their own (`student_preferences.show_strength_profile`, `PATCH /me/preferences { showStrengthProfile }`) and their
+  counselor's (`student_polygon_settings.hidden_by_counselor`, `PUT /student-page/:id/polygon/visibility { hidden }`,
+  counselor with edit access only). The counselor's lives in its own table because `student_preferences` is
+  student-writable and a student must not undo it; RLS and the route both refuse a student's write. `/me/overview`
+  carries `strengthProfile: { visible, hiddenBy: "counselor" | "student" | null }` (the counselor's wins). **A
+  counselor's hide keeps the data back too**: `/me/polygon`, `/me/polygon/years` and the student's own read of
+  `/student-page/:id/polygon` answer 403 `polygon_hidden`; a student's own hide is a screen preference and blocks
+  nothing. The counselor's polygon and its history are never touched, and `GET /student-page/:id/polygon` tells
+  the counselor `hiddenFromStudent`. Without the migration nothing is hidden (a missing table or column reads as
+  shown) and a write answers 503 `polygon_visibility_unavailable`. Not in `REQUIRED_SCHEMA`.
+- **Resume builder** (`routes/resume.ts`, `lib/resume.ts`). `student_resumes` holds one resume per student: a
+  template (`classic` | `compact`) and bounded, strict JSON content (header, education, activities with bullets,
+  honors, skills). The student saves it (`PUT /resume`) and reads it (`GET /resume`); the counselor who can see the
+  student reads it with `?studentId=`. **`POST /resume/draft`** (student only, 20 a minute, `ai_runs` module
+  `resume`, Haiku, under the practice's "AI summaries" switch) turns up to 8 of the student's own activity rows into
+  1-3 bullets each. The model sees only rows loaded from the student's record by id (never text the client typed),
+  each wrapped as untrusted data, and the answer is checked in code: an id the request didn't name is dropped, and a
+  bullet is dropped unless it is 8-160 characters, has no first-person word and states no figure the row did not.
+  It drafts bullets only, no summary or story, so the essay rule holds; nothing is stored until the student saves.
+  Without the migration the routes answer 503 `resume_unavailable`. Tests: `test/unit/resume-draft.test.ts`.
+- **Coherence's activity alignment** (`lib/activityAlignment.ts`). `GET /application/coherence` adds `alignment`:
+  the Activities and Honors sheets sorted into Research, Service and Competitions (by category and by the row's own
+  words; hours per year from hours per week x weeks per year), the declared majors, which entries connect to a major
+  (its own words plus a small table of each field's usual ones) and plain notes for the counselor ("Nothing listed
+  under research"). Deterministic, no model, nothing stored, no migration; null when the sheets can't be read.
+  Tests: `test/unit/activity-alignment.test.ts`, `test/integration/student-view-extras.test.mjs` (all three).
 
 ### College results and scholarship tracking (`20261028000001`)
 
@@ -1254,6 +1336,15 @@ token, every 5-15 minutes (see "Import pipeline"):
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
   "https://<api-host>/internal/imports/sweep"
+```
+
+**The fourth cron: pipeline email sequences.**
+`POST /internal/pipeline-sequences/dispatch`, same bearer token, every 10-15
+minutes. Without it enrolled contacts are never emailed (see the Contact
+Pipeline bullet above):
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
+  "https://<api-host>/internal/pipeline-sequences/dispatch"
 ```
 
 ## AI inside the search

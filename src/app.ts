@@ -72,12 +72,15 @@ import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
+import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
+import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 // SV Demo v2: the student view
 import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
+import resumeRoutes from "./routes/resume.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -203,6 +206,9 @@ export function buildApp() {
   // v10 sync routes: management-pipeline
   app.register(pipelineRoutes, { prefix: "/pipeline" });
   app.register(pipelineActivityRoutes, { prefix: "/pipeline" });
+  app.register(resumeRoutes, { prefix: "/resume" });
+  app.register(pipelineSequenceRoutes, { prefix: "/pipeline" });
+  app.register(pipelineUnsubscribeRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis

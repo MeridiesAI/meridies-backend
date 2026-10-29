@@ -22,7 +22,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
-import { summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
+import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
+import { dispatchDueSequences } from "../lib/pipelineSequences.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { recoverExtractions } from "../lib/documentExtraction.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
 import { startEventsDiscovery } from "../lib/eventsDiscovery.js";
@@ -54,6 +56,32 @@ async function requireCronSecret(request: FastifyRequest): Promise<void> {
 }
 
 export default async function internalRoutes(app: FastifyInstance) {
+  /**
+   * Every 10-15 minutes: send the Contact Pipeline sequence emails that are due
+   * (lib/pipelineSequences.ts). Each enrollment is claimed before it is sent,
+   * so overlapping runs cannot send an email twice.
+   */
+  app.post(
+    "/pipeline-sequences/dispatch",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "Sequences need the service role key" });
+      try {
+        const tally = await dispatchDueSequences(svc, request.log);
+        await beat("pipeline-sequences", true, undefined, request.log);
+        return { ran: true, ...tally };
+      } catch (err) {
+        // Before the migration is applied there is nothing to send; that is not a failure.
+        if (isResultsNotApplied(err as { code?: string })) {
+          return reply.code(200).send({ ran: false, reason: "Apply 20261028000004_pipeline_email_sequences.sql" });
+        }
+        await beat("pipeline-sequences", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
   /** Re-queue confirmed documents whose extraction was asked for and never finished; expire leases (also runs on boot and every minute). */
   app.post("/documents/extraction-recover", { preHandler: [requireCronSecret] }, async (request, reply) => {
     const queued = await recoverExtractions(request.log);

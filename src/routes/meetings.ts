@@ -262,6 +262,20 @@ export default async function meetingRoutes(app: FastifyInstance) {
           ? null
           : await checkAttendees(request, primary, patch.attendeeIds);
 
+      // A meeting links only a note written about the same student (RLS already
+      // hides other counselors' notes, so a foreign id reads as missing).
+      if (patch.meetingNoteId) {
+        const { data: note, error: noteError } = await request.db
+          .from("meeting_notes")
+          .select("student_id")
+          .eq("id", patch.meetingNoteId)
+          .maybeSingle();
+        if (noteError) throw fromPostgrest(noteError);
+        if (!note || String((note as Row).student_id) !== primary) {
+          throw badRequest("That note isn't about this student");
+        }
+      }
+
       const ready = await invitesReady(request.db);
       const before = meetingState(existing);
       const endError = inviteEndError(
