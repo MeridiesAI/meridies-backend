@@ -2,6 +2,7 @@
  * Time saved (monthly ROI report). Spec:
  * docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md
  */
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
@@ -11,7 +12,7 @@ import { limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
 import { assertOwnsSubject } from "../lib/kpi/subjects.js";
 import { KPI_SCHEMA_MISSING, TASK_TYPES, type TaskType } from "../lib/kpi/types.js";
-import { toBaselinesDto, type BaselinesRow } from "../lib/kpi/defaults.js";
+import { measuredUsual, toBaselinesDto, type BaselinesRow, type MeasuredUsual } from "../lib/kpi/defaults.js";
 import { monthIn, monthsBack } from "../lib/kpi/report.js";
 import { BASELINE_COLUMNS, KpiReadError, loadReport } from "../lib/kpi/load.js";
 
@@ -49,17 +50,34 @@ export default async function kpiRoutes(app: FastifyInstance) {
   const schemaError = (error: { code?: string; message?: string }) =>
     KPI_SCHEMA_MISSING.has(error.code ?? "") ? kpiUnavailable() : fromPostgrest(error);
 
+  /**
+   * The Settings hint: the caller's measured time per task, the same rows the
+   * report's median uses (measured active or capped, with time). Always keyed by
+   * the caller, so no one sees another consultant's figures.
+   */
+  const loadMeasured = async (db: SupabaseClient, counselorId: string): Promise<MeasuredUsual> => {
+    const { data, error } = await db
+      .from("kpi_completions")
+      .select("task_type, measured_seconds")
+      .eq("counselor_id", counselorId)
+      .in("measure_method", ["active", "capped"])
+      .gt("measured_seconds", 0)
+      .limit(20000);
+    if (error) throw schemaError(error);
+    return measuredUsual((data ?? []) as { task_type: string; measured_seconds: number }[]);
+  };
+
   // Signup figures are asked during onboarding, while the account may still be
   // pending review, so these two routes are open to a pending counselor for their
   // own row only (read and written on the service client, keyed by the caller).
   app.get("/baselines", { preHandler: [...counselor, limit("kpi:baselines", 120, 60)], config: { allowPending: true } }, async (request) => {
-    const { data, error } = await (serviceClient() ?? request.db)
-      .from("kpi_baselines")
-      .select(BASELINE_COLUMNS)
-      .eq("counselor_id", request.auth.userId)
-      .maybeSingle();
+    const db = serviceClient() ?? request.db;
+    const [{ data, error }, measured] = await Promise.all([
+      db.from("kpi_baselines").select(BASELINE_COLUMNS).eq("counselor_id", request.auth.userId).maybeSingle(),
+      loadMeasured(db, request.auth.userId),
+    ]);
     if (error) throw schemaError(error);
-    return toBaselinesDto((data as BaselinesRow | null) ?? null);
+    return toBaselinesDto((data as BaselinesRow | null) ?? null, measured);
   });
 
   /**
@@ -100,7 +118,7 @@ export default async function kpiRoutes(app: FastifyInstance) {
       .eq("counselor_id", request.auth.userId)
       .single();
     if (error) throw schemaError(error);
-    return toBaselinesDto(data as BaselinesRow);
+    return toBaselinesDto(data as BaselinesRow, await loadMeasured(svc, request.auth.userId));
   });
 
   /** The caller's own month: per-task lines with their arithmetic, value or extra students, raw activity. */
