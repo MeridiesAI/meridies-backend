@@ -286,8 +286,10 @@ export function registerCollection<T extends ZodTypeAny>(
       await resolveStudentId(request, existing.student_id as string, "edit");
       await opts.beforeDelete?.(request, existing.student_id as string, id);
 
-      const { error } = await request.db.from(table).delete().eq("id", id);
+      const { data: removed, error } = await request.db.from(table).delete().eq("id", id).select("id");
       if (error) throw fromPostgrest(error);
+      // RLS filters a delete the caller may not make down to zero rows; that is not a success.
+      if (!removed || removed.length === 0) throw notFound();
       return { deleted: true };
     }
   );
