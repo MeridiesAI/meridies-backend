@@ -22,13 +22,13 @@ const account = async () => (await call(S.token, "GET", "/pipeline/payments")).b
 await call(S.token, "PUT", `/pipeline/contacts/${id}/package`, { packageName: "Senior package", totalCents: 50000, installments: 1 });
 
 // 1. An overpayment warns and records nothing.
-const over = await call(S.token, "POST", `/pipeline/contacts/${id}/payments`, { amountCents: 90000, receivedOn: day(0), method: "ach" });
+const over = await call(S.token, "POST", `/pipeline/contacts/${id}/payments`, { amountCents: 90000, receivedOn: day(-1), method: "ach" });
 check("a payment above what's left is refused with a warning", over.status === 409 && over.body.code === "overpayment", JSON.stringify(over.body));
 check("the warning says how much is over", over.body.overpaymentCents === 40000 && over.body.remainingCents === 50000, JSON.stringify(over.body));
 check("nothing was recorded", (await account()).payments.length === 0);
 
 // 2. Confirmed, the extra is held as credit.
-const ok = await call(S.token, "POST", `/pipeline/contacts/${id}/payments`, { amountCents: 90000, receivedOn: day(0), method: "ach", overpayment: "credit" });
+const ok = await call(S.token, "POST", `/pipeline/contacts/${id}/payments`, { amountCents: 90000, receivedOn: day(-1), method: "ach", overpayment: "credit" });
 check("a confirmed overpayment is recorded", ok.status === 201, JSON.stringify(ok.body));
 check("it pays the package off and holds $400 credit", ok.body.paidCents === 50000 && ok.body.creditCents === 40000 && ok.body.status === "paid-up", JSON.stringify(ok.body));
 
@@ -58,15 +58,15 @@ check("PostgREST can't apply credit that isn't there", forged.status >= 400, JSO
 // 6. Voiding gives the credit back; Mark refunded clears it.
 await call(S.token, "POST", `/pipeline/invoices/${inv.id}/void`);
 check("voiding the invoice gives the credit back", (await account()).creditCents === 40000);
-const refund = await call(S.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(0), note: "Check returned" });
+const refund = await call(S.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(-1), note: "Check returned" });
 check("Mark refunded clears the credit", refund.status === 201 && refund.body.creditCents === 0 && refund.body.refunds.length === 1, JSON.stringify(refund.body));
 check("and takes it out of what was collected", refund.body.collectedCents === 50000, JSON.stringify(refund.body));
-const again = await call(S.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(0) });
+const again = await call(S.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(-1) });
 check("there's nothing left to refund", again.status === 409 && again.body.code === "no_credit", JSON.stringify(again.body));
 const forgedRefund = await rest(S.token, "POST", "/rest/v1/pipeline_credit_refunds", { contact_id: id, amount_cents: 100, refunded_on: day(0), created_by: S.id });
 check("PostgREST can't refund credit that isn't there", forgedRefund.status >= 400, JSON.stringify(forgedRefund.body));
 
 // 7. Another counselor can't see or touch any of it.
 const X = await user("pc-outsider");
-const xr = await call(X.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(0) });
+const xr = await call(X.token, "POST", `/pipeline/contacts/${id}/credit/refund`, { refundedOn: day(-1) });
 check("an outsider can't mark a refund", xr.status === 404 || xr.status === 403, JSON.stringify(xr.body));

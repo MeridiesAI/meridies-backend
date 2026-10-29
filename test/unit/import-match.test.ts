@@ -142,7 +142,38 @@ test("fallbacks only suggest: name + birthday + school, or name + grad year + sc
   assert.equal(byYear.matchStatus, "suggested");
   assert.equal(byYear.confidence, "medium");
   const [noSchool] = itemsFor([["", "Ann Lee", "3.0", "", "2028", ""]]);
-  assert.equal(noSchool.matchStatus, "skipped", "a name and year alone never suggest");
+  assert.equal(noSchool.matchStatus, "suggested", "a roster student is never skipped for having no email");
+  assert.equal(noSchool.confidence, "low");
+});
+
+test("a roster student with no email in the file is a low-confidence suggestion, never 'No email to invite'", () => {
+  const [yearOnly, nameOnly] = itemsFor([["", "Ann Lee", "3.0", "", "2028", ""], ["", "Robert Smith", "3.4", "", "", ""]]);
+  assert.equal(yearOnly.matchStatus, "suggested");
+  assert.equal(yearOnly.confidence, "low");
+  assert.deepEqual(yearOnly.candidates.map((c) => c.id), ["s-ann"]);
+  assert.match(yearOnly.candidates[0]!.why, /name and graduation year/i);
+  assert.equal(yearOnly.studentId, null, "the counselor confirms it");
+  assert.equal(nameOnly.matchStatus, "suggested");
+  assert.equal(nameOnly.confidence, "low");
+  assert.match(nameOnly.candidates[0]!.why, /only the name/i);
+  assert.notEqual(nameOnly.skipReason, "No email to invite");
+});
+
+test("a detail that contradicts the roster isn't suggested, and says why", () => {
+  const [wrongYear, wrongBirthday] = itemsFor([
+    ["", "Ann Lee", "3.0", "", "2031", "Roosevelt Academy"],
+    ["", "Jane Doe", "3.9", "2011-07-07", "", ""],
+  ]);
+  assert.equal(wrongYear.matchStatus, "skipped");
+  assert.match(wrongYear.skipReason ?? "", /Ann Lee.*graduation year/i);
+  assert.equal(wrongBirthday.matchStatus, "skipped");
+  assert.match(wrongBirthday.skipReason ?? "", /birthday/i);
+});
+
+test("a malformed email says so, instead of 'No email to invite'", () => {
+  const [bad] = itemsFor([["not-an-email", "Brand New", "3.0", "", "", ""]]);
+  assert.equal(bad.matchStatus, "skipped");
+  assert.match(bad.skipReason ?? "", /isn't a valid email/i);
 });
 
 test("initials never match", () => {

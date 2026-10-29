@@ -19,6 +19,8 @@ export type RecordKey = {
   birthday: string | null;
   gradYear: number | null;
   highSchool: string | null;
+  /** The email cell had text that isn't an email address (kept out of `email`). */
+  emailInvalid?: boolean;
 };
 
 export type RecordValue = {
@@ -138,6 +140,7 @@ export function applyPlan(plan: ParsePlan, files: ParsedFile[], fields: FieldDef
         birthday: null,
         gradYear: raw("grad_year") ? gradYearOf(raw("grad_year") as string) : null,
         highSchool: raw("high_school") ? cap((raw("high_school") as string).replace(/\s+/g, " "), 200) : null,
+        ...(emailRaw && !(emailRaw.length <= 320 && isEmailShape(emailRaw)) ? { emailInvalid: true } : {}),
       };
       const values: RecordValue[] = [];
       const groups = new Map<string, { table: RowTable; parts: Record<string, Json>; bad: Record<string, string>; cols: string[]; flags: Set<string> }>();

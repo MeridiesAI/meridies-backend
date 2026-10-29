@@ -214,7 +214,7 @@ export function deriveAccount(pkg: Row, invoiceRows: Row[], paymentRows: Row[], 
     unappliedCents: Math.max(0, pool),
     canInvoice: invoiceBlockedReason === null,
     invoiceBlockedReason,
-    balanceCents: openOwedCents,
+    balanceCents: billedCents - paidCents,
     overdueCents,
     status,
     nextDue: next ? { invoiceId: next.id, dueOn: next.dueOn, owedCents: owed(next) } : null,
@@ -257,11 +257,10 @@ export function totals(accounts: AccountDTO[]) {
     (t, a) => ({
       contractedCents: t.contractedCents + a.totalCents,
       collectedCents: t.collectedCents + a.collectedCents,
-      outstandingCents: t.outstandingCents + a.remainingCents,
+      outstandingCents: t.outstandingCents + Math.max(0, a.balanceCents),
       overdueCents: t.overdueCents + a.overdueCents,
-      creditCents: t.creditCents + a.creditCents,
     }),
-    { contractedCents: 0, collectedCents: 0, outstandingCents: 0, overdueCents: 0, creditCents: 0 }
+    { contractedCents: 0, collectedCents: 0, outstandingCents: 0, overdueCents: 0 }
   );
 }
 

@@ -10,7 +10,12 @@
  *   the counselor confirms it one by one.
  * - No email match: name plus birthday plus school, or name plus graduation
  *   year plus school: suggested (high when the school matches exactly).
- * - Otherwise an email is invited; no email is skipped.
+ * - A roster student whose row has less to go on (the name alone, or the name
+ *   and one detail) is still a suggestion, low confidence, for the counselor
+ *   to confirm; it is never skipped as "No email to invite". A detail that
+ *   contradicts the roster (another birthday, class year or school) isn't
+ *   suggested, and the skip says what differs.
+ * - Otherwise an email is invited; no email is skipped (a malformed one says so).
  * - Within an item, single-row values that disagree become one change
  *   flagged conflict_in_file, with the alternatives, for the counselor to pick.
  */
@@ -235,16 +240,35 @@ export function matchRecords(records: SheetRecord[], roster: RosterStudent[]): S
       return { ...base, matchStatus: "matched_email" as const, confidence: "high" as const, reasons: ["email", "name"], studentId: onRoster.id, candidates: [], skipReason: null };
     }
 
-    // No email match: name and birthday or graduation year, and the school.
+    // No email match: name and birthday or graduation year, and the school;
+    // else the name with less to go on (low); a contradicting detail rules out.
     const candidates: Array<{ s: RosterStudent; conf: "high" | "medium"; reasons: string[] }> = [];
+    const weak: Array<{ s: RosterStudent; reasons: string[]; why: string }> = [];
+    const contradicted: Array<{ s: RosterStudent; what: string }> = [];
     if (key.name) {
       for (const s of roster) {
         if (s.archived || !s.name || !namesMatch(key.name, s.name)) continue;
-        const bday = key.birthday !== null && s.birthday === key.birthday;
-        const year = key.gradYear !== null && Number(s.gradYear) === key.gradYear;
+        const bdayKnown = key.birthday !== null && Boolean(s.birthday);
+        const yearKnown = key.gradYear !== null && Boolean(s.gradYear) && Number.isFinite(Number(s.gradYear));
         const school = schoolMatch(key.highSchool, s.highSchool);
-        if (!(bday || year) || !school) continue;
-        candidates.push({ s, conf: school === "exact" ? "high" : "medium", reasons: ["name", bday ? "birthday" : "grad_year", school === "exact" ? "school" : "school_fuzzy"] });
+        const schoolKnown = Boolean(key.highSchool) && Boolean(s.highSchool);
+        const bday = bdayKnown && s.birthday === key.birthday;
+        const year = yearKnown && Number(s.gradYear) === key.gradYear;
+        if (bdayKnown && !bday) contradicted.push({ s, what: "birthday" });
+        else if (yearKnown && !year) contradicted.push({ s, what: "graduation year" });
+        else if (schoolKnown && !school) contradicted.push({ s, what: "high school" });
+        else if ((bday || year) && school) {
+          candidates.push({ s, conf: school === "exact" ? "high" : "medium", reasons: ["name", bday ? "birthday" : "grad_year", school === "exact" ? "school" : "school_fuzzy"] });
+        } else {
+          const matched = [bday ? "birthday" : null, year ? "graduation year" : null, school ? "school" : null].filter(Boolean) as string[];
+          weak.push({
+            s,
+            reasons: ["name", ...(bday ? ["birthday"] : []), ...(year ? ["grad_year"] : []), ...(school ? ["school_fuzzy"] : []), "weak"],
+            why: matched.length === 0
+              ? "Only the name matches. Check before confirming"
+              : `Only the name and ${matched.join(" and ")} match. Check before confirming`,
+          });
+        }
       }
     }
     if (candidates.length > 0) {
@@ -263,13 +287,32 @@ export function matchRecords(records: SheetRecord[], roster: RosterStudent[]): S
         skipReason: null,
       };
     }
+    if (weak.length > 0) {
+      return {
+        ...base,
+        matchStatus: "suggested" as const,
+        confidence: "low" as const,
+        reasons: weak[0].reasons,
+        studentId: null,
+        candidates: weak.slice(0, 5).map((x) => ({ id: x.s.id, why: x.why })),
+        skipReason: null,
+      };
+    }
     if (key.email && c.shared) {
       return { ...base, matchStatus: "skipped" as const, confidence: null, reasons: ["shared_email"], studentId: null, candidates: [], skipReason: "Shares an email with another student in this file" };
     }
     if (key.email) {
       return { ...base, matchStatus: "new_invite" as const, confidence: null, reasons: [], studentId: null, candidates: [], skipReason: null };
     }
-    return { ...base, matchStatus: "skipped" as const, confidence: null, reasons: [], studentId: null, candidates: [], skipReason: key.name ? "No email to invite" : "No email or name in this row" };
+    const invalidEmail = c.records.some((r) => r.key.emailInvalid);
+    const skipReason = contradicted.length > 0
+      ? `A student named ${contradicted[0].s.name} is on your roster, but the ${contradicted[0].what} differs`
+      : invalidEmail
+        ? "The email in this row isn't a valid email address"
+        : key.name
+          ? "No email to invite"
+          : "No email or name in this row";
+    return { ...base, matchStatus: "skipped" as const, confidence: null, reasons: [], studentId: null, candidates: [], skipReason };
   });
 
   // One item per student: a second email match to the same student is a suggestion.
@@ -293,7 +336,7 @@ export function matchRecords(records: SheetRecord[], roster: RosterStudent[]): S
     if (it.candidates.length === 0) {
       Object.assign(it, it.matchKey.email
         ? { matchStatus: "new_invite", confidence: null, reasons: [] }
-        : { matchStatus: "skipped", confidence: null, reasons: [], skipReason: "No email to invite" });
+        : { matchStatus: "skipped", confidence: null, reasons: [], skipReason: "Another row in this file is already matched to that student" });
     }
   }
   // Rows that carry nothing to import and match no one are noise.
