@@ -20,6 +20,7 @@
  *   flagged conflict_in_file, with the alternatives, for the counselor to pick.
  */
 
+import { gpaOverScale } from "../gpa.js";
 import { MAX_CHANGES_PER_ITEM } from "./caps.js";
 import { namesMatch, normalizeName } from "./names.js";
 import type { RecordKey, RecordValue, SheetRecord } from "./rows.js";
@@ -382,4 +383,29 @@ export function toPayload(items: StageItem[], counts: { rows: number; blocked: n
     ),
     counts,
   };
+}
+
+/**
+ * A GPA the file gives without a scale is checked against the scale on the
+ * student's record (gpaOverScale): over it, it needs a fix, because the
+ * database refuses it and one refusal would fail the whole save. A suggested
+ * row is checked against its first candidate. Returns how many were flagged.
+ */
+export function flagGpaOverRecordScale(items: StageItem[], scales: Map<string, string | null>): number {
+  let flagged = 0;
+  for (const it of items) {
+    const student = it.studentId ?? it.candidates[0]?.id ?? null;
+    if (!student || it.changes.some((c) => c.target === "student_academics" && c.field === "gpa_scale" && !c.invalid)) continue;
+    const scale = scales.get(student) ?? null;
+    if (!scale) continue;
+    for (const c of it.changes) {
+      if (c.invalid || c.target !== "student_academics" || (c.field !== "gpa_weighted" && c.field !== "gpa_unweighted")) continue;
+      if (gpaOverScale(Number(c.value), scale, c.field === "gpa_weighted" ? "weighted" : "unweighted")) {
+        c.invalid = true;
+        c.flags = [...c.flags, "gpa_over_scale"];
+        flagged += 1;
+      }
+    }
+  }
+  return flagged;
 }

@@ -65,6 +65,27 @@ export async function cleanFixes(request: FastifyRequest, importId: string, fixe
       .in("item_id", gpaItems);
     if (sc.error) throw fromPostgrest(sc.error);
     for (const r of (sc.data ?? []) as Row[]) if (typeof r.new_value === "string") scales.set(String(r.item_id), r.new_value);
+    // No scale in the file: the scale on the matched student's record.
+    const without = gpaItems.filter((id) => !scales.has(id));
+    if (without.length > 0) {
+      const its = await request.db.from("import_items").select("id, student_id, candidates").in("id", without);
+      if (its.error) throw fromPostgrest(its.error);
+      const studentOf = new Map<string, string>();
+      for (const r of (its.data ?? []) as Row[]) {
+        const first = Array.isArray(r.candidates) ? (r.candidates[0] as { id?: string } | undefined)?.id : undefined;
+        const sid = (r.student_id as string | null) ?? first ?? null;
+        if (sid) studentOf.set(String(r.id), sid);
+      }
+      if (studentOf.size > 0) {
+        const rec = await request.db.from("student_academics").select("student_id, gpa_scale").in("student_id", [...new Set(studentOf.values())]);
+        if (rec.error) throw fromPostgrest(rec.error);
+        const bySid = new Map(((rec.data ?? []) as Row[]).map((r) => [String(r.student_id), r.gpa_scale as string | null]));
+        for (const [item, sid] of studentOf) {
+          const sc2 = bySid.get(sid);
+          if (sc2) scales.set(item, sc2);
+        }
+      }
+    }
   }
   const out: Record<string, Json> = {};
   for (const r of (data ?? []) as Row[]) {

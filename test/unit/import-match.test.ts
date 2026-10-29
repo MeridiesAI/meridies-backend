@@ -220,3 +220,16 @@ test("a GPA above its scale needs a fix: 9.9 on 4.0 refused, 4.6 weighted on 4.0
   assert.equal(val(1, "gpa_weighted").invalid, false);
   assert.equal(val(1, "gpa_unweighted").invalid, false);
 });
+
+test("with no scale in the file, a GPA is checked against the scale on the student's record", async () => {
+  const { flagGpaOverRecordScale } = await import("../../src/lib/imports/match.js");
+  const p = plan([k(0, "email"), k(1, "full_name"), fld(2, "student_academics", "gpa_weighted")]);
+  const items = matchRecords(applyPlan(p, [file(sheet(["Email", "Name", "W"], [["jane@x.org", "Jane Doe", "9.9"], ["rob@x.org", "Robert Smith", "4.6"], ["", "Ann Lee", "7.5"]]))], FIELDS).records, roster);
+  const n = flagGpaOverRecordScale(items, new Map([["s-jane", "4.0"], ["s-rob", "4.0"], ["s-ann", "4.0"]]));
+  const gpa = (i: number) => items[i]!.changes.find((c) => c.field === "gpa_weighted")!;
+  assert.equal(gpa(0).invalid, true, "9.9 on the record's 4.0 scale needs a fix");
+  assert.ok(gpa(0).flags.includes("gpa_over_scale"));
+  assert.equal(gpa(1).invalid, false, "4.6 weighted on 4.0 is fine");
+  assert.equal(gpa(2).invalid, true, "a suggested match is checked against its candidate's scale");
+  assert.equal(n, 2);
+});

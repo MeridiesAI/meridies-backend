@@ -25,7 +25,7 @@ import { loadFields } from "./fields.js";
 import { loadImportRow } from "./files.js";
 import { heldAtAddresses, skipHeldElsewhere } from "./heldAddresses.js";
 import { profiledFiles } from "./mapping.js";
-import { matchRecords, TooManyChangesError, toPayload, type RosterStudent } from "./match.js";
+import { flagGpaOverRecordScale, matchRecords, TooManyChangesError, toPayload, type RosterStudent } from "./match.js";
 import { parseFailureMessage, parseInWorker } from "./parse.js";
 import { parsePlanSchema, validatePlan } from "./plan.js";
 import { applyPlan, type ParsedFile } from "./rows.js";
@@ -91,6 +91,13 @@ export async function stageImport(request: FastifyRequest, importId: string): Pr
       return rows[0].out as RosterStudent[];
     });
     const items = matchRecords(applied.records, roster);
+    // A GPA with no scale in the file is held to the scale on the record.
+    const gpaStudents = [...new Set(items.flatMap((it) => (it.changes.some((c) => c.field === "gpa_weighted" || c.field === "gpa_unweighted") ? [it.studentId ?? it.candidates[0]?.id] : [])).filter((x): x is string => Boolean(x)))];
+    if (gpaStudents.length > 0) {
+      const { data: scales, error: scaleError } = await request.db.from("student_academics").select("student_id, gpa_scale").in("student_id", gpaStudents);
+      if (scaleError) throw new Error("scales unreadable");
+      flagGpaOverRecordScale(items, new Map(((scales ?? []) as Row[]).map((r) => [String(r.student_id), (r.gpa_scale as string | null) ?? null])));
+    }
     // An address already carrying another student's held data from an
     // earlier import is not invited for this one (heldAddresses.ts).
     const inviting = items.filter((it) => it.matchStatus === "new_invite" && it.matchKey.email).map((it) => String(it.matchKey.email));
