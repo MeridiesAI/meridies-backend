@@ -1206,7 +1206,10 @@ there).
   202, 409 while running, 503 naming the migration before it is applied;
   lease `college-photos`, 3 hours; `ingest_runs` + `job_heartbeats`), or
   `npx tsx --env-file=.env scripts/ingest/college-photos.ts [--limit N]
-  [--only <unitids>] [--dry-run]`. It re-checks every stored file and
+  [--only <unitids>] [--dry-run]`, or the **College photos** workflow
+  (`.github/workflows/college-photos.yml`: monthly and by hand, behind the
+  `production-db` approval; it reads the project's keys from the Management API
+  with `SUPABASE_ACCESS_TOKEN` at run time). It re-checks every stored file and
   downloads only changed ones (same sha1: nothing downloaded, the text
   refreshed under the rule above); a deleted or relicensed file loses its row and objects. A
   Wikidata or picks failure ends the run before anything changes, and
