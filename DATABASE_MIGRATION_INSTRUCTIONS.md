@@ -385,24 +385,29 @@ select count(*) from pg_tables where schemaname = 'public' and rowsecurity = fal
 
 ---
 
-# Not yet applied: everything after `20261022000001`
+# Where production stands (2026-10-29)
 
-These thirty-six files are merged ahead of production's database on purpose: the code was written to
-run without them, so they can go in when the team is ready. Until then the Apply migrations workflow's
-plan lists all of them on every merge that touches `supabase/migrations/**`; leave the apply job
-unapproved (manual mode: don't run it with apply on). None of them is in `REQUIRED_SCHEMA`, so
-`/health` stays green and Railway keeps deploying.
+`supabase migration list --linked` on 2026-10-29: **every file through `20261028000007` is applied**, including
+the thirty-six below (the six feature sets and eight security sets that were merged ahead of the database), the
+KPI / Time saved files (`20261027000001`-`06`) and the 10/28 files (`20261028000001`-`07`).
 
-What works without them: every existing screen and route, unchanged (the persona suites from before
-these files pass against a database that has none of them). Each new feature answers that it isn't
-switched on yet: the questionnaire save stores the answers and copies nothing (`fromQuestionnaire: []`),
-step-2 import routes `503 { code: "imports_unavailable" }` and `GET /imports` `{ available: false }`,
-caseload transfer `503 { code: "caseload_transfer_unavailable" }` (removing a firm member keeps today's
-behaviour), meetings `invites: { status: "unavailable" }`, colleges `photo: null`, and the extended
-Scorecard figures read null (the monthly load writes every older figure).
+**Not yet applied** (each degrades without its file; none is in `REQUIRED_SCHEMA`):
 
-Apply in this order, after taking a backup (the workflow, or `supabase db push` from a laptop). Each
-set's own section below says what it does and how to check it.
+| File | What waits for it |
+|---|---|
+| `20261029000001_payment_credits.sql` | Overpayment as credit and Mark refunded answer 409 `payment_credits_unavailable`; invoices apply no credit |
+| `20261029000002_gpa_within_scale.sql` | The database's GPA-within-scale check (NOT VALID; the routes apply the same rule in code). Before validating it, list rows with `scripts/migrations/gpa-scale-violations.sql` |
+| `20261029000003_invitation_import_data.sql` | A CSV import's extra columns are dropped from the invitation; cards read `importData: null` |
+
+Apply them through the Apply migrations workflow (manual mode: apply on, confirm `20261029000003`) after a backup.
+
+## History: the thirty-six files merged ahead of the database (applied by 2026-10-29)
+
+These thirty-six files were merged ahead of production's database on purpose: the code was written to
+run without them. They are all applied now; the table and notes below are kept for the order and the
+checks.
+
+They went in this order. Each set's own section below says what it does and how to check it.
 
 | # | File | Set |
 |---|---|---|
