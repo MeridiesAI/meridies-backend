@@ -19,6 +19,7 @@ import { z } from "zod";
 import { rankPercentile, type RankRead } from "./classRank.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "./errors.js";
 import { fourPointGpa } from "./gpa.js";
+import { assertGpaFitsScale } from "./gpaCheck.js";
 import { resultsUnavailable } from "./resultsAvailability.js";
 import { loadIntakeFills, questionnaireFields, type QuestionnaireField } from "./intakeFills.js";
 import { toRankBand } from "./serialize.js";
@@ -313,6 +314,10 @@ export async function applyInfoPatch(
   if (patch.act !== undefined) academics.act_composite = patch.act;
   if (patch.rigor !== undefined) academics.rigor_context = patch.rigor;
   if (Object.keys(academics).length > 0) {
+    await assertGpaFitsScale(db, student, {
+      ...(patch.gpaWeighted !== undefined ? { gpaWeighted: patch.gpaWeighted } : {}),
+      ...(patch.gpaUnweighted !== undefined ? { gpaUnweighted: patch.gpaUnweighted } : {}),
+    });
     const { error } = await db
       .from("student_academics")
       .upsert({ ...academics, student_id: student }, { onConflict: "student_id" });

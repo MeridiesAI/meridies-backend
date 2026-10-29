@@ -4,6 +4,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { assertGpaFitsScale } from "../lib/gpaCheck.js";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
@@ -235,6 +236,11 @@ export default async function recordRoutes(app: FastifyInstance) {
       const { studentId, ...rest } = raw ?? {};
       const patch = academicsBody.parse(rest);
       const student = await resolveStudentId(request, studentId, "edit");
+      await assertGpaFitsScale(request.db, student, {
+        ...(patch.gpa_weighted !== undefined ? { gpaWeighted: patch.gpa_weighted } : {}),
+        ...(patch.gpa_unweighted !== undefined ? { gpaUnweighted: patch.gpa_unweighted } : {}),
+        ...(patch.gpa_scale !== undefined ? { gpaScale: patch.gpa_scale } : {}),
+      });
 
       const { data, error } = await request.db
         .from("student_academics")

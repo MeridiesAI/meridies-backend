@@ -209,3 +209,14 @@ test("the payload leaves out the changes of rows nothing can be done with", () =
   assert.equal(p.items.length, 2);
   assert.deepEqual([...new Set(p.changes.map((c) => c.item))], [items[1].key]);
 });
+
+test("a GPA above its scale needs a fix: 9.9 on 4.0 refused, 4.6 weighted on 4.0 accepted", () => {
+  const p = plan([k(0, "email"), k(1, "full_name"), fld(2, "student_academics", "gpa_weighted"), fld(3, "student_academics", "gpa_unweighted")], { gpaScale: "4.0" });
+  const out = applyPlan(p, [file(sheet(["Email", "Name", "W", "U"], [["a@x.org", "A A", "9.9", "4.1"], ["b@x.org", "B B", "4.6", "3.9"]]))], FIELDS);
+  const val = (r: number, f: string) => out.records[r]!.values.find((v) => v.field === f)!;
+  assert.equal(val(0, "gpa_weighted").invalid, true);
+  assert.ok(val(0, "gpa_weighted").flags.includes("gpa_over_scale"));
+  assert.equal(val(0, "gpa_unweighted").invalid, true);
+  assert.equal(val(1, "gpa_weighted").invalid, false);
+  assert.equal(val(1, "gpa_unweighted").invalid, false);
+});
