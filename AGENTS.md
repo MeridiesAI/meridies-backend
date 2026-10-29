@@ -211,48 +211,21 @@ production: a file older than production's newest version gets a new
 timestamp. The CLI version is pinned in both workflows (a unit test checks they
 match). Runbook, setup and recovery: `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 
-**Merged but not yet applied to production.** Everything after
-`20261022000001`: the questionnaire sync (`20261023010001`-`04`), import
-pipeline step 2 (`20261023020001`-`03`), caseload transfer
-(`20261023030001`-`03`), campus photos (`20261023070001`), the extended
-College Scorecard columns (`20261023080001`), emailed meeting invites
-(`20261023090001`), the meeting owner guard (`20261024000011`-`12`, a security
-fix that depends only on applied files and can go in ahead of the rest),
-the RLS and ownership fixes (`20261024000021`-`25`, below), the
-submission-review and reminder security fixes (`20261024000041`-`45`),
-the security review's chat lock (`20261024000051`, restrictive inserts only;
-the API already refuses students on `/chat`) and its other AI guardrails
-(`20261024000052`-`54`: identity text, a student's practice AI switches,
-kept-out links hold no digest), the per-counselor import
-invitation review and the same-student rule for held data (`20261024000061`-`62`), the campus photo review queue
-(`20261024000071`), the profile column bounds (`20261024000081`), the
-caseload transfer's file rule (`20261024000082`, which replaces
-`transfer_caseload` from `20261023030002`), the one-student folder tree
-triggers (`20261024000083`), the held import apply's student check
-(`20261024000091`) and the sheet rows' idempotency key (`20261028000002`:
-`client_request_id` on `activities` and `awards`; without it
-`POST /application/activities` and `/honors` insert as before, with no
-key, and `lib/collection.ts` remembers the column is missing for five
-minutes), Payment Tracker credits (`20261029000001`: without it an
+**Where production stands (2026-10-29).** Every file through
+`20261028000007` is applied (the questionnaire sync, import step 2, caseload
+transfer, campus photos, the Scorecard columns, meeting invites, every
+`202610240000xx` security file, the KPI files and the 10/28 files). **Not yet
+applied:** Payment Tracker credits (`20261029000001`: without it an
 overpayment and Mark refunded answer 409 `payment_credits_unavailable` and
-invoices apply no credit, `paymentCreditsReady`) and the GPA-within-scale
-check (`20261029000002`, NOT VALID: new writes only; list what breaks it
-with `scripts/migrations/gpa-scale-violations.sql`, fix those rows, then
-VALIDATE it in a later migration; the routes apply the same rule in code
-either way). They go in later, in filename order
-(`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
-`REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
-route works as before (origin/main's persona suites pass against a database
-that has none of them), and each new feature says it isn't switched on yet
-rather than failing: `503 imports_unavailable` (and `GET /imports` reads
-`available: false`), `503 caseload_transfer_unavailable` (removing a firm
-member falls back to the old function), `invites: { status: "unavailable" }`
-on meetings, `photo: null` on colleges, the extended Scorecard figures null
-on extras and Compare (the monthly load writes the older ones and stays
-clean), `fromQuestionnaire: []` and
-`transferredFrom: null` on the info card, and a questionnaire save that copies
-nothing. Keep it that way until they are applied: a feature that needs one of
-these files degrades, it never 500s.
+invoices apply no credit, `paymentCreditsReady`), the GPA-within-scale check
+(`20261029000002`, NOT VALID: new writes only; list what breaks it with
+`scripts/migrations/gpa-scale-violations.sql`, fix those rows, then VALIDATE
+it in a later migration; the routes apply the same rule in code either way)
+and CSV import extras on invitations (`20261029000003`). None is in
+`REQUIRED_SCHEMA`; each feature degrades without its file, never 500s
+(`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
+writing new features that way: a migration lands minutes from its code in
+no fixed order.
 
 **The v10 sync added 24 migrations (`20261005*`)**, applied by hand on
 2026-10-06 before the workflow existed. `DATABASE_MIGRATION_INSTRUCTIONS.md`
