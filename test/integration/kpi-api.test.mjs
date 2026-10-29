@@ -25,6 +25,25 @@ await call(d.token, "PUT", "/kpi/baselines", { dismissPrompt: true });
 const gd = await call(d.token, "GET", "/kpi/baselines");
 check("dismissing the prompt hides it and keeps defaults unedited", gd.body.needsPrompt === false && gd.body.rateEdited === false && gd.body.hourlyRate === 150, JSON.stringify(gd.body));
 
+// ---- Measured usual (the Settings hint) -------------------------------------------------
+{
+  const h = await user("kpi-api-measured");
+  const seed = (i, minutes, method) =>
+    sql(`insert into public.kpi_completions (counselor_id, task_type, dedupe_key, month, manual_minutes, manual_is_estimate, measured_seconds, meridies_minutes, measure_method, saved_minutes, hourly_rate, rate_is_estimate)
+         values ('${h.id}', 'college_list', 'm-${i}', date_trunc('month', now())::date, 240, true, ${minutes * 60}, ${minutes}, '${method}', ${240 - minutes}, 150, true)`);
+  for (const [i, m] of [10, 12, 14, 16].entries()) await seed(i, m, "active");
+  await seed(9, 0, "signup"); // unmeasured: never counts
+  const four = await call(h.token, "GET", "/kpi/baselines");
+  check("measured usual: hidden under 5 measured tasks", four.status === 200 && four.body.measured?.college_list === null && four.body.measured?.meeting === null, JSON.stringify(four.body.measured));
+  await seed(4, 90, "capped");
+  const five = await call(h.token, "GET", "/kpi/baselines");
+  check("measured usual: the median once there are 5", JSON.stringify(five.body.measured?.college_list) === JSON.stringify({ minutes: 14, count: 5 }), JSON.stringify(five.body.measured));
+  const put = await call(h.token, "PUT", "/kpi/baselines", { tasks: { college_list: { meridies: 14, meridiesEdited: true } } });
+  check("measured usual: PUT returns it too, and the saved figure is separate", put.body.measured?.college_list?.minutes === 14 && put.body.tasks.college_list.meridies === 14, JSON.stringify(put.body));
+  const other = await call(c.token, "GET", "/kpi/baselines");
+  check("measured usual: another consultant never sees it", other.body.measured?.college_list === null, JSON.stringify(other.body.measured));
+}
+
 // ---- Notes sent ----------------------------------------------------------------------
 const s = await studentOf(c, "kpi-api-student");
 const scheduled = await sql(`with m as (insert into public.meetings (student_id, counselor_id, title, starts_at) values ('${s.id}', '${c.id}', 'Upcoming', now() + interval '1 day') returning id) select id from m`);

@@ -33,11 +33,38 @@ export type BaselinesDto = {
   hoursEdited: boolean;
   monthlyEmail: boolean;
   needsPrompt: boolean;
+  /** Settings hint: the consultant's measured usual minutes per task, once the report uses it. */
+  measured: MeasuredUsual;
 };
+
+export type MeasuredUsual = Record<TaskType, { minutes: number; count: number } | null>;
+
+/** The report switches from the signup figure to the measured median at this many tasks. */
+export const MEASURED_MIN_COUNT = 5;
+
+/**
+ * The median of measured time per task type, as private.kpi_measure computes it
+ * (completions measured active or capped, with time; percentile_cont midpoint),
+ * shown in whole minutes and never 0. Null until there are MEASURED_MIN_COUNT.
+ */
+export function measuredUsual(rows: { task_type: string; measured_seconds: number }[]): MeasuredUsual {
+  return Object.fromEntries(
+    TASK_TYPES.map((t) => {
+      const mins = rows
+        .filter((r) => r.task_type === t && r.measured_seconds > 0)
+        .map((r) => r.measured_seconds / 60)
+        .sort((a, b) => a - b);
+      if (mins.length < MEASURED_MIN_COUNT) return [t, null];
+      const mid = (mins.length - 1) / 2;
+      const median = (mins[Math.floor(mid)] + mins[Math.ceil(mid)]) / 2;
+      return [t, { minutes: Math.max(1, Math.round(median)), count: mins.length }];
+    })
+  ) as MeasuredUsual;
+}
 
 const num = (v: unknown, fallback: number) => (v === null || v === undefined || Number.isNaN(Number(v)) ? fallback : Number(v));
 
-export function toBaselinesDto(row: BaselinesRow | null): BaselinesDto {
+export function toBaselinesDto(row: BaselinesRow | null, measured: MeasuredUsual = measuredUsual([])): BaselinesDto {
   const tasks = Object.fromEntries(
     TASK_TYPES.map((t) => [
       t,
@@ -65,5 +92,6 @@ export function toBaselinesDto(row: BaselinesRow | null): BaselinesDto {
         !row.hours_edited &&
         !Object.values(row.manual_edited ?? {}).some((v) => v === true) &&
         !Object.values(row.meridies_edited ?? {}).some((v) => v === true)),
+    measured,
   };
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_BASELINES, DEFAULT_HOURS_PER_STUDENT, DEFAULT_RATE, toBaselinesDto } from "../../src/lib/kpi/defaults.js";
+import { DEFAULT_BASELINES, DEFAULT_HOURS_PER_STUDENT, DEFAULT_RATE, measuredUsual, toBaselinesDto } from "../../src/lib/kpi/defaults.js";
 
 test("defaults are the spec's figures", () => {
   assert.deepEqual(DEFAULT_BASELINES, {
@@ -43,4 +43,39 @@ test("a row nobody answered (e.g. made for an unsubscribe token) still asks", ()
   assert.equal(toBaselinesDto(blank).needsPrompt, true);
   assert.equal(toBaselinesDto({ ...blank, prompt_dismissed_at: "2026-10-01T00:00:00Z" }).needsPrompt, false);
   assert.equal(toBaselinesDto({ ...blank, rate_edited: true }).needsPrompt, false);
+});
+
+// The settings hint: the same median the report switches to at 5 measured tasks.
+const row = (task_type: string, minutes: number) => ({ task_type, measured_seconds: minutes * 60 });
+
+test("measured usual: nothing until 5 measured tasks of a type", () => {
+  const m = measuredUsual([10, 12, 14, 16].map((x) => row("college_list", x)));
+  assert.equal(m.college_list, null);
+  assert.equal(m.meeting, null);
+});
+
+test("measured usual: the median, in whole minutes, with the count", () => {
+  const m = measuredUsual([10, 30, 12, 14, 90].map((x) => row("college_list", x)));
+  assert.deepEqual(m.college_list, { minutes: 14, count: 5 });
+});
+
+test("measured usual: an even count takes the midpoint, like the report", () => {
+  const m = measuredUsual([10, 11, 20, 21, 30, 31].map((x) => row("meeting", x)));
+  assert.deepEqual(m.meeting, { minutes: 21, count: 6 }); // (20 + 21) / 2 = 20.5 -> 21
+});
+
+test("measured usual: never shows 0 minutes", () => {
+  const m = measuredUsual([0.1, 0.1, 0.2, 0.2, 0.2].map((x) => row("activity_list", x)));
+  assert.deepEqual(m.activity_list, { minutes: 1, count: 5 });
+});
+
+test("measured usual: unmeasured rows and unknown types are ignored", () => {
+  const m = measuredUsual([...[5, 5, 5, 5].map((x) => row("meeting", x)), row("meeting", 0), row("bogus", 9)]);
+  assert.equal(m.meeting, null);
+});
+
+test("the DTO carries the measured usual for every task, null by default", () => {
+  assert.deepEqual(toBaselinesDto(null).measured, { college_list: null, essay_feedback: null, meeting: null, family_report: null, activity_list: null });
+  const measured = measuredUsual([10, 30, 12, 14, 90].map((x) => row("college_list", x)));
+  assert.deepEqual(toBaselinesDto(null, measured).measured.college_list, { minutes: 14, count: 5 });
 });
