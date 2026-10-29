@@ -30,3 +30,18 @@ test("labels show the scale", () => {
   assert.equal(gpaLabel(3.8, null), "3.8");
   assert.equal(gpaLabel(null, "4.0"), null);
 });
+
+test("a GPA fits its scale: unweighted up to the scale, weighted up to the scale plus one", async () => {
+  const { gpaOverScale, gpaScaleNumber } = await import("../../src/lib/gpa.js");
+  assert.equal(gpaScaleNumber("4.0"), 4);
+  assert.equal(gpaScaleNumber(" 5 scale"), 5);
+  assert.equal(gpaScaleNumber("100-point"), 100);
+  assert.equal(gpaScaleNumber("weighted"), null);
+  assert.equal(gpaScaleNumber(null), null);
+  assert.match(gpaOverScale(9.9, "4.0", "weighted") ?? "", /5 on a 4.0 scale/);
+  assert.equal(gpaOverScale(4.6, "4.0", "weighted"), null);
+  assert.equal(gpaOverScale(5, "4.0", "weighted"), null);
+  assert.match(gpaOverScale(4.1, "4.0", "unweighted") ?? "", /4 on a 4.0 scale/);
+  assert.equal(gpaOverScale(4, "4.0", "unweighted"), null);
+  assert.equal(gpaOverScale(9.9, null, "weighted"), null, "no scale, nothing to check against");
+});

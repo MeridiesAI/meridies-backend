@@ -42,3 +42,27 @@ export function gpaLabel(
   if (kind === "hundred") return `${shown} (100-point scale)`;
   return `${shown} (${(scale ?? "").trim()} scale)`;
 }
+
+/** The number a scale names ("4.0", "5 scale", "100-point"), or null when it names none. */
+export function gpaScaleNumber(scale: string | null | undefined): number | null {
+  const m = /^\s*(\d+(?:\.\d+)?)/.exec(scale ?? "");
+  if (!m) return null;
+  const n = Number.parseFloat(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Why a GPA doesn't fit its scale, or null when it does (or there is no scale
+ * to check against). Unweighted up to the scale, weighted up to the scale plus
+ * one (bug hunt 2026-10-28, S2-M2). The same rule is the database's
+ * `student_academics_gpa_within_scale` (20261029000002).
+ */
+export function gpaOverScale(value: number | null | undefined, scale: string | null | undefined, kind: "weighted" | "unweighted"): string | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  const s = gpaScaleNumber(scale);
+  if (s === null) return null;
+  const max = kind === "weighted" ? s + 1 : s;
+  if (value <= max) return null;
+  const label = (scale ?? "").trim();
+  return `${kind === "unweighted" ? "An" : "A"} ${kind} GPA can be at most ${Number(max.toFixed(3))} on a ${label} scale`;
+}

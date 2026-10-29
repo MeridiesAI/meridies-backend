@@ -142,7 +142,38 @@ test("fallbacks only suggest: name + birthday + school, or name + grad year + sc
   assert.equal(byYear.matchStatus, "suggested");
   assert.equal(byYear.confidence, "medium");
   const [noSchool] = itemsFor([["", "Ann Lee", "3.0", "", "2028", ""]]);
-  assert.equal(noSchool.matchStatus, "skipped", "a name and year alone never suggest");
+  assert.equal(noSchool.matchStatus, "suggested", "a roster student is never skipped for having no email");
+  assert.equal(noSchool.confidence, "low");
+});
+
+test("a roster student with no email in the file is a low-confidence suggestion, never 'No email to invite'", () => {
+  const [yearOnly, nameOnly] = itemsFor([["", "Ann Lee", "3.0", "", "2028", ""], ["", "Robert Smith", "3.4", "", "", ""]]);
+  assert.equal(yearOnly.matchStatus, "suggested");
+  assert.equal(yearOnly.confidence, "low");
+  assert.deepEqual(yearOnly.candidates.map((c) => c.id), ["s-ann"]);
+  assert.match(yearOnly.candidates[0]!.why, /name and graduation year/i);
+  assert.equal(yearOnly.studentId, null, "the counselor confirms it");
+  assert.equal(nameOnly.matchStatus, "suggested");
+  assert.equal(nameOnly.confidence, "low");
+  assert.match(nameOnly.candidates[0]!.why, /only the name/i);
+  assert.notEqual(nameOnly.skipReason, "No email to invite");
+});
+
+test("a detail that contradicts the roster isn't suggested, and says why", () => {
+  const [wrongYear, wrongBirthday] = itemsFor([
+    ["", "Ann Lee", "3.0", "", "2031", "Roosevelt Academy"],
+    ["", "Jane Doe", "3.9", "2011-07-07", "", ""],
+  ]);
+  assert.equal(wrongYear.matchStatus, "skipped");
+  assert.match(wrongYear.skipReason ?? "", /Ann Lee.*graduation year/i);
+  assert.equal(wrongBirthday.matchStatus, "skipped");
+  assert.match(wrongBirthday.skipReason ?? "", /birthday/i);
+});
+
+test("a malformed email says so, instead of 'No email to invite'", () => {
+  const [bad] = itemsFor([["not-an-email", "Brand New", "3.0", "", "", ""]]);
+  assert.equal(bad.matchStatus, "skipped");
+  assert.match(bad.skipReason ?? "", /isn't a valid email/i);
 });
 
 test("initials never match", () => {
@@ -177,4 +208,28 @@ test("the payload leaves out the changes of rows nothing can be done with", () =
   const p = toPayload(items, { rows: 2, blocked: 0 });
   assert.equal(p.items.length, 2);
   assert.deepEqual([...new Set(p.changes.map((c) => c.item))], [items[1].key]);
+});
+
+test("a GPA above its scale needs a fix: 9.9 on 4.0 refused, 4.6 weighted on 4.0 accepted", () => {
+  const p = plan([k(0, "email"), k(1, "full_name"), fld(2, "student_academics", "gpa_weighted"), fld(3, "student_academics", "gpa_unweighted")], { gpaScale: "4.0" });
+  const out = applyPlan(p, [file(sheet(["Email", "Name", "W", "U"], [["a@x.org", "A A", "9.9", "4.1"], ["b@x.org", "B B", "4.6", "3.9"]]))], FIELDS);
+  const val = (r: number, f: string) => out.records[r]!.values.find((v) => v.field === f)!;
+  assert.equal(val(0, "gpa_weighted").invalid, true);
+  assert.ok(val(0, "gpa_weighted").flags.includes("gpa_over_scale"));
+  assert.equal(val(0, "gpa_unweighted").invalid, true);
+  assert.equal(val(1, "gpa_weighted").invalid, false);
+  assert.equal(val(1, "gpa_unweighted").invalid, false);
+});
+
+test("with no scale in the file, a GPA is checked against the scale on the student's record", async () => {
+  const { flagGpaOverRecordScale } = await import("../../src/lib/imports/match.js");
+  const p = plan([k(0, "email"), k(1, "full_name"), fld(2, "student_academics", "gpa_weighted")]);
+  const items = matchRecords(applyPlan(p, [file(sheet(["Email", "Name", "W"], [["jane@x.org", "Jane Doe", "9.9"], ["rob@x.org", "Robert Smith", "4.6"], ["", "Ann Lee", "7.5"]]))], FIELDS).records, roster);
+  const n = flagGpaOverRecordScale(items, new Map([["s-jane", "4.0"], ["s-rob", "4.0"], ["s-ann", "4.0"]]));
+  const gpa = (i: number) => items[i]!.changes.find((c) => c.field === "gpa_weighted")!;
+  assert.equal(gpa(0).invalid, true, "9.9 on the record's 4.0 scale needs a fix");
+  assert.ok(gpa(0).flags.includes("gpa_over_scale"));
+  assert.equal(gpa(1).invalid, false, "4.6 weighted on 4.0 is fine");
+  assert.equal(gpa(2).invalid, true, "a suggested match is checked against its candidate's scale");
+  assert.equal(n, 2);
 });

@@ -233,7 +233,13 @@ triggers (`20261024000083`), the held import apply's student check
 `client_request_id` on `activities` and `awards`; without it
 `POST /application/activities` and `/honors` insert as before, with no
 key, and `lib/collection.ts` remembers the column is missing for five
-minutes). They go in later, in filename order
+minutes), Payment Tracker credits (`20261029000001`: without it an
+overpayment and Mark refunded answer 409 `payment_credits_unavailable` and
+invoices apply no credit, `paymentCreditsReady`) and the GPA-within-scale
+check (`20261029000002`, NOT VALID: new writes only; list what breaks it
+with `scripts/migrations/gpa-scale-violations.sql`, fix those rows, then
+VALIDATE it in a later migration; the routes apply the same rule in code
+either way). They go in later, in filename order
 (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Not yet applied"). None of them is in
 `REQUIRED_SCHEMA`, and the code runs without them: every existing screen and
 route works as before (origin/main's persona suites pass against a database
@@ -435,6 +441,38 @@ forget it.
   history can't be deleted. Billing rights: a solo counselor, or in a firm its
   owners/admins and the contact's owner (`private.crm_can_bill`). The tables
   are `pipeline_*` because `public.invoices` is subscription billing.
+  **Credits and invoices** (`20261029000001`, bug hunt 2026-10-28): a payment
+  above what is left on the package (total minus paid) answers 409
+  `overpayment` with the amounts, and is recorded only with `overpayment:
+  "credit"`, the extra held on the payment (`credit_cents`). An invoice bills
+  part of the package: held credit comes off it first and is stored
+  (`credit_applied_cents`, "Credit applied"), then money paid ahead ("Already
+  paid", which settles it like any payment), so it asks for the package total
+  minus what's paid. It is refused (409) when the package is paid in full
+  (`nothing_to_invoice`), past what's left to bill (`over_billable`), or when
+  payments already cover it (`already_covered`). `POST
+  /contacts/:id/invoices/preview` returns what Send would email. Nothing is
+  refunded automatically: `POST /contacts/:id/credit/refund` ("Mark
+  refunded") records all held credit as a `pipeline_credit_refunds` row. A
+  voided invoice gives its credit back; a payment whose credit is in use can't
+  be deleted (`credit_in_use`). `private.pipeline_credit_guard` refuses
+  applying or refunding more credit than the family holds, even through
+  PostgREST, under a lock on the package. `balanceCents` stays billed minus
+  paid and Outstanding stays what open invoices ask for.
+- **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
+  `lib/gpaCheck.ts`, `20261029000002`): unweighted up to the number the scale
+  names, weighted up to it plus one; a scale with no number is checked by the
+  older 0-10 / 0-110 range only. `PATCH /student-page/:id/info` and `PUT
+  /academics` answer 400 in words; the import marks an over-scale GPA
+  "Needs a fix" (flag `gpa_over_scale`) against the file's scale, else the
+  student's scale on record, and holds a typed fix to the same rule, because
+  one refusal at commit would fail the whole save.
+- **Email blast audiences** (`routes/blasts.ts`): `high-school` is the
+  students' own high school (`profiles.high_school`, any case;
+  `highSchools` on `GET /blasts/audiences`); `school` is a college on their
+  lists (AxIS's "students applying to"). A high-school blast is stored as a
+  `selection` with the school in its label, because `email_blasts`' CHECK
+  predates the kind; its recipients are frozen either way.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
@@ -2373,6 +2411,17 @@ Spec: `docs/superpowers/specs/2026-10-09-import-pipeline-design.md`.
 Spec as above (§5.1-§5.10, "v1.0 as built" at its end). The Import page's API;
 Ready to apply (`GET /imports/held`, `POST /imports/held/:itemId/apply`) is
 step 1's and is never gated.
+
+- **Matching** (`lib/imports/match.ts`). Email and name: matched. Email,
+  name differs: a low suggestion. No email match: name + birthday + school or
+  name + grad year + school is a suggestion (high, or medium on a similar
+  school); a roster student with less to go on (the name alone, or the name
+  and one detail) is still a low suggestion the counselor confirms, never
+  "No email to invite" (bug hunt 2026-10-28). A birthday, class year or
+  school that contradicts the roster isn't suggested: the skip says what
+  differs. A malformed email cell says so. "Confirm all high-confidence" in
+  the app takes high ones only. Matching is the same with `IMPORTS_AI` on or
+  off (AI maps columns only).
 
 - **Rollout.** `IMPORTS_ROLLOUT=off|pilot|all` (default `pilot`) and
   `IMPORTS_PILOT` (comma-separated firm ids, or a solo counselor's own id;

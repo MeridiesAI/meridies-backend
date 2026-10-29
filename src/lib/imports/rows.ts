@@ -11,6 +11,7 @@ import type { ParsePlan, PlanColumn } from "./plan.js";
 import { blockValue, flagValue } from "./sensitive.js";
 import type { ParsedSheet } from "./sheet.js";
 import { isEmailShape } from "./textShapes.js";
+import { gpaOverScale } from "../gpa.js";
 import { cleanCell, cleanEnum, parseDate, parseNumber, testKindOf, valueOk, type Json } from "./values.js";
 
 export type RecordKey = {
@@ -19,6 +20,8 @@ export type RecordKey = {
   birthday: string | null;
   gradYear: number | null;
   highSchool: string | null;
+  /** The email cell had text that isn't an email address (kept out of `email`). */
+  emailInvalid?: boolean;
 };
 
 export type RecordValue = {
@@ -138,6 +141,7 @@ export function applyPlan(plan: ParsePlan, files: ParsedFile[], fields: FieldDef
         birthday: null,
         gradYear: raw("grad_year") ? gradYearOf(raw("grad_year") as string) : null,
         highSchool: raw("high_school") ? cap((raw("high_school") as string).replace(/\s+/g, " "), 200) : null,
+        ...(emailRaw && !(emailRaw.length <= 320 && isEmailShape(emailRaw)) ? { emailInvalid: true } : {}),
       };
       const values: RecordValue[] = [];
       const groups = new Map<string, { table: RowTable; parts: Record<string, Json>; bad: Record<string, string>; cols: string[]; flags: Set<string> }>();
@@ -240,6 +244,18 @@ export function applyPlan(plan: ParsePlan, files: ParsedFile[], fields: FieldDef
           patternKey: cap(`student_academics.gpa_scale|${sheet.name}!scale`, 200),
           flags: [],
         });
+      }
+
+      // A GPA above the scale it was written on needs a fix (gpaOverScale):
+      // the database refuses it, and one refusal would fail the whole save.
+      const rowScale = scale ?? (values.find((v) => v.field === "gpa_scale" && !v.invalid)?.value as string | undefined) ?? null;
+      for (const v of values) {
+        if (v.invalid || v.table !== "student_academics" || (v.field !== "gpa_weighted" && v.field !== "gpa_unweighted")) continue;
+        if (gpaOverScale(Number(v.value), rowScale, v.field === "gpa_weighted" ? "weighted" : "unweighted")) {
+          v.invalid = true;
+          v.flags = [...v.flags, "gpa_over_scale"];
+          tally.invalid += 1;
+        }
       }
 
       rows += 1;

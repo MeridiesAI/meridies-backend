@@ -26,7 +26,9 @@ type Row = Record<string, unknown>;
 /** A blast is a broadcast, not a mail merge campaign. */
 const MAX_RECIPIENTS = 500;
 
-const AUDIENCE_KINDS = ["roster", "class-year", "school", "status", "selection"] as const;
+// "school" is a college on the students' lists (what AxIS calls "students
+// applying to"); "high-school" is the students' own high school.
+const AUDIENCE_KINDS = ["roster", "class-year", "high-school", "school", "status", "selection"] as const;
 
 const audienceInput = z
   .object({
@@ -50,12 +52,17 @@ type Recipient = {
 async function loadRoster(request: FastifyRequest): Promise<Row[]> {
   const { data, error } = await request.db
     .from("profiles")
-    .select("id, full_name, email, phone, grad_year")
+    .select("id, full_name, email, phone, grad_year, high_school")
     .eq("counselor_id", request.auth.userId)
     .is("archived_at", null)
     .order("full_name");
   if (error) throw fromPostgrest(error);
   return (data ?? []) as Row[];
+}
+
+/** One high school however it was typed: trimmed, spaces collapsed, any case. */
+function schoolKey(s: string): string {
+  return s.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 /**
@@ -79,6 +86,13 @@ async function resolveAudience(
     if (!year) throw badRequest("Pick a class year");
     selected = roster.filter((r) => String(r.grad_year ?? "") === year);
     label = `Class of ${year} (${selected.length})`;
+  } else if (audience.audienceKind === "high-school") {
+    const value = audience.audienceValue;
+    if (!value) throw badRequest("Pick a high school");
+    const key = schoolKey(value);
+    selected = roster.filter((r) => schoolKey(String(r.high_school ?? "")) === key);
+    const shown = selected[0] ? String(selected[0].high_school).trim() : value;
+    label = `${shown} (${selected.length})`;
   } else if (audience.audienceKind === "school" || audience.audienceKind === "status") {
     const value = audience.audienceValue;
     if (!value) {
@@ -156,10 +170,16 @@ export default async function blastRoutes(app: FastifyInstance) {
       const ids = roster.map((r) => r.id as string);
 
       const classYears = new Map<string, number>();
+      const highSchools = new Map<string, { value: string; count: number }>();
       for (const r of roster) {
         const year = String(r.grad_year ?? "").trim();
-        if (!year) continue;
-        classYears.set(year, (classYears.get(year) ?? 0) + 1);
+        if (year) classYears.set(year, (classYears.get(year) ?? 0) + 1);
+        const school = String(r.high_school ?? "").trim().replace(/\s+/g, " ");
+        if (school) {
+          const hit = highSchools.get(schoolKey(school)) ?? { value: school, count: 0 };
+          hit.count += 1;
+          highSchools.set(schoolKey(school), hit);
+        }
       }
 
       const schools = new Map<string, Set<string>>();
@@ -196,6 +216,7 @@ export default async function blastRoutes(app: FastifyInstance) {
         classYears: [...classYears.entries()]
           .map(([value, count]) => ({ value, count }))
           .sort((a, b) => a.value.localeCompare(b.value)),
+        highSchools: [...highSchools.values()].sort((a, b) => b.count - a.count || a.value.localeCompare(b.value)),
         schools: counted(schools),
         statuses: counted(statuses),
       };
@@ -297,8 +318,11 @@ export default async function blastRoutes(app: FastifyInstance) {
           firm_id: request.profile.firm_id ?? null,
           subject: b.subject,
           body: b.body,
-          audience_kind: b.audienceKind,
-          audience_value: b.audienceValue ?? null,
+          // email_blasts' CHECK predates high schools: the blast is stored as the
+          // students it reached (its recipients are frozen either way), and the
+          // label keeps the school ("Harbor View High School (12)").
+          audience_kind: b.audienceKind === "high-school" ? "selection" : b.audienceKind,
+          audience_value: b.audienceKind === "high-school" ? null : (b.audienceValue ?? null),
           audience_label: label,
           channel: "email",
           status: "sending",
