@@ -62,6 +62,23 @@ Two Railway crons call this API with `Authorization: Bearer $CRON_SECRET`:
 `POST /communication/internal/dispatch` (scheduled family messages). Both need
 `SUPABASE_SERVICE_ROLE_KEY`. See `AGENTS.md`.
 
+## Card payments (Stripe Connect)
+
+The Payment Tracker can take card payments: each practice connects its own
+Stripe account and families pay invoices on Stripe Checkout, so the money goes
+straight to the practice. It is off unless all of these are set:
+
+| Variable | Purpose |
+|---|---|
+| `STRIPE_SECRET_KEY` | The Meridies platform account's secret key (`sk_live_…`) |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret of the Connect webhook endpoint `<PUBLIC_API_URL>/webhooks/stripe` |
+| `PUBLIC_API_URL` | This API's public origin; pay links are `<PUBLIC_API_URL>/pay/<token>` |
+| `SUPABASE_SERVICE_ROLE_KEY` | The webhook and the pay page run with nobody signed in |
+
+plus migration `20261030000001`. Without them `GET /pipeline/stripe` answers
+`configured: false` and the app shows nothing about cards. See `AGENTS.md`
+("Card payments are Stripe Connect") and `DATABASE_MIGRATION_INSTRUCTIONS.md`.
+
 ## Rate limiting
 
 In-process per-user limiting via `@fastify/rate-limit`, plus Postgres-backed

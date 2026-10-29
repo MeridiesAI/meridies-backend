@@ -958,3 +958,38 @@ Not in `REQUIRED_SCHEMA`.
 select count(*) = 3 from pg_trigger
  where tgname in ('student_colleges_stamp_decision_date', 'student_colleges_one_enrolled', 'student_colleges_notify_counselor');  -- true
 ```
+
+## Payment Tracker card payments (Stripe Connect): `20261030000001`
+
+New tables `practice_stripe_accounts` (one connected Stripe account per practice; clients may only read
+their own practice's row, the API's service role writes it), `pipeline_pay_tokens` (sha256 of each pay
+link token; insert and select for whoever may bill the family) and `stripe_webhook_events` (handled
+event ids; no client access at all). RLS and the approval gate on all three. `pipeline_payments` gains
+`via_stripe`, `refunded_cents`, `stripe_payment_intent_id` (unique when set), `stripe_checkout_session_id`,
+`stripe_charge_id` and `invoice_id`, with a check that only a card payment carries Stripe ids or a refund.
+Two policies are replaced with stricter versions: a client insert can't claim to be a card payment, and
+a client delete skips `via_stripe` rows. `private.pipeline_credit_available` is replaced to count a
+payment net of `refunded_cents` (the same answer for every existing row, where it is 0). Nothing is
+dropped and no row is changed. Apply after `20261029000001` (filename order; it uses `credit_cents`).
+
+Either order with the code. Code first: the probe (`stripeReady`) finds the tables missing, `GET
+/pipeline/stripe` answers `configured: false`, the other Stripe routes, the pay page and the webhook
+answer 503 (Stripe keeps retrying a webhook for up to three days), and the Payment Tracker is what it
+was. Migration first: the previous build selects `*` and ignores the new columns, and no card payment
+can exist until the new code and the Stripe settings are live. Not in `REQUIRED_SCHEMA`.
+
+Card payments also need, outside the database: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`SUPABASE_SERVICE_ROLE_KEY` and `PUBLIC_API_URL` on Railway, Connect enabled on the Meridies Stripe
+account, and a Connect webhook endpoint ("Events on connected accounts") at
+`<PUBLIC_API_URL>/webhooks/stripe` for `checkout.session.completed`,
+`checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.refund.updated`,
+`account.updated` and `account.application.deauthorized`.
+
+```sql
+select count(*) = 3 from pg_tables
+ where schemaname = 'public' and tablename in ('practice_stripe_accounts', 'pipeline_pay_tokens', 'stripe_webhook_events');  -- true
+select count(*) = 6 from information_schema.columns
+ where table_schema = 'public' and table_name = 'pipeline_payments'
+   and column_name in ('via_stripe', 'refunded_cents', 'stripe_payment_intent_id', 'stripe_checkout_session_id', 'stripe_charge_id', 'invoice_id');  -- true
+select prosrc like '%refunded_cents%' from pg_proc where proname = 'pipeline_credit_available';  -- true
+```
