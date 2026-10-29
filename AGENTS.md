@@ -90,6 +90,8 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
+│   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
+│   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
@@ -141,6 +143,9 @@ src/
 │   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
 │   ├── pipelineSequences.ts # /pipeline   email sequences and enrollments
 │   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out
+│   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)
+│   ├── pay.ts             # /pay/:token   public: an invoice's pay link, opens Stripe Checkout
+│   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
@@ -220,10 +225,12 @@ overpayment and Mark refunded answer 409 `payment_credits_unavailable` and
 invoices apply no credit, `paymentCreditsReady`), the GPA-within-scale check
 (`20261029000002`, NOT VALID: new writes only; list what breaks it with
 `scripts/migrations/gpa-scale-violations.sql`, fix those rows, then VALIDATE
-it in a later migration; the routes apply the same rule in code either way)
-and CSV import extras on invitations (`20261029000003`). None is in
-`REQUIRED_SCHEMA`; each feature degrades without its file, never 500s
-(`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
+it in a later migration; the routes apply the same rule in code either way),
+CSV import extras on invitations (`20261029000003`) and card payments
+(`20261030000001`: without it `GET /pipeline/stripe` answers `configured:
+false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`).
+None is in `REQUIRED_SCHEMA`; each feature degrades without its file, never
+500s (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
 writing new features that way: a migration lands minutes from its code in
 no fixed order.
 
@@ -432,6 +439,61 @@ forget it.
   applying or refunding more credit than the family holds, even through
   PostgREST, under a lock on the package. `balanceCents` stays billed minus
   paid and Outstanding stays what open invoices ask for.
+- **Card payments are Stripe Connect, and the practice is paid directly**
+  (`20261030000001`; `lib/stripeConnect.ts`, `lib/stripePractice.ts`,
+  `routes/pipelineStripe.ts`, `routes/pay.ts`, `routes/stripeWebhook.ts`).
+  Each practice (a firm, or a solo counselor; the practice id is
+  `coalesce(firm_id, counselor_id)`, the same as an invoice's `number_scope`)
+  connects its own **Standard** Stripe account, and a family pays on a Checkout
+  Session created *on that account* (a direct charge): the money never passes
+  through Meridies, the practice pays Stripe's fee, and it refunds in its own
+  Stripe dashboard. `GET /pipeline/stripe` answers `{ configured, connected,
+  chargesEnabled, payoutsEnabled, canManage }` to anyone in the practice;
+  `POST /pipeline/stripe/connect` (a firm owner/admin or solo counselor only,
+  `canManage`) creates the account on first use (idempotency key per practice)
+  and returns Stripe's onboarding link, which comes back to the app's
+  `/dashboard/counselor/contact-pipeline?stripe=return`. The status read asks
+  Stripe again while `chargesEnabled` is false, so the return doesn't wait on
+  the webhook. `practice_stripe_accounts` has no client write grant: the API
+  writes it with the service role after the caller's own client showed they run
+  the practice, and the webhook keeps its flags. **Pay links**: `GET
+  /pipeline/invoices/:id/pay-link` answers `{ url, reason: null }` or `{ url:
+  null, reason: "void" | "paid" | "not-connected" }`; the url is the API's own
+  `<PUBLIC_API_URL>/pay/<token>` (32 random bytes, stored as sha256 in
+  `pipeline_pay_tokens`, inserted on the caller's client so RLS checks
+  `crm_can_bill`). Every mint is a new token and every token keeps working.
+  `GET /pay/:token` shows the invoice and what it owes now with a button (so a
+  mail scanner's prefetch starts nothing); `POST` creates a fresh Checkout for
+  exactly what is owed and redirects, so a link never expires and never asks
+  for more than is owed. It refuses a voided or paid invoice, a practice that
+  doesn't take charges, and a practice whose counselor isn't approved. New
+  invoice emails and `POST /pipeline/invoices/:id/send` (Send again, works
+  without Stripe too: `{ sentTo, emailSent, hasPayLink }`) carry a "Pay by
+  card" button when there is a link. **The webhook** (`POST /webhooks/stripe`,
+  a Connect endpoint, signature over the raw body) records
+  `checkout.session.completed` / `async_payment_succeeded` as a
+  `pipeline_payments` row (`via_stripe`, method `card`, the invoice, the Stripe
+  ids, `created_by` null) only when the session carries Meridies metadata and
+  was paid on the account of the practice that issued the invoice. The unique
+  PaymentIntent makes it idempotent. Money above what the package has left is
+  held as credit (the counselor's "record the extra as credit", made for them
+  because the money has moved). `charge.refunded` (and the refund update
+  events, which re-read the charge) set `refunded_cents` to Stripe's running
+  total, never an increment; a refund of a Meridies charge whose payment isn't
+  recorded yet answers 503 so Stripe retries. `account.updated` and
+  `account.application.deauthorized` set the flags. Handled event ids go in
+  `stripe_webhook_events`. **A refunded amount stops counting** (`netOfRefund`
+  in `lib/payments.ts`): it comes off the payment's held credit first, then off
+  what it paid, so the invoice reads as owed again; `pipeline_credit_available`
+  counts the same way. **A card payment can't be removed**: `DELETE
+  /pipeline/payments/:id` answers 409 `stripe_payment`, the delete policy skips
+  `via_stripe` rows, and a client can't insert one. Payment DTOs carry
+  `viaStripe` and `refundedCents` always (false / 0 before the migration).
+  Card payments are on only with `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+  the service role key, `PUBLIC_API_URL` and the migration (`hasStripe` +
+  `stripeReady`); otherwise status says `configured: false`, the other routes
+  and the pay page answer 503, and the tracker is what it was. Not in
+  `REQUIRED_SCHEMA`.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`): unweighted up to the number the scale
   names, weighted up to it plus one; a scale with no number is checked by the
@@ -2770,7 +2832,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   mapping (against a recorded real Scorecard response in `test/fixtures`; the
   extended fields, the field reference, the degrade paths and the status
   summary in `scorecard-extended` and `college-official`), the
-  essay guardrails, the link guard, payments, class rank, proposals, webhook
+  essay guardrails, the link guard, payments (`payments-credit`, `payments-card`),
+  card payments (`stripe-connect`: events to actions, the payment row, idempotency,
+  pay links, the SDK's signature check; `stripe-unavailable`: the routes and the pay
+  page with card payments off, and the migration probe), class rank, proposals, webhook
   signatures, heartbeats, the context layer (allowlist, packing, feature
   profiles, coherence material, consumers), and research (`research-brief`,
   `research-citations`, `research-extract`, `research-run`,
@@ -2926,6 +2991,9 @@ npm run dev               # http://localhost:4000
 | `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 | `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |
+| `STRIPE_SECRET_KEY` | Optional; the Meridies platform account's secret key (`sk_live_…`, or a restricted `rk_live_…`). Payment Tracker card payments (Stripe Connect). Without it, or without the next one, the service role key, `PUBLIC_API_URL` or migration `20261030000001`, `GET /pipeline/stripe` answers `configured: false` and the other Stripe routes 503 `stripe_unavailable` |
+| `STRIPE_WEBHOOK_SECRET` | Optional; signing secret (`whsec_…`) of the Connect webhook endpoint `<PUBLIC_API_URL>/webhooks/stripe` ("Events on connected accounts": `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.refund.updated`, `account.updated`, `account.application.deauthorized`) |
+| `PUBLIC_API_URL` | This API's public origin: Twilio's status callback, the access review link, and card payments' pay links (`/pay/<token>`) |
 
 `GET /health` reports `{ status, database, schema, anthropic, serviceRole }` — presence
 and reachability only, never values, URLs or error text. `database` is a 2s HEAD

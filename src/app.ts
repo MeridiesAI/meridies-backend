@@ -30,6 +30,8 @@ import intakeRoutes from "./routes/intake.js";
 import accountRoutes from "./routes/account.js";
 import collegeIntelRoutes from "./routes/collegeIntel.js";
 import webhookRoutes from "./routes/webhooks.js";
+import stripeWebhookRoutes from "./routes/stripeWebhook.js";
+import payRoutes from "./routes/pay.js";
 import resourceRoutes from "./routes/resources.js";
 import searchRoutes from "./routes/search.js";
 import settingsRoutes from "./routes/settings.js";
@@ -74,6 +76,7 @@ import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
 import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
+import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 // SV Demo v2: the student view
@@ -209,6 +212,9 @@ export function buildApp() {
   app.register(resumeRoutes, { prefix: "/resume" });
   app.register(pipelineSequenceRoutes, { prefix: "/pipeline" });
   app.register(pipelineUnsubscribeRoutes);
+  app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
+  // Absolute paths (/pay/:token): the public pay link page.
+  app.register(payRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis
@@ -224,6 +230,7 @@ export function buildApp() {
   app.register(settingsRoutes, { prefix: "/settings" });
   app.register(accountRoutes, { prefix: "/account" });
   app.register(webhookRoutes, { prefix: "/webhooks" });
+  app.register(stripeWebhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
   startSweepInterval(app);
   startExtractionRecovery(app);

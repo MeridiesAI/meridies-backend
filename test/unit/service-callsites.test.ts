@@ -42,13 +42,21 @@ const REVIEWED = [
   // routes/pipelineUnsubscribe.ts: public, the hashed token decides; it only stamps that one contact's
   // email_opted_out_at. The sequence dispatcher (lib/pipelineSequences.ts) is handed its client by the
   // cron route in routes/internal.ts and asks approvedCounselorIds before sending for anyone.
+  // routes/pipelineStripe.ts: inside an approved counselor's own request (authenticate + requireRole), after
+  // their RLS client's crm_my_workspace said they run the practice (Connect) or can see it (status); writes only
+  // that practice's practice_stripe_accounts row, which clients have no write grant on. routes/pay.ts: public,
+  // the hashed pay token decides; reads only that invoice, its family's billing rows and the practice's Stripe
+  // account, asks approvedCounselorIds for the contact's counselor before opening a Checkout, writes nothing.
+  // routes/stripeWebhook.ts: acts for no counselor; Stripe's signature decides, and it writes only a card
+  // payment against the invoice named in a session taken on that invoice's own practice account, refunded
+  // amounts on such payments, the matching practice_stripe_accounts flags, and stripe_webhook_events.
   "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/kpi.ts", "routes/kpiUnsubscribe.ts", "routes/pipelineUnsubscribe.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "routes/kpi.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

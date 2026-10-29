@@ -13,6 +13,12 @@
  * clears what is left with a `pipeline_credit_refunds` row. Nothing is ever
  * refunded automatically. An overpayment recorded before credits existed
  * shows as credit too, so it never reads as more to bill.
+ *
+ * Card payments (20261030000001): a payment taken through an invoice's Stripe
+ * pay link is recorded by the webhook with `via_stripe`, and what the practice
+ * refunds in Stripe lands as `refunded_cents`. A refunded amount stops
+ * counting: it comes off the payment's held credit first, then off what it
+ * paid toward the package, so the invoice it paid reads as owed again.
  */
 
 type Row = Record<string, unknown>;
@@ -49,6 +55,10 @@ export type PaymentDTO = {
   /** The part of this payment held as credit (above what the package had left). */
   creditCents: number;
   createdAt: string;
+  /** Returned to the family through Stripe; it no longer counts. */
+  refundedCents: number;
+  /** Taken through a Stripe pay link (recorded by the webhook, can't be removed here). */
+  viaStripe: boolean;
 };
 
 export type RefundDTO = { id: string; amountCents: number; refundedOn: string; note: string | null; createdAt: string };
@@ -115,7 +125,15 @@ export function toPaymentDTO(r: Row): PaymentDTO {
     note: (r.note as string | null) ?? null,
     creditCents: num(r.credit_cents),
     createdAt: String(r.created_at),
+    refundedCents: num(r.refunded_cents),
+    viaStripe: r.via_stripe === true,
   };
+}
+
+/** What a payment still brings in, and the part of that held as credit, once Stripe refunds come off. */
+export function netOfRefund(p: Pick<PaymentDTO, "amountCents" | "creditCents" | "refundedCents">): { netCents: number; heldCents: number } {
+  const refunded = Math.min(Math.max(0, p.refundedCents), p.amountCents);
+  return { netCents: p.amountCents - refunded, heldCents: Math.max(0, p.creditCents - refunded) };
 }
 
 export function toRefundDTO(r: Row): RefundDTO {
@@ -137,8 +155,9 @@ export function deriveAccount(pkg: Row, invoiceRows: Row[], paymentRows: Row[], 
   const live = invoices
     .filter((i) => !i.voidedAt)
     .sort((a, b) => a.issuedOn.localeCompare(b.issuedOn) || a.createdAt.localeCompare(b.createdAt));
-  const receivedCents = payments.reduce((n, p) => n + p.amountCents, 0);
-  const heldCents = payments.reduce((n, p) => n + p.creditCents, 0);
+  // A card payment refunded in Stripe counts only for what it still brings in.
+  const receivedCents = payments.reduce((n, p) => n + netOfRefund(p).netCents, 0);
+  const heldCents = payments.reduce((n, p) => n + netOfRefund(p).heldCents, 0);
   const appliedCents = live.reduce((n, i) => n + i.creditAppliedCents, 0);
   const refundedCents = refunds.reduce((n, r) => n + r.amountCents, 0);
   // Cash toward invoices is what payments brought in beyond what they hold as credit.

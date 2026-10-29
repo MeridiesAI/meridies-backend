@@ -17,6 +17,12 @@
  *
  * Money is integer cents. Balances and statuses are derived on every read by
  * lib/payments.ts and never stored.
+ *
+ * Card payments (Stripe Connect, 20261030000001): once the practice's Stripe
+ * account takes charges, an open invoice has a pay link (`GET
+ * /invoices/:id/pay-link`), the invoice email carries one, and Stripe's
+ * webhook records what the family pays (routes/stripeWebhook.ts). A payment
+ * taken by card can't be removed here: it is refunded in Stripe.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -37,7 +43,10 @@ import {
   summarizeFollowups,
   type FollowupSummary,
 } from "../lib/pipelineExtras.js";
+import { serializeErr } from "../lib/requestLog.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
+import { invoiceOwed, payLinkBlock, stripeUnavailable } from "../lib/stripeConnect.js";
+import { mintPayLink, practiceAccount, stripeConfigured } from "../lib/stripePractice.js";
 
 type Row = Record<string, unknown>;
 
@@ -374,8 +383,8 @@ async function loadAccount(request: FastifyRequest, contactId: string): Promise<
 
 type InvoiceDraft = { label: string; grossCents: number; creditAppliedCents: number; alreadyPaidCents: number; amountDueCents: number; dueOn: string };
 
-/** The invoice email, the same for the preview and the send. */
-function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null) {
+/** The invoice email, the same for the preview and the send. A pay link adds a "Pay by card" button. */
+function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null, payLink: string | null = null) {
   const to = String(contact.parent_email || contact.student_email || "");
   const name = String(contact.student_name ?? "").trim();
   const lines = [`${draft.label}${name ? ` for ${name}` : ""}: ${formatUsd(draft.grossCents)}.`];
@@ -383,10 +392,13 @@ function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, 
   if (draft.alreadyPaidCents > 0) lines.push(`Already paid: −${formatUsd(draft.alreadyPaidCents)}.`);
   lines.push(`Amount due: ${formatUsd(draft.amountDueCents)}, by ${draft.dueOn}.`);
   if (draft.amountDueCents === 0) lines.push("Your credit covers this invoice in full. There's nothing to pay.");
+  const cta = payLink && draft.amountDueCents > 0 ? { label: "Pay by card", url: payLink } : undefined;
+  if (cta) lines.push("You can pay by card with the button below. The payment goes straight to the practice.");
   lines.push("Reply to this email with any questions about the invoice.");
   const template = {
     heading: number ? `Invoice ${number}` : "Invoice",
     paragraphs: lines,
+    ...(cta ? { cta } : {}),
     footnote: senderName ? `Sent by ${senderName} through Meridies.` : "Sent through Meridies.",
   };
   return {
@@ -421,6 +433,23 @@ async function requireAccount(request: FastifyRequest, contactId: string): Promi
     throw notFound("Set up a package for this family first, or ask a firm admin to");
   }
   return account;
+}
+
+/**
+ * A pay link for an invoice when the practice takes cards, else null. Never
+ * fails the caller: an invoice still goes out without one.
+ */
+async function payLinkIfCards(request: FastifyRequest, invoice: Row, owedCents: number): Promise<string | null> {
+  if (owedCents <= 0) return null;
+  try {
+    if (!(await stripeConfigured(request.db))) return null;
+    const acct = await practiceAccount(request.db, String(invoice.number_scope));
+    if (acct?.charges_enabled !== true) return null;
+    return await mintPayLink(request.db, String(invoice.id), request.auth.userId);
+  } catch (err) {
+    request.log.warn({ err: serializeErr(err) }, "pipeline: could not make a pay link");
+    return null;
+  }
 }
 
 export default async function pipelineRoutes(app: FastifyInstance) {
@@ -942,8 +971,8 @@ export default async function pipelineRoutes(app: FastifyInstance) {
 
   /**
    * Send an invoice. With `send`, it is emailed to the parent (or the student
-   * when no parent address is on the card). There is no payment provider, so
-   * the email states the amount and due date and carries no pay link.
+   * when no parent address is on the card). The email states the amount and due
+   * date, and carries a pay link when the practice's Stripe account takes cards.
    */
   app.post(
     "/contacts/:id/invoices",
@@ -976,8 +1005,9 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const invoice = data as Row;
 
       let emailSent = false;
-      const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null);
-      const to = mail.to;
+      const to = String(contact.parent_email || contact.student_email || "");
+      const payLink = b.send && to ? await payLinkIfCards(request, invoice, draft.amountDueCents) : null;
+      const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null, payLink);
       if (b.send && to) {
         const sent = await sendEmail({
           to,
@@ -1022,6 +1052,80 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     if (!data) throw notFound("No open invoice of yours matches that");
     return requireAccount(request, String((data as Row).contact_id));
   });
+
+  /**
+   * The invoice's pay link (`<PUBLIC_API_URL>/pay/<token>`): a page that opens a
+   * fresh Stripe Checkout for what is still owed, so a link never expires. Each
+   * call mints a new token; the old ones keep working. 503 stripe_unavailable
+   * until card payments are switched on.
+   */
+  app.get("/invoices/:id/pay-link", { preHandler: write("pipeline:pay-link", 60) }, async (request) => {
+    const { id } = idParam.parse(request.params);
+    if (!(await stripeConfigured(request.db))) throw stripeUnavailable();
+    const { data, error } = await request.db.from("pipeline_invoices").select("*").eq("id", id).maybeSingle();
+    if (error) throw crmError(error);
+    if (!data) throw notFound("No invoice of yours matches that");
+    const invoice = data as Row;
+    const account = await requireAccount(request, String(invoice.contact_id));
+    const { state, owedCents } = invoiceOwed(account, id);
+    const acct = await practiceAccount(request.db, String(invoice.number_scope));
+    const reason = payLinkBlock(state, owedCents, acct?.charges_enabled === true);
+    if (reason) return { url: null, reason };
+    return { url: await mintPayLink(request.db, id, request.auth.userId), reason: null };
+  });
+
+  /**
+   * Email an open invoice again, for what it still asks, with its pay link when
+   * the practice takes cards. Works without Stripe too (`hasPayLink: false`).
+   */
+  app.post(
+    "/invoices/:id/send",
+    { preHandler: [...counselor, limit("pipeline:invoices", 30, 3600)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const { data, error } = await request.db.from("pipeline_invoices").select("*").eq("id", id).maybeSingle();
+      if (error) throw crmError(error);
+      if (!data) throw notFound("No invoice of yours matches that");
+      const invoice = data as Row;
+      const contactId = String(invoice.contact_id);
+      const contact = await loadContactRow(request, contactId);
+      const account = await requireAccount(request, contactId);
+      const { state, owedCents, invoice: dto } = invoiceOwed(account, id);
+      if (!dto || state === "void") throw new HttpError(409, "That invoice was voided", "invoice_void");
+      if (state === "paid" || owedCents <= 0) throw new HttpError(409, "Nothing is owed on that invoice", "invoice_paid");
+
+      const to = String(contact.parent_email || contact.student_email || "");
+      if (!to) return { sentTo: null, emailSent: false, hasPayLink: false };
+      const payLink = await payLinkIfCards(request, invoice, owedCents);
+      const draft: InvoiceDraft = {
+        label: dto.label,
+        grossCents: dto.amountCents,
+        creditAppliedCents: dto.creditAppliedCents,
+        alreadyPaidCents: dto.paidCents,
+        amountDueCents: owedCents,
+        dueOn: dto.dueOn,
+      };
+      const mail = invoiceEmail(contact, draft, dto.number, request.profile.full_name ?? null, payLink);
+      const sent = await sendEmail({
+        to,
+        subject: mail.subject,
+        html: mail.html,
+        text: mail.text,
+        template: "pipeline-invoice",
+        recipient_kind: mail.recipientKind,
+        logger: request.log,
+      });
+      await request.db
+        .from("pipeline_invoices")
+        .update({
+          sent_to: to,
+          sent_at: sent.sent ? new Date().toISOString() : dto.sentAt,
+          message_delivery_id: sent.deliveryId,
+        })
+        .eq("id", id);
+      return { sentTo: to, emailSent: sent.sent, hasPayLink: Boolean(payLink) };
+    }
+  );
 
   app.post("/contacts/:id/payments", { preHandler: write("pipeline:billing", 60) }, async (request, reply) => {
     const { id } = idParam.parse(request.params);
@@ -1094,9 +1198,15 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     return reply.code(201).send(await requireAccount(request, id));
   });
 
-  /** Remove a payment recorded by mistake. */
+  /** Remove a payment recorded by mistake. A card payment stays: refund it in Stripe. */
   app.delete("/payments/:id", { preHandler: write("pipeline:billing", 60) }, async (request) => {
     const { id } = idParam.parse(request.params);
+    // `*` so this reads via_stripe once the card payments migration is in, and nothing before it.
+    const existing = await request.db.from("pipeline_payments").select("*").eq("id", id).maybeSingle();
+    if (existing.error) throw crmError(existing.error);
+    if ((existing.data as Row | null)?.via_stripe === true) {
+      throw new HttpError(409, "A card payment can't be removed here. Refund it in Stripe and the refund will show here.", "stripe_payment");
+    }
     // A payment whose credit was applied to an invoice or refunded can't go
     // first: that would leave the family owing a credit they never had.
     if (await paymentCreditsReady(request)) {
