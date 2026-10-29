@@ -203,7 +203,7 @@ revoke all on function private.pipeline_credit_available(uuid) from public, anon
 -- ---------------------------------------------------------------------------
 
 create table if not exists public.stripe_webhook_events (
-  id           text primary key check (id ~ '^evt_[A-Za-z0-9]{1,255}$'),
+  id           text primary key check (id ~ '^evt_[A-Za-z0-9_]{1,255}$'),
   type         text not null check (length(type) <= 120),
   account      text check (length(account) <= 80),
   received_at  timestamptz not null default now()
