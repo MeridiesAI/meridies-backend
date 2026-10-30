@@ -285,7 +285,8 @@ export default async function aidRoutes(app: FastifyInstance) {
       studentId: z.string().uuid().optional(),
       name: z.string().trim().min(1).max(200),
       sponsor: z.string().trim().max(200).optional(),
-      url: z.string().trim().url().max(2000).optional(),
+      // Rendered as a link to students: http(s) only, as routes/events.ts requires (zod's .url() accepts javascript: and data:).
+      url: z.string().trim().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").optional(),
       amountCents: awardMoney.optional(),
       deadline: z.string().date().nullable().optional(),
       requirements: z.array(requirement).max(30).optional(),

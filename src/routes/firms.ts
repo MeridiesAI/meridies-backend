@@ -49,9 +49,11 @@ const hexColor = z
 const brandingBody = z
   .object({
     name: z.string().trim().min(1).max(200).optional(),
-    website: z.string().trim().url().max(500).nullable().optional(),
-    logoUrl: z.string().trim().url().max(2000).nullable().optional(),
-    bannerUrl: z.string().trim().url().max(2000).nullable().optional(),
+    // Shown as a link and as image sources to the whole practice: http(s) only
+    // (zod's .url() accepts javascript: and data:).
+    website: z.string().trim().url().max(500).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").nullable().optional(),
+    logoUrl: z.string().trim().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").nullable().optional(),
+    bannerUrl: z.string().trim().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").nullable().optional(),
     // Validated here as well as by the CHECK constraint: this value is
     // interpolated into styles by the client, so a named colour or a css
     // function must never get through.

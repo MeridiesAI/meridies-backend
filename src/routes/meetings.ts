@@ -75,7 +75,8 @@ const meetingBody = z
     title: z.string().trim().min(1).max(300),
     mode: z.enum(["google-meet", "teams", "in-person", "phone"]).optional(),
     location: z.string().trim().max(300).nullable().optional(),
-    joinUrl: z.string().url().max(2000).nullable().optional(),
+    // The Join link a student opens: http(s) only, as the AxIS catalog already requires.
+    joinUrl: z.string().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) link").nullable().optional(),
     startsAt: z.string().datetime(),
     endsAt: z.string().datetime().nullable().optional(),
     agenda: z.string().trim().max(4000).nullable().optional(),
