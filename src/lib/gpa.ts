@@ -6,6 +6,9 @@
  * "unknown" to them rather than a guess.
  */
 
+/** The scales a counselor picks from on the Overview card. */
+export const GPA_SCALE_CHOICES = ["4.0", "5.0", "10", "100"] as const;
+
 export type GpaScaleKind = "four" | "five" | "ten" | "hundred" | "other" | "unknown";
 
 export function gpaScaleKind(scale: string | null | undefined): GpaScaleKind {
@@ -54,14 +57,15 @@ export function gpaScaleNumber(scale: string | null | undefined): number | null 
 /**
  * Why a GPA doesn't fit its scale, or null when it does (or there is no scale
  * to check against). Unweighted up to the scale, weighted up to the scale plus
- * one (bug hunt 2026-10-28, S2-M2). The same rule is the database's
+ * one (bug hunt 2026-10-28, S2-M2), except a 100-point scale, where honors and
+ * AP points put a weighted average up to 110 (Elvin, 10/29). The same rule is the database's
  * `student_academics_gpa_within_scale` (20261029000002).
  */
 export function gpaOverScale(value: number | null | undefined, scale: string | null | undefined, kind: "weighted" | "unweighted"): string | null {
   if (value === null || value === undefined || !Number.isFinite(value)) return null;
   const s = gpaScaleNumber(scale);
   if (s === null) return null;
-  const max = kind === "weighted" ? s + 1 : s;
+  const max = kind === "weighted" ? (s === 100 ? 110 : s + 1) : s;
   if (value <= max) return null;
   const label = (scale ?? "").trim();
   return `${kind === "unweighted" ? "An" : "A"} ${kind} GPA can be at most ${Number(max.toFixed(3))} on a ${label} scale`;

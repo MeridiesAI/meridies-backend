@@ -9,13 +9,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { badRequest, fromPostgrest } from "./errors.js";
 import { gpaOverScale } from "./gpa.js";
 
+/**
+ * Returns the scale the saved row will carry. Callers that upsert put it in
+ * the row: the database checks an upsert's insert row before it finds the
+ * existing one, so a row without its scale is held to the 0-10 range and a
+ * 107 on a 100-point scale was refused.
+ */
 export async function assertGpaFitsScale(
   db: SupabaseClient,
   studentId: string,
   next: { gpaWeighted?: number | null; gpaUnweighted?: number | null; gpaScale?: string | null }
-): Promise<void> {
+): Promise<string | null | undefined> {
   const touchesGpa = next.gpaWeighted != null || next.gpaUnweighted != null || next.gpaScale !== undefined;
-  if (!touchesGpa) return;
+  if (!touchesGpa) return undefined;
   const { data, error } = await db
     .from("student_academics")
     .select("gpa_weighted, gpa_unweighted, gpa_scale")
@@ -30,4 +36,5 @@ export async function assertGpaFitsScale(
     gpaOverScale(weighted === null ? null : Number(weighted), scale, "weighted") ??
     gpaOverScale(unweighted === null ? null : Number(unweighted), scale, "unweighted");
   if (why) throw badRequest(why);
+  return scale;
 }

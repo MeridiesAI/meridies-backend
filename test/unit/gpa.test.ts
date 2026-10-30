@@ -45,3 +45,13 @@ test("a GPA fits its scale: unweighted up to the scale, weighted up to the scale
   assert.equal(gpaOverScale(4, "4.0", "unweighted"), null);
   assert.equal(gpaOverScale(9.9, null, "weighted"), null, "no scale, nothing to check against");
 });
+
+test("a 100-point scale allows weighted up to 110 (honors and AP points), unweighted up to 100", async () => {
+  const { gpaOverScale } = await import("../../src/lib/gpa.js");
+  assert.equal(gpaOverScale(107, "100", "weighted"), null);
+  assert.equal(gpaOverScale(110, "100", "weighted"), null);
+  assert.match(gpaOverScale(111, "100", "weighted") ?? "", /at most 110 on a 100 scale/);
+  assert.equal(gpaOverScale(100, "100", "unweighted"), null);
+  assert.match(gpaOverScale(101, "100", "unweighted") ?? "", /at most 100/);
+  assert.equal(gpaOverScale(5, "4.0", "weighted"), null, "other scales keep scale + 1");
+});
