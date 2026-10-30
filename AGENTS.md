@@ -878,8 +878,11 @@ Two layers, and they are not redundant:
    detected by its `RAILWAY_*` variables, and in development, 0 elsewhere in
    production with an error at boot), so the X-Forwarded-For entries a client
    writes to the left of the edge's own are ignored by the limiter and the
-   request log. Never set it back to `true`: that takes the leftmost,
-   client-written entry, and a fresh header per request was a fresh bucket.
+   request log. The count is handed to Fastify as a function
+   (`trustProxyOption`), because Fastify 5.12 reads a bare number as "trust
+   nothing" (every caller in the edge's one bucket). Never set it back to
+   `true`: that takes the leftmost, client-written entry, and a fresh header
+   per request was a fresh bucket.
    Behind Cloudflare and Railway set 2 (a request carrying Cloudflare headers
    while one hop is trusted logs that once): too few hops puts every caller in
    the proxy's one bucket.

@@ -4,7 +4,7 @@ import swaggerUi from "@fastify/swagger-ui";
 import Fastify, { type FastifyError } from "fastify";
 import { ZodError } from "zod";
 import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio, trustProxy } from "./env.js";
-import { proxyMismatch } from "./lib/proxyTrust.js";
+import { proxyMismatch, trustProxyOption } from "./lib/proxyTrust.js";
 import { HttpError } from "./lib/errors.js";
 import { loggedUrl, serializeErr } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
@@ -103,8 +103,9 @@ export function buildApp() {
     // X-Forwarded-For. Trusting exactly that many hops (lib/proxyTrust.ts)
     // gives the per-IP limiter and the request log the edge's view; trusting
     // every hop (`true`) took the leftmost entry, which the client writes, so a
-    // fresh header each request got a fresh rate-limit bucket.
-    trustProxy: trustProxy.hops,
+    // fresh header each request got a fresh rate-limit bucket. The count goes
+    // in as a function: Fastify 5.12 reads a bare number as "trust nothing".
+    trustProxy: trustProxyOption(trustProxy.hops),
     bodyLimit: 1_048_576,
     // A client whose base URL ends in "/" sends "//auth/me". Fastify treats
     // that as a distinct, unrouted path and 404s, which reads like the endpoint

@@ -5,11 +5,15 @@
  * code and state there, and nothing in a query string is worth keeping in
  * Railway's logs. Keys stay for debugging. The account review link carries
  * its one-time token in the path (lib/accessReview.ts), so that segment is
- * dropped too.
+ * dropped too, and so is the token of a one-click unsubscribe link.
  */
 export function loggedUrl(url: string): string {
   const [rawPath, query] = url.split("?", 2);
-  const path = rawPath.replace(/^\/*access-review\/[^/]*\/?$/, "/access-review/…");
+  const path = rawPath
+    .replace(/^\/*access-review\/[^/]*\/?$/, "/access-review/…")
+    // The one-click unsubscribe links (routes/kpiUnsubscribe.ts, routes/pipelineUnsubscribe.ts)
+    // carry a long-lived capability token in the path; a log line must not be able to use it.
+    .replace(/^\/*(kpi|pipeline)\/unsubscribe\/[^/]*\/?$/, "/$1/unsubscribe/…");
   const keys = query
     ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
     : "";
