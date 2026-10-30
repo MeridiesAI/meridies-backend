@@ -433,9 +433,14 @@ forget it.
   PostgREST, under a lock on the package. `balanceCents` stays billed minus
   paid and Outstanding stays what open invoices ask for.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
-  `lib/gpaCheck.ts`, `20261029000002`): unweighted up to the number the scale
-  names, weighted up to it plus one; a scale with no number is checked by the
-  older 0-10 / 0-110 range only. `PATCH /student-page/:id/info` and `PUT
+  `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
+  the number the scale names, weighted up to it plus one, or up to 110 on a
+  100-point scale (honors and AP points); a scale with no number is checked
+  by the older 0-10 / 0-110 range only. The counselor picks the scale on the
+  Overview card (`gpaScale` on `PATCH /student-page/:id/info`: `4.0`, `5.0`,
+  `10`, `100`), refused when the GPAs on file wouldn't fit it. A save that
+  touches a GPA carries the scale on record into its upsert, because the
+  database checks an upsert's insert row before it finds the existing one. `PATCH /student-page/:id/info` and `PUT
   /academics` answer 400 in words; the import marks an over-scale GPA
   "Needs a fix" (flag `gpa_over_scale`) against the file's scale, else the
   student's scale on record, and holds a typed fix to the same rule, because
