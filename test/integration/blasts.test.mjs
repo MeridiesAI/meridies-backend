@@ -69,8 +69,8 @@ check("parents: the list says which students can't be reached", parents.body.stu
 // ---------------------------------------------------------------------------
 const sentNow = await call(C.token, "POST", "/blasts", { recipientType: "parents", classYears: ["2027"], studentIds: [a.id], subject: `Now ${tag}`, body: "Hi {first},\n\nA note from {me}." });
 check("a blast to parents goes now", sentNow.status === 201 && sentNow.body.status === "sent" && sentNow.body.recipientType === "parents", JSON.stringify(sentNow.body));
-const mail = await sql(`select count(*) from public.message_deliveries where blast_id = '${sentNow.body.id}' and to_email = 'pat-${tag}@families.test' and recipient_kind = 'guardian' and body like 'Hi Pat,%'`);
-check("it reached the parent, greeted by the parent's first name", mail === "1", mail);
+const mail = await sql(`select count(*) from public.message_deliveries where blast_id = '${sentNow.body.id}' and to_email = 'pat-${tag}@families.test' and recipient_kind = 'guardian' and body like '%Hi Pat,%A note from blast-c.%' and body not like '%Hi there%'`);
+check("it reached the parent, greeted once by the parent's first name, signed by the counselor", mail === "1", mail);
 
 const empty = await call(C.token, "POST", "/blasts", { classYears: ["2027"], colleges: ["Nowhere U"], subject: "x", body: "y" });
 check("an empty audience is refused", empty.status === 400, `${empty.status}`);
