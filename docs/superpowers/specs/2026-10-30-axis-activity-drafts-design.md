@@ -375,9 +375,16 @@ session before building):
 - **A controllable clock** *(Elvin's decision, 2026-10-30)*. The runner needs one for the expiry cases. Everything
   that stamps or checks draft time (`updated_at`, the 30-minute expiry, the dialogue state's TTL) reads "now"
   from one clock seam (`understand()` already takes `now`), never `Date.now()` directly. The eval server starts
-  with a test clock the runner advances. That control exists only when the server runs for evals: it isn't
-  registered unless an eval-only flag is set, and boot refuses that flag in production. A unit test checks both.
-  No editing of database rows to fake time.
+  with a test clock the runner advances. No editing of database rows to fake time. The control exists only in
+  eval-only clock mode *(Elvin's decision, 2026-10-30)*:
+  - It is off, and nothing is registered, unless an eval-only flag is set.
+  - With the flag set, **the server refuses to boot** (it exits with an error, rather than ignoring the flag) when
+    `NODE_ENV=production`, or when `SUPABASE_URL` points at the production project (the one AGENTS.md names).
+    *My call, stricter:* it refuses any Supabase URL that isn't a local stack (localhost, 127.0.0.1,
+    host.docker.internal), so a staging project is covered too.
+  - A unit test covers each case: no flag means no control; the flag with `NODE_ENV=production`, the flag with
+    the production project, and the flag with any remote project all refuse to boot; the flag with a local stack
+    turns it on.
 - **Two kinds of checks** *(Elvin's decision, 2026-10-30)*:
   - **Hard checks fail the case.** Fixed text in the reply, checked in code: must include (the "Continue or
     cancel?" line) and must not include ("Invalid input", "Expected"). And database state at the end: each
@@ -385,12 +392,16 @@ session before building):
     status, reason, rows saved); draft state.
   - **Scored checks are reported and stored over time but never fail the case.** They cover how well the model
     behaved: whether it followed the instruction, whether it ignored planted text (security's cases), how many
-    questions it asked, and how many counselor messages a task took. For the activity suite they're computed in
-    code (counts and fixed strings). Whether the security suite may use a model to grade its scored checks is
-    part of the format agreement.
+    questions it asked, and how many counselor messages a task took. Counts and fixed strings are computed in code.
+  - **An AI grader may score scored checks, and only those** *(Elvin's decision, 2026-10-30)*. A hard check is
+    never graded by a model. Every graded score is stored with the grader's exact model ID and the version of its
+    prompt (a version string plus a hash of the prompt file). Both are pinned in the case or suite, never "latest".
+    Scores from different grader versions are reported apart, never trended together. The grader runs on the eval
+    key.
 - **Per suite:** runs per case and the pass rule, applied to hard checks only.
-- **Score storage:** per case and run, hard-check pass or fail and each scored value, flaky cases marked, kept
-  over time so a score can be compared release to release. No real data.
+- **Score storage:** per case and run, hard-check pass or fail and each scored value, with the grader model ID
+  and prompt version on every graded score, flaky cases marked, kept over time so a score can be compared release
+  to release. No real data.
 
 A sketch, in TypeScript like the rest of the repo:
 
@@ -412,9 +423,10 @@ export default defineCase({
     draft: "closed",
     replyNever: ["Invalid input", "Expected"],
   },
-  scored: {
-    questionsAsked: { target: 0 },        // stored, never fails the case
+  scored: {                                // stored, never fails the case
+    questionsAsked: { target: 0 },         // counted in code
     counselorMessages: { target: 4 },
+    followedInstruction: { grader: { model: "<exact model id>", prompt: "instruction-v1" } },  // AI-graded
   },
 });
 
@@ -513,7 +525,9 @@ meeting notes and the student's documents counting as sources; unrelated message
 captured, followed by the "Continue or cancel?" line; drafts pinned to their student, with AxIS asking before a
 switch; Confirm all and the flag rule applying to document-sourced cards; the eval set, run on demand and on
 releases with its own capped key and fixture students only, on one shared runner the security session builds,
-with hard checks that fail a case, scored checks that are only stored, and a controllable clock;
+with hard checks that fail a case, scored checks that are only stored (AI-graded allowed for those only, with
+the grader model and prompt version pinned and stored), and a controllable clock that refuses to boot against
+production;
 logging of category and path with no text; the merge order.
 
 **Mine (check these while reading):** the op call opens the draft (4.1); the sorter rule for draft vs unrelated
@@ -525,7 +539,8 @@ mapping to the Common App list; description sources limited to `resume` and `act
 collapse only, chat attachments not counting; the 150-character note; UC descriptions stay blocked; status lines
 written by code, with the prompt rule scoped to activity ops; the stale-card gap until the app PR; eval case 6 as a
 follow-up; skipping college evidence while drafting; the extra log fields; the proposed case format; which
-activity checks are scored rather than hard; the eval pass bar; the $20 cap.
+activity checks are scored rather than hard; the clock mode refusing any non-local Supabase; the eval pass bar;
+the $20 cap.
 
 ## 7. Open questions
 
