@@ -350,8 +350,9 @@ One `axis turn` log line on every turn (today only the direct path logs one):
 
 **Layer 2: the real model, on demand and on releases** *(Elvin's decision)*. Run before merging any PR that
 touches `src/lib/axis/`, by someone clicking Run.
-- New workflow `axis-eval.yml`: `workflow_dispatch` plus `release: published`. Same local Supabase setup as the
-  CI integration job, seeded with made-up fixture students only. Never real data.
+- Runs on the shared `evals/axis/` runner the security session builds (4.11), from a workflow with
+  `workflow_dispatch` plus `release: published` and the same local Supabase setup as the CI integration job,
+  seeded with made-up fixture students only. Never real data.
 - Its own API key, `AXIS_EVAL_ANTHROPIC_API_KEY`, from a separate Console workspace with a spend limit (section 5).
   Note: prompt caches are per workspace, so eval runs won't warm or read production's cache.
 - Each conversation is scored in code, not by a model: the sheet rows at the end equal the expected rows field
@@ -360,6 +361,47 @@ touches `src/lib/axis/`, by someone clicking Run.
 - Pass bar: all 18 pass (over Elvin's 10–15: the resume, unrelated-message and switch-student cases came with
   his later decisions). A failed case is rerun twice and must pass 2 of 3, and any flaky case is reported as such.
   *(My call.)*
+
+**What the activity cases need from the shared case format** (this side's proposal, to agree with the security
+session before building):
+
+- **Seed:** fixture counselor and students, plus Meridies documents with extracted text (a fixture resume for
+  case 16) in the local Supabase stack.
+- **Chat:** a student's chat or the roster chat.
+- **Steps, in order:** `say` (a counselor message through `POST /axis/conversations/:id/messages`), `confirm` (a
+  card, optionally with the `rows` to keep), `dismiss`, `undo`, and `age` (move the chat's clock back N minutes,
+  for the expiry case, by editing the fixture rows on the local stack).
+- **Checks after a step:** on the reply text, only fixed strings in code: must include (the "Continue or
+  cancel?" line) and must not include ("Invalid input", "Expected"). The model never judges a case.
+- **Checks at the end, read from the database:** each student's Activities rows field by field, as an exact set
+  (so extra rows fail); cards (`axis_actions`: op, status, reason, rows saved); draft state; number of AxIS
+  questions.
+- **Per suite:** runs per case and the pass rule.
+- **Score storage:** pass or fail per case and run, flaky cases marked, no real data.
+
+A sketch, in TypeScript like the rest of the repo:
+
+```ts
+export default defineCase({
+  id: "activity-12-unrelated-question",
+  suite: "activity-drafts",
+  seed: { students: ["studentA"], documents: [] },
+  chat: { student: "studentA" },
+  steps: [
+    { say: "Add Code Club for Student A, cofounder, grade 11, summer, 6 hrs a week, 2 weeks" },
+    { say: "what's her GPA?", replyIncludes: ["You still have an activity draft for Student A"] },
+    { say: "continue" },
+    { confirm: "last" },
+  ],
+  expect: {
+    activities: { studentA: [{ organization: "Code Club", position: "cofounder", grade_levels: ["11"], timing: ["break"], hours_per_week: 6, weeks_per_year: 2 }] },
+    cards: [{ op: "application.add_activities", status: "confirmed", reason: null }],
+    draft: "closed",
+    replyNever: ["Invalid input", "Expected"],
+    maxQuestions: 1,
+  },
+});
+```
 
 **The conversations (fixture student "Student A"):**
 
@@ -401,15 +443,19 @@ a resume, and Confirm all would sweep a document-sourced card in. So an activity
   the turn flag has cleared.
 - Values only from typed messages and the counselor's meeting notes don't flag the card.
 
-Tests: a layer 1 test for both triggers, and eval case 16 checks the reason.
+Tests: a layer 1 test for both triggers, including a card built from a resume read 3 messages earlier (the turn
+flag long cleared, the card still tagged and skipped by Confirm all), and eval case 16 checks the reason.
 
 **For the security session** (Elvin to pass on): the same gap applies to every op that is `confirm` by nature,
 not only activities. Its Confirm-all rule relies on `reason`, so it should set `outside-content` on every card
 filed in a flagged turn.
 
-**One eval runner, not two.** Both designs propose `evals/axis/` and `npm run eval:axis`. Whichever PR lands first
-creates it, and the other adds its cases. The workflow and capped key in 4.10 serve both. The security cases keep
-their own pass rule (all 3 runs must pass, code guarantees only); the activity cases keep 4.10's.
+**One eval runner, not two** *(Elvin's decision, 2026-10-30)*. The security session builds the shared
+`evals/axis/` runner: the case format, the real-model harness and score storage. This project adds its 18 cases
+to it and builds none of the runner. **The case format is agreed between the two sessions before either starts
+building**; 4.10 lists what the activity cases need from it, as this side's proposal. The capped key in section 5
+serves both. Each suite keeps its own pass rule: security, all 3 runs pass, code guarantees only; activity drafts,
+4.10's.
 
 ## 5. Rollout and steps for Elvin
 
@@ -446,8 +492,8 @@ saves and opens the sheet to edit (not a form); the provenance check, with typed
 meeting notes and the student's documents counting as sources; unrelated messages answered normally, never
 captured, followed by the "Continue or cancel?" line; drafts pinned to their student, with AxIS asking before a
 switch; Confirm all and the flag rule applying to document-sourced cards; the eval set, run on demand and on
-releases with its own capped key and fixture students only; logging of category and path with no text; the merge
-order.
+releases with its own capped key and fixture students only, on one shared runner the security session builds;
+logging of category and path with no text; the merge order.
 
 **Mine (check these while reading):** the op call opens the draft (4.1); the sorter rule for draft vs unrelated
 messages; activity ops refused in an unrelated turn; the 30-minute clock restarts on every message; cancel
@@ -457,8 +503,8 @@ dropped; edits as their own cards; the normalizer phrasings, range midpoint, "al
 mapping to the Common App list; description sources limited to `resume` and `activity-list` documents, whitespace
 collapse only, chat attachments not counting; the 150-character note; UC descriptions stay blocked; status lines
 written by code, with the prompt rule scoped to activity ops; the stale-card gap until the app PR; eval case 6 as a
-follow-up; skipping college evidence while drafting; the extra log fields; one shared eval runner; the eval pass
-bar; the $20 cap.
+follow-up; skipping college evidence while drafting; the extra log fields; the proposed case format; the eval
+pass bar; the $20 cap.
 
 ## 7. Open questions
 
