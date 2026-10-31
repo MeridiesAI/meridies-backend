@@ -403,10 +403,11 @@ the read ops' declarations. Rebase over the intent-routing session's `engine.ts`
   counselor who can edit the student confirms it (`POST /tasks/:id/checks/:checkId/values/confirm` with the
   value keys; PR C puts a Confirm beside each). A confirmed value reads "Confirmed by <counselor>, <date>". AxIS
   reads them with the same words, still wrapped as untrusted data.
-- **Confirming doesn't write the record (my call).** A printed "4.3" carries no scale and "24 of 410" isn't a
-  record field yet, so the counselor puts a value into the record the usual way (the info card, the academics
-  sheet, or an AxIS card they confirm). Runner-up: Confirm also saves into the record, which means parsing each
-  printed value into the record's typed fields under the GPA-scale rule; worth adding if counselors ask for it.
+- **Confirm also adds the values to the profile (changed while planning, 10/30).** The app already has an "Apply to
+  profile" button on hand-ins that parses these values and saves them through `PATCH /student-page/:id/info`, so
+  Confirm does the same, server side, through the info card's own code (its GPA-scale check included), and
+  replaces that button. A value the parser can't read is marked confirmed without being saved. (The draft's call
+  was "Confirm doesn't write the record"; it was made without knowing the button existed.)
 - The counselor's notification and email can't change once sent, so they say "(unverified)" beside each value.
 - **Before the migration is applied,** the values stay in the findings text, each reading "Weighted GPA
   (unverified, from the student's file): 4.3", and there is no Confirm.
