@@ -8,7 +8,7 @@
 
 **Tech Stack:** Next.js (App Router), React, TypeScript, Tailwind; checks are `scripts/*-check.mjs` run with Node 22.18+ type stripping (`node --no-warnings --test`).
 
-**Spec:** `docs/superpowers/specs/2026-10-30-axis-security-hardening-design.md` in meridies-backend (2.1, 2.4, 3.3 card text, 4, 1.5 `ai_paused`). Backend fields come from PR B (`restoreUntil`, undo's `restored`/`paused`, `values`, the confirm route) and PR A (`ai_paused`, `ai_budget_unavailable`).
+**Spec:** `docs/superpowers/specs/2026-10-30-axis-security-hardening-design.md` in meridies-backend (2.1, 2.4, 3.3 card text, 4, 1.5 `ai_paused`). Backend fields come from PR B (`restoreUntil`, undo's `restored`/`paused`, `values`, the confirm route) and PR A2 (`ai_paused`, `ai_budget_unavailable`).
 
 ## Global Constraints
 

@@ -87,11 +87,18 @@ settings reachable), but four things don't:
 - Audit all background jobs for budgets recorded under non-existent accounts (1.10).
 - Add the 30-day deleted-item retention line to the privacy policy follow-up (2.5).
 
+Relayed by the cost session (Elvin, 10/30), folded in while planning:
+
+- Prices in one `ai_prices` database table, read by the code and the SQL reports. It replaces the price list in
+  `lib/aiPricing.ts` and the test that compared it with the report (1.2, 1.8).
+- Chat files read once (1.6) is the top AxIS cost fix: ship it first, as its own PR (A1).
+- Stored file text counts toward the history budget, and sits where the prompt cache keeps it across turns (1.6).
+
 Calls marked **(my call)** below are the designer's, for Elvin to check while reading.
 
 ---
 
-## 1. Cost caps (PR A, backend)
+## 1. Cost caps (PRs A1 and A2, backend)
 
 ### 1.1 One gate for every model call
 
@@ -122,11 +129,12 @@ A test fails when a new file constructs an Anthropic client or calls `messages.*
   AxIS relies on. Until the 5-minute/1-hour cache-write split exists, every cache write counts at the 1-hour rate
   (over-counts slightly, the safe side). The cost session has an uncommitted change adding that split to
   `loop.ts`/`llm.ts`; whichever PR lands second rebases onto the other.
-- **Estimated spend** is usage times a price table in one new file, `lib/aiPricing.ts` (per model: input, output,
-  cache read, cache write by TTL, the long-prompt tier where a model has one, such as Haiku 5.5 above 100K
-  tokens; web search per use). Fill it from Anthropic's current list at build time. An unknown model counts at
-  the most expensive model's rate (fail toward stopping). The cost session's report SQL keeps its own copy of the
-  prices; a test checks the two agree.
+- **Estimated spend** is usage times the prices in one database table, `private.ai_prices` (per model: input,
+  output, cache read, cache write by TTL, the long-prompt tier where a model has one, such as Haiku 5.5 above 100K
+  tokens; web search per use). Seeded from Anthropic's current list at build time; a price change is a new
+  migration. The code (`lib/aiPricing.ts` holds only the arithmetic) and the cost report SQL both read it, so
+  there is no second copy to keep in step. An unknown model counts at the table's highest rates (fail toward
+  stopping).
 - **Counters that aren't a person.** `usage_counters.subject_id` must be a profile, so the events-discovery
   system budget (`SYSTEM_SUBJECT` in `lib/eventsDiscovery.ts`) hits a foreign-key error on every call and
   `consumeQuota` lets the call through: that budget has never been enforced. The company ceiling and the system
@@ -189,8 +197,13 @@ Today every AxIS and `/chat` turn re-sends the chat's newest 8 files (up to 24 M
   through the gate).
 - Later turns send that text inside `wrapUntrusted("attachment:<file name>", …)`, at most 12,000 characters
   per file (then a line saying it was cut), instead of the file. If the text isn't there yet, or extraction
-  failed, the file goes as today. Where the text sits in the prompt is the builder's call; somewhere the prompt
-  cache keeps it across turns is better.
+  failed, the file goes as today.
+- **Where the text sits (cost session, 10/30):** every earlier file's text goes in one message at the start of
+  the messages, ahead of the replayed history, in the order attached. It is the same every turn, so the prompt
+  cache keeps it; a newly read file adds to its end. The newest message carries only the new message's files and
+  any file without stored text. `fitHistory` counts both (the text by length, files still sent as files by an
+  estimate) and drops older replayed messages first, never the files message.
+- This ships first, as its own PR (A1), before the caps (A2).
 - Unchanged: a chat with files counts as outside content every turn, so its changes wait for a click.
 - With text instead of an opaque file, later turns get live grounding again (`opaqueFiles` is false when every
   file is text).
@@ -208,9 +221,10 @@ it missing).
 ### 1.8 Boundary with the axis-cost-research session
 
 That session (worktree `meridies-backend-axiscost`) owns measurement (`scripts/axis/axis-cost-report.sql`, audit
-row fields) and the pre-warm (whether and when it runs). This work owns `lib/aiBudget.ts`, `lib/aiPricing.ts`
-and the call sites. The pre-warm call goes through the gate like any call, with no change to when it runs. The
-cost session should read prices from `lib/aiPricing.ts` instead of keeping a second table.
+row fields) and the pre-warm (whether and when it runs). This work owns `lib/aiBudget.ts`, `lib/aiPricing.ts`,
+the `ai_prices` table and the call sites. The pre-warm call goes through the gate like any call, with no change to
+when it runs. The cost report reads its prices from `ai_prices`: PR A2 swaps its price list for the table and
+changes nothing else in that file.
 
 ### 1.9 Before merge
 
@@ -508,9 +522,11 @@ header, as the repo requires. Elvin applies them on production himself.
 - Real model: `npm run eval:axis` (section 5), run by hand before PR B is merged with results pasted in the PR,
   then by `axis-evals.yml` on every AxIS release.
 
-## The three PRs
+## The PRs
 
-- **PR A, backend: cost caps** (section 1, with the background-job audit). Independent of the others.
+- **PR A1, backend: chat files read once** (1.6). First, as the top cost fix.
+- **PR A2, backend: cost caps** (the rest of section 1, with the background-job audit). After A1, which it builds
+  on.
 - **PR B, backend: injection fixes** (sections 2.2-2.5, 3, 4 server side, 5 with `axis-evals.yml`). Rebase over
   the intent-routing session first; it touches `engine.ts`.
 - **PR C, app** (2.1, Restore on cards, the flagged-chat card text, hand-in values with Unverified and Confirm,
@@ -520,7 +536,7 @@ Each PR updates AGENTS.md for what it changes.
 
 ## Left to the builder
 
-The exact SQL shapes and function names; where attachment text sits in the prompt; the token estimate for files;
+The exact SQL shapes and function names; the token estimate for files;
 how each sending trigger skips a restore; how the 8-word comparison is done and how quoted runs are kept (ranges
 or a redacted copy); the shape of a read op's free-text declaration; the lines that stand in for left-out values
 in the question record; the eval seeding and workflow details.

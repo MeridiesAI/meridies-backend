@@ -14,9 +14,9 @@
 
 - New worktree `meridies-backend-axissec-b`, branch `axis-injection-fixes`, off `origin/main`. Tasks 1-7 don't touch `engine.ts`, `nlu.ts` or `ops/catalog/application.ts`; before Task 8, rebase over the intent-routing session's merged work (check `git log origin/main -- src/lib/axis/nlu.ts src/lib/axis/engine.ts`). If it hasn't merged by then, stop and tell Elvin.
 - Never touch production. Local Supabase only. Elvin merges and applies migrations.
-- Migrations (each header states deploy order; none in `REQUIRED_SCHEMA`; re-timestamp newer than production's newest if PR A lands after): `20261031000002_axis_trash.sql`, `20261031000003_axis_outside_flags.sql`, `20261031000004_hand_in_values.sql`.
+- Migrations (each header states deploy order; none in `REQUIRED_SCHEMA`; re-timestamp newer than production's newest if PR A1 or A2 lands after): `20261031000003_axis_trash.sql`, `20261031000004_axis_outside_flags.sql`, `20261031000005_hand_in_values.sql`.
 - Trash: kept 30 days; restore only by the counselor who confirmed the delete; all or nothing; same ids; parents before children; sends nothing now or later; `pipeline_sequence_enrollments` rows that were `active` come back `paused`.
-- Before the trash migration, covered AxIS deletes are refused with: "AxIS can't delete things until the database update 20261031000002_axis_trash is applied."
+- Before the trash migration, covered AxIS deletes are refused with: "AxIS can't delete things until the database update 20261031000003_axis_trash is applied."
 - Restore refusals (exact card sentences): expired "This can't be restored: the 30 days are up."; no access "This can't be restored: you no longer have access to that student."; conflict "This can't be restored: something with the same details exists again."; parent gone "This can't be restored: what it belonged to has been deleted."; done "That was already restored."
 - Free text: any student-, family-, import- or web-written value over 80 characters (`SHORT_FIELD_MAX = 80`), and every value from documents, essay bodies, uploads, chat files, email, connected files and web pages. Free text flags the turn that reads it and the next one.
 - Quotes: a run of 8 or more consecutive words (case, punctuation and spacing ignored) from free text the turn could see flags the answer; the fold sees `[quote from <source>]` instead. Quoting short fields doesn't count.
@@ -39,7 +39,7 @@
 ### Task 1: The trash migration
 
 **Files:**
-- Create: `supabase/migrations/20261031000002_axis_trash.sql`
+- Create: `supabase/migrations/20261031000003_axis_trash.sql`
 - Test: `test/integration/axis-trash-db.test.mjs`
 
 **Interfaces:**
@@ -145,7 +145,7 @@ test("the data export carries no trash", ...)                      // GET /accou
 ### Task 4: Hand-ins: wrapped prompt, values unverified until confirmed
 
 **Files:**
-- Create: `supabase/migrations/20261031000004_hand_in_values.sql`, `src/lib/handInValues.ts`
+- Create: `supabase/migrations/20261031000005_hand_in_values.sql`, `src/lib/handInValues.ts`
 - Modify: `src/lib/submissionReview.ts`, `src/lib/serialize.ts` (`toTrackerCheck`), `src/lib/newStudentIntake.ts` (building read), `src/routes/tasks.ts` (confirm route), `test/unit/service-callsites.test.ts`, `AGENTS.md` (the hand-in bullet)
 - Test: `test/unit/submissions.test.ts`, `test/unit/hand-in-values.test.ts`, `test/integration/hand-in-values.test.mjs`
 
@@ -185,7 +185,7 @@ test("an accepted hand-in with a planted GPA leaves the record unchanged", ...)
 ### Task 5: Flags migration and the free-text rule in the context layer
 
 **Files:**
-- Create: `supabase/migrations/20261031000003_axis_outside_flags.sql`, `src/lib/context/freeText.ts`
+- Create: `supabase/migrations/20261031000004_axis_outside_flags.sql`, `src/lib/context/freeText.ts`
 - Modify: `src/lib/context/pack.ts` (`Section.untrusted[]` gains `free?: boolean`), `src/lib/context/sections.ts` (each loader sets `free`), `src/lib/context/index.ts` (`buildStudentContext` option `shortOnly`; result `freeText: SectionName[]`), the roster context builder (result `freeText: boolean`), `src/lib/axis/failsafe.ts` (`flagsReady(db)`)
 - Test: `test/unit/context-free-text.test.ts`
 
@@ -341,4 +341,4 @@ test("no baseline means no drop", ...)
 ### Task 11: Whole-branch check and PR
 
 - [ ] **Step 1:** `npm run typecheck && npm test && npm run test:integration` → all PASS.
-- [ ] **Step 2:** Push and open the PR (Elvin merges). The description carries: the three migrations and their deploy order; the eval results (or that they run after merge); and Elvin's numbered steps: (1) create an Anthropic key for evals with a monthly spend limit in the Anthropic console (Settings → API keys → Create key; then Limits); (2) in GitHub: meridies-backend → Settings → Secrets and variables → Actions → New repository secret, name `ANTHROPIC_API_KEY`, paste the key there (not in chat); (3) merge; (4) approve the Apply migrations run; (5) Actions → AxIS evals → Run workflow, and check it ends green with a first line in `axis-eval-scores`.
+- [ ] **Step 2:** Push and open the PR (Elvin merges). The description carries: the three migrations and their deploy order; the eval results (or that they run after merge); and Elvin's numbered steps: (1) create an Anthropic key for evals with a monthly spend limit in the Anthropic console (Settings → API keys → Create key; then Limits); (2) in GitHub: meridies-backend → Settings → Secrets and variables → Actions → New repository secret, name `ANTHROPIC_API_KEY`, paste the key there (not in chat); (3) merge; (4) in the Terminal app, `cd ~/"Meridies AI/meridies-backend" && git checkout main && git pull`, then `supabase db push --linked --dry-run`, which should list exactly the three files (stop and send the output if not), then `supabase db push --linked`, answer `Y`, ending "Finished supabase db push."; (5) Actions → AxIS evals → Run workflow, and check it ends green with a first line in `axis-eval-scores`.
