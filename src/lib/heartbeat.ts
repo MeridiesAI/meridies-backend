@@ -15,7 +15,8 @@ export type Job =
   | "events-discovery"
   | "college-photos"
   | "kpi-monthly"
-  | "pipeline-sequences";
+  | "pipeline-sequences"
+  | "email-blasts";
 
 export async function beat(job: Job, ok: boolean, error?: string, log?: { warn: (o: object, m?: string) => void }) {
   const svc = serviceClient();
