@@ -79,22 +79,26 @@ Elvin can query on production. Direct and essay turns log nothing today; section
 **What it holds.** In `ai_conversations.state` (jsonb, ≤4000 bytes), a `draft` object:
 
 ```
+// ai_conversations.state (the existing 4000-byte slot): only the small header
 draft: {
   kind: "activity",
-  student_id,                      // fixed for the draft's life
-  rows: [                          // up to 5 (a counselor often adds two or three at once)
-    { key: "r1", op: "add" | "update", activity_id?,   // activity_id for an edit
-      fields: { organization?, position?, grade_levels?, timing?, hours_per_week?, weeks_per_year?, continuing?, category?, uc_category? },
-      status: "collecting" | "card" | "saved" | "dismissed",
-      card_id? }
-  ],
+  student_id,                      // pinned for the draft's life (see "Pinned to its student")
   opened_at, updated_at,
+  card_id?,                        // the pending add card, when one is filed
   expired?: true                   // set for one turn after a timeout (below)
 }
+
+// ai_conversations.draft_rows (new jsonb column, size-checked, e.g. ≤32000 bytes)
+[                                  // up to 10 rows (the Common App lists 10 activities; a resume can fill them)
+  { key: "r1", op: "add" | "update", activity_id?,     // activity_id for an edit
+    fields: { organization?, position?, grade_levels?, timing?, hours_per_week?, weeks_per_year?, continuing?, category?, uc_category?, description? },
+    sources: { <field>: "your message" | "Resume.pdf" | "meeting notes (Oct 12)" | … },
+    status: "collecting" | "card" | "saved" | "dismissed" | "skipped" }
+]
 ```
 
-Long text goes in a **new column**, `ai_conversations.draft_text` (jsonb, keyed by row: `{ "r1": { "description": "…" } }`,
-size-checked, e.g. ≤12000 bytes). *(Elvin's decision: keep long text out of the 4000-byte slot.)*
+*(Elvin's decision: long text out of the 4000-byte slot. My call: all rows go in the new column, not only
+descriptions, because a resume can fill ten rows.)*
 Builder: three places would drop or lose `draft` today, and all three need changing. `nextState()` and the engine
 rebuild `state` from scratch each turn (`{...nextState(), outside}`). `memory.ts`'s `stateSchema` strips unknown
 keys on load. `saveState` runs after `done` as best effort, and a failure is only a warning. A draft change must be
@@ -112,18 +116,36 @@ adds a deterministic opener: action intent + "activity/activities" + a student i
 message in the last 30 minutes. `updated_at` moves on every counselor message in the conversation, not only on
 draft changes, so a draft never expires while the counselor is still chatting. *(My call.)*
 
-**While a draft is open, every message in that conversation:**
-- skips the direct-answer compiler (engine step 3);
-- runs in `action` mode (the Clerk profile, 6 calls) whatever `understand()` scored. When `understand()` scored
-  something other than `action` (a side question), the turn keeps the after-answer check (`verify: true`) that
-  the record profile would have had. *(My call: a side question shouldn't lose its grounding check.)*
+**While a draft is open, code sorts each message as part of the draft or unrelated** *(Elvin's decision,
+2026-10-30: unrelated messages are answered normally and never captured)*.
+
+A message **continues the draft** when any of these hold (checked in code, in this order):
+1. it's a cancel, yes or continue word ("cancel", "never mind", "yes", "continue", "keep going");
+2. a normalizer (4.2) finds an activity value in it: a grade, timing phrase, hours or weeks;
+3. it names one of the draft's organizations or positions;
+4. it starts with a correction cue ("actually", "no,", "wait", "make it", "change");
+5. `understand()` scored `action`, or nothing scored above the fallback (a bare list of details, "i gave it").
+
+Field words alone don't count ("what are her grades?" has no value in it), and numbers without an activity unit
+don't count ("is her 1450 good for UCLA?"). *(The rule is my call; a unit-test table of 30+ messages pins it, and
+the builder tunes it there.)*
+
+A **draft message**:
+- skips the direct-answer compiler (engine step 3) and runs in `action` mode (the Clerk profile, 6 calls);
 - gets a short draft block added to the user turn, written by code: the student, each row's key, fields so far,
-  missing fields, and card status. It goes in the user turn, not the system prompt, so the cached prefix doesn't move.
-- still goes through the essay route if it's an essay request. The lexicon doesn't catch "write a description
-  for it" today (it scores no intent and falls back to `record`), so add essay patterns for writing, drafting
-  or rewriting an activity description. The essay route runs no tools, so the draft stays open untouched.
-  Safety doesn't rest on the router: a description the model writes still fails the substring rule (4.4).
-- A side question ("what's her GPA?") is answered in the same Clerk turn, and the draft stays open.
+  each value's source, missing fields, and card status. It goes in the user turn, not the system prompt, so the
+  cached prefix doesn't move.
+
+An **unrelated message**:
+- runs exactly as if no draft were open (its own intent and mode, direct answers allowed, no draft block);
+- can't change the draft. Activity add and update ops are refused in that turn with "there's an open activity
+  draft; ask the counselor to continue it", and nothing it says is merged in;
+- ends with a code-written line: "You still have an activity draft for Student A. Continue or cancel?"
+  "Continue" shows the draft's status and asks for what's missing; "cancel" cancels it.
+
+Essay requests stay on the essay route either way. The lexicon doesn't catch "write a description for it" today
+(it scores no intent and falls back to `record`), so add essay patterns for writing, drafting or rewriting an
+activity description. Safety doesn't rest on the router: a description the model writes still fails 4.4.
 
 **How it ends.**
 - **Saved:** every row is `saved` or `dismissed` (the counselor confirmed or dismissed each card).
@@ -139,16 +161,20 @@ draft changes, so a draft never expires while the counselor is still chatting. *
   - If every unsaved row was already a pending card, there's no expiry line. The draft closes and the cards stay
     valid; the counselor can still Confirm them. *(My call.)*
 
-**When to ask.** A card can be filed once a row has an organization. If position, grades, timing, hours or weeks
-are missing, AxIS asks once, in one message, naming only what's missing. If the counselor answers without them,
-or says "add it" / "that's all", AxIS files the card with blanks; the card lists them. *(My call: today's
-transcript shows the cost of asking repeatedly.)*
+**When to ask.** A card can be filed once every row has an organization. If position, grades, timing, hours or
+weeks are missing, AxIS asks once, in one message, naming only what's missing, row by row. If the counselor
+answers without them, or says "add it" / "that's all", AxIS files the card with blanks; the card lists them.
+*(My call: today's transcript shows the cost of asking repeatedly.)*
 
-**Student.** One draft at a time, for one student. A question that names another student ("what's Student B's
-GPA?") is answered and the draft stays. Only a request to add or change an *activity* for another student
-triggers a code-written question: "Your activity draft for Student A isn't finished. Drop it and start one for
-Student B?" Yes cancels the old draft (as above) and goes ahead; anything else keeps the old one. *(My call;
-one slot keeps the state small.)*
+**Pinned to its student** *(Elvin's decision, 2026-10-30)*. One draft at a time, for one student, fixed when it
+opens (in a student's chat, that student). Enforced in code, not by the prompt:
+- While a draft is open, any activity add or update for a different student is refused before anything is
+  filed. Nothing is saved onto the new student, and nothing from that message is merged into the open draft.
+- AxIS then asks, in a code-written line: "Your activity draft for Student A isn't finished. Drop it and start
+  one for Student B?" Yes cancels the old draft (as below) and opens a new one for Student B from that message.
+  Anything else keeps Student A's draft, and Student B gets nothing.
+- A question that only names another student ("what's Student B's GPA?") is an unrelated message (above).
+- Tests: a unit test that the op is refused for a second student while a draft is open, and eval conversation 18.
 
 ### 4.2 Normalizers (code, before validation)
 
@@ -186,11 +212,20 @@ Never raw error text, never silence.
 
 ### 4.4 Descriptions *(Elvin's decision)*
 
-`description` is added to `add_activity` and `update_activity`. The server accepts it only when, after trimming
-leading and trailing whitespace, it is an **exact, case-sensitive substring of one of the counselor's own messages
-in this conversation**: typed messages only, not attachments, files, emails or tool results. Anything else is
-rejected to the model with: "description must be the counselor's exact words; AxIS can't write or edit it."
-AI-written descriptions stay blocked, so the essay guardrail holds.
+`description` is added to the activity ops. The server accepts it only when, after trimming leading and trailing
+whitespace, it is an **exact, case-sensitive copy** from one of two sources, checked in code:
+- **one of the counselor's typed messages in this conversation**, labelled "from your message";
+- **the student's own Meridies documents** *(Elvin's decision, 2026-10-30)*, labelled "from resume" (or the
+  document's kind, e.g. "from activity list"). The text is checked against the document's full extracted text,
+  read on the counselor's client through `documentAiDecision`, so a file the AI may not read can't be a source.
+  *My calls:* only kinds `resume` and `activity-list` count, so an essay file can't feed a description. For the
+  comparison, every run of whitespace (PDF line breaks) collapses to one space on both sides; nothing else is
+  loosened. Files attached only in the chat don't count for descriptions in v1; the counselor can file the resume
+  to the student's documents.
+
+Anything else is rejected to the model with: "description must be copied exactly from the counselor's message or
+the student's resume; AxIS can't write or edit it." AI-written descriptions stay blocked, so the essay guardrail
+holds. `proseRefusal` still runs on it.
 
 - A description longer than the Common App's 150 characters still saves (the API allows 2000), but the card
   notes "Over the Common App's 150-character limit." *(My call.)*
@@ -213,9 +248,9 @@ AI-written descriptions stay blocked, so the essay guardrail holds.
   (`documentAiDecision` already applies).
 
 *My call:* these don't count: AxIS's own earlier answers, emails, intake answers, other record fields the student
-wrote, and anything from the web. **Descriptions stay typed-messages-only** (4.4). Each value on the card names
-its source: "from your message", "from Resume.pdf", "from meeting notes (Oct 12)". Reading a file or document
-already marks the turn as outside content, which is fine since every activity op is a card now.
+wrote, and anything from the web. **Descriptions have their own, narrower rule** (4.4). Each value on the card
+names its source: "from your message", "from Resume.pdf", "from meeting notes (Oct 12)". A card with any value
+from a file or document is flagged (4.11).
 
 Before a card is filed, every value must trace back to one of those sources:
 
@@ -235,10 +270,22 @@ eval conversation 11 checks the model gets it right.
 
 - `application.add_activity` and `application.update_activity` change from `risk: "auto"` to `"confirm"`
   (delete already confirms). The existing card, Confirm/Dismiss routes and post-confirm Undo are reused.
-- The card shows every field it will save, a "Not given: …" line for blank fields, the description in full, and
-  how a converted value was read ("Grades 10, 11, 12 (from 'grades 10–12')").
+- **One card per draft, a row per activity** *(Elvin's decision, 2026-10-30)*. Adds in a draft are filed as a
+  single card, through a new op (suggested `application.add_activities`, `{ student_id, rows: [...] }`, ≤10 rows,
+  `confirm`), with one row per activity and **a checkbox per row, checked by default**. Confirm saves the checked
+  rows, one `POST /application/activities` each, and records a result per row. Undo deletes the rows that card
+  saved. Unchecked rows are `skipped` and the draft closes. *(My call: skipped rows are dropped, not kept.)*
+  - `POST /axis/actions/:id/confirm` takes an optional `{ rows: ["r1","r3"] }` for this op only. Without it (the
+    app before its PR), every row is saved.
+  - A row the route refuses (e.g. the sheet's 30-row cap) shows its own reason; the others still save.
+  - Edits to an existing activity stay one `update_activity` card each. *(My call.)*
+- Each row shows every field it will save with its source, a "Not given: …" line for blank fields, the description
+  in full, and how a converted value was read ("Grades 10, 11, 12 (from 'grades 10–12')").
+  - The payload carries the rows as structured data for the app's checkbox rows. For the app as it is today, the
+    detail lines are one compact line per row ("Code Club · Cofounder/Teacher · 11 · break · 6 h/wk · 2 wk/yr
+    · from your message"). That fits `runWrite`'s 12-line limit at 10 rows. Builder: make sure no value is cut.
 - **A correction while a card is pending** ("actually 8 hours") replaces it: the old card is dismissed with reason
-  "replaced" and a new one is filed for the same draft row. One pending card per row. The backend sends the old
+  "replaced" and a new one is filed with every row, all checked. One pending add card per draft. The backend sends the old
   card's new status as a live `action` event. Today the app only redraws pending and executed cards live
   (`LIVE_OPERATION_STATUSES` in meridies-app `lib/axisSse.ts`) and knows only two reasons, so until the app PR
   teaches it `dismissed` and the `replaced` reason, the old card keeps its Confirm button until the chat reloads.
@@ -247,11 +294,12 @@ eval conversation 11 checks the model gets it right.
 - **A correction after saving** is an `update_activity` card on that row.
 - **Save & edit button (app, meridies-app):** *(Elvin's decision, 2026-10-30.)* The app has no separate activity
   form; the Activities sheet is edited inline (`components/student/ApplicationSheets.tsx`). So the card's extra
-  button **confirms the card as shown, then opens the student's Activities sheet with the new row highlighted**,
+  button **confirms the card as shown (the checked rows), then opens the student's Activities sheet with the new
+  rows highlighted**,
   where every cell is already editable and saves on change. Undo on the card still works. *My call:* label it
   "Save & edit", not "Edit", so it's clear the row is saved first. Dismiss stays the way to stop a wrong row
-  entirely. Builder: the confirm response must carry the new row's id (check `POST /axis/actions/:id/confirm`'s
-  answer; add it if missing), and the sheet needs a way to scroll to and highlight a row. No new
+  entirely. Builder: the confirm response must carry the new rows' ids (check `POST /axis/actions/:id/confirm`'s
+  answer; add them if missing), and the sheet needs a way to scroll to and highlight rows. No new
   confirm-with-changes path. The backend part (cards, drafts) works without the button, so the app PR can land after.
 
 ### 4.7 Status lines written by code
@@ -280,7 +328,7 @@ waiting" behavior. *(My call. It stops the false claims in turns 3, 4 and 6 with
 
 One `axis turn` log line on every turn (today only the direct path logs one):
 - `intent` (the category `understand()` picked) and `path` (direct / essay / agent / specialists). Elvin's decision.
-- Also, *my call, strike if unwanted:* `draft` (none / opened / continued / expired / closed:saved|cancelled|timeout),
+- Also, *my call, strike if unwanted:* `draft` (none / opened / continued / unrelated / expired / closed:saved|cancelled|timeout),
   op outcome codes (`filed`, `done`, `rejected:hours_per_week`; field names, never values), model calls used vs the
   cap, and the conversation id so a reported bad chat can be found.
 - No message text, field values, student names or student ids.
@@ -288,11 +336,17 @@ One `axis turn` log line on every turn (today only the direct path logs one):
 ### 4.10 The eval set
 
 **Layer 1: every PR, in `npm test`, no API key.** Uses the scripted model in `test/unit/axis-fakes.ts`.
-- Table tests for each normalizer, the description substring rule and the provenance check.
-- Engine tests: an open draft skips the direct compiler and forces action mode; the essay route still wins;
-  cancel; expiry line and restore; card replacement; status lines; draft survives `nextState`; long text
-  goes to `draft_text`.
-- The 16 conversations below with scripted model turns, to test the plumbing.
+- Table tests for each normalizer, the description rule (typed messages and resume copies, whitespace collapse,
+  essay-kind documents refused) and the provenance check.
+- A table of 30+ messages for the draft/unrelated sorter (4.1).
+- Engine tests: a draft message skips the direct compiler and runs in action mode; an unrelated message runs
+  normally, can't change the draft, and gets the reminder line; the essay route still wins; cancel; expiry line
+  and restore; card replacement; status lines; the draft survives `nextState`, `stateSchema` and a failed save.
+- Pinned student: an activity op for a second student while a draft is open is refused, files nothing, and
+  merges nothing.
+- Cards: confirm with a `rows` selection saves only those rows; confirm without one saves all; a refused row
+  doesn't stop the others; Undo removes exactly the saved rows; the flag rule in 4.11.
+- The 18 conversations below with scripted model turns, to test the plumbing.
 
 **Layer 2: the real model, on demand and on releases** *(Elvin's decision)*. Run before merging any PR that
 touches `src/lib/axis/`, by someone clicking Run.
@@ -303,7 +357,8 @@ touches `src/lib/axis/`, by someone clicking Run.
 - Each conversation is scored in code, not by a model: the sheet rows at the end equal the expected rows field
   by field; no extra rows; no counselor-visible text contains raw error text ("Invalid input", "Expected",
   zod paths); the number of AxIS questions is at or under the case's limit; draft state at the end is as expected.
-- Pass bar: all 16 pass (one over Elvin's 10–15, for the resume case added with his sources decision). A failed case is rerun twice and must pass 2 of 3, and any flaky case is reported as such.
+- Pass bar: all 18 pass (over Elvin's 10–15: the resume, unrelated-message and switch-student cases came with
+  his later decisions). A failed case is rerun twice and must pass 2 of 3, and any flaky case is reported as such.
   *(My call.)*
 
 **The conversations (fixture student "Student A"):**
@@ -319,24 +374,53 @@ touches `src/lib/axis/`, by someone clicking Run.
 | 7 | "actually 8 hours" before Confirm | old card replaced, new card 8 |
 | 8 | Rename after saving | update card on that row |
 | 9 | "never mind" mid-draft | no rows, draft closed |
-| 10 | Two activities in one go | 2 cards |
+| 10 | Two activities in one go | 1 card with 2 rows, both checked |
 | 11 | "It ran at City Library" (venue) | organization stays "Code Club"; no invented position |
-| 12 | Side question mid-draft, then more details | question answered; draft continues |
+| 12 | Mid-draft: "what's her GPA?", then "continue", then the missing hours | GPA answered normally, then "You still have an activity draft for Student A. Continue or cancel?"; draft unchanged by the question; "continue" shows what's missing; the hours complete the card |
 | 13 | Reply after 30 minutes | expiry line; "yes" restores the fields |
 | 14 | "200 hours a week" | plain "couldn't save" line, no raw error |
 | 15 | The redacted transcript replayed | Code Club saved once, correctly; no City Library row; ≤3 counselor messages after the details |
-| 16 | "Add the activities from her resume" (fixture resume as a Meridies document) | one card per activity; each value labelled "from Resume.pdf"; no descriptions; nothing not in the resume |
+| 16 | "Add the activities from her resume" (fixture resume as a Meridies document) | one card, a row per activity; each value labelled with its source; descriptions are exact copies labelled "from resume"; nothing not in the resume; card reason `outside-content` |
+| 17 | Mid-draft: "Is her SAT 1450 good for UCLA?" | answered normally with the reminder line; no draft value changes (1450 is not hours or a grade) |
+| 18 | Draft for Student A open; "add Debate Club for Student B, 5 hrs a week"; then "yes" | no card for Student B and nothing added to A's draft from that message; the switch question; after yes, A's draft cancelled (its card dismissed) and a draft for B holds Debate Club; Student A's sheet unchanged |
+
+### 4.11 Security: Confirm all and the outside-content flag
+
+Checked against the security session's design (`2026-10-30-axis-security-hardening-design.md`, in progress in
+another worktree). Its rules that touch these cards: **"Confirm all" skips any card whose `reason` is
+`outside-content`** (and destructive ops and sends), so those are confirmed one by one; and a chat stays flagged
+while flagged text is in reach (its section 3).
+
+**The gap, and the fix here.** Today `ops/run.ts` sets `reason: "outside-content"` only when it turns an *instant*
+change into a card. Activity ops are now cards by default, so the reason would stay null even in a turn that read
+a resume, and Confirm all would sweep a document-sourced card in. So an activity card gets `reason:
+"outside-content"`:
+- when its turn is flagged (by whatever rule the security design ends with), or
+- when **any value or description on it came from an attached file or a student document**, judged from the
+  per-value sources (4.5), not from the turn. A resume read in turn 1 still flags the card filed in turn 3, after
+  the turn flag has cleared.
+- Values only from typed messages and the counselor's meeting notes don't flag the card.
+
+Tests: a layer 1 test for both triggers, and eval case 16 checks the reason.
+
+**For the security session** (Elvin to pass on): the same gap applies to every op that is `confirm` by nature,
+not only activities. Its Confirm-all rule relies on `reason`, so it should set `outside-content` on every card
+filed in a flagged turn.
+
+**One eval runner, not two.** Both designs propose `evals/axis/` and `npm run eval:axis`. Whichever PR lands first
+creates it, and the other adds its cases. The workflow and capped key in 4.10 serve both. The security cases keep
+their own pass rule (all 3 runs must pass, code guarantees only); the activity cases keep 4.10's.
 
 ## 5. Rollout and steps for Elvin
 
 **Order** *(Elvin's decision, same as before):* database change to production → backend PR → bcha's app PR.
 
-1. **Migration** (`ai_conversations.draft_text`): safe to apply before the code, nothing reads it yet. Elvin
+1. **Migration** (`ai_conversations.draft_rows`): safe to apply before the code, nothing reads it yet. Elvin
    pushes it from plain Terminal on main, dry-run first, as usual.
 2. **Backend PR** (Elvin merges): drafts, normalizers, provenance, descriptions, cards, status lines, logging, evals.
    Works with or without the app's Save & edit button.
-3. **App PR** (bcha reviews and merges): the Save & edit button, live `dismissed`/`replaced` card updates, and
-   the per-value source labels if the card needs layout work for them.
+3. **App PR** (bcha reviews and merges): the activity card's checkbox rows (sending the checked `rows` on Confirm),
+   the Save & edit button, live `dismissed`/`replaced` card updates, and the per-value source labels.
 
 **Setting up the eval key** (Elvin, once; checked against the Console docs 2026-10-30: spend limits are set on a
 **workspace**, not on a key, and the Default Workspace can't have one):
@@ -355,20 +439,26 @@ touches `src/lib/axis/`, by someone clicking Run.
 ## 6. Decisions
 
 **Elvin's:** the draft per conversation, its three endings and the expiry wording; long text in its own column;
-normalizers before validation; field-level messages to the model and plain lines to the counselor;
-descriptions only as exact substrings of the counselor's messages; confirm cards for adds and edits, with a
-button that saves and opens the sheet to edit (not a form); the provenance check, with typed messages, attached
-files, meeting notes and the student's documents counting as sources; the eval set, run on demand and on releases with its own capped key
-and fixture students only; logging of category and path with no text; the merge order.
+normalizers before validation; field-level messages to the model and plain lines to the counselor; descriptions
+only as exact, code-checked copies of the counselor's messages or the student's own documents (labelled "from
+resume"); confirm cards for adds and edits; one card per draft with a checkbox row per activity; a button that
+saves and opens the sheet to edit (not a form); the provenance check, with typed messages, attached files,
+meeting notes and the student's documents counting as sources; unrelated messages answered normally, never
+captured, followed by the "Continue or cancel?" line; drafts pinned to their student, with AxIS asking before a
+switch; Confirm all and the flag rule applying to document-sourced cards; the eval set, run on demand and on
+releases with its own capped key and fixture students only; logging of category and path with no text; the merge
+order.
 
-**Mine (check these while reading):** the op call opens the draft (4.1); the 30-minute clock restarts on every
-message; side questions keep their grounding check; cancel dismisses pending cards; no expiry line when only
-cards are left; asking once and filing with blanks; restoring fields on "yes" after expiry; one draft at a time,
-and the question when another student's activity comes up; saving the draft before `done`; up to 5 rows; the
-normalizer phrasings, range midpoint, "all year" = 52 and the category mapping to the Common App list; the
-150-character note; UC descriptions stay blocked; status lines written by code, with the prompt rule scoped to
-activity ops; the stale-card gap until the app PR; eval case 6 as a follow-up; skipping college evidence while
-drafting; the extra log fields; the eval pass bar; the $20 cap.
+**Mine (check these while reading):** the op call opens the draft (4.1); the sorter rule for draft vs unrelated
+messages; activity ops refused in an unrelated turn; the 30-minute clock restarts on every message; cancel
+dismisses pending cards; no expiry line when only cards are left; asking once and filing with blanks; restoring
+fields on "yes" after expiry; saving the draft before `done`; all rows in the new column, up to 10; unchecked rows
+dropped; edits as their own cards; the normalizer phrasings, range midpoint, "all year" = 52 and the category
+mapping to the Common App list; description sources limited to `resume` and `activity-list` documents, whitespace
+collapse only, chat attachments not counting; the 150-character note; UC descriptions stay blocked; status lines
+written by code, with the prompt rule scoped to activity ops; the stale-card gap until the app PR; eval case 6 as a
+follow-up; skipping college evidence while drafting; the extra log fields; one shared eval runner; the eval pass
+bar; the $20 cap.
 
 ## 7. Open questions
 
