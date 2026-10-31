@@ -58,6 +58,8 @@ export type AccountDTO = {
   packageName: string;
   totalCents: number;
   installments: number;
+  /** How long the package runs, in months; null when nobody said. */
+  durationMonths: number | null;
   invoices: InvoiceDTO[];
   payments: PaymentDTO[];
   refunds: RefundDTO[];
@@ -202,6 +204,7 @@ export function deriveAccount(pkg: Row, invoiceRows: Row[], paymentRows: Row[], 
     packageName: String(pkg.package_name),
     totalCents,
     installments,
+    durationMonths: pkg.duration_months == null ? null : num(pkg.duration_months),
     invoices: out,
     payments: payments.reverse(),
     refunds,
@@ -270,4 +273,20 @@ export function formatUsd(cents: number): string {
     currency: "USD",
     minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
   });
+}
+
+/** "6 months", "1 year", "2 years", "18 months". */
+export function describeDuration(months: number): string {
+  if (months % 12 === 0) {
+    const years = months / 12;
+    return `${years} year${years === 1 ? "" : "s"}`;
+  }
+  return `${months} month${months === 1 ? "" : "s"}`;
+}
+
+/** "Payment 2 of 6 for Senior package ($3,000 over 6 months)"; null for a one-payment package. */
+export function planLine(a: Pick<AccountDTO, "packageName" | "totalCents" | "installments" | "durationMonths">, nth: number): string | null {
+  if (a.installments <= 1) return null;
+  const span = a.durationMonths ? ` over ${describeDuration(a.durationMonths)}` : "";
+  return `Payment ${Math.min(nth, a.installments)} of ${a.installments} for ${a.packageName} (${formatUsd(a.totalCents)}${span}).`;
 }
