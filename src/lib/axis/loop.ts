@@ -28,7 +28,7 @@
  * The client is injected, so the loop is tested with a scripted fake.
  */
 import Anthropic from "@anthropic-ai/sdk";
-import { disableFeature, featureOn, MAX_TOKENS, type Effort } from "./models.js";
+import { disableFeature, featureOn, LOWER_RATE_PROMPT_TOKENS, MAX_TOKENS, type Effort } from "./models.js";
 import type { ToolOutput } from "./tools.js";
 
 type BetaMessage = Anthropic.Beta.BetaMessage;
@@ -46,8 +46,63 @@ export type StreamLike = {
 
 export type MessagesApi = { stream(params: StreamParams, options?: { signal?: AbortSignal }): StreamLike };
 
-export type Usage = { input: number; output: number; cacheRead: number; cacheWrite: number };
-export const emptyUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+/** Tokens and billed calls, summed over some model calls. */
+export type Tokens = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  /** Every cache write. The two below split it by lifetime (they bill differently) when the API reports the split. */
+  cacheWrite: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  /** Responses that came back: the billed calls, specialists' included. */
+  calls: number;
+};
+const TOKEN_KEYS = ["input", "output", "cacheRead", "cacheWrite", "cacheWrite5m", "cacheWrite1h", "calls"] as const satisfies readonly (keyof Tokens)[];
+const noTokens = (): Tokens => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite5m: 0, cacheWrite1h: 0, calls: 0 });
+
+/**
+ * What the model calls of a run cost, summed. `longPrompt` is the part from calls whose prompt
+ * passed Haiku 5.5's lower rate card: those are billed at the higher rate on every token, so the
+ * cost report (scripts/axis/axis-cost-report.sql) needs their tokens apart, not just a count.
+ */
+export type Usage = Tokens & { longPrompt: Tokens };
+export const emptyUsage = (): Usage => ({ ...noTokens(), longPrompt: noTokens() });
+
+/** The usage block of one response, beta or not. */
+type ApiUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cache_creation?: { ephemeral_5m_input_tokens: number; ephemeral_1h_input_tokens: number } | null;
+};
+
+/** One response's usage, as one billed call. */
+export function usageFromApi(u: ApiUsage): Usage {
+  const one: Tokens = {
+    input: u.input_tokens,
+    output: u.output_tokens,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheWrite: u.cache_creation_input_tokens ?? 0,
+    cacheWrite5m: u.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+    cacheWrite1h: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+    calls: 1,
+  };
+  // The rate card counts the whole prompt, cached tokens included.
+  const long = one.input + one.cacheRead + one.cacheWrite > LOWER_RATE_PROMPT_TOKENS;
+  return { ...one, longPrompt: long ? { ...one } : noTokens() };
+}
+
+function addTokens(into: Tokens, x: Tokens): void {
+  for (const k of TOKEN_KEYS) into[k] += x[k];
+}
+
+/** Adds every count of `x` into `into`, the long-prompt part included. */
+export function addUsage(into: Usage, x: Usage): void {
+  addTokens(into, x);
+  addTokens(into.longPrompt, x.longPrompt);
+}
 
 export type ToolCall = { id: string; name: string; input: unknown };
 
@@ -84,13 +139,6 @@ export type LoopResult = {
 /** Two rounds that brought nothing new end the tool phase. */
 export const STALE_ROUNDS = 2;
 const JSON_RETRIES = 2;
-
-function addUsage(u: Usage, m: BetaMessage): void {
-  u.input += m.usage.input_tokens;
-  u.output += m.usage.output_tokens;
-  u.cacheRead += m.usage.cache_read_input_tokens ?? 0;
-  u.cacheWrite += m.usage.cache_creation_input_tokens ?? 0;
-}
 
 /** Folds the optional system messages into plain request shape after the API refused them. */
 export function degrade(messages: BetaMessageParam[]): { changed: boolean; usedPerMessageEffort: boolean; usedSystemMessages: boolean } {
@@ -197,7 +245,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
       throw err;
     }
     o.signal.removeEventListener("abort", relay);
-    addUsage(usage, msg);
+    addUsage(usage, usageFromApi(msg.usage));
 
     const uses = msg.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (msg.stop_reason === "tool_use" && uses.length && !mustAnswer) {

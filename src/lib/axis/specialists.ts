@@ -19,7 +19,7 @@
  * would each pay for the whole prefix.
  */
 import type Anthropic from "@anthropic-ai/sdk";
-import { runLoop, emptyUsage, type LoopOptions, type MessagesApi, type ToolCall, type Usage } from "./loop.js";
+import { addUsage, runLoop, emptyUsage, type LoopOptions, type MessagesApi, type ToolCall, type Usage } from "./loop.js";
 import { effortMessage, featureOn, type Effort } from "./models.js";
 import type { Intent, Understanding } from "./nlu.js";
 import { modeLine } from "./profiles.js";
@@ -103,10 +103,7 @@ export async function runSpecialists(o: {
       onFirstEvent: firstEvent,
       onToolStart: (c) => o.onStep(`${task.intent}: ${c.name.replace(/_/g, " ")}`),
     });
-    usage.input += res.usage.input;
-    usage.output += res.usage.output;
-    usage.cacheRead += res.usage.cacheRead;
-    usage.cacheWrite += res.usage.cacheWrite;
+    addUsage(usage, res.usage);
     return { clause: task.clause, intent: task.intent, text: res.text.trim(), tools: res.tools };
   };
 
