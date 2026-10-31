@@ -120,3 +120,16 @@ test("an older overpayment recorded before credits existed still shows as credit
   assert.equal(a.remainingCents, 0);
   assert.equal(a.canInvoice, false);
 });
+
+test("a package's length is said in months, then years", async () => {
+  const { describeDuration, planLine } = await import("../../src/lib/payments.js");
+  assert.equal(describeDuration(1), "1 month");
+  assert.equal(describeDuration(6), "6 months");
+  assert.equal(describeDuration(12), "1 year");
+  assert.equal(describeDuration(24), "2 years");
+  assert.equal(describeDuration(18), "18 months");
+  const pkg = { packageName: "Senior package", totalCents: 300_000, installments: 6, durationMonths: 6 };
+  assert.equal(planLine(pkg, 2), "Payment 2 of 6 for Senior package ($3,000 over 6 months).");
+  assert.equal(planLine({ ...pkg, durationMonths: null }, 9), "Payment 6 of 6 for Senior package ($3,000).");
+  assert.equal(planLine({ ...pkg, installments: 1 }, 1), null);
+});
