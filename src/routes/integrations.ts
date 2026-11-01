@@ -2,7 +2,8 @@
  * Suite integrations.
  *
  * Both suites ask in two steps: Connect is identity plus files (Google: drive.file, only the
- * files the counselor picks; Microsoft: Files.Read.All until PR B moves it to the picker), and
+ * files the counselor picks; Microsoft: Files.Read, the counselor's own OneDrive, picked in
+ * Microsoft's picker), and
  * Calendar is added on request (`?add=calendar`). Neither lights up mail. The granular provider
  * values (`common-app`, `scoir`, `csv`, ...) stay for the imports that really
  * are separate things.
@@ -39,6 +40,7 @@ import {
   MSA_TENANT_ID,
   hasScope,
   pickerConfigProblem,
+  pickerTokenFor,
   providerLabel,
   revokeAndForget,
   SUITE_PROVIDERS,
@@ -51,8 +53,11 @@ import { serviceClient } from "../lib/supabase.js";
 import {
   assertFileId,
   downloadRemoteFile,
+  getOwnOneDriveFile,
   getRemoteFile,
-  listRemoteFiles,
+  listGoogleFiles,
+  oneDriveInfo,
+  pickerSetup,
 } from "../lib/suiteApi.js";
 import { assertOwnFolder, assertSameStudentTree, studentFolderId } from "./files.js";
 
@@ -160,10 +165,11 @@ export default async function integrationRoutes(app: FastifyInstance) {
         calendarEnabled: account ? account.scopes.some((s) => /calendar\.events$|calendars\.readwrite$/i.test(s)) : false,
         driveGranted: account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
         // Until the Railway variables are set the app hides the Drive button (Elvin, 10/15).
+        // Microsoft's picker needs nothing beyond the sign-in client.
         pickerReady:
-          provider === "google" &&
           reason === null &&
-          pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null,
+          (provider === "microsoft" ||
+            pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null),
         maxFiles: provider === "google" ? env.GOOGLE_PICKER_MAX_FILES : env.MICROSOFT_PICKER_MAX_FILES,
       };
     });
@@ -251,7 +257,52 @@ export default async function integrationRoutes(app: FastifyInstance) {
     }
   );
 
-  /** Drive / OneDrive files the counselor's connected account can see. */
+  /**
+   * What the browser needs to open Microsoft's OneDrive picker (spec §3-4): the
+   * account type, where the picker page lives, the origin its messages come
+   * from, and a short-lived OneDrive token exchanged from the stored grant. The
+   * token reaches only what the grant's Files.Read reaches; it is never stored
+   * or logged, and the answer is not cached anywhere.
+   */
+  app.get(
+    "/microsoft/picker-session",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRole("counselor"),
+        limit("integrations:picker-session", 20, 60, "You're opening OneDrive very fast."),
+      ],
+    },
+    async (request, reply) => {
+      reply.header("Cache-Control", "no-store");
+      const reason = unavailableReason("microsoft");
+      if (reason) throw new HttpError(503, reason, "picker_not_configured");
+      // 409 microsoft_disconnected / microsoft_reconnect / files_not_granted
+      const drive = await oneDriveInfo(request.auth.userId, request.log);
+      const { data: grant } = await request.db
+        .from("integrations")
+        .select("config")
+        .eq("owner_id", request.auth.userId)
+        .eq("provider", "microsoft")
+        .maybeSingle();
+      const config = (grant?.config ?? {}) as { tenantId?: unknown };
+      const setup = pickerSetup(drive, typeof config.tenantId === "string" ? config.tenantId : null);
+      const { token, expiresAt } = await pickerTokenFor(request.auth.userId, setup.target, request.log);
+      return {
+        accountType: setup.accountType,
+        baseUrl: setup.baseUrl,
+        pickerOrigin: setup.pickerOrigin,
+        token,
+        expiresAt,
+        maxFiles: env.MICROSOFT_PICKER_MAX_FILES,
+      };
+    }
+  );
+
+  /**
+   * Google Drive files the app can already reach (earlier picks and supplement
+   * Docs). OneDrive has no list: its files are chosen in Microsoft's picker.
+   */
   app.get(
     "/:provider/files",
     {
@@ -263,10 +314,13 @@ export default async function integrationRoutes(app: FastifyInstance) {
     },
     async (request) => {
       const { provider } = suiteParam.parse(request.params);
+      if (provider === "microsoft") {
+        throw new HttpError(410, "OneDrive files are chosen in Microsoft's picker now.", "use_picker");
+      }
       const { q } = z
         .object({ q: z.string().trim().max(200).optional() })
         .parse(request.query);
-      return listRemoteFiles(request.auth.userId, provider, q || undefined, request.log);
+      return listGoogleFiles(request.auth.userId, q || undefined, request.log);
     }
   );
 
@@ -312,7 +366,12 @@ export default async function integrationRoutes(app: FastifyInstance) {
 
       let file;
       try {
-        file = await getRemoteFile(request.auth.userId, provider, b.fileId, b.driveId ?? null, request.log);
+        // OneDrive: always read from the counselor's own drive; the client's drive id isn't trusted
+        // or needed, and a file shared with them answers 422 shared_not_supported.
+        file =
+          provider === "microsoft"
+            ? await getOwnOneDriveFile(request.auth.userId, b.fileId, request.log)
+            : await getRemoteFile(request.auth.userId, provider, b.fileId, b.driveId ?? null, request.log);
       } catch (err) {
         if (provider === "google" && err instanceof HttpError && err.code === "not_found") {
           const email = (await connectedAccountEmail(request.auth.userId, "google")) ?? "your connected Google account";

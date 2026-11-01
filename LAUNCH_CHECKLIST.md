@@ -163,17 +163,24 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
   - run `scripts/smoke/google-picker.md` once by hand against the deployed setup
 - [ ] **Do not set `NODE_OPTIONS=--max-old-space-size` on Railway.** The PDF text worker caps its own heap at
   256 MB with `resourceLimits`, and a process-wide heap flag can override that limit.
-- [ ] **Microsoft OAuth** (keep it off in production, no `MICROSOFT_*` vars, until browsing moves to Microsoft's
-  picker with the narrowest scope that works; `Files.Read.All` reads the whole drive and is not shippable):
-  - register the app in Entra ID as multi-tenant plus personal Microsoft accounts (one prod, one dev)
-  - set `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET`; the secret expires (24 months at most): put the
-    renewal date on the calendar
-  - register `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/microsoft`
-  - leave `MICROSOFT_TENANT=common`
-  - **publisher verification** (a Microsoft Partner Network ID tied to the meridiesai.com domain). Without it,
-    work and school tenants show the app as unverified and many block user consent outright since Nov 2020.
-  - API permissions match the code: `openid`, `email`, `offline_access`, `User.Read`, the files scope, and
-    `Calendars.ReadWrite` (asked only when a counselor turns Calendar on). No `Mail.Send`.
+- [ ] **Microsoft OAuth** (off in production, no `MICROSOFT_*` vars, until the steps below; the OneDrive picker
+  and the `Files.Read` scope are built, spec `docs/superpowers/specs/2026-11-01-onedrive-picker-design.md`):
+  - register the production app **with a work account** in the Meridies directory (`admin@meridiesai.com`, with
+    `meridiesai.com` added as a verified custom domain). An app registered by a personal Microsoft account
+    (such as the dev app's `team@meridiesai.com`) can't be publisher verified.
+  - name it **Meridies** (counselors see the name on the consent screen); multi-tenant plus personal Microsoft
+    accounts; publisher domain `meridiesai.com`
+  - API permissions match the code: `openid`, `email`, `offline_access`, `User.Read`, `Files.Read` (never
+    `Files.Read.All`), and `Calendars.ReadWrite` (asked only when a counselor turns Calendar on). No `Mail.Send`.
+  - one Web redirect: `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/microsoft`. No
+    single-page application entry: the picker's token comes from the API.
+  - set `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET` on Railway; the secret expires (24 months at most):
+    put the renewal date on the calendar. Leave `MICROSOFT_TENANT=common`.
+  - **publisher verification**: the Partner global account ID from the Microsoft AI Cloud Partner Program,
+    linked under the app's Branding & properties. Without it, tenants with risk-based step-up consent block
+    the app, and the consent screen says "unverified".
+  - work tenants: `Calendars.ReadWrite` needs IT approval by default since November 2025; `Files.Read` doesn't.
+  - privacy policy names Microsoft OneDrive and Outlook Calendar beside Google Drive
 - [ ] **Leaked-password protection**: Supabase Auth > Attack Protection. Needs the Supabase Pro plan;
   the project is on Free, which also has no daily backups. The upgrade is pending a team decision.
 

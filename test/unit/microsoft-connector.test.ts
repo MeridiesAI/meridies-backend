@@ -38,7 +38,7 @@ const tokenRow = (over: Record<string, unknown> = {}) => ({
   account_email: "counselor@school.org",
   access_token_enc: encryptToken("AT-live"),
   refresh_token_enc: encryptToken("RT-1"),
-  scopes: ["openid", "email", "offline_access", "User.Read", "Files.Read.All"],
+  scopes: ["openid", "email", "offline_access", "User.Read", "Files.Read"],
   expires_at: new Date(Date.now() + 3600_000).toISOString(),
   ...over,
 });
@@ -89,7 +89,8 @@ const log = () => {
 test("Microsoft connect asks for files only; Calendar only with add=calendar; never Mail.Send", () => {
   const base = oauth.microsoftScopesFor({ calendar: false });
   assert.ok(base.includes("offline_access"), "offline_access is requested");
-  assert.ok(base.includes("Files.Read.All"));
+  assert.deepEqual(base, ["openid", "email", "offline_access", "User.Read", "Files.Read"], "own OneDrive only (spec 2026-11-01)");
+  assert.ok(!base.includes("Files.Read.All"), "never every file the counselor can see");
   assert.ok(!base.some((s) => /^mail\./i.test(s)), "no Mail.* scope");
   assert.ok(!base.includes("Calendars.ReadWrite"));
   assert.ok(oauth.microsoftScopesFor({ calendar: true }).includes("Calendars.ReadWrite"));
@@ -126,7 +127,7 @@ test("a Microsoft reconnect as a different account is refused and nothing is sav
       return json([{ owner_id: OWNER, code_verifier_enc: encryptToken("verifier"), expires_at: new Date(Date.now() + 60_000).toISOString() }]);
     }
     if (c.url.includes("/oauth2/v2.0/token")) {
-      return json({ access_token: "AT-other", refresh_token: "RT-other", expires_in: 3600, scope: "openid email Files.Read.All" });
+      return json({ access_token: "AT-other", refresh_token: "RT-other", expires_in: 3600, scope: "openid email Files.Read" });
     }
     if (c.url.startsWith("https://graph.microsoft.com/v1.0/me?")) return json({ id: "graph-me-OTHER", mail: "other@school.org" });
     return undefined;
@@ -194,7 +195,7 @@ test("a refresh keeps Calendar on a grant that has it and never adds it to one t
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await oauth.__test.refreshGrant(db as any, msConfig(), OWNER, "microsoft", tokenRow());
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  await oauth.__test.refreshGrant(db as any, msConfig(), OWNER, "microsoft", tokenRow({ scopes: ["Files.Read.All", "https://graph.microsoft.com/Calendars.ReadWrite"] }));
+  await oauth.__test.refreshGrant(db as any, msConfig(), OWNER, "microsoft", tokenRow({ scopes: ["Files.Read", "https://graph.microsoft.com/Calendars.ReadWrite"] }));
   const scopes = calls.filter((c) => c.url.includes("/token")).map((c) => new URLSearchParams(c.body!).get("scope")!);
   assert.ok(!scopes[0].includes("Calendars.ReadWrite"));
   assert.ok(scopes[1].includes("Calendars.ReadWrite"));
@@ -217,54 +218,7 @@ test("invalid_grant marks the Microsoft grant broken and answers microsoft_recon
   assert.match(marked!.body!, /"status":"error"/);
 });
 
-// ---- 6. OData search escaping -----------------------------------------------------
-
-/** Reads the OData string literal inside search(q='...') the way Graph does: decode, then '' -> '. */
-function searchLiteral(url: string): string {
-  const m = /search\(q='(.*)'\)\?/.exec(url);
-  assert.ok(m, "a single quoted literal");
-  const decoded = decodeURIComponent(m![1]);
-  assert.ok(!/(^|[^'])'([^']|$)/.test(decoded.replace(/''/g, "")), "no lone quote ends the literal early");
-  return decoded.replace(/''/g, "'");
-}
-
-test("OneDrive search escapes quotes and URL-encodes: o'brien and ') or ( stay search words", () => {
-  for (const q of ["o'brien", "') or (", "a'b''c", "50% & more/#?"]) {
-    const url = suite.graphSearchUrl(q);
-    assert.equal(searchLiteral(url), q);
-    const literal = /search\(q='(.*)'\)\?/.exec(url)![1];
-    assert.ok(!/['()]/.test(literal), "quotes and parentheses are percent-encoded");
-  }
-});
-
-// ---- 7. Nothing about a browse or search reaches the logs --------------------------
-
-test("a failed browse and a search never log a file name or the search words", async () => {
-  const secret = "Okafor_FAFSA_2027";
-  handlers.push(postgrest(() => tokenRow()));
-  handlers.push((c) => {
-    if (c.url.includes("/me/drive/recent") || c.url.includes("/root/children")) return json({ error: { message: `cannot list ${secret}.pdf` } }, 500);
-    return undefined;
-  });
-  const l = log();
-  const browse = await suite.listRemoteFiles(OWNER, "microsoft", undefined, l).catch((e: unknown) => e);
-  assert.ok(browse instanceof HttpError);
-
-  // A search that fails at the network level (the URL holds the words).
-  handlers.splice(1, 1);
-  const search = await suite.listRemoteFiles(OWNER, "microsoft", secret, l).catch((e: unknown) => e);
-  assert.ok(search instanceof HttpError);
-
-  // A search that succeeds returns names to the caller only.
-  handlers.push((c) =>
-    c.url.includes("/root/search(") ? json({ value: [{ id: "A1", name: `${secret}.pdf`, size: 10, file: { mimeType: "application/pdf" } }] }) : undefined
-  );
-  const found = await suite.listRemoteFiles(OWNER, "microsoft", secret, l);
-  assert.equal(found[0].name, `${secret}.pdf`);
-
-  const logged = [...l.lines, JSON.stringify(serializeErr(browse)), JSON.stringify(serializeErr(search))].join("\n");
-  assert.ok(!logged.includes(secret), logged);
-});
+// ---- 6-7. The OneDrive list and search are gone (picker, spec 2026-11-01): see onedrive-picker.test.ts ----
 
 // ---- 8. 429: Retry-After with backoff ----------------------------------------------
 
