@@ -673,7 +673,15 @@ export const blasts: OpGroup = {
       request: (i) => ({
         method: "POST",
         url: "/blasts",
-        body: defined({ audienceKind: i.audience_kind, audienceValue: i.audience_value, studentIds: i.student_ids, subject: i.subject, body: i.body }),
+        // One audience becomes one filter: the route combines filters, AxIS names a single audience.
+        body: defined({
+          classYears: i.audience_kind === "class-year" ? [i.audience_value] : undefined,
+          colleges: i.audience_kind === "school" ? [i.audience_value] : undefined,
+          statuses: i.audience_kind === "status" ? [i.audience_value] : undefined,
+          studentIds: i.student_ids,
+          subject: i.subject,
+          body: i.body,
+        }),
       }),
       describe: async (i, h) => `Email blast to ${await audienceLabel(i, h)}: "${plainText(i.subject, 80)}"`,
       details: async (i, h) => {

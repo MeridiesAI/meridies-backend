@@ -463,9 +463,13 @@ export const toBlast = (r: Row) => ({
   subject: str(r.subject),
   body: str(r.body),
   audienceKind: str(r.audience_kind) as
-    | "roster" | "class-year" | "school" | "status" | "selection",
+    | "roster" | "class-year" | "school" | "status" | "selection" | "filters",
   audienceValue: nstr(r.audience_value),
   audienceLabel: nstr(r.audience_label),
+  // Absent until 20261030000001: a blast then is the students it reached, sent once.
+  recipientType: (r.recipient_type === "parents" ? "parents" : "students") as "students" | "parents",
+  scheduledFor: nstr(r.scheduled_for),
+  repeatYearly: r.repeat_yearly === true,
   channel: str(r.channel) as "email" | "sms" | "both",
   status: str(r.status),
   recipientCount: num(r.recipient_count) ?? 0,

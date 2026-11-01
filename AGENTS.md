@@ -88,6 +88,7 @@ src/
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
+│   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -440,12 +441,27 @@ forget it.
   "Needs a fix" (flag `gpa_over_scale`) against the file's scale, else the
   student's scale on record, and holds a typed fix to the same rule, because
   one refusal at commit would fail the whole save.
-- **Email blast audiences** (`routes/blasts.ts`): `high-school` is the
-  students' own high school (`profiles.high_school`, any case;
-  `highSchools` on `GET /blasts/audiences`); `school` is a college on their
-  lists (AxIS's "students applying to"). A high-school blast is stored as a
-  `selection` with the school in its label, because `email_blasts`' CHECK
-  predates the kind; its recipients are frozen either way.
+- **Email blasts** (`routes/blasts.ts`, `lib/blasts.ts`, `20261030000001`). An audience is three filters that
+  combine (class year, a college on the students' lists, an application status; a college and a status are read
+  from the same list row), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
+  `students` (their sign-in email) or `parents` (guardians with an address and alerts on, one email per address,
+  a student nobody can reach kept as a skipped row). `{first}` and `{me}` are filled per recipient (the guardian's
+  first name for a parent); a body that doesn't already greet gets "Hi <first>,". `POST /blasts` sends now, or
+  with `scheduledFor` (an instant, 1 minute to 5 years ahead) and optionally `repeatYearly` queues a `scheduled`
+  row; `GET /blasts?status=scheduled` is the Queued list and `POST /blasts/:id/cancel` takes one out. **The cron**
+  is `POST /internal/blasts/dispatch` (`CRON_SECRET`, every 10-15 minutes; heartbeat `email-blasts`): it claims a
+  due row (`claimed_at`, reclaimed after 10 minutes), re-resolves recipients from the counselor's live roster at
+  send time (the row stores filters and ticked ids, never who the people are), gives Resend a stable
+  idempotency key (`blast:<id>[:<due time>]:<address>`), and a counselor gets at most 10 scheduled runs a day
+  (`BLAST_DAILY_CAP`, an hour's wait when over). A yearly blast writes each run as its own `email_blasts` row
+  and moves its own `scheduled_for` a year on in the counselor's time zone (Feb 29 becomes Feb 28); a year
+  where nobody can be reached is skipped, a one-off that reaches nobody ends `failed`. **Deploy order:** either;
+  not in `REQUIRED_SCHEMA`. `scheduleReady` (a zero-row probe) makes a scheduled blast answer `503
+  blast_schedule_unavailable` and the cron answer nothing to do until it is applied; a blast sent now still
+  works (stored as a `selection`). Then add the Railway cron service
+  (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/internal/blasts/dispatch"`, every 10-15
+  minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. Tests:
+  `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
