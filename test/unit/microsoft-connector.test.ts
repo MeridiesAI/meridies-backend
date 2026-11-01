@@ -266,10 +266,14 @@ test("download hosts: exact or dot-boundary suffix, HTTPS only, no port or crede
     "https://sharepoint.com/x",
     "https://public.dm.files.1drv.com/y",
     "https://abc.livefilestore.com/z",
+    // Personal OneDrive downloads (seen live 2026-11-01: graph.microsoft.com -> my.microsoftpersonalcontent.com).
+    "https://my.microsoftpersonalcontent.com/personal/abc/_layouts/15/download.aspx?UniqueId=1",
   ]) assert.ok(suite.isMicrosoftDownloadUrl(ok), ok);
   for (const bad of [
     "https://evil-sharepoint.com/x",
     "https://sharepoint.com.evil.io/x",
+    "https://evilmicrosoftpersonalcontent.com/x",
+    "https://microsoftpersonalcontent.com.evil.io/x",
     "http://contoso.sharepoint.com/x",
     "https://contoso.sharepoint.com:8443/x",
     "https://user:pw@contoso.sharepoint.com/x",

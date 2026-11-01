@@ -438,9 +438,10 @@ export async function downloadRemoteFile(
 /**
  * Where a OneDrive / SharePoint download may be fetched from: the host itself
  * or a subdomain of it (a dot boundary, so `evil-sharepoint.com` is not
- * `sharepoint.com`). Commercial cloud only; sovereign clouds aren't supported.
+ * `sharepoint.com`). Commercial cloud only; sovereign clouds aren't supported. Personal
+ * OneDrive serves its downloads from my.microsoftpersonalcontent.com.
  */
-export const MICROSOFT_DOWNLOAD_HOSTS = ["sharepoint.com", "1drv.com", "livefilestore.com", "onedrive.live.com"] as const;
+export const MICROSOFT_DOWNLOAD_HOSTS = ["sharepoint.com", "1drv.com", "livefilestore.com", "onedrive.live.com", "microsoftpersonalcontent.com"] as const;
 export const MAX_DOWNLOAD_REDIRECTS = 2;
 
 export function isMicrosoftDownloadUrl(raw: string): boolean {
