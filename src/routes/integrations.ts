@@ -21,7 +21,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
@@ -116,6 +116,29 @@ const importBody = z
 const GRANT_COLUMNS = "id, provider, status, scopes, last_synced_at, last_error, updated_at";
 const BUCKET = "student-documents";
 
+/**
+ * "onedrive" when the connected account is personal and Microsoft won't yet issue the picker's
+ * token (the counselor hasn't agreed to OneDrive.ReadOnly); null otherwise. Never fails the
+ * completion: anything unexpected is logged and the picker asks again later.
+ */
+async function oneDriveConsentNext(request: FastifyRequest): Promise<"onedrive" | null> {
+  const { data: grant } = await request.db
+    .from("integrations")
+    .select("config")
+    .eq("owner_id", request.auth.userId)
+    .eq("provider", "microsoft")
+    .maybeSingle();
+  if ((grant?.config as { microsoftAccount?: unknown } | null)?.microsoftAccount !== "personal") return null;
+  try {
+    await pickerTokenFor(request.auth.userId, { kind: "personal" }, request.log);
+    return null;
+  } catch (err) {
+    if (err instanceof HttpError && err.code === "onedrive_consent_needed") return "onedrive";
+    request.log.warn({ provider: "microsoft", code: err instanceof HttpError ? err.code ?? null : null }, "onedrive picker check after connect failed");
+    return null;
+  }
+}
+
 export default async function integrationRoutes(app: FastifyInstance) {
   app.get(
     "/",
@@ -189,7 +212,8 @@ export default async function integrationRoutes(app: FastifyInstance) {
     },
     async (request) => {
       const { provider } = suiteParam.parse(request.params);
-      const { add } = z.object({ add: z.enum(["calendar"]).optional() }).strict().parse(request.query ?? {});
+      // onedrive: a personal Microsoft account's consent to the picker's scope (lib/oauth.ts ONEDRIVE_CONSUMER_SCOPE).
+      const { add } = z.object({ add: z.enum(["calendar", "onedrive"]).optional() }).strict().parse(request.query ?? {});
       return { url: await beginAuthorization(request.auth.userId, provider, { add: add ?? null }) };
     }
   );
@@ -220,7 +244,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
         body.state,
         request.log
       );
-      return { connected: true, provider, scopes };
+      // A personal Microsoft account needs one more OK before OneDrive's picker opens: say so now,
+      // so the app can ask for it straight after Connect instead of at the first pick.
+      const next = provider === "microsoft" ? await oneDriveConsentNext(request) : null;
+      return { connected: true, provider, scopes, ...(next ? { next } : {}) };
     }
   );
 

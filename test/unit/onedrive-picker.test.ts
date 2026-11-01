@@ -358,3 +358,92 @@ test("a file shared with the counselor answers 422 shared_not_supported with the
     assert.ok(!l.lines.join("\n").includes("Okafor"), l.lines.join("\n"));
   }
 });
+
+// ---- Personal accounts: OneDrive.ReadOnly needs its own consent (found live, 2026-11-01) -------------
+// Microsoft answered a personal account's exchange with invalid_grant AADSTS70000 "one or more scopes
+// requested are unauthorized ... grant the client application access to the requested scope": the
+// Graph Files.Read consent doesn't cover OneDrive.ReadOnly. The grant itself was fine.
+
+const SCOPE_REFUSED = { error: "invalid_grant", error_codes: [70000], error_description: "AADSTS70000: The request was denied because one or more scopes requested are unauthorized or expired." };
+
+/** Microsoft refuses OneDrive.ReadOnly / .default exchanges but still refreshes Graph. */
+function scopeRefusingEndpoint() {
+  let n = 1;
+  return (c: Call) => {
+    if (!c.url.startsWith("https://login.microsoftonline.com/")) return undefined;
+    const scope = new URLSearchParams(c.body ?? "").get("scope") ?? "";
+    if (!scope.includes("Files.Read")) return json(SCOPE_REFUSED, 400);
+    n += 1;
+    return json({ access_token: `AT-${n}`, refresh_token: `RT-${n}`, expires_in: 3600, scope });
+  };
+}
+
+test("a personal account whose OneDrive scope isn't consented gets onedrive_consent_needed, and the grant stays connected", async () => {
+  const store = tokenStore(tokenRow());
+  handlers.push(store.handler, scopeRefusingEndpoint());
+  await assert.rejects(
+    oauth.pickerTokenFor(OWNER, { kind: "personal" }, log()),
+    (e: unknown) => e instanceof HttpError && e.statusCode === 409 && e.code === "onedrive_consent_needed"
+  );
+  assert.ok(!calls.some((c) => c.method === "PATCH" && c.url.includes("/rest/v1/integrations")), "the grant isn't marked broken");
+  assert.ok(
+    calls.some((c) => c.url.includes("/oauth2/v2.0/token") && (new URLSearchParams(c.body ?? "").get("scope") ?? "").includes("Files.Read")),
+    "the grant was checked with a Graph refresh"
+  );
+});
+
+test("the same refusal on a work account asks for the IT admin (picker_consent_needed)", async () => {
+  handlers.push(tokenStore(tokenRow()).handler, scopeRefusingEndpoint());
+  await assert.rejects(oauth.pickerTokenFor(OWNER, WORK, log()), (e: unknown) => e instanceof HttpError && e.code === "picker_consent_needed");
+});
+
+test("when the Graph refresh fails too, the grant really is gone: microsoft_reconnect", async () => {
+  handlers.push(tokenStore(tokenRow()).handler, tokenEndpoint({ refuse: SCOPE_REFUSED }).handler);
+  await assert.rejects(oauth.pickerTokenFor(OWNER, { kind: "personal" }, log()), (e: unknown) => e instanceof HttpError && e.code === "microsoft_reconnect");
+});
+
+test("the OneDrive consent asks a personal account for OneDrive.ReadOnly at Microsoft's consumers endpoint", async () => {
+  const connect = oauth.microsoftAuthorizeParams({ add: null, loginHint: null });
+  assert.ok(!connect.scope.split(" ").includes("OneDrive.ReadOnly"), "Connect never asks for it (a work account would refuse the scope)");
+  const od = oauth.microsoftAuthorizeParams({ add: "onedrive", loginHint: "me@outlook.com" });
+  assert.deepEqual(od.scope.split(" "), ["openid", "email", "offline_access", "User.Read", "Files.Read", "OneDrive.ReadOnly"]);
+  assert.equal(od.login_hint, "me@outlook.com");
+
+  // A personal grant: the consent URL is the consumers endpoint.
+  handlers.push((c) =>
+    c.url.includes("/rest/v1/integrations?") && c.method === "GET"
+      ? json({ config: { microsoftAccount: "personal", tenantId: oauth.MSA_TENANT_ID } })
+      : undefined
+  );
+  handlers.push(tokenStore(tokenRow({ account_email: "me@outlook.com" })).handler);
+  const url = new URL(await oauth.beginAuthorization(OWNER, "microsoft", { add: "onedrive" }));
+  assert.equal(`${url.origin}${url.pathname}`, "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize");
+  assert.ok(url.searchParams.get("scope")!.split(" ").includes("OneDrive.ReadOnly"));
+});
+
+test("the OneDrive consent is refused for a work account and for Google", async () => {
+  handlers.push((c) =>
+    c.url.includes("/rest/v1/integrations?") && c.method === "GET" ? json({ config: { microsoftAccount: "work-or-school", tenantId: TENANT } }) : undefined
+  );
+  handlers.push(tokenStore(tokenRow()).handler);
+  await assert.rejects(oauth.beginAuthorization(OWNER, "microsoft", { add: "onedrive" }), (e: unknown) => e instanceof HttpError && e.code === "onedrive_unsupported");
+  await assert.rejects(oauth.beginAuthorization(OWNER, "google", { add: "onedrive" }), (e: unknown) => e instanceof HttpError && e.statusCode === 400);
+});
+
+test("a personal account's sign-in is completed at the consumers token endpoint", async () => {
+  handlers.push((c) => {
+    if (c.url.includes("integration_oauth_states") && c.method === "DELETE") {
+      return json({ owner_id: OWNER, code_verifier_enc: encryptToken("verifier"), expires_at: new Date(Date.now() + 60_000).toISOString() });
+    }
+    if (c.url.includes("/rest/v1/integrations?") && c.method === "GET") return json({ config: { microsoftAccount: "personal", tenantId: oauth.MSA_TENANT_ID } });
+    if (c.url.includes("/oauth2/v2.0/token")) {
+      return json({ access_token: "AT-new", refresh_token: "RT-new", expires_in: 3600, scope: "Files.Read User.Read", id_token: `x.${Buffer.from(JSON.stringify({ tid: oauth.MSA_TENANT_ID })).toString("base64url")}.y` });
+    }
+    if (c.url.startsWith("https://graph.microsoft.com/v1.0/me?")) return json({ id: "graph-me-2", mail: "me@outlook.com" });
+    return undefined;
+  });
+  handlers.push(tokenStore(tokenRow()).handler);
+  await oauth.completeAuthorization(OWNER, "microsoft", "code", "state", log());
+  const exchange = calls.find((c) => c.url.includes("/oauth2/v2.0/token"))!;
+  assert.equal(exchange.url, "https://login.microsoftonline.com/consumers/oauth2/v2.0/token");
+});
