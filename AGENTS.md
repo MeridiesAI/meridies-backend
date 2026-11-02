@@ -1751,8 +1751,8 @@ refused refresh re-reads the row first — if another replica already rotated it
 that token is used — and only then marks the grant `error` so the card says
 "reconnect".
 
-After connect: `GET /integrations/:provider/files?q=` lists OneDrive files (and, for Google, only what the app
-can already reach, below); `POST /integrations/:provider/files/import` copies one into the
+After connect: `GET /integrations/google/files?q=` lists what the app can already reach (below; OneDrive has
+no list, `/microsoft/files` answers 410 `use_picker`); `POST /integrations/:provider/files/import` copies one into the
 student's folder (Storage upload on the caller's client, `source:
 'integration'`, `external_*` pointer kept). `POST /meetings` (and `PATCH`) with
 `createConference: true` creates the event on the counselor's calendar with a
@@ -1764,17 +1764,34 @@ per Retry-After (twice, 10 s at most each); past that the check is
 `provider_rate_limited` and the tracker answers 429 instead of a "no activity"
 verdict.
 
-**Microsoft stays off in production** (no `MICROSOFT_*` vars) until browsing
-moves to Microsoft's picker with the narrowest scope that works (PR B, after
-the `Files.ReadWrite.Selected` vs `Files.Read` test). Today Connect asks for
-`openid email offline_access User.Read Files.Read.All`; Calendar
-(`Calendars.ReadWrite`) only with `?add=calendar`; no `Mail.Send`. A refresh
-asks for Calendar only when the grant already has it. Hardening in place:
+**Microsoft is the counselor's own OneDrive, picked in Microsoft's picker** (spec
+`docs/superpowers/specs/2026-11-01-onedrive-picker-design.md`). Connect asks for
+`openid email offline_access User.Read Files.Read` (own drive only; never
+`Files.Read.All`, which work tenants' default consent policy also stops staff
+approving); Calendar (`Calendars.ReadWrite`) only with `?add=calendar`; no
+`Mail.Send`. A refresh asks for Calendar only when the grant already has it.
+**The picker's token** comes from `GET /integrations/microsoft/picker-session`
+(counselor, 20 a minute, `Cache-Control: no-store`): it reads `/me/drive`,
+picks the picker by `driveType` (`pickerSetup`: personal posts to
+`https://onedrive.live.com/picker`; work only to the drive's own
+`https://<name>-my.sharepoint.com` origin, anything else 409
+`onedrive_unsupported`), and exchanges the stored refresh token for a
+OneDrive token (`pickerTokenFor`: personal at the `consumers` endpoint for
+`OneDrive.ReadOnly`, work at the directory kept at Connect for
+`<origin>/.default`). The exchange is serialized with `accessTokenFor`'s
+refreshes (the `exchanges` map), saves only the rotated refresh token,
+compare-and-swap, and never stores or logs the picker token. Missing consent
+(AADSTS65001/65004/90094) is 409 `picker_consent_needed` and leaves the grant
+alone; 500011 is `onedrive_unsupported`; `interaction_required` is
+`microsoft_reconnect`. **Imports are own-drive only:** a Microsoft item is
+always read at `/me/drive/items/{id}` (the client's `driveId` is ignored, the
+tracker reads the same path), and a 403/404 or a shortcut (`remoteItem`) is
+422 `shared_not_supported` ("save a copy to your OneDrive, then pick the
+copy"). Hardening in place:
 a reconnect as another account (Graph `/me` id) is 409
 `microsoft_other_account`, and an unreadable identity is refused; a rotated
 refresh token is saved compare-and-swap on the one it replaced, and the loser
-of a race uses the stored row; the OneDrive search literal is `''`-escaped
-and fully percent-encoded (`graphSearchUrl`); no search words, file names or
+of a race uses the stored row; no file names or
 fetch URLs reach a log or an error (`quietFetch`); `/content` redirects are
 followed by hand (`followDownload`: HTTPS, `MICROSOFT_DOWNLOAD_HOSTS` exact or
 dot-boundary suffix, at most 2, no Authorization after Graph); the bytes must
@@ -1785,7 +1802,9 @@ Docs/Sheets/Slides export); `DELETE
 /integrations/microsoft` returns `consentUrl` (account.live.com for the
 personal tenant `9188040d-…`, else My Apps, from the tenant kept in
 `integrations.config` at connect). `MICROSOFT_PICKER_MAX_FILES` (default 10)
-is served as `maxFiles` on `/integrations/providers`.
+is served as `maxFiles` on `/integrations/providers` and the picker session.
+Tests: `test/unit/onedrive-picker.test.ts`, `test/unit/microsoft-connector.test.ts`,
+`test/integration/onedrive-picker.test.mjs`.
 
 **Google is picked files only** (spec `docs/superpowers/specs/2026-10-14-google-connector-design.md`). Connect asks for
 `openid`, `email` and `drive.file`; turning Calendar on (`GET /integrations/google/authorize?add=calendar`) adds
