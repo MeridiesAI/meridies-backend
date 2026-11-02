@@ -33,9 +33,21 @@ export function itemStatus(task: { status: string; sentBackNote?: string | null 
   return "requested";
 }
 
-/** Every request received; with nothing requested, joining is enough. */
-export function canConfirm(inv: { status: string; requests: { provided: boolean }[] }): boolean {
-  return inv.status === "accepted" && inv.requests.every((r) => r.provided);
+/**
+ * Every request received; with nothing requested, joining is enough. The
+ * counselor may confirm over a request they don't need yet by naming it in
+ * `waived`: it stays open, so the student still owes it and keeps their red
+ * card for it. An id that isn't one of this invitation's requests waives
+ * nothing and refuses the whole confirm.
+ */
+export function canConfirm(
+  inv: { status: string; requests: { id?: string; provided: boolean }[] },
+  waived: string[] = []
+): boolean {
+  if (inv.status !== "accepted") return false;
+  const known = new Set(inv.requests.map((r) => r.id));
+  if (waived.some((id) => !known.has(id))) return false;
+  return inv.requests.every((r) => r.provided || (r.id !== undefined && waived.includes(r.id)));
 }
 
 const oneLine = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);

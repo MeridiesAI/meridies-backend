@@ -20,6 +20,17 @@ test("confirm waits for the student to join and every request to be received", (
   assert.equal(canConfirm({ status: "accepted", requests: [{ provided: true }, { provided: true }] }), true);
 });
 
+test("the counselor can confirm over open requests by waiving each one by name", () => {
+  const open = { status: "accepted", requests: [{ id: "transcript", provided: false }, { id: "resume", provided: false }] };
+  assert.equal(canConfirm(open), false);
+  assert.equal(canConfirm(open, ["transcript"]), false);
+  assert.equal(canConfirm(open, ["transcript", "resume"]), true);
+  assert.equal(canConfirm({ status: "accepted", requests: [{ id: "transcript", provided: true }, { id: "resume", provided: false }] }, ["resume"]), true);
+  // A waiver never lets someone who hasn't joined be confirmed, and an id nobody asked for waives nothing.
+  assert.equal(canConfirm({ status: "pending", requests: [] }, ["x"]), false);
+  assert.equal(canConfirm(open, ["transcript", "nope"]), false);
+});
+
 test("on a New student request AxIS advises and never moves the task", () => {
   assert.equal(nextTaskStatus("review", "accepted", true), null);
   assert.equal(nextTaskStatus("review", "needs-fix", true), null);

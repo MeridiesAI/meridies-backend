@@ -729,7 +729,13 @@ the database (`20261010*`):
   (`PATCH /invites/:id { receive }`, which sets the request's `provided`) or
   sends it back with a note (`{ sendBack }`: the task returns to the student,
   the files come off it, `submitted_at` clears), then confirms (`{ confirmed:
-  true }`, only with every request received). A student never sets an intake
+  true }`, only with every request received, or named in `waive`: `{ confirmed: true, waive: [requestId, ...] }`
+  confirms over requests the counselor doesn't need yet; every open request must be received or waived, an
+  id nobody asked for refuses the confirm, and a waived request stays an open task, never marked received, so the
+  student keeps their red card for it and `submit_intake()` takes their Submit after confirmation
+  (`20261101000001`) until nothing is left open; before that migration such a Submit answers 400 "Your counselor
+  already has everything"). `GET /invites/building` carries `acceptedByName`, the name the student signed up
+  with, which the app prefers to the invitation's `fullName` (what the counselor typed before they joined). A student never sets an intake
   task `complete` (the guard trigger). `GET /invites/building` lists
   invitations with `confirmed_at` null, each request with its status, files,
   answer and AxIS's read.
