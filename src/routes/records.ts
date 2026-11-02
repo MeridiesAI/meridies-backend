@@ -236,11 +236,12 @@ export default async function recordRoutes(app: FastifyInstance) {
       const { studentId, ...rest } = raw ?? {};
       const patch = academicsBody.parse(rest);
       const student = await resolveStudentId(request, studentId, "edit");
-      await assertGpaFitsScale(request.db, student, {
+      const scale = await assertGpaFitsScale(request.db, student, {
         ...(patch.gpa_weighted !== undefined ? { gpaWeighted: patch.gpa_weighted } : {}),
         ...(patch.gpa_unweighted !== undefined ? { gpaUnweighted: patch.gpa_unweighted } : {}),
         ...(patch.gpa_scale !== undefined ? { gpaScale: patch.gpa_scale } : {}),
       });
+      if (scale !== undefined && patch.gpa_scale === undefined) patch.gpa_scale = scale;
 
       const { data, error } = await request.db
         .from("student_academics")
