@@ -94,6 +94,20 @@ Relayed by the cost session (Elvin, 10/30), folded in while planning:
 - Chat files read once (1.6) is the top AxIS cost fix: ship it first, as its own PR (A1).
 - Stored file text counts toward the history budget, and sits where the prompt cache keeps it across turns (1.6).
 
+Plan review (Elvin, 11/2). These override the sections they name:
+
+- Chat files (1.6): the stored-text columns have no client grant. Only the server writes them, through the service
+  client after an ownership check. Scanned PDFs and document images get a word-for-word transcription (up to 12,000
+  characters), not a summary. When any file's text was cut, the files message says so.
+- Caps (1.2): a fifth reservation line, a per-user daily spend cap (`AI_USER_DAILY_USD`, default $10), so one account
+  can't use up the company ceiling. Daily refusals give the reset in hours ("It resets in 5 hours.").
+- Restore (2.4): deny by default. A row from a table without an explicit access rule is refused, and so is a caller
+  who is no longer an approved counselor. `private.axis_trash` is tested unreadable through PostgREST.
+- Hand-ins (4): Confirm sends the values the card showed, with the profile values the card saw. The server writes
+  each field only if the profile still holds what the card saw; otherwise it keeps the newer value and reports it.
+- Build: a fresh reviewer checks the work after A2 Task 3 (the gate), B Tasks 1-2 (trash and restore) and B Tasks 5-8
+  (the flag model), as well as each whole PR. Each PR pastes the exact test commands and their output.
+
 Calls marked **(my call)** below are the designer's, for Elvin to check while reading.
 
 ---

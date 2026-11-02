@@ -13,11 +13,12 @@
 ## Global Constraints
 
 - New worktree `meridies-app-axissec`, branch `axis-security-app`, off `origin/main` of meridies-app. PR left open for bcha to merge; it goes live after PR B.
-- Exact copy: outside-content reason "AxIS read a document or other text someone else wrote in this chat, so it asks before changing anything. Start a new chat to change things at once."; Restore button "Restore", with "until <Mon D>" beside it; hand-in value labels "Unverified, from the student's file" and "Confirmed by <name>, <Mon D>"; the button "Confirm and add to profile".
+- Exact copy: outside-content reason "AxIS read a document or other text someone else wrote in this chat, so it asks before changing anything. Start a new chat to change things at once."; Restore button "Restore", with "until <Mon D>" beside it; hand-in value labels "Unverified, from the student's file" and "Confirmed by <name>, <Mon D>"; the button "Confirm and add to profile"; a value the server kept "The profile changed to <current> after this was shown, so it was kept."
 - Sends stay out of "Confirm all" (unchanged). The button shows only when two or more cards qualify, and never in the danger colour (nothing destructive qualifies any more).
 - `ai_paused` (429) and `ai_budget_unavailable` (503) never fall back to `/chat`; the counselor sees the API's message.
 - Before PR B is live the app must still work: a payload without `restoreUntil` shows today's Undo; a check without `values` shows today's findings and today's "Apply to profile".
 - `npm run typecheck`, `npm run lint` and every `check:*` script pass.
+- Reviews: a fresh reviewer on the most capable model checks the whole branch before the PR; findings are fixed first. The PR description pastes the exact check commands run and their output.
 
 ## Review Focus
 
@@ -75,10 +76,10 @@ test("a refused restore leaves the card's state as it was", ...)   // Review Foc
 
 **Files:**
 - Create: `lib/handInValues.ts`, `scripts/hand-in-values-check.mjs`
-- Modify: `lib/api.ts` (`HandInValue`, `TrackerCheck.values: HandInValue[] | null`, the building item's `axis.values`, `confirmHandInValues(taskId, checkId, keys)` calling `POST /tasks/:id/checks/:checkId/values/confirm`, plus a server action beside `patchStudentInfoAction` following its pattern), `lib/axisFigures.ts` (the regex also accepts the infix `(unverified, from the student's file)`), `components/student/TaskHandIn.tsx` (with `values`: a list of each value and its label, and "Confirm and add to profile" for the unconfirmed ones; without `values`: today's findings and "Apply to profile"), `components/overview/BuildingCard.tsx` (values with their labels), `package.json` (`check:hand-in-values`)
+- Modify: `lib/api.ts` (`HandInValue`, `TrackerCheck.values: HandInValue[] | null`, the building item's `axis.values`, `HandInValue.current`, `confirmHandInValues(taskId, checkId, values)` calling `POST /tasks/:id/checks/:checkId/values/confirm` with the values the card showed (`{ key, printed, profileWas: value.current }` for each unconfirmed one) and returning `{ values, saved, kept }`, plus a server action beside `patchStudentInfoAction` following its pattern), `lib/axisFigures.ts` (the regex also accepts the infix `(unverified, from the student's file)`), `components/student/TaskHandIn.tsx` (with `values`: a list of each value and its label, and "Confirm and add to profile" for the unconfirmed ones, then the kept sentence under each value the server kept; without `values`: today's findings and "Apply to profile"), `components/overview/BuildingCard.tsx` (values with their labels), `package.json` (`check:hand-in-values`)
 
 **Interfaces:**
-- Produces: `valueLabel(v: HandInValue, fmt?: (iso: string) => string): string`.
+- Produces: `valueLabel(v: HandInValue, fmt?: (iso: string) => string): string`; `confirmBody(values: HandInValue[]): { key; printed; profileWas }[]` (unconfirmed values only); `keptLine(k: { key: string; current: string | number | null }): string`.
 
 - [ ] **Step 1: Write the failing checks**
 
@@ -86,6 +87,8 @@ test("a refused restore leaves the card's state as it was", ...)   // Review Foc
 test("an unconfirmed value reads Unverified, from the student's file", ...)
 test("a confirmed value names the confirmer and the date", ...)       // Review Focus 4: never "you"
 test("old findings with the unverified infix still give figures", ...) // Review Focus 3
+test("Confirm sends what the card showed, with the profile value beside it", ...) // the body built from values
+test("a kept value reads the profile's newer value", ...)               // keptLine({ key, current: 4 }) -> "The profile changed to 4 after this was shown, so it was kept."
 ```
 
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** → PASS; `npm run typecheck` clean.
@@ -118,4 +121,5 @@ test("ai_paused and ai_budget_unavailable don't", ...)
 
 - [ ] **Step 1:** `npm run typecheck && npm run lint` and every `npm run check:*` → PASS.
 - [ ] **Step 2:** Against a local backend on PR B's branch (`npm run dev` in both), click through once: a delete card shows Restore after Confirm; Confirm all skips it; a hand-in with a GPA shows Unverified, then Confirmed after the button. Screenshots in the PR.
-- [ ] **Step 3:** Push and open the PR, left for bcha; the description says it goes live after backend PR B.
+- [ ] **Step 3:** Fresh-reviewer pass on the whole branch; fix what it finds; run Step 1's commands again.
+- [ ] **Step 4:** Push and open the PR, left for bcha. The description pastes Step 3's exact commands and their output, and says it goes live after backend PR B.

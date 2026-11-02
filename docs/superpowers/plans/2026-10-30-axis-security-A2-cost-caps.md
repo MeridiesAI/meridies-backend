@@ -8,21 +8,22 @@
 
 **Tech Stack:** Fastify 5, TypeScript strict (ESM), Supabase Postgres + PostgREST RPC, `@anthropic-ai/sdk`, node:test via tsx, integration suites on local Supabase.
 
-**Spec:** `docs/superpowers/specs/2026-10-30-axis-security-hardening-design.md` (section 1 and the Review round). Read both. Builds on PR A1 (chat files read once), which merges first.
+**Spec:** `docs/superpowers/specs/2026-10-30-axis-security-hardening-design.md` (section 1, the Review round and the Plan review of 11/2, which overrides section 1 where they differ). Read both. Builds on PR A1 (chat files read once), which merges first.
 
 ## Global Constraints
 
 - Branch `axis-cost-caps`, created in worktree `meridies-backend-axissec` from PR A1's tip. It is rebased onto `origin/main` once A1 has merged, before this PR opens. PR title "AxIS cost caps". Elvin merges it, after A1.
 - Never touch production (no prod queries, env vars or migrations). Local Supabase only.
 - Only `src/lib/anthropic.ts` and `src/lib/axis/llm.ts` may call the model.
-- Defaults (env vars, spec 1.2): `AI_DAILY_CALLS` 300 per user per UTC day; `AI_MONTHLY_OUTPUT_TOKENS` 5,000,000 per user per calendar month; `AI_MONTHLY_INPUT_TOKENS` 100,000,000 weighted per user per month; `AI_DAILY_CEILING_USD` 100 company-wide per UTC day. Events discovery system budget: 2,000 calls per month.
-- Exact copy: 503 `{ code: "ai_budget_unavailable" }` "AI is unavailable right now. Try again in a few minutes."; 429 `{ code: "ai_paused" }` "AI features are paused for today. They come back at midnight UTC."; daily calls "You've hit today's AI limit. It resets at midnight."; monthly output or input "Monthly AI usage limit reached."
+- Defaults (env vars, spec 1.2 and the Plan review): `AI_DAILY_CALLS` 300 per user per UTC day; `AI_USER_DAILY_USD` 10 (estimated spend) per user per UTC day, so one account can't use up the company ceiling; `AI_MONTHLY_OUTPUT_TOKENS` 5,000,000 per user per calendar month; `AI_MONTHLY_INPUT_TOKENS` 100,000,000 weighted per user per month; `AI_DAILY_CEILING_USD` 100 company-wide per UTC day. Events discovery system budget: 2,000 calls per month.
+- Exact copy: 503 `{ code: "ai_budget_unavailable" }` "AI is unavailable right now. Try again in a few minutes."; 429 `{ code: "ai_paused" }` "AI features are paused for today. They come back <reset>."; daily calls or daily spend "You've hit today's AI limit. It resets <reset>."; monthly output or input "Monthly AI usage limit reached." `<reset>` is `resetsIn(now)`: the time to the next 00:00 UTC rounded up to whole hours, "in 5 hours", "in 1 hour", or "in under an hour" when less than one is left (my call: hours, because the server doesn't know the counselor's time zone).
 - Fallback log line (warn): `AI budget fallback active: migration 20261031000002_ai_budget not applied, caps not enforced`, first time per process, then at most once an hour while it lasts.
 - Budget check timeout 2,000 ms. Readiness: "ready" kept for the process, "missing" re-probed after 30 s; any other probe error is an error (refuse).
 - Ceiling emails to `env.COMPANY_CONTACT_EMAIL` at 50%, 80% and 100% (paused), once per UTC day per threshold. Body: day's estimated spend, top five subjects by spend (ids and roles, no names), top modules.
 - Prices live only in `private.ai_prices`, seeded by this PR's migration. No price figure in `src/`. A price change is a new migration that updates rows. The code reads them through `public.ai_budget_prices()`, cached 10 minutes per process.
 - Migration `20261031000002_ai_budget.sql`: header states deploy order (either; without it the gate counts as today), not in `REQUIRED_SCHEMA`. If PR B's migrations merge first, re-timestamp this file newer than production's newest before merge.
 - engine.ts: change only the charging lines; the intent-routing session owns the rest of the file. Don't change when the pre-warm runs (the cost session owns that).
+- Reviews: a fresh reviewer on the most capable model checks the work after Task 3 (the gate) and the whole branch before the PR; findings are fixed before the next task. The PR description pastes the exact test commands run and their output.
 - Every new service-client call site goes on `REVIEWED` in `test/unit/service-callsites.test.ts` with a one-line reason.
 
 ## Review Focus
@@ -64,6 +65,7 @@ Expected: on the new branch from A1's tip; local stack running (else `supabase s
 test("reserve adds every line when all fit", ...)        // totals["company|spend_usd|day"] === 0.5 after reserving 0.5 of 100
 test("reserve over one cap changes nothing and names it", ...) // calls limit 1, reserve 1 twice: second { ok:false, metric:"calls" }; ai_budget_total still 1
 test("parallel reserves never pass the cap", ...)        // 20 concurrent serviceRpc reserves of 1 call, limit 10: exactly 10 ok; total 10
+test("a user at their daily spend cap is refused while another user proceeds", ...) // user:A spend_usd/day 10 of 10 -> { ok:false, metric:"spend_usd" }; same reserve for user:B -> ok
 test("settle applies a delta and floors at zero", ...)   // amount 100, delta -150 -> 0
 test("a signed-in user can't call the budget functions or read prices", ...) // user token -> PostgREST error (401/403/404), never ok
 test("every model the code uses has a price row", ...)   // FAST_MODEL, DEEP_MODEL, RESEARCH_MODEL, AXIS_MODEL, DISCOVERY_MODEL in ai_budget_prices()
@@ -129,7 +131,7 @@ test("priceTableFrom reads numeric strings and refuses a malformed row", ...);
 
 **Files:**
 - Create: `src/lib/aiBudget.ts`
-- Modify: `src/env.ts` (the four env vars, defaults above, `z.coerce`, blank is unset)
+- Modify: `src/env.ts` (the five env vars, defaults above, `z.coerce`, blank is unset)
 - Modify: `test/unit/service-callsites.test.ts` (add `lib/aiBudget.ts`: "service-only budget counters, prices and the ceiling email; no student data")
 - Test: `test/unit/ai-budget.test.ts`
 
@@ -146,19 +148,22 @@ test("priceTableFrom reads numeric strings and refuses a malformed row", ...);
   - `estimatePromptTokens(p: { system?: unknown; tools?: unknown; messages: unknown }): number`: JSON length / 3 with base64 data removed, plus `fileTokens` for every document and image block.
   - Test seams: `setBudgetBackend(b: BudgetBackend | null)`, `setAlertSender(fn)`, `setProductionForTest(on: boolean)`, where `BudgetBackend = { probe(): Promise<void>; prices(): Promise<unknown[]>; reserve(lines): Promise<ReserveResult>; settle(lines): Promise<void>; total(subject, metric, period, start): Promise<number> }`. The default backend calls the Task 1 RPCs on `serviceClient()`.
 - Behaviour pinned by the spec:
-  - A user reservation is four lines: `calls/day` +1 (limit `AI_DAILY_CALLS`), `output_tokens/month` +`maxOutputTokens`, `input_weighted/month` +`weightedInput(model, { input: promptTokens, ... zeros })`, and `company spend_usd/day` +`spendUsd(model, { input: promptTokens, output: maxOutputTokens, webSearches })`. A system reservation is `system:<key> calls/month` +1 plus the company line.
+  - A user reservation is five lines: `calls/day` +1 (limit `AI_DAILY_CALLS`), `output_tokens/month` +`maxOutputTokens`, `input_weighted/month` +`weightedInput(model, { input: promptTokens, ... zeros })`, the user's own `spend_usd/day` and `company spend_usd/day`, both +`spendUsd(model, { input: promptTokens, output: maxOutputTokens, webSearches })` (limits `AI_USER_DAILY_USD` and `AI_DAILY_CEILING_USD`). A system reservation is `system:<key> calls/month` +1 plus the company line.
   - Prices: read on first use and every 10 minutes after. A failed refresh keeps the last table and logs a warning. With no table yet, a failed read refuses like any check error (503).
   - `period_start` is computed in UTC at reserve time and kept on the hold; settle uses it.
-  - Refusal mapping: company line → 429 `ai_paused` (and the 100% email); user calls → daily message; user output or input → monthly message; system calls → 429 "This month's system AI budget is used up."
+  - Refusal mapping: company line → 429 `ai_paused` (and the 100% email); user calls or user spend → daily message; user output or input → monthly message; system calls → 429 "This month's system AI budget is used up."
+  - `resetsIn(now: Date): string` exported for the copy above.
   - Error or timeout while ready → 503 `ai_budget_unavailable`, `log.error`. Schema missing (codes in `isSchemaMissing`, `lib/axis/failsafe.ts`) → fallback: today's `consumeQuota` calls/day for a user (and output after the call in settle, `.catch` as today), the warn line above; no prices needed. No service client → production refuses (503); elsewhere in-memory counters of calls and output only (mode `memory`), no prices.
   - After an ok reserve, when the returned company total crosses 50% or 80% of the ceiling, send that alert once per UTC day (`consumeRateLimit("ai-ceiling:<YYYY-MM-DD>:<pct>", 1, 172_800)`), fire and forget.
-  - settle deltas: output `actual.output - reserved`, input `weightedInput(actual) - reserved`, spend `spendUsd(actual) - reserved`; calls unchanged. `actual = null` releases output, input and spend, and keeps the call.
+  - settle deltas: output `actual.output - reserved`, input `weightedInput(actual) - reserved`, spend `spendUsd(actual) - reserved` on both spend lines; calls unchanged. `actual = null` releases output, input and spend, and keeps the call.
 
 - [ ] **Step 1: Write the failing tests** (fake backend via `setBudgetBackend`; `mock.timers` for time)
 
 ```ts
-test("a user reservation is one call, max output, weighted input and spend", ...)   // assert the 4 lines and amounts for haiku-5-5, 8_000 max, 20_000 prompt
+test("a user reservation is one call, max output, weighted input and spend twice", ...) // assert the 5 lines and amounts for haiku-5-5, 8_000 max, 20_000 prompt
 test("over the daily calls cap: 429 with the daily message, nothing else counted", ...)
+test("over the user's daily spend cap: 429 with the daily message; another user still passes", ...)
+test("resetsIn gives the hours to midnight UTC", ...)                                   // 19:00 -> "in 5 hours"; 23:00 -> "in 1 hour"; 23:30 -> "in under an hour"
 test("over the company ceiling: 429 ai_paused and one paused email", ...)
 test("once the migration is in, a backend error refuses with 503 ai_budget_unavailable", ...)
 test("once the migration is in, a check slower than 2 s refuses", ...)
@@ -178,6 +183,7 @@ test("estimatePromptTokens counts text, PDFs and images", ...)                  
 - [ ] **Step 3: Implement `src/lib/aiBudget.ts` and the env vars.**
 - [ ] **Step 4: Run** `npm test` → all PASS.
 - [ ] **Step 5: Commit** `feat(ai-budget): reserve and settle gate that fails closed`
+- [ ] **Step 6: Checkpoint.** A fresh reviewer reads Tasks 1-3 (the migration, the arithmetic and the gate) against spec section 1 and this plan. Fix what it finds and commit before Task 4.
 
 ---
 
@@ -193,7 +199,7 @@ test("estimatePromptTokens counts text, PDFs and images", ...)                  
   - `type CallGate = { before(params: StreamParams): Promise<Hold>; after(hold: Hold, usage: Usage | null): Promise<void> }` in `loop.ts`; `LoopOptions.gate?: CallGate`. The loop calls `after` in a `finally` per call with that call's `msg.usage` mapped to `Usage`, or null when the stream threw or was aborted.
   - `axisGate(request: FastifyRequest, prepaid?: Hold): CallGate` in `llm.ts`: the first `before` returns `prepaid` when given; otherwise reserves `{ model: AXIS_MODEL, maxOutputTokens: params.max_tokens, promptTokens: estimatePromptTokens(params) }`.
   - `reserveTurn(request: FastifyRequest): Promise<Hold>` in `llm.ts`: estimate `{ model: AXIS_MODEL, maxOutputTokens: MAX_TOKENS.high, promptTokens: PROMPT_TOKEN_BUDGET }`.
-  - `structured(o)`: option `precharged?: boolean` becomes `hold?: Hold`; reserves when absent; settles in `finally`. This covers PR A1's file summaries too. `prewarm`: reserves with `maxOutputTokens: 0`, settles.
+  - `structured(o)`: option `precharged?: boolean` becomes `hold?: Hold`; reserves when absent; settles in `finally`. PR A1's `transcribe` reserves (`maxOutputTokens: 5000`, `estimatePromptTokens` over its file block) and settles the same way. `prewarm`: reserves with `maxOutputTokens: 0`, settles.
   - `runAxisTurn` option `prepaidCalls?: number` becomes `prepaid?: Hold`; an unused prepaid hold is settled with null when the turn ends (keeps the call, as the route's charge does today).
   - `routes/axis.ts`: `await chargeCall(request)` becomes `const prepaid = await reserveTurn(request)`, before the stream opens (so a cap or `ai_paused` is a plain 429/503, not a fallback); the hold is settled with null if anything throws before `runAxisTurn` takes it.
 
@@ -259,7 +265,8 @@ test("events discovery no longer charges a made-up account", ...)               
 - [ ] **Step 1: Write the failing integration tests** (API running locally without `ANTHROPIC_API_KEY`, as in CI; seed counters with `sql()`)
 
 ```js
-test("a counselor at the daily call cap gets the daily message", ...)  // seed user:<id> calls/day 300; POST /ai/meeting-summary -> 429, error text exact
+test("a counselor at the daily call cap gets the daily message", ...)  // seed user:<id> calls/day 300; POST /ai/meeting-summary -> 429, text matches /^You've hit today's AI limit\. It resets in (\d+ hours?|under an hour)\.$/
+test("a counselor at the daily spend cap is refused; another counselor isn't", ...) // seed user:A spend_usd/day 10; A -> 429 daily message; B's same request -> not 429
 test("a budget check that errors refuses once the migration is in", ...) // revoke execute on ai_budget_reserve from service_role; -> 503 code ai_budget_unavailable; re-grant in finally
 test("at the company ceiling AI pauses and the team gets one email", ...) // seed company spend_usd/day 100 -> 429 code ai_paused; Mailpit has one "paused" email
 test("crossing 50% sends the 50% email once", ...)                       // seed 49.999; two calls; Mailpit has exactly one 50% email
@@ -293,7 +300,7 @@ test("no budget is charged to a made-up account", ...)
 
 - [ ] **Step 2: Run** `npm test` → FAIL until Task 5's change is in; then PASS.
 - [ ] **Step 3: Switch the cost report's prices to the table.** If PR #85 hasn't merged yet, skip this step and say in the PR that whichever lands second makes the switch. Run each of its queries against the local database: they execute and price the seeded models.
-- [ ] **Step 4: Write the pre-merge usage check for the PR description.** It is not a repo file: production has no `ai_prices` until this merges, so its `prices` CTE is the migration's seed rows, copied at PR time and used once. `begin read only; ... rollback;`, last 60 days of `ai_runs`, four result sets: each user's busiest day of calls, each user's busiest month of output tokens, each user's busiest month of weighted input, the company's busiest day of estimated spend; each row shows `pct_of_default` and is listed only at 70% or more. Run it against the local database to check it executes.
+- [ ] **Step 4: Write the pre-merge usage check for the PR description.** It is not a repo file: production has no `ai_prices` until this merges, so its `prices` CTE is the migration's seed rows, copied at PR time and used once. `begin read only; ... rollback;`, last 60 days of `ai_runs`, five result sets: each user's busiest day of calls, each user's busiest day of estimated spend, each user's busiest month of output tokens, each user's busiest month of weighted input, the company's busiest day of estimated spend; each row shows `pct_of_default` and is listed only at 70% or more. Run it against the local database to check it executes.
 - [ ] **Step 5: Repeat the audit on main** (`grep -rn "consumeQuota\|enforceQuota\|reserve(" src`) and keep the result for the PR description.
 - [ ] **Step 6: Update AGENTS.md.**
 - [ ] **Step 7: Commit** `test(ai-budget): constant-subject audit; cost report reads the price table; docs`
@@ -303,7 +310,8 @@ test("no budget is charged to a made-up account", ...)
 ### Task 8: Whole-branch check and PR
 
 - [ ] **Step 1:** Rebase onto `origin/main` (A1 merged). `npm run typecheck && npm test && npm run test:integration` → all PASS.
-- [ ] **Step 2:** Push the branch and open the PR (Elvin merges). The description carries the audit result, the usage check (Task 7) and, as numbered click-by-click steps for Elvin:
+- [ ] **Step 2:** Fresh-reviewer pass on the whole branch; fix what it finds; run Step 1's commands again.
+- [ ] **Step 3:** Push the branch and open the PR (Elvin merges). The description pastes Step 2's exact commands and their output, and carries the audit result, the usage check (Task 7) and, as numbered click-by-click steps for Elvin:
   1. Open Supabase, then SQL editor, then New query. Paste the usage check from this description and click Run. Every result set should be empty.
   2. If a row shows up, raise that env var on Railway before merging (the API service, Variables tab, the var named in the row's `env_var` column).
   3. Merge the PR (either order with the migration is safe).

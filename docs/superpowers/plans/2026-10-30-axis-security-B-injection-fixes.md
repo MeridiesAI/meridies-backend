@@ -8,7 +8,7 @@
 
 **Tech Stack:** Fastify 5, TypeScript strict (ESM), Supabase Postgres (plpgsql triggers, SECURITY DEFINER), PostgREST, node:test via tsx, GitHub Actions.
 
-**Spec:** `docs/superpowers/specs/2026-10-30-axis-security-hardening-design.md` (sections 2.2-2.5, 3, 4, 5 and the Review round). Read both.
+**Spec:** `docs/superpowers/specs/2026-10-30-axis-security-hardening-design.md` (sections 2.2-2.5, 3, 4, 5, the Review round and the Plan review of 11/2, which overrides those sections where they differ). Read both.
 
 ## Global Constraints
 
@@ -17,12 +17,13 @@
 - Migrations (each header states deploy order; none in `REQUIRED_SCHEMA`; re-timestamp newer than production's newest if PR A1 or A2 lands after): `20261031000003_axis_trash.sql`, `20261031000004_axis_outside_flags.sql`, `20261031000005_hand_in_values.sql`.
 - Trash: kept 30 days; restore only by the counselor who confirmed the delete; all or nothing; same ids; parents before children; sends nothing now or later; `pipeline_sequence_enrollments` rows that were `active` come back `paused`.
 - Before the trash migration, covered AxIS deletes are refused with: "AxIS can't delete things until the database update 20261031000003_axis_trash is applied."
-- Restore refusals (exact card sentences): expired "This can't be restored: the 30 days are up."; no access "This can't be restored: you no longer have access to that student."; conflict "This can't be restored: something with the same details exists again."; parent gone "This can't be restored: what it belonged to has been deleted."; done "That was already restored."
+- Restore refusals (exact card sentences): expired "This can't be restored: the 30 days are up."; no access "This can't be restored: you no longer have access to that student."; conflict "This can't be restored: something with the same details exists again."; parent gone "This can't be restored: what it belonged to has been deleted."; done "That was already restored."; caller no longer an approved counselor "This can't be restored: your counselor access isn't active." (my call).
 - Free text: any student-, family-, import- or web-written value over 80 characters (`SHORT_FIELD_MAX = 80`), and every value from documents, essay bodies, uploads, chat files, email, connected files and web pages. Free text flags the turn that reads it and the next one.
 - Quotes: a run of 8 or more consecutive words (case, punctuation and spacing ignored) from free text the turn could see flags the answer; the fold sees `[quote from <source>]` instead. Quoting short fields doesn't count.
 - Before the flags migration: today's rules unchanged (wider outside meaning, full question record, one-turn floor).
 - Hand-in value labels (exact): "Unverified, from the student's file"; confirmed "Confirmed by <name>, <date>"; fallback findings line `<Label> (unverified, from the student's file): <value>`; emails and notifications add "(unverified)" after each value.
 - Evals: 6 cases x 3 runs; drop = a gated case failing, a case's resistance down 2+ of 3, or the total down 3+ of 18. Scores on branch `axis-eval-scores`, file `scores.jsonl`. Workflow never runs on `pull_request`.
+- Reviews: a fresh reviewer on the most capable model checks the work after Task 2 (trash and restore, Tasks 1-2), after Task 8 (the flag model, Tasks 5-8) and the whole branch before the PR; findings are fixed before the next task. The PR description pastes the exact test commands run and their output.
 - Every new service-client call site goes on `REVIEWED` in `test/unit/service-callsites.test.ts` with a reason. Supabase CLI pinned to `2.121.0` in any workflow (a unit test checks the pins match).
 - AGENTS.md is updated for each area in the task that changes it.
 
@@ -47,8 +48,9 @@
   - `private.axis_trash(id bigint generated always as identity primary key, action_id uuid not null, table_name text not null, row_pk jsonb not null, row_data jsonb not null, kind text not null check (kind in ('delete','set-null')), student_id uuid references public.profiles(id) on delete cascade, deleted_by uuid not null references public.profiles(id) on delete cascade, deleted_at timestamptz not null default now(), restored_at timestamptz)`; index `(action_id, id)`. RLS on, no policies, no client grants.
   - `private.axis_trash_capture()` trigger function: when `current_setting('request.headers', true)::json ->> 'x-meridies-axis-action'` is a uuid, stores OLD (`delete` on `BEFORE DELETE`; `set-null` on `BEFORE UPDATE` when a listed foreign-key column goes from non-null to null) with `deleted_by = auth.uid()` and `student_id` from OLD's `student_id` column when the table has one. Returns OLD/NEW unchanged. No header: does nothing.
   - `private.attach_axis_trash(p_table regclass, p_set_null_cols text[] default null)`.
+  - `private.axis_trash_rules(table_name text primary key, rule text not null check (rule in ('student','practice','owner')), columns text[] not null)`: how restore decides access for each covered table. `student`: the row's `student_id` passes `private.counselor_can_edit_student`; `practice`: the row's firm and counselor columns pass `private.crm_can_access`; `owner`: the named column equals the caller. One row per covered table, written out explicitly beside its `attach_axis_trash` line. RLS on, no policies, no client grants.
   - The covered tables: every table a covered op's route deletes from (Task 2's list), plus every table reached from them by `ON DELETE CASCADE` or `SET NULL`, found with a recursive `pg_constraint` query on the local database and written out explicitly in the migration.
-  - `public.axis_trash_restore(p_action uuid) returns jsonb` (SECURITY DEFINER, `search_path` pinned, EXECUTE to `authenticated`): refuses `{ ok:false, reason }` with `not-yours` (any row's `deleted_by` isn't `auth.uid()`, or no rows), `expired` (older than 30 days), `already` (restored), `no-access` (a row with `student_id` the caller can't edit per `private.counselor_can_edit_student`, or a practice row `private.crm_can_access` refuses), `conflict` (the primary key or a unique key exists), `parent-missing` (a foreign key target is gone); otherwise inserts `delete` rows in ascending `id` with `jsonb_populate_record`, re-applies `set-null` keys, sets `restored_at`, and returns `{ ok:true, restored: n, paused: ["<table>"...] }`. While it runs it sets `set_config('meridies.axis_restore','on', true)`. `pipeline_sequence_enrollments` rows with `status = 'active'` are inserted as `'paused'`. Guard triggers keyed on `current_user` let it through the way they let `transfer_caseload` through. Run by hand as `postgres` (`auth.uid()` is null), the caller is taken to be the rows' `deleted_by` and every other check still applies; AGENTS.md gives the command `select public.axis_trash_restore('<action id>');`.
+  - `public.axis_trash_restore(p_action uuid) returns jsonb` (SECURITY DEFINER, `search_path` pinned, EXECUTE to `authenticated`): refuses `{ ok:false, reason }` with `not-yours` (any row's `deleted_by` isn't `auth.uid()`, or no rows), `not-approved` (the caller isn't an approved counselor now: `private.is_counselor`, which a revoke turns false), `expired` (older than 30 days), `already` (restored), `no-access` (deny by default: a row from a table with no `axis_trash_rules` row, or one its table's rule refuses), `conflict` (the primary key or a unique key exists), `parent-missing` (a foreign key target is gone); otherwise inserts `delete` rows in ascending `id` with `jsonb_populate_record`, re-applies `set-null` keys, sets `restored_at`, and returns `{ ok:true, restored: n, paused: ["<table>"...] }`. While it runs it sets `set_config('meridies.axis_restore','on', true)`. `pipeline_sequence_enrollments` rows with `status = 'active'` are inserted as `'paused'`. Guard triggers keyed on `current_user` let it through the way they let `transfer_caseload` through. Run by hand as `postgres` (`auth.uid()` is null), the caller is taken to be the rows' `deleted_by` and every other check still applies; AGENTS.md gives the command `select public.axis_trash_restore('<action id>');`.
   - Every insert trigger on a covered table that sends (an email, notification, invite or calendar update) returns early when `current_setting('meridies.axis_restore', true) = 'on'`; record-only triggers are left alone. List them in the migration header.
   - `public.axis_trash_purge(p_now timestamptz default now()) returns table(bucket text, storage_path text)` (service_role): deletes rows older than 30 days and returns the document objects (`table_name = 'documents'`) that no live `documents` row points at.
   - `public.axis_trash_forget(p_user uuid) returns table(bucket text, storage_path text)` (service_role): deletes rows where `deleted_by = p_user or student_id = p_user`, returning document objects as above.
@@ -66,6 +68,10 @@ test("restore over an existing row is refused", ...)
 test("an active sequence enrollment comes back paused", ...)
 test("purge removes rows past 30 days and returns kept document objects", ...)
 test("a forged mark keeps only the forger's own rows", ...)         // random action uuid; deleted_by = forger; other counselor can't restore
+test("a row from a table with no access rule is refused", ...)      // trash row inserted by sql() for a table not in axis_trash_rules -> no-access, nothing restored
+test("every table with the capture trigger has an access rule", ...) // pg_trigger rows calling axis_trash_capture vs axis_trash_rules
+test("a counselor whose approval was revoked can't restore", ...)   // private.revoke_counselor_access(deleter), then the RPC with their token -> not-approved
+test("private.axis_trash and its rules aren't readable through PostgREST", ...) // GET /rest/v1/axis_trash, also with Accept-Profile: private -> error, never rows
 ```
 
 - [ ] **Step 2: Run** `node --import tsx --test test/integration/axis-trash-db.test.mjs` → FAIL.
@@ -89,7 +95,7 @@ test("a forged mark keeps only the forger's own rows", ...)         // random ac
   - `dispatch(request, call, opts?: { actionId?: string })` adds header `x-meridies-axis-mark`.
   - `supabaseAuth.ts`: a valid mark sets `request.axisActionId` and builds `request.db` with header `x-meridies-axis-action: <id>`; an invalid one is ignored.
   - `confirmOperation`: a covered op gets `{ actionId }`; before the migration it fails with the exact refusal. On success the action's result carries `{ trash: true }` and the payload carries `restoreUntil` (ISO, confirmed time + 30 days) and `undoable: true`.
-  - `POST /axis/actions/:id/undo` on a trash result: `rpc("axis_trash_restore", { p_action: id })` on `request.db`; ok → status `undone`, response `{ id, status: "undone", restored, paused }`; refused → 409 with `restoreSentence(reason)` (`not-yours` → 404 "That change isn't AxIS's to undo.").
+  - `POST /axis/actions/:id/undo` on a trash result: `rpc("axis_trash_restore", { p_action: id })` on `request.db`; ok → status `undone`, response `{ id, status: "undone", restored, paused }`; refused → 409 with `restoreSentence(reason)` (`not-yours` → 404 "That change isn't AxIS's to undo."; `not-approved` → 403 with its sentence).
   - `files.ts`: when `request.axisActionId` is set, the Storage object is kept.
 
 - [ ] **Step 1: Write the failing tests**
@@ -115,6 +121,7 @@ test("without the migration AxIS refuses the delete", ...)               // unit
 - [ ] **Step 3: Implement.** A covered route that deletes on the service client moves to `request.db`, or the test fails on it.
 - [ ] **Step 4: Run** both → PASS.
 - [ ] **Step 5: Commit** `feat(axis-trash): AxIS marks its deletes; Restore on the card`
+- [ ] **Step 6: Checkpoint.** A fresh reviewer reads Tasks 1-2 (the trash, its access rules and Restore) against spec section 2 and this plan. Fix what it finds and commit before Task 3.
 
 ---
 
@@ -156,9 +163,11 @@ test("the data export carries no trash", ...)                      // GET /accou
   - `submissionReview.ts`: file text, file name, task title, instructions and student name each in `wrapUntrusted(...)`; the system prompt carries `UNTRUSTED_DATA_RULE`. With the column, values go to `extracted_values` and `findings` keeps only AxIS's observations; without it, `fallbackFindings`. Accepted still only completes the task.
   - **Changed from the spec's call in section 4 (found while planning):** the app already has an "Apply to profile"
     button on hand-ins that parses these values and saves them through `PATCH /student-page/:id/info`. So Confirm
-    also adds the values to the profile, through the same `applyInfoPatch`, and replaces that button (PR C). The
+    also adds the values to the profile, under the info card's rules, and replaces that button (PR C). The
     spec's "my call" is amended to match in the same commit as these plans.
-  - `POST /tasks/:id/checks/:checkId/values/confirm`, body `{ keys: HandInKey[] }` (1-4, unique), counselor only, `limit("tasks:confirm-values", 30, 60)`: `resolveStudentId(request, task.student_id, "edit")`; the check must belong to the task; `applyInfoPatch(request, student, infoPatchFrom(chosen))` when the patch is non-empty (its errors propagate, nothing stamped); then stamps the chosen values confirmed (service client, after the check above). Returns `{ values: HandInValue[], saved: (keyof InfoPatch)[] }`.
+  - `HandInValue` gains `current: string | number | null`: the profile's value now for the column that key writes (`testScore` names SAT or ACT by its value), read with the check (one `student_academics` read per response, not per check).
+  - Migration, same file: `public.apply_hand_in_values(p_student uuid, p_fields jsonb) returns jsonb`, SECURITY INVOKER (RLS applies), EXECUTE to `authenticated`. Fields `[{ column, value, expected }]`, column limited to `gpa_weighted`, `gpa_unweighted`, `class_rank`, `sat_superscore`, `act_composite`. It creates the student's `student_academics` row if missing, locks it (`for update`), and writes each field only when its current value equals `expected` (compared as jsonb, so 4 and 4.00 match and null matches null); otherwise it leaves the field. Returns `{ saved: [column], kept: [{ column, current }] }`. One transaction, so an edit that lands between the card and the click is never overwritten.
+  - `POST /tasks/:id/checks/:checkId/values/confirm`, body `{ values: { key: HandInKey; printed: string; profileWas: string | number | null }[] }` (1-4, unique keys): the values the card showed, each with the profile value the card showed beside it. Counselor only, `limit("tasks:confirm-values", 30, 60)`: `resolveStudentId(request, task.student_id, "edit")`; the check must belong to the task; each `printed` must equal that key's stored value on this check, else 409 "This hand-in changed. Reload to see it." and nothing changes. Then the info card's rules for the fields being written (`infoPatchFrom`, `assertGpaFitsScale`; a refusal is 400 with the card's message, nothing written or stamped), then `apply_hand_in_values` on `request.db`. It stamps confirmed only the keys it saved (service client, after the checks above). Returns `{ values: HandInValue[], saved: HandInKey[], kept: { key: HandInKey; current: string | number | null }[] }`.
   - `toTrackerCheck` adds `values: HandInValue[] | null`; the building read adds `values` to `axis`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -173,6 +182,8 @@ test("infoPatchFrom keeps only plausible values", ...)                  // "4.05
 test("a student can't confirm values", ...)                             // 403
 test("a counselor who can't edit the student can't confirm", ...)
 test("confirm adds the values to the profile and marks them", ...)
+test("a profile edit after the card appears survives Confirm", ...)      // read the check (current 3.9); PATCH /student-page/:id/info gpaWeighted 4.0; confirm with profileWas 3.9 -> kept [{ weightedGpa, current: 4 }], profile still 4.0, value still unverified
+test("a printed value that isn't the stored one is refused", ...)       // 409, nothing written or stamped
 test("a GPA over the student's scale is refused and nothing is marked", ...) // Review Focus 5
 test("an accepted hand-in with a planted GPA leaves the record unchanged", ...)
 ```
@@ -291,6 +302,7 @@ test("without the migration the old rules apply", ...)
 
 - [ ] **Step 3: Run** → FAIL. **Step 4: Implement.** **Step 5: Run** `npm test` → PASS.
 - [ ] **Step 6: Commit** `feat(axis-flags): outside text stays out of chat memory`
+- [ ] **Step 7: Checkpoint.** A fresh reviewer reads Tasks 5-8 (the flag model) against spec section 3 and Elvin's three tests. Fix what it finds and commit before Task 9.
 
 ---
 
@@ -341,4 +353,5 @@ test("no baseline means no drop", ...)
 ### Task 11: Whole-branch check and PR
 
 - [ ] **Step 1:** `npm run typecheck && npm test && npm run test:integration` → all PASS.
-- [ ] **Step 2:** Push and open the PR (Elvin merges). The description carries: the three migrations and their deploy order; the eval results (or that they run after merge); and Elvin's numbered steps: (1) create an Anthropic key for evals with a monthly spend limit in the Anthropic console (Settings → API keys → Create key; then Limits); (2) in GitHub: meridies-backend → Settings → Secrets and variables → Actions → New repository secret, name `ANTHROPIC_API_KEY`, paste the key there (not in chat); (3) merge; (4) in the Terminal app, `cd ~/"Meridies AI/meridies-backend" && git checkout main && git pull`, then `supabase db push --linked --dry-run`, which should list exactly the three files (stop and send the output if not), then `supabase db push --linked`, answer `Y`, ending "Finished supabase db push."; (5) Actions → AxIS evals → Run workflow, and check it ends green with a first line in `axis-eval-scores`.
+- [ ] **Step 2:** Fresh-reviewer pass on the whole branch; fix what it finds; run Step 1's commands again.
+- [ ] **Step 3:** Push and open the PR (Elvin merges). The description pastes Step 2's exact commands and their output, and carries: the three migrations and their deploy order; the eval results (or that they run after merge); and Elvin's numbered steps: (1) create an Anthropic key for evals with a monthly spend limit in the Anthropic console (Settings → API keys → Create key; then Limits); (2) in GitHub: meridies-backend → Settings → Secrets and variables → Actions → New repository secret, name `ANTHROPIC_API_KEY`, paste the key there (not in chat); (3) merge; (4) in the Terminal app, `cd ~/"Meridies AI/meridies-backend" && git checkout main && git pull`, then `supabase db push --linked --dry-run`, which should list exactly the three files (stop and send the output if not), then `supabase db push --linked`, answer `Y`, ending "Finished supabase db push."; (5) Actions → AxIS evals → Run workflow, and check it ends green with a first line in `axis-eval-scores`.
