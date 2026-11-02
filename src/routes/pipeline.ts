@@ -29,6 +29,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
+import { guardianFootnote } from "../lib/parentCopy.js";
 import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { activeStudentMessage, isValidPhone, missingForActiveStudent } from "../lib/contactRules.js";
@@ -422,6 +423,18 @@ type InvoiceDraft = {
 };
 
 /** The invoice email, the same for the preview and the send. A pay link adds a "Pay by card" button. */
+/**
+ * Who a family hears from and where a reply goes, for every email a counselor
+ * sends from the pipeline: their name on the From line, their own address on
+ * Reply-To. Both come from the signed-in account, never from the request.
+ */
+function senderFields(request: { profile: { full_name?: string | null; email?: string | null } }) {
+  return {
+    fromName: request.profile.full_name ?? null,
+    ...(request.profile.email ? { replyTo: request.profile.email } : {}),
+  };
+}
+
 function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null, payLink: string | null = null) {
   const to = String(contact.parent_email || contact.student_email || "");
   const name = String(contact.student_name ?? "").trim();
@@ -434,11 +447,16 @@ function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, 
   const cta = payLink && draft.amountDueCents > 0 ? { label: "Pay by card", url: payLink } : undefined;
   if (cta) lines.push("You can pay by card with the button below. The payment goes straight to the practice.");
   lines.push("Reply to this email with any questions about the invoice.");
+  const toParent = Boolean(contact.parent_email);
   const template = {
     heading: number ? `Invoice ${number}` : "Invoice",
     paragraphs: lines,
     ...(cta ? { cta } : {}),
-    footnote: senderName ? `Sent by ${senderName} through Meridies.` : "Sent through Meridies.",
+    footnote: toParent
+      ? guardianFootnote(senderName)
+      : senderName
+        ? `Sent by ${senderName} through Meridies.`
+        : "Sent through Meridies.",
   };
   return {
     to,
@@ -898,11 +916,15 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         const template = {
           heading: subject,
           paragraphs: paragraphs(body),
-          footnote: request.profile.full_name
-            ? `Sent by ${request.profile.full_name} through Meridies.`
-            : "Sent through Meridies.",
+          footnote:
+            t.who === "parent"
+              ? guardianFootnote(request.profile.full_name ?? null)
+              : request.profile.full_name
+                ? `Sent by ${request.profile.full_name} through Meridies. Reply to this email and ${request.profile.full_name} will receive it directly.`
+                : "Sent through Meridies.",
         };
         const sent = await sendEmail({
+          ...senderFields(request),
           to: t.email,
           subject,
           html: brandedEmail(template),
@@ -1095,6 +1117,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null, payLink);
       if (b.send && to) {
         const sent = await sendEmail({
+          ...senderFields(request),
           to,
           subject: mail.subject,
           html: mail.html,
@@ -1144,10 +1167,11 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           `Invoice ${String(invoice.number)} (${String(invoice.label)}, ${formatUsd(Number(invoice.amount_cents))}) has been cancelled. You don't need to pay it.`,
           "Reply to this email with any questions.",
         ],
-        footnote: request.profile.full_name ? `Sent by ${request.profile.full_name} through Meridies.` : "Sent through Meridies.",
+        footnote: guardianFootnote(request.profile.full_name ?? null),
       };
       const contact = await loadContactRow(request, String(invoice.contact_id));
       const sent = await sendEmail({
+        ...senderFields(request),
         to: String(invoice.sent_to),
         subject: `Invoice ${String(invoice.number)} cancelled`,
         html: brandedEmail(template),
@@ -1220,6 +1244,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       };
       const mail = invoiceEmail(contact, draft, dto.number, request.profile.full_name ?? null, payLink);
       const sent = await sendEmail({
+        ...senderFields(request),
         to,
         subject: mail.subject,
         html: mail.html,

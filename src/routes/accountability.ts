@@ -545,7 +545,10 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
       if (status !== "queued") {
         return reply.code(201).send({ ...data, blockedReason: blocked, delivery: null });
       }
-      const delivery = await deliverParentAlert(request, data as ParentAlertRow, request.log);
+      const delivery = await deliverParentAlert(request, data as ParentAlertRow, request.log, {
+        name: request.profile.full_name ?? null,
+        email: request.profile.email ?? null,
+      });
       return reply.code(201).send({
         ...data,
         status: delivery.status,

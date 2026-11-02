@@ -83,6 +83,12 @@ type SendEmailArgs = DeliveryColumns & {
   /** Where a reply goes when it isn't the From address (a valid address, server-chosen). */
   replyTo?: string;
   /**
+   * The sender's name, shown as "Name via Meridies <address>". The address is
+   * still ours (the verified one); only the display name changes, so a parent
+   * sees who wrote to them.
+   */
+  fromName?: string | null;
+  /**
    * On a 429 from Resend, wait out Retry-After (1 to 10 seconds) and try
    * once more before recording the send as failed. For sends whose loss
    * leaves something wrong, like a calendar update that never arrives.
@@ -114,12 +120,24 @@ async function recordDelivery(
   return (data?.id as string | undefined) ?? null;
 }
 
+/**
+ * The From header with the sender's name on it. Only the display name is
+ * taken from the caller, cleaned of anything that could end the name early or
+ * start another header; the address always stays the configured one.
+ */
+export function fromHeader(configured: string, name?: string | null): string {
+  const m = /^(.*?)\s*<([^>]+)>$/.exec(configured);
+  const address = m ? (m[2] as string) : configured;
+  const clean = (name ?? "").replace(/[<>"\r\n,;:@]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
+  return clean ? `${clean} via Meridies <${address}>` : configured;
+}
+
 /** Mailpit's send API (local development only, see `DEV_MAIL_URL`). */
 async function sendToDevMail(
   base: string,
-  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string> }
+  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string>; fromName?: string | null }
 ): Promise<{ providerId: string | null; sent: boolean; errorText: string | null }> {
-  const from = /^(.*?)\s*<([^>]+)>$/.exec(env.INVITE_FROM_EMAIL);
+  const from = /^(.*?)\s*<([^>]+)>$/.exec(fromHeader(env.INVITE_FROM_EMAIL, m.fromName));
   try {
     const res = await fetch(new URL("/api/v1/send", base), {
       method: "POST",
@@ -172,6 +190,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       attachments,
       replyTo: args.replyTo,
       headers: args.headers,
+      fromName: args.fromName,
     }));
     if (!sent) logger?.error({ template, err: errorText }, "dev mail send failed");
   } else if (!hasResend) {
@@ -180,7 +199,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
   } else {
     try {
       const body = JSON.stringify({
-        from: env.INVITE_FROM_EMAIL,
+        from: fromHeader(env.INVITE_FROM_EMAIL, args.fromName),
         to: [to],
         subject,
         html,

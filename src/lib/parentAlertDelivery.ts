@@ -28,6 +28,7 @@ import {
   sendSms,
   type SmsStatus,
 } from "./email.js";
+import { alertFootnote } from "./parentCopy.js";
 
 type Logger = {
   warn: (obj: unknown, msg?: string) => void;
@@ -72,7 +73,9 @@ function smsBody(alert: ParentAlertRow): string {
 export async function deliverParentAlert(
   ctx: { db: SupabaseClient },
   alert: ParentAlertRow,
-  logger?: Logger
+  logger?: Logger,
+  /** Who is sending: their name signs the email and their address takes the replies. */
+  sender?: { name: string | null; email: string | null }
 ): Promise<AlertDeliveryResult> {
   const recipients: Recipient[] = [];
 
@@ -116,14 +119,12 @@ export async function deliverParentAlert(
   const wantEmail = alert.channel === "email" || alert.channel === "both";
   const wantSms = alert.channel === "sms" || alert.channel === "both";
 
-  const template = {
+  const templateFor = (kind: "guardian" | "student") => ({
     heading: alert.subject,
     paragraphs: alert.body.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean),
     bullets: alert.action_items?.length ? alert.action_items : undefined,
-    footnote: studentName
-      ? `Sent by ${studentName}'s counselor through Meridies. Contact your counselor directly with any questions.`
-      : "Sent by your counselor through Meridies. Contact your counselor directly with any questions.",
-  };
+    footnote: alertFootnote(kind, studentName, sender?.name ?? null),
+  });
 
   const attempts: AlertDeliveryAttempt[] = [];
 
@@ -141,12 +142,15 @@ export async function deliverParentAlert(
       if (!r.email) {
         attempts.push({ recipient: r.kind, channel: "email", status: "unavailable", error: "no email address on file" });
       } else {
+        const template = templateFor(r.kind);
         const res = await sendEmail({
           ...columns,
           to: r.email,
           subject: alert.subject,
           html: brandedEmail(template),
           text: brandedText(template),
+          ...(sender?.email ? { replyTo: sender.email } : {}),
+          fromName: sender?.name ?? null,
         });
         attempts.push({
           recipient: r.kind,

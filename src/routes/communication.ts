@@ -325,7 +325,6 @@ export default async function communicationRoutes(app: FastifyInstance) {
       const db = request.db;
 
       const kind = b.kind ?? "message";
-      if (b.audience === "parent" && b.channel !== "email") throw badRequest("Messages to the parents go by email");
       if (b.channel === "email" && !b.subject) throw badRequest("Add a subject first");
       if (b.channel === "sms" && b.body.length > TEXT_LIMIT) {
         throw badRequest(`Texts are kept under ${TEXT_LIMIT} characters`);
@@ -381,10 +380,17 @@ export default async function communicationRoutes(app: FastifyInstance) {
         return reply.code(201).send({ ...toMessage(row), referralTracked });
       }
 
+      const studentContact = await loadStudentContact(db, student);
       const outcome = await deliverMessage(
         row as unknown as MessageRow,
         request.profile.full_name ?? null,
-        request.log
+        request.log,
+        {
+          studentName: studentContact?.name ?? null,
+          // Until replies are routed into the app, a reply goes to the
+          // counselor's own inbox (their sign-in address, server-chosen).
+          replyToFor: () => request.profile.email ?? undefined,
+        }
       );
       const written = await recordOutcome(db, String(row.id), outcome, request.log);
       return reply.code(201).send({
