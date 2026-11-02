@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canConfirm, itemStatus } from "../../src/lib/newStudentIntake.js";
+import { canConfirm, itemStatus, markWaived } from "../../src/lib/newStudentIntake.js";
 import { COUNSELOR_STEPS, STUDENT_STEPS, hasAnswers, openSteps, type SetupFacts } from "../../src/lib/studentSetup.js";
 import { nextTaskStatus } from "../../src/lib/submissionReview.js";
 
@@ -29,6 +29,25 @@ test("the counselor can confirm over open requests by waiving each one by name",
   // A waiver never lets someone who hasn't joined be confirmed, and an id nobody asked for waives nothing.
   assert.equal(canConfirm({ status: "pending", requests: [] }, ["x"]), false);
   assert.equal(canConfirm(open, ["transcript", "nope"]), false);
+});
+
+test("confirming over open requests stores the waiver on those requests only", () => {
+  const requests = [
+    { id: "transcript", label: "Transcript", provided: true },
+    { id: "resume", label: "Resume", provided: false },
+    { id: "gpa", label: "GPA", provided: false },
+  ];
+  assert.deepEqual(markWaived(requests, ["resume", "gpa"]), [
+    { id: "transcript", label: "Transcript", provided: true },
+    { id: "resume", label: "Resume", provided: false, waived: true },
+    { id: "gpa", label: "GPA", provided: false, waived: true },
+  ]);
+  // A received request is never marked, even if named; an unnamed one is left alone.
+  assert.deepEqual(markWaived(requests, ["transcript", "gpa"]).map((r) => (r as { waived?: boolean }).waived ?? false), [false, false, true]);
+  assert.deepEqual(markWaived(requests, undefined), requests);
+  assert.deepEqual(markWaived(requests, []), requests);
+  // The input is not changed.
+  assert.equal((requests[1] as { waived?: boolean }).waived, undefined);
 });
 
 test("on a New student request AxIS advises and never moves the task", () => {

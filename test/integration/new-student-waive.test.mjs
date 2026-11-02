@@ -77,6 +77,7 @@ let mine = await call(s.token, "GET", "/me/intake");
 const tasks = mine.body.intake?.tasks ?? [];
 check("the student's request card still lists both", tasks.length === 2 && tasks.every((t) => t.status !== "complete"), JSON.stringify(tasks.map((t) => t.status)));
 check("…and says they are confirmed", Boolean(mine.body.intake?.confirmedAt));
+check("…and names the requests it was confirmed over", JSON.stringify([...(mine.body.intake?.waivedRequestIds ?? [])].sort()) === JSON.stringify(["resume", "transcript"]), JSON.stringify(mine.body.intake?.waivedRequestIds));
 
 const tooSoon = await call(s.token, "POST", "/me/intake/submit", {});
 check("Submit still waits for every open item", tooSoon.status === 400 && /Still needed/.test(tooSoon.body.error ?? tooSoon.body.message ?? ""), JSON.stringify(tooSoon.body));
@@ -88,6 +89,8 @@ await call(s.token, "POST", `/tasks/${byLabel.Transcript.id}/submissions`, { doc
 await call(s.token, "POST", `/tasks/${byLabel.Resume.id}/submissions`, { documentId: resumeDoc.id });
 const sent = await call(s.token, "POST", "/me/intake/submit", {});
 check("after confirming, the student can still Submit", sent.status === 200 && sent.body.intake?.tasks?.every((t) => t.status === "review"), `status ${sent.status} ${JSON.stringify(sent.body).slice(0, 200)}`);
+const sentNote = await sql(`select href from notifications where recipient_id='${c.id}' and student_id='${s.id}' order by created_at desc limit 1`);
+check("…and the counselor's notice opens the student's page, not a card that is gone", sentNote === `/dashboard/counselor/students/${s.id}`, sentNote);
 
 // A normal confirmation (everything received) is still closed to a late Submit.
 const s2 = await user("student-waive-done", "student");
@@ -107,3 +110,23 @@ const normal = await call(c.token, "PATCH", `/invites/${inv2Id}`, { confirmed: t
 check("a normal confirmation still works", normal.status === 200, `status ${normal.status}`);
 const late = await call(s2.token, "POST", "/me/intake/submit", {});
 check("…and a Submit after it is still refused", late.status === 400 && /already has everything/.test(late.body.error ?? late.body.message ?? ""), JSON.stringify(late.body));
+
+// A student confirmed some other way with a task left open (a legacy confirmation, a request removed after its
+// task was made) was never waived: nothing about them changes.
+const s3 = await user("student-waive-legacy", "student");
+const inv3 = await call(c.token, "POST", "/invites", {
+  email: s3.email, source: "intake", fullName: "Third Student",
+  intakeRequests: [{ id: "transcript", label: "Transcript" }],
+});
+const inv3Id = inv3.body.invitation?.id ?? inv3.body.id;
+const token3 = await sql(`select token from invitations where id='${inv3Id}'`);
+await fetch(`${SB}/rest/v1/rpc/accept_invitation`, {
+  method: "POST",
+  headers: { apikey: ANON, Authorization: `Bearer ${s3.token}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ p_token: token3 }),
+});
+await sql(`update invitations set confirmed_at = now() where id = '${inv3Id}'`);
+const legacy = await call(s3.token, "GET", "/me/intake");
+check("a student confirmed without a waiver has none named", Array.isArray(legacy.body.intake?.waivedRequestIds) && legacy.body.intake.waivedRequestIds.length === 0, JSON.stringify(legacy.body.intake?.waivedRequestIds));
+const lateLegacy = await call(s3.token, "POST", "/me/intake/submit", {});
+check("…and a Submit is still refused, though an old task is open", lateLegacy.status === 400 && /already has everything/.test(lateLegacy.body.error ?? lateLegacy.body.message ?? ""), JSON.stringify(lateLegacy.body));

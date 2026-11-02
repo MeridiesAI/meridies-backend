@@ -13,7 +13,7 @@ import { hasAnswers } from "../lib/studentSetup.js";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
+import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, markWaived, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
   addressStatuses,
@@ -160,10 +160,15 @@ async function onboardingStep(
     if (!canConfirm({ status: inv.status, requests: inv.intakeRequests }, body.waive)) {
       throw conflict("Check off everything you asked for first.");
     }
-    const { error: updateError } = await request.db
-      .from("invitations")
-      .update({ confirmed_at: new Date().toISOString() })
-      .eq("id", id);
+    // The waiver is stored with the confirmation, in one write: nothing is left half-marked.
+    const update: Record<string, unknown> = { confirmed_at: new Date().toISOString() };
+    if (body.waive?.length) {
+      update.intake_requests = markWaived(
+        Array.isArray(row.intake_requests) ? (row.intake_requests as Record<string, unknown>[]) : [],
+        body.waive
+      );
+    }
+    const { error: updateError } = await request.db.from("invitations").update(update).eq("id", id);
     if (updateError) throw fromPostgrest(updateError);
   }
 
