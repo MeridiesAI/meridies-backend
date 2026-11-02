@@ -729,7 +729,18 @@ the database (`20261010*`):
   (`PATCH /invites/:id { receive }`, which sets the request's `provided`) or
   sends it back with a note (`{ sendBack }`: the task returns to the student,
   the files come off it, `submitted_at` clears), then confirms (`{ confirmed:
-  true }`, only with every request received). A student never sets an intake
+  true }`, only with every request received, or named in `waive`: `{ confirmed: true, waive: [requestId, ...] }`
+  confirms over requests the counselor doesn't need yet; every open request must be received or waived, and an
+  id nobody asked for refuses the confirm). The waiver is **stored, never inferred**: in the same write that sets
+  `confirmed_at`, each waived request gets `"waived": true` in `invitations.intake_requests` (`markWaived`). It stays
+  an open task, never marked received, and `GET /me/intake` names those requests as `waivedRequestIds`
+  (`my_waived_requests()`), so the student's red card stays for those only; `submit_intake()` takes their Submit after
+  confirmation while a waived request is still open (`20261101000001`), and refuses it as before for anyone else
+  confirmed (a legacy backfill or a request removed after its task was made also leave open tasks, and must stay
+  closed). The counselor's notice about such a Submit links to the student's page, since the Building card is gone.
+  Before that migration a Submit answers 400 "Your counselor already has everything" and `waivedRequestIds` reads
+  empty. `GET /invites/building` carries `acceptedByName`, the name the student signed up
+  with, which the app prefers to the invitation's `fullName` (what the counselor typed before they joined). A student never sets an intake
   task `complete` (the guard trigger). `GET /invites/building` lists
   invitations with `confirmed_at` null, each request with its status, files,
   answer and AxIS's read.
