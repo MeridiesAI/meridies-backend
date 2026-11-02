@@ -73,6 +73,8 @@ export type WikimediaClient = {
    */
   imageinfo(titles: string[], width: number, full: boolean): Promise<unknown>;
   download(url: string): Promise<Uint8Array>;
+  /** Commons file titles ("File:...") whose name or description matches the words, best match first. */
+  search(words: string, limit: number): Promise<string[]>;
 };
 
 export function wikimediaClient(opts: { fetch?: Fetch; sleep?: Sleep; minGapMs?: number; attempts?: number } = {}): WikimediaClient {
@@ -154,6 +156,23 @@ export function wikimediaClient(opts: { fetch?: Fetch; sleep?: Sleep; minGapMs?:
         { method: "POST", body: params.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded" } },
         30_000
       );
+    },
+
+    async search(words, limit) {
+      const params = new URLSearchParams({
+        action: "query",
+        format: "json",
+        formatversion: "2",
+        list: "search",
+        srnamespace: "6",
+        srsearch: `${words.slice(0, 200)} filetype:bitmap`,
+        srlimit: String(Math.min(Math.max(limit, 1), 20)),
+        maxlag: "5",
+      });
+      const body = (await apiJson("Commons search", new URL(COMMONS_API), { method: "POST", body: params.toString(), headers: { "Content-Type": "application/x-www-form-urlencoded" } }, 30_000)) as {
+        query?: { search?: { title?: unknown }[] };
+      };
+      return (body.query?.search ?? []).map((r) => r.title).filter((t): t is string => typeof t === "string" && /^File:./.test(t) && !t.includes("|"));
     },
 
     async download(u) {

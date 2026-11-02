@@ -463,6 +463,181 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
   throw badRequest("That link redirects too many times");
 }
 
+// ---- Page metadata and one image (college lookup) ------------------------------------------
+
+type FetchedBytes = { finalUrl: URL; contentType: string; bytes: Buffer };
+
+/**
+ * GET with the same per-hop validation, pinning and caps as fetchReadablePage,
+ * for a body the caller reads as bytes. `truncate` keeps the first `maxBytes`
+ * of a longer page (a `<head>` is at the top); otherwise a longer body is refused.
+ */
+async function fetchBytes(
+  rawUrl: string,
+  o: { accept: string; types: string[]; maxBytes: number; truncate: boolean }
+): Promise<FetchedBytes> {
+  let current = await validateUrl(rawUrl);
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const signal = AbortSignal.timeout(TIMEOUT_MS);
+    let res: PinnedResponse;
+    try {
+      res = await open(current, {
+        method: "GET",
+        signal,
+        headers: { "User-Agent": "Meridies-LinkReader/1.0 (+https://meridiesai.com)", Accept: o.accept },
+      });
+    } catch (err) {
+      throw badRequest(isAbort(err) ? "That page took too long to respond" : "Couldn't reach that page");
+    }
+
+    if (res.status >= 300 && res.status < 400) {
+      res.body.destroy();
+      const location = header(res.headers, "location");
+      if (!location) throw badRequest("That link redirects nowhere");
+      if (hop === MAX_REDIRECTS) throw badRequest("That link redirects too many times");
+      current = await validateUrl(new URL(location, current.url).toString());
+      continue;
+    }
+    if (res.status < 200 || res.status >= 300) {
+      res.body.destroy();
+      throw badRequest(`That page returned ${res.status}`);
+    }
+
+    const contentType = (header(res.headers, "content-type") ?? "").toLowerCase();
+    if (!o.types.some((t) => contentType.includes(t))) {
+      res.body.destroy();
+      throw badRequest("That link isn't the kind of file we can read");
+    }
+    const declared = Number(header(res.headers, "content-length") ?? 0);
+    if (!o.truncate && declared > o.maxBytes) {
+      res.body.destroy();
+      throw badRequest("That file is too large to read");
+    }
+
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for await (const chunk of res.body) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        total += buf.byteLength;
+        if (total > o.maxBytes) {
+          if (!o.truncate) throw badRequest("That file is too large to read");
+          chunks.push(buf.subarray(0, buf.byteLength - (total - o.maxBytes)));
+          break;
+        }
+        chunks.push(buf);
+      }
+    } catch (err) {
+      res.body.destroy();
+      if (err instanceof Error && "statusCode" in err) throw err;
+      throw badRequest(isAbort(err) ? "That page took too long to respond" : "Couldn't read that page");
+    }
+    res.body.destroy();
+    return { finalUrl: current.url, contentType, bytes: Buffer.concat(chunks) };
+  }
+  throw badRequest("That link redirects too many times");
+}
+
+export type PageMeta = {
+  finalUrl: string;
+  title: string | null;
+  description: string | null;
+  /** The page's og:image (or twitter:image) as an absolute http(s) URL, unchecked. */
+  image: string | null;
+};
+
+/** One `<meta ...>` tag's attributes, read character by character so a `>` inside quotes doesn't end it. */
+function readTag(html: string, from: number): { attrs: Map<string, string>; end: number } {
+  const attrs = new Map<string, string>();
+  const limit = Math.min(html.length, from + 2000);
+  let i = from;
+  while (i < limit && html[i] !== ">") {
+    while (i < limit && /[\s/]/.test(html[i]!)) i += 1;
+    const nameStart = i;
+    while (i < limit && !/[\s=>/]/.test(html[i]!)) i += 1;
+    const name = html.slice(nameStart, i).toLowerCase();
+    while (i < limit && /\s/.test(html[i]!)) i += 1;
+    let value = "";
+    if (html[i] === "=") {
+      i += 1;
+      while (i < limit && /\s/.test(html[i]!)) i += 1;
+      const q = html[i];
+      if (q === '"' || q === "'") {
+        const close = html.indexOf(q, i + 1);
+        const stop = close < 0 || close > limit ? limit : close;
+        value = html.slice(i + 1, stop);
+        i = stop + 1;
+      } else {
+        const vs = i;
+        while (i < limit && !/[\s>]/.test(html[i]!)) i += 1;
+        value = html.slice(vs, i);
+      }
+    }
+    if (name && !attrs.has(name)) attrs.set(name, value);
+  }
+  return { attrs, end: i };
+}
+
+/** The title, description and share image a page declares in its head. Linear in the page. */
+export function parsePageMeta(html: string, base: URL): PageMeta {
+  const head = html.slice(0, 400_000);
+  const lower = asciiLower(head);
+  const tags = new Map<string, string>();
+  let from = 0;
+  for (let n = 0; n < 300; n += 1) {
+    const start = lower.indexOf("<meta", from);
+    if (start < 0) break;
+    const { attrs, end } = readTag(head, start + 5);
+    from = end + 1;
+    const key = (attrs.get("property") ?? attrs.get("name") ?? "").toLowerCase();
+    const content = attrs.get("content");
+    if (key && content && !tags.has(key)) tags.set(key, decodeEntities(content).trim());
+  }
+  const rawTitle = findTitle(head, lower);
+  const clip = (v: string | undefined | null, n: number) => (v ? v.replace(/\s+/g, " ").trim().slice(0, n) || null : null);
+
+  let image: string | null = null;
+  for (const k of ["og:image:secure_url", "og:image", "twitter:image", "twitter:image:src"]) {
+    const v = tags.get(k);
+    if (!v) continue;
+    try {
+      const u = new URL(v, base);
+      if (u.protocol === "http:" || u.protocol === "https:") {
+        image = u.toString();
+        break;
+      }
+    } catch {
+      // not a URL; try the next tag
+    }
+  }
+  return {
+    finalUrl: base.toString(),
+    title: clip(tags.get("og:title") ?? (rawTitle === null ? null : decodeEntities(rawTitle)), 200),
+    description: clip(tags.get("og:description") ?? tags.get("description"), 400),
+    image,
+  };
+}
+
+/** A page's declared title, description and share image (college lookup). */
+export async function fetchPageMeta(rawUrl: string): Promise<PageMeta> {
+  const page = await fetchBytes(rawUrl, {
+    accept: "text/html,application/xhtml+xml;q=0.9",
+    types: ["text/html", "application/xhtml+xml"],
+    maxBytes: 600_000,
+    truncate: true,
+  });
+  return parsePageMeta(page.bytes.toString("utf8"), page.finalUrl);
+}
+
+/** One JPEG, at most `maxBytes`, through the same validation and pinning. */
+export async function fetchJpeg(rawUrl: string, maxBytes: number): Promise<{ finalUrl: string; bytes: Buffer }> {
+  const img = await fetchBytes(rawUrl, { accept: "image/jpeg,*/*;q=0.1", types: ["image/jpeg"], maxBytes, truncate: false });
+  const b = img.bytes;
+  if (b.length < 3 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) throw badRequest("That image isn't a JPEG");
+  return { finalUrl: img.finalUrl.toString(), bytes: b };
+}
+
 export type LinkCheck = {
   /** ok: answers 2xx. broken: 404/410, or the name no longer resolves. blocked: the site refuses or drops robots (401/403/429, no answer) or errs (5xx), so we can't say. */
   status: "ok" | "broken" | "blocked";
