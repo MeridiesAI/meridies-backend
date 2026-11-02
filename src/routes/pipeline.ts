@@ -25,9 +25,10 @@ import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Worksp
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
 import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
+import { activeStudentMessage, isValidPhone, missingForActiveStudent } from "../lib/contactRules.js";
 import { createInvitation } from "../lib/invites.js";
 import { enforceQuota, limit } from "../lib/limits.js";
-import { deriveAccount, formatUsd, PAYMENT_METHODS, planInvoice, planPayment, totals, type AccountDTO } from "../lib/payments.js";
+import { deriveAccount, formatUsd, PAYMENT_METHODS, planInvoice, planLine, planPayment, totals, type AccountDTO } from "../lib/payments.js";
 import {
   CONTACT_EXTRA_COLUMNS,
   extrasUnavailable,
@@ -48,6 +49,7 @@ const uuid = z.string().uuid();
 const idParam = z.object({ id: uuid }).strict();
 const shortText = (max: number) => z.string().trim().max(max);
 const optionalEmail = z.union([z.literal(""), z.string().trim().toLowerCase().email().max(320)]);
+const optionalPhone = z.union([z.literal(""), shortText(40).refine(isValidPhone, "Enter a valid phone number, 10 to 15 digits")]);
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date");
 
 /** The info-card fields a contact carries before they are a student. */
@@ -82,10 +84,10 @@ const contactFields = {
   studentName: contactName,
   gradYear: z.number().int().min(2000).max(2100).nullable(),
   studentEmail: optionalEmail,
-  studentPhone: shortText(40),
+  studentPhone: optionalPhone,
   parentName: shortText(200),
   parentEmail: optionalEmail,
-  parentPhone: shortText(40),
+  parentPhone: optionalPhone,
   nextStep: shortText(300),
   ownerId: uuid.nullable(),
   info: contactInfo,
@@ -211,6 +213,33 @@ async function loadContactRow(request: FastifyRequest, id: string): Promise<Row>
   if (error) throw crmError(error);
   if (!data) throw notFound("That contact isn't in your pipeline");
   return data as unknown as Row;
+}
+
+/**
+ * A card can only enter a "current" (Active student) stage with a student
+ * email, a phone and an address on it. `fields` overlays what this request
+ * changes on the card. Cards already in a current stage are never held up.
+ */
+async function assertActiveStudentReady(
+  request: FastifyRequest,
+  ws: Workspace,
+  moves: { row: Row; toStageId: string; fields?: { studentEmail?: string; studentPhone?: string; parentPhone?: string; address?: string } }[]
+): Promise<void> {
+  if (moves.length === 0) return;
+  const groups = new Map((await workspaceStages(request, ws)).map((st) => [String(st.id), String(st.lifecycle_group)]));
+  for (const { row, toStageId, fields } of moves) {
+    if (groups.get(toStageId) !== "current" || groups.get(String(row.stage_id)) === "current") continue;
+    const info = (row.info as Record<string, string> | null) ?? {};
+    const missing = missingForActiveStudent({
+      studentEmail: fields?.studentEmail ?? String(row.student_email ?? ""),
+      studentPhone: fields?.studentPhone ?? String(row.student_phone ?? ""),
+      parentPhone: fields?.parentPhone ?? String(row.parent_phone ?? ""),
+      address: fields?.address ?? info.address,
+    });
+    if (missing.length > 0) {
+      throw new HttpError(409, activeStudentMessage(String(row.student_name ?? ""), missing), "active_student_info_required");
+    }
+  }
 }
 
 /**
@@ -372,7 +401,16 @@ async function loadAccount(request: FastifyRequest, contactId: string): Promise<
   );
 }
 
-type InvoiceDraft = { label: string; grossCents: number; creditAppliedCents: number; alreadyPaidCents: number; amountDueCents: number; dueOn: string };
+type InvoiceDraft = {
+  label: string;
+  grossCents: number;
+  creditAppliedCents: number;
+  alreadyPaidCents: number;
+  amountDueCents: number;
+  dueOn: string;
+  /** Which payment of the package this is, in words. */
+  plan: string | null;
+};
 
 /** The invoice email, the same for the preview and the send. */
 function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null) {
@@ -382,6 +420,7 @@ function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, 
   if (draft.creditAppliedCents > 0) lines.push(`Credit applied: −${formatUsd(draft.creditAppliedCents)}.`);
   if (draft.alreadyPaidCents > 0) lines.push(`Already paid: −${formatUsd(draft.alreadyPaidCents)}.`);
   lines.push(`Amount due: ${formatUsd(draft.amountDueCents)}, by ${draft.dueOn}.`);
+  if (draft.plan) lines.push(draft.plan);
   if (draft.amountDueCents === 0) lines.push("Your credit covers this invoice in full. There's nothing to pay.");
   lines.push("Reply to this email with any questions about the invoice.");
   const template = {
@@ -410,6 +449,7 @@ function draftInvoice(account: AccountDTO, credits: boolean, b: { label: string;
     alreadyPaidCents: plan.alreadyPaidCents,
     amountDueCents: plan.amountDueCents,
     dueOn: b.dueOn,
+    plan: planLine(account, account.invoices.filter((i) => i.state !== "void").length + 1),
   };
 }
 
@@ -487,6 +527,26 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       .strict()
       .parse(request.body);
     if (Object.keys(b.layout).length > 200) throw badRequest("Too many stages in one layout");
+    // A drop into an Active student column must carry the contact details the
+    // board asked for; the app prompts for them first, this keeps a stale or
+    // hand-made request honest.
+    const ws = await loadWorkspace(request);
+    const placed = new Map<string, string>();
+    for (const [stageId, ids] of Object.entries(b.layout)) for (const id of ids) placed.set(id, stageId);
+    if (placed.size > 0) {
+      const { data, error: rowsError } = await request.db
+        .from("pipeline_contacts")
+        .select("id, stage_id, student_name, student_email, student_phone, parent_phone, info")
+        .in("id", [...placed.keys()]);
+      if (rowsError) throw crmError(rowsError);
+      await assertActiveStudentReady(
+        request,
+        ws,
+        ((data ?? []) as unknown as Row[])
+          .filter((row) => placed.get(String(row.id)) !== String(row.stage_id))
+          .map((row) => ({ row, toStageId: placed.get(String(row.id)) as string }))
+      );
+    }
     const { error } = await request.db.rpc("apply_pipeline_layout", { p_layout: b.layout });
     if (error) throw crmError(error);
     return { ok: true };
@@ -639,6 +699,21 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           "duplicate_contact"
         );
       }
+    }
+
+    if (b.stageId !== undefined && b.stageId !== current.stage_id) {
+      await assertActiveStudentReady(request, ws, [
+        {
+          row: current,
+          toStageId: b.stageId,
+          fields: {
+            studentEmail: b.studentEmail,
+            studentPhone: b.studentPhone,
+            parentPhone: b.parentPhone,
+            address: b.info?.address,
+          },
+        },
+      ]);
     }
 
     const update = contactPatchToRow(b);
@@ -886,6 +961,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         packageName: z.string().trim().min(1).max(200),
         totalCents: z.number().int().min(0).max(100_000_000),
         installments: z.number().int().min(1).max(60),
+        durationMonths: z.number().int().min(1).max(120).nullable().optional(),
       })
       .strict()
       .parse(request.body);
@@ -893,12 +969,21 @@ export default async function pipelineRoutes(app: FastifyInstance) {
 
     const existing = await request.db.from("pipeline_packages").select("contact_id").eq("contact_id", id).maybeSingle();
     if (existing.error) throw crmError(existing.error);
-    const row = { package_name: b.packageName, total_cents: b.totalCents, installments: b.installments };
+    const row = {
+      package_name: b.packageName,
+      total_cents: b.totalCents,
+      installments: b.installments,
+      ...(b.durationMonths !== undefined ? { duration_months: b.durationMonths } : {}),
+    };
     const { error } = existing.data
       ? await request.db.from("pipeline_packages").update(row).eq("contact_id", id)
       : await request.db.from("pipeline_packages").insert({ ...row, contact_id: id, created_by: request.auth.userId });
     if (error) {
       if (error.code === "42501") throw forbidden("Only a firm admin or this family's owner can bill them");
+      // The package-length migration isn't applied: say so, the app resends without it.
+      if (error.code === "42703" && b.durationMonths !== undefined) {
+        throw new HttpError(503, "Package length isn't switched on yet", "package_duration_unavailable");
+      }
       throw crmError(error);
     }
     const account = await loadAccount(request, id);
@@ -1008,7 +1093,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     }
   );
 
-  /** Void an invoice sent in error. It stays on the record and stops counting. */
+  /** Cancel an invoice sent in error. It stays on the record, stops counting, and the family is told. */
   app.post("/invoices/:id/void", { preHandler: write("pipeline:billing", 60) }, async (request) => {
     const { id } = idParam.parse(request.params);
     const { data, error } = await request.db
@@ -1016,11 +1101,34 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       .update({ voided_at: new Date().toISOString() })
       .eq("id", id)
       .is("voided_at", null)
-      .select("contact_id")
+      .select("contact_id, number, label, amount_cents, sent_to, sent_at")
       .maybeSingle();
     if (error) throw crmError(error);
     if (!data) throw notFound("No open invoice of yours matches that");
-    return requireAccount(request, String((data as Row).contact_id));
+    const invoice = data as Row;
+    // Only a family that was actually emailed this invoice hears it was cancelled.
+    if (invoice.sent_to && invoice.sent_at) {
+      const template = {
+        heading: `Invoice ${String(invoice.number)} cancelled`,
+        paragraphs: [
+          `Invoice ${String(invoice.number)} (${String(invoice.label)}, ${formatUsd(Number(invoice.amount_cents))}) has been cancelled. You don't need to pay it.`,
+          "Reply to this email with any questions.",
+        ],
+        footnote: request.profile.full_name ? `Sent by ${request.profile.full_name} through Meridies.` : "Sent through Meridies.",
+      };
+      const contact = await loadContactRow(request, String(invoice.contact_id));
+      const sent = await sendEmail({
+        to: String(invoice.sent_to),
+        subject: `Invoice ${String(invoice.number)} cancelled`,
+        html: brandedEmail(template),
+        text: brandedText(template),
+        template: "pipeline-invoice-cancelled",
+        recipient_kind: contact.parent_email ? "guardian" : "student",
+        logger: request.log,
+      });
+      if (!sent.sent) request.log.warn({ invoice: id }, "pipeline: the cancellation email didn't go out");
+    }
+    return requireAccount(request, String(invoice.contact_id));
   });
 
   app.post("/contacts/:id/payments", { preHandler: write("pipeline:billing", 60) }, async (request, reply) => {
