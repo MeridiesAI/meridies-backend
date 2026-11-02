@@ -5,7 +5,9 @@
  * description) and tries to find a picture of the campus, in this order:
  *
  *   1. Wikimedia Commons, searched by the school's name. A file counts only if
- *      its name contains every significant word of the school's name, and it
+ *      its name contains every word of the school's name as a whole word (bar
+ *      "the/of/at…" and university/college), names no other kind of school or
+ *      "State" the school's name lacks (`titleNamesCollege`), and it
  *      passes the same rules as the monthly loader (`choosePhoto`: JPEG, big
  *      enough, CC0 / public domain / CC BY / CC BY-SA, a credit). Stored as
  *      source `commons-search`, with the Commons credit and license.
@@ -37,7 +39,10 @@ import { MAX_BYTES } from "./ingest/wikimedia.js";
 
 const MIN_SITE_WIDTH = 800;
 const COMMONS_CANDIDATES = 6;
-const NAME_STOPWORDS = new Set(["the", "of", "at", "in", "and", "for", "university", "college", "institute", "school", "state"]);
+/** Words that don't tell one school from another. */
+const FILLER = new Set(["the", "of", "at", "in", "and", "for"]);
+/** The kind of institution: a title may leave it out, but may not name a different kind. */
+const TYPE_WORDS = new Set(["university", "college", "institute", "school"]);
 
 export type LookupPhoto = { source: "commons-search" | "site"; storagePath: string };
 
@@ -61,23 +66,39 @@ export type LookupDeps = {
   log?: { warn: (o: object, m?: string) => void };
 };
 
-/** The words of a school's name that a Commons file name must all contain. */
-export function nameWords(name: string): string[] {
-  const words = name
+/** Whole lowercase words: accents folded away, and "A&M" kept as the one word "am". */
+function tokens(s: string): string[] {
+  return s
     .toLowerCase()
     .normalize("NFKD")
-    .replace(/[^a-z0-9 ]+/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !NAME_STOPWORDS.has(w));
+    .replace(/\p{M}+/gu, "")
+    .replace(/\b([a-z])\s*&\s*([a-z])\b/g, "$1$2")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter(Boolean);
+}
+
+/** The words of a school's name that a Commons file name must all contain, as whole words. */
+export function nameWords(name: string): string[] {
+  const words = tokens(name).filter((w) => w.length > 1 && !FILLER.has(w) && !TYPE_WORDS.has(w));
   return [...new Set(words)];
 }
 
-/** Whether a Commons title names this school (every significant word of its name). */
+/**
+ * Whether a Commons title names this school. Every word of its name must be a
+ * whole word of the title ("rice" is not in "price"), the title may leave out
+ * "university"/"college" but may not name a different kind (Boston College is
+ * not Boston University), and it may say "State" only if the name does (Ohio
+ * University is not Ohio State).
+ */
 export function titleNamesCollege(title: string, name: string): boolean {
   const words = nameWords(name);
   if (words.length === 0) return false;
-  const t = title.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, " ");
-  return words.every((w) => t.includes(w));
+  const have = new Set(tokens(title));
+  if (!words.every((w) => have.has(w))) return false;
+  const named = new Set(tokens(name));
+  for (const t of TYPE_WORDS) if (have.has(t) && !named.has(t)) return false;
+  return !(have.has("state") && !named.has("state"));
 }
 
 /** Width and height from a baseline or progressive JPEG's frame header; null if unreadable. */
