@@ -371,7 +371,7 @@ export async function deliverMessage(
         continue;
       }
       const body = r.kind === "guardian" ? parentTextBody(row.body, r, copy) : row.body;
-      const res = await sendSms({ ...columns, to: r.phone, body });
+      const res = await sendSms({ ...columns, to: r.phone, body, counselorId: row.counselor_id });
       attempts.push({
         recipient: r.name,
         recipientKind: r.kind,

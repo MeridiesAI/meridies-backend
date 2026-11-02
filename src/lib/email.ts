@@ -21,7 +21,9 @@
  */
 
 import { insertDelivery } from "./deliveryInsert.js";
-import { devMailUrl, env, hasResend, hasTwilio, resendBase } from "../env.js";
+import { devMailUrl, env, hasResend, hasTwilio, resendBase, twilioBase } from "../env.js";
+import { withOptOutNotice } from "./parentCopy.js";
+import { isResultsNotApplied } from "./resultsAvailability.js";
 import { serviceClient } from "./supabase.js";
 
 type Logger = {
@@ -311,12 +313,15 @@ type TwilioReply = { sid?: string; code?: number; message?: string };
  */
 async function postToTwilio(
   to: string,
-  body: string
+  body: string,
+  /** The consultant's own number; the account's shared sender when absent. */
+  from?: string | null
 ): Promise<{ sid: string; error: null } | { sid: null; error: string }> {
   const sid = env.TWILIO_ACCOUNT_SID as string;
   const token = env.TWILIO_AUTH_TOKEN as string;
   const form = new URLSearchParams({ To: to, Body: body });
-  if (env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", env.TWILIO_MESSAGING_SERVICE_SID);
+  if (from) form.set("From", from);
+  else if (env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", env.TWILIO_MESSAGING_SERVICE_SID);
   else form.set("From", env.TWILIO_FROM_NUMBER as string);
   // Delivered / undelivered come back to routes/webhooks.ts.
   if (env.PUBLIC_API_URL) form.set("StatusCallback", `${env.PUBLIC_API_URL.replace(/\/+$/, "")}/webhooks/twilio/status`);
@@ -324,7 +329,7 @@ async function postToTwilio(
   let res: Response;
   try {
     res = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`,
+      `${twilioBase}/2010-04-01/Accounts/${encodeURIComponent(sid)}/Messages.json`,
       {
         method: "POST",
         headers: {
@@ -353,6 +358,34 @@ async function postToTwilio(
   return { sid: null, error: `SMS provider error${code}: ${detail}`.slice(0, 300) };
 }
 
+type SenderState = { from: string | null; refusal: string | null; firstText: boolean };
+
+/**
+ * What a consultant's text to this number needs to know first: their own number
+ * (if they have one), whether the recipient told them to stop, and whether this
+ * is the first text this number has had. Fails closed on the opt-out read; a
+ * database without the messaging tables just sends as before.
+ */
+async function senderState(counselorId: string, to: string, logger?: Logger): Promise<SenderState> {
+  const none: SenderState = { from: null, refusal: null, firstText: false };
+  const svc = serviceClient();
+  if (!svc) return none;
+
+  const out = await svc.from("sms_opt_outs").select("phone_e164").eq("counselor_id", counselorId).eq("phone_e164", to).maybeSingle();
+  if (out.error) {
+    if (isResultsNotApplied(out.error)) return none;
+    logger?.warn({ code: out.error.code }, "sms: could not check the opt-out list; not sending");
+    return { ...none, refusal: "Couldn't check whether this number opted out, so nothing was sent" };
+  }
+  if (out.data) return { ...none, refusal: "This number replied STOP to you, so Meridies won't text it again unless they reply START" };
+
+  const num = await svc.from("consultant_phone_numbers").select("phone_e164").eq("counselor_id", counselorId).eq("status", "active").maybeSingle();
+  const from = num.error ? null : ((num.data as { phone_e164?: string } | null)?.phone_e164 ?? null);
+
+  const prior = await svc.from("message_deliveries").select("id").eq("channel", "sms").eq("to_phone", to).in("status", ["queued", "sent", "delivered"]).limit(1);
+  return { from, refusal: null, firstText: !prior.error && (prior.data?.length ?? 0) === 0 };
+}
+
 /**
  * Send an SMS through Twilio, and record the attempt in `message_deliveries`.
  *
@@ -366,11 +399,24 @@ async function postToTwilio(
  * Best-effort like `sendEmail`: never throws for a delivery failure.
  */
 export async function sendSms(
-  args: DeliveryColumns & { to: string; body: string; template: string; logger?: Logger }
+  args: DeliveryColumns & {
+    to: string;
+    body: string;
+    template: string;
+    /**
+     * Whose text this is. With it, the text goes from that consultant's own
+     * number when they have one, is refused to a number that answered STOP to
+     * them, and the first text to a number carries the opt-out line. Without it
+     * (a system text with no consultant) it goes from the shared sender.
+     */
+    counselorId?: string | null;
+    logger?: Logger;
+  }
 ): Promise<SmsResult> {
   const { logger, template } = args;
-  const body = args.body.slice(0, SMS_MAX_CHARS);
   const to = toE164(args.to);
+  const state = to && args.counselorId ? await senderState(args.counselorId, to, logger) : null;
+  const body = withOptOutNotice(args.body.slice(0, SMS_MAX_CHARS), state?.firstText === true);
 
   const base = {
     student_id: args.student_id ?? null,
@@ -395,13 +441,21 @@ export async function sendSms(
     return { id: null, sent: false, deliveryId, error, status: "failed" };
   }
 
-  if (!hasTwilio) {
+  if (state?.refusal) {
+    const deliveryId = await recordDelivery({ ...base, provider: hasTwilio ? "twilio" : null, status: "failed", error: state.refusal }, logger);
+    return { id: null, sent: false, deliveryId, error: state.refusal, status: "failed" };
+  }
+
+  // A consultant's own number needs only the account (SID and token); the
+  // shared sender needs a number or a Messaging Service on top.
+  const canSend = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) && (Boolean(state?.from) || hasTwilio);
+  if (!canSend) {
     const deliveryId = await recordDelivery({ ...base, provider: null, status: "queued" }, logger);
     return { id: null, sent: false, deliveryId, error: null, status: "queued" };
   }
 
   const deliveryId = await recordDelivery({ ...base, provider: "twilio", status: "queued" }, logger);
-  const result = await postToTwilio(to, body);
+  const result = await postToTwilio(to, body, state?.from);
 
   const update = result.sid
     ? { status: "sent", provider_message_id: result.sid, sent_at: new Date().toISOString(), error: null }

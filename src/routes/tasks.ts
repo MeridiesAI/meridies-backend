@@ -1502,6 +1502,8 @@ async function notifyAssignment(
         deliverable_id: input.taskId,
         recipient_id: input.studentId,
         recipient_kind: "student",
+        // From the assigning counselor's own number when they have one.
+        counselorId: request.auth.userId,
         logger: request.log,
       });
       smsState = sms.status;

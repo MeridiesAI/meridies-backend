@@ -7,6 +7,9 @@
  *                                  (lib/inboundEmail.ts)
  *   POST /webhooks/twilio/status   Twilio StatusCallback (X-Twilio-Signature):
  *                                  sent, delivered, undelivered, failed
+ *   POST /webhooks/twilio/inbound  a family's text to a consultant's number
+ *                                  (X-Twilio-Signature); answered with empty TwiML
+ *                                  (lib/inboundSms.ts)
  *
  * Both verify the provider's signature over the raw body before reading it,
  * match the message by provider id, and never move a status backwards
@@ -18,6 +21,7 @@ import type { FastifyInstance } from "fastify";
 import { env } from "../env.js";
 import { HttpError, unauthorized, unavailable } from "../lib/errors.js";
 import { fetchReceivedEmail, handleInboundEmail } from "../lib/inboundEmail.js";
+import { handleInboundSms, twiml } from "../lib/inboundSms.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { serviceClient } from "../lib/supabase.js";
 
@@ -163,5 +167,31 @@ export default async function webhookRoutes(app: FastifyInstance) {
     if (!status || !sid) return reply.code(204).send();
     await applyStatus("twilio", sid, status, String(params.MessageStatus), status === "failed" ? `Twilio: ${params.ErrorCode ?? params.MessageStatus}` : null);
     return reply.code(204).send();
+  });
+
+  app.post("/twilio/inbound", { config: { rateLimit: { max: 600, timeWindow: "1 minute" } } }, async (request, reply) => {
+    if (!env.TWILIO_AUTH_TOKEN || !env.PUBLIC_API_URL) throw unavailable("Set TWILIO_AUTH_TOKEN and PUBLIC_API_URL to accept Twilio texts");
+    const raw = typeof request.body === "string" ? request.body : "";
+    const params = Object.fromEntries(new URLSearchParams(raw));
+    const url = `${env.PUBLIC_API_URL.replace(/\/+$/, "")}/webhooks/twilio/inbound`;
+    if (!verifyTwilio(env.TWILIO_AUTH_TOKEN, url, params, request.headers["x-twilio-signature"] as string | undefined)) throw unauthorized();
+
+    const svc = serviceClient();
+    if (!svc) throw unavailable("Set SUPABASE_SERVICE_ROLE_KEY to accept texts");
+    reply.type("text/xml");
+    try {
+      await handleInboundSms(
+        svc,
+        { from: String(params.From ?? ""), to: String(params.To ?? ""), body: String(params.Body ?? ""), sid: String(params.MessageSid ?? params.SmsSid ?? "") },
+        request.log
+      );
+    } catch (err) {
+      if (isResultsNotApplied(err as { code?: string })) throw new HttpError(503, "Texts aren't switched on yet", "messaging_unavailable");
+      // A non-2xx makes Twilio retry; the message sid makes a retry write nothing twice.
+      request.log.error({ err: err instanceof Error ? err.message : String(err) }, "inbound sms: could not be handled");
+      throw err;
+    }
+    // Always an empty reply: Meridies never answers a family's text on its own.
+    return twiml();
   });
 }

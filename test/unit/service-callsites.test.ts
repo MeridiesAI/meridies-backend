@@ -59,13 +59,17 @@ const REVIEWED = [
   // to that contact/student (RLS-bound read) before asking, and it never takes an id from a client. Writes only
   // messaging_routes, which clients cannot touch. The inbound side (lib/inboundEmail.ts) is handed the client by
   // routes/webhooks.ts (Resend's signature decides) and asks isCounselorApproved for the route's counselor.
+  // routes/messaging.ts: inside an approved counselor's own request (authenticate + requireRole); writes only the
+  // caller's own consultant_phone_numbers row, keyed by request.auth.userId (never a request value), after buying
+  // the number they picked, and releases the number if that write fails. lib/inboundSms.ts is handed the client by
+  // routes/webhooks.ts (Twilio's signature decides) and asks isCounselorApproved for the number's counselor.
   "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/kpi.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

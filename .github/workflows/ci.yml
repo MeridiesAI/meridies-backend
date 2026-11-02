@@ -152,6 +152,32 @@ jobs:
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
         run: npm run test:integration
 
+      # Two-way messaging needs an API configured for it: reply routing on, and the
+      # providers pointed at stand-ins the two suites serve themselves (Resend on
+      # :4199, Twilio on :4198). A second API on :4101 shares the database; the
+      # persona suite above skips these two files (no MESSAGING_SUITE). No mail
+      # catcher here, so sends reach the stand-in Resend and the suite can read them.
+      - name: Messaging suites (second API, stand-in Resend and Twilio)
+        env:
+          MESSAGING_SUITE: "1"
+          API_URL: http://127.0.0.1:4101
+          PORT: "4101"
+          NODE_ENV: development
+          CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
+          RESEND_WEBHOOK_SECRET: whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==
+          PUBLIC_API_URL: http://127.0.0.1:4101
+          REPLY_DOMAIN: reply.test.local
+          RESEND_API_KEY: re_ci_not_a_real_key
+          RESEND_API_BASE: http://127.0.0.1:4199
+          TWILIO_ACCOUNT_SID: AC00000000000000000000000000000000
+          TWILIO_AUTH_TOKEN: local-twilio-test-token-123
+          TWILIO_MESSAGING_SERVICE_SID: MG00000000000000000000000000000000
+          TWILIO_API_BASE: http://127.0.0.1:4198
+        run: |
+          npx tsx src/index.ts > api-messaging.log 2>&1 &
+          for _ in $(seq 1 30); do curl -s http://127.0.0.1:4101/health >/dev/null && break; sleep 1; done
+          node --import tsx --test test/integration/inbound-email.test.mjs test/integration/texting.test.mjs
+
       # The app's signed-in suite seeds its stack with this; keep it running. The
       # accounts it prints stay out of the log.
       - name: E2E stack seed runs

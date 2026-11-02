@@ -2,7 +2,7 @@
 // POST /webhooks/resend `email.received`), as real accounts on a local Supabase
 // against a running API (see harness.mjs).
 //
-// The API must be started with:
+// Runs only when MESSAGING_SUITE=1. The API must be started with:
 //   REPLY_DOMAIN=reply.test.local  RESEND_API_KEY=re_test_key
 //   RESEND_API_BASE=http://127.0.0.1:4199  (this file serves a stand-in Resend there)
 //   RESEND_WEBHOOK_SECRET=whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==
@@ -15,6 +15,11 @@
 import { createHmac } from "node:crypto";
 import http from "node:http";
 import { API, CLIENT, call, check, rest, sql, user } from "./harness.mjs";
+
+if (process.env.MESSAGING_SUITE !== "1") {
+  console.log("SKIP  inbound email suite (set MESSAGING_SUITE=1 with an API started for it)");
+  process.exit(0);
+}
 
 const SECRET = process.env.RESEND_WEBHOOK_SECRET ?? "whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==";
 const DOMAIN = process.env.REPLY_DOMAIN ?? "reply.test.local";
@@ -110,44 +115,54 @@ if (out) {
   console.log("SKIP  (mail went to a catcher, not the stand-in: Reply-To not inspected)");
 }
 
+// ---- a running sequence ----
+const seq = await call(C.token, "POST", "/pipeline/sequences", {
+  name: "Reply test drip",
+  sendHour: 9,
+  steps: [{ offsetDays: 3, to: "parent", subject: "Checking in", body: "Any questions so far?" }],
+});
+const enrolled = await call(C.token, "POST", `/pipeline/contacts/${contact.id}/sequences`, { sequenceId: seq.body.id });
+check("the contact is in a sequence before they reply", enrolled.status === 201 && enrolled.body.status === "active", JSON.stringify(enrolled.body));
+
 // ---- a reply lands on the timeline ----------------------------------------------------
-incoming("em-1", token);
-const r1 = await webhook("em-1");
+incoming(`em-1-${tag}`, token);
+const r1 = await webhook(`em-1-${tag}`);
 check("the webhook accepts the reply", r1.status === 200 && r1.body.stored === true && r1.body.onTimeline === true, JSON.stringify(r1));
 const tl = (await activities()).filter((a) => a.meta?.direction === "in");
 check("exactly one inbound entry is on the contact timeline", tl.length === 1, String(tl.length));
 check("it holds what she wrote, not the quoted history", tl[0]?.body === "Tuesday at 4 works for us.\n\nAnn", JSON.stringify(tl[0]?.body));
 check("it is an email entry from the parent, from a known address", tl[0]?.kind === "email" && tl[0]?.meta?.party === "parent" && tl[0]?.meta?.senderKnown === true);
+check("their sequence stops, because they answered", (await sql(`select status || ':' || stop_reason from public.pipeline_sequence_enrollments where contact_id = '${contact.id}'`)) === "stopped:replied");
 check("a reply counts as contact", (await sql(`select last_contacted_at is not null from public.pipeline_contacts where id = '${contact.id}'`)) === "t");
 check("a copy was sent to the counselor's inbox", (await sql(`select count(*) from public.message_deliveries where template = 'family-reply-forward' and to_email = '${C.email}'`)) === "1");
 const row = JSON.parse(await sql(`select row_to_json(m) from public.inbound_messages m where contact_id = '${contact.id}'`));
 check("the reply is stored with its sender and authentication", row.from_addr === "ann@families.test" && row.sender_known === true && row.authenticated === true);
 
 // ---- a retried webhook writes nothing twice ------------------------------------------------
-const r1b = await webhook("em-1");
+const r1b = await webhook(`em-1-${tag}`);
 check("a retried webhook is recognised", r1b.status === 200 && r1b.body.ignored === "duplicate", JSON.stringify(r1b));
 check("still one inbound entry", (await activities()).filter((a) => a.meta?.direction === "in").length === 1);
 
 // ---- an address we don't hold ---------------------------------------------------------------------
-incoming("em-2", token, { from: "Someone Else <ann.work@elsewhere.test>", text: "Replying from my work account." });
-const r2 = await webhook("em-2");
+incoming(`em-2-${tag}`, token, { from: "Someone Else <ann.work@elsewhere.test>", text: "Replying from my work account." });
+const r2 = await webhook(`em-2-${tag}`);
 check("a reply from another address is kept", r2.status === 200 && r2.body.stored === true, JSON.stringify(r2));
 const second = (await activities()).find((a) => a.body === "Replying from my work account.");
 check("and flagged as not a known address", second?.meta?.senderKnown === false);
 
 // ---- not a person -------------------------------------------------------------------------------------
-incoming("em-3", token, { headers: { "Auto-Submitted": "auto-replied" }, text: "I am out of the office." });
-const r3 = await webhook("em-3");
+incoming(`em-3-${tag}`, token, { headers: { "Auto-Submitted": "auto-replied" }, text: "I am out of the office." });
+const r3 = await webhook(`em-3-${tag}`);
 check("an out-of-office reply is ignored", r3.status === 200 && r3.body.ignored === "automated", JSON.stringify(r3));
-incoming("em-4", token, { text: "   " });
-check("an empty reply is ignored", (await webhook("em-4")).body.ignored === "empty");
+incoming(`em-4-${tag}`, token, { text: "   " });
+check("an empty reply is ignored", (await webhook(`em-4-${tag}`)).body.ignored === "empty");
 
 // ---- not ours -------------------------------------------------------------------------------------------
-incoming("em-5", "ffffffffffffffffffffffff");
-check("an unknown token places nothing", (await webhook("em-5")).body.ignored === "no-route");
-incoming("em-6", token, { to: [`r-${token}@somewhere-else.test`] });
-check("another domain's address places nothing", (await webhook("em-6")).body.ignored === "no-route");
-const bad = await webhook("em-1", { badSig: true });
+incoming(`em-5-${tag}`, "ffffffffffffffffffffffff");
+check("an unknown token places nothing", (await webhook(`em-5-${tag}`)).body.ignored === "no-route");
+incoming(`em-6-${tag}`, token, { to: [`r-${token}@somewhere-else.test`] });
+check("another domain's address places nothing", (await webhook(`em-6-${tag}`)).body.ignored === "no-route");
+const bad = await webhook(`em-1-${tag}`, { badSig: true });
 check("a bad signature is refused", bad.status === 401, String(bad.status));
 check("nothing else reached the timeline", (await activities()).filter((a) => a.meta?.direction === "in").length === 2);
 
@@ -163,7 +178,7 @@ check("a client can't read reply tokens", routes.status >= 400 || (Array.isArray
 
 // ---- a revoked counselor receives nothing ----------------------------------------------------------------
 await sql(`update public.profiles set counselor_approved_at = null where id = '${C.id}'`);
-incoming("em-7", token, { text: "Anyone there?" });
-check("a revoked counselor's route places nothing", (await webhook("em-7")).body.ignored === "unapproved");
+incoming(`em-7-${tag}`, token, { text: "Anyone there?" });
+check("a revoked counselor's route places nothing", (await webhook(`em-7-${tag}`)).body.ignored === "unapproved");
 
 fake.close();

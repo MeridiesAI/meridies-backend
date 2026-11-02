@@ -75,6 +75,11 @@ src/
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
+│   ├── parentCopy.ts      # what a parent is told (email + text wording), who is reachable; pure
+│   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
+│   ├── inboundEmail.ts    # a family's emailed reply: decode, strip the quote, place it, copy the counselor
+│   ├── inboundSms.ts      # a family's text reply: keywords (STOP/START), whose number, place it
+│   ├── twilioNumbers.ts   # search/buy/release a consultant's own Twilio number
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
@@ -134,6 +139,7 @@ src/
 │   ├── studentPage.ts     # /student-page info card, polygon, private note
 │   ├── studentAid.ts      # /student-aid  Financial aid page, scholarship matching
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
+│   ├── messaging.ts       # /messaging    a consultant's own texting number: find, buy
 │   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
 │   ├── collegeAi.ts       # /ai           college research, Build College Lists bar
 │   ├── meetingSummary.ts  # /ai/meeting-summary   a counselor's pasted notes -> a draft summary + action items (stores nothing)
@@ -155,7 +161,7 @@ src/
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
 │   ├── account.ts         # /account      data export (self, a student), account deletion
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
-│   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status (signed)
+│   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
@@ -606,10 +612,10 @@ forget it.
   headers) with a fresh random token whose sha256 is stored in
   `pipeline_unsubscribe_tokens` (service role only), the KPI emails' pattern;
   GET shows a button, POST stamps `pipeline_contacts.email_opted_out_at`, which
-  no client can write, and no sequence emails them again. Not built: reply
-  detection (there is no inbound mail, so a family that replies keeps getting
-  the next email until the counselor pauses or stops it), and a per-address
-  rather than per-contact opt-out.
+  no client can write, and no sequence emails them again. A family's reply
+  (email or text, see "Two-way family messaging") stops the contact's running
+  enrollment with the reason `replied`. Not built: a per-address rather than
+  per-contact opt-out.
   **Deploy order:** after `20261028000003`; not in `REQUIRED_SCHEMA`.
   `sequencesReady` (a zero-row probe) makes the routes answer `503
   pipeline_sequences_unavailable`, and the cron answers `ran: false` instead of
@@ -617,6 +623,46 @@ forget it.
   (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET"
   "$API_URL/internal/pipeline-sequences/dispatch"`, every 10-15 minutes).
   Test: `test/integration/pipeline-sequences.test.mjs`.
+- **Two-way family messaging** (`20261103000001`, `20261103000002`; `lib/parentCopy.ts`, `lib/replyRouting.ts`,
+  `lib/inboundEmail.ts`, `lib/inboundSms.ts`, `lib/twilioNumbers.ts`, `routes/messaging.ts`, the webhooks). **What a parent
+  reads:** the composer, parent alerts, the CRM one-off email, invoices and sequences say who wrote and that replying
+  reaches them (`composerEmailTemplate`, `guardianFootnote`, `alertFootnote`); the student keeps "Reply to your counselor
+  directly". Every counselor email shows `Name via Meridies <our address>` (`fromHeader`: only the cleaned display name is
+  the caller's) and carries a Reply-To. **Email replies:** with `REPLY_DOMAIN` set (a domain whose MX is Resend's receiving
+  service) the Reply-To is `r-<24 hex>@<domain>`, a token in `messaging_routes` per (counselor, party, contact | student |
+  guardian), minted by `replyAddressFor` (service role; the CALLER must already have shown the counselor may write to that
+  contact/student, and it never takes a client id). Resend calls `POST /webhooks/resend` with `email.received` (same svix
+  signature as delivery status; metadata only), `fetchReceivedEmail` reads the message from
+  `GET /emails/receiving/{id}`, and `handleInboundEmail` places it: unknown token, an unapproved counselor
+  (`isCounselorApproved`, fail closed), an automated message (Auto-Submitted, Precedence bulk, mailer-daemon...), an
+  empty one, a duplicate (`provider_message_id` unique) or 40 a day per address place nothing. Otherwise it writes
+  `inbound_messages`, a `pipeline_activities` `email` row (meta `direction: "in"`, `senderKnown`, `authenticated`) on the
+  contact's timeline under the follow-ups, stops the contact's running sequence, and mails the counselor a copy with
+  Reply-To the family. The quoted history is dropped (`stripQuotedReply`, line-by-line, linear); a sender not on file is
+  kept and shown as such, never trusted. Without `REPLY_DOMAIN`, the migration, or on any error, Reply-To is the
+  counselor's own address and the email still goes. **Texts:** each counselor can have one Twilio number of their own
+  (`consultant_phone_numbers`; `POST /messaging/number` buys the one they picked from `/number/search`, points its
+  incoming-text webhook at `POST /webhooks/twilio/inbound`, adds it to `TWILIO_MESSAGING_SERVICE_SID` so it travels under
+  the A2P campaign, and releases it if recording fails). `sendSms({ counselorId })` sends from that number, refuses a
+  number that answered STOP to that counselor (`sms_opt_outs`, fail closed on an unreadable list), and puts "Reply STOP to
+  opt out." on the first text to a number. The composer can text a parent (`student_messages_parent_is_email` is gone;
+  the client guard `student_message_recipients_ok` verifies a guardian by phone for sms; dispatch drops a frozen phone that
+  changed), and `POST /pipeline/contacts/:id/text` texts the card's parent and/or student and logs a `sms` timeline entry.
+  An inbound text finds its counselor by the number dialled and its family member by the number it came from among that
+  counselor's own guardians, students and workspace contacts; STOP/START are honoured and shown on the timeline; one that
+  matches nothing is stored unplaced. `GET /communication/:id/replies` lists the family's replies for the student page.
+  **Deploy order:** `…0001` and `…0002` either order with the code; not in `REQUIRED_SCHEMA`; the code degrades
+  (`messaging_unavailable`, `texting_unavailable`, Reply-To falls back, a text goes from the shared sender or is queued).
+  **Switching it on (not code):** a reply domain with Resend's MX and the `email.received` webhook to
+  `/webhooks/resend`, `REPLY_DOMAIN`; a paid Twilio account with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
+  `TWILIO_MESSAGING_SERVICE_SID`, `PUBLIC_API_URL`, and A2P 10DLC brand + campaign registration (carriers filter
+  unregistered US numbers; a text can be accepted by Twilio and still not arrive). Known limits: a student's due-tomorrow
+  reminders still go from the shared sender; "first text to a number" is judged by number, not by counselor; matching an
+  inbound text scans the counselor's own guardians/contacts in memory (fine at a practice's size). Tests:
+  `test/unit/parent-comms.test.ts`, `inbound-email.test.ts`, `inbound-sms.test.ts`; `test/integration/parent-comms.test.mjs`,
+  and `inbound-email.test.mjs` / `texting.test.mjs` which run only with `MESSAGING_SUITE=1` against an API started with the
+  routing env and stand-in providers (`RESEND_API_BASE`, `TWILIO_API_BASE`, honoured outside production only; CI has a
+  second API for them).
 - **`consultant_tasks` (Management) are visible to the assignee, the assigner
   and the firm's owners/admins, and nobody else.** Anyone may assign
   themselves a task; only an owner or admin assigns to another firm member,

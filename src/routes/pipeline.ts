@@ -28,8 +28,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
-import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
-import { guardianFootnote } from "../lib/parentCopy.js";
+import { brandedEmail, brandedText, sendEmail, sendSms } from "../lib/email.js";
+import { contactTextBody, guardianFootnote } from "../lib/parentCopy.js";
 import { replyAddressFor } from "../lib/replyRouting.js";
 import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
@@ -953,6 +953,76 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         if (logError) request.log.warn({ err: logError }, "pipeline: could not log the email to the timeline");
       }
       return { results, sentCount: delivered.length };
+    }
+  );
+
+  /**
+   * Text a contact: the parent, the student, or both, at the phone numbers on
+   * the card (never from the request). It goes from the counselor's own number
+   * when they have one, skips a number that answered STOP, and is logged on the
+   * contact's timeline with what was said. A text recorded `queued` means
+   * texting isn't switched on for this deployment yet; it is never reported
+   * as sent.
+   */
+  app.post(
+    "/contacts/:id/text",
+    {
+      preHandler: [
+        ...counselor,
+        limit("pipeline:text", 30, 3600, "You've texted a lot of families this hour. Give it a moment."),
+      ],
+    },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const b = z
+        .object({
+          body: z.string().trim().min(1).max(1000),
+          to: z.array(z.enum(["student", "parent"])).min(1).max(2),
+        })
+        .strict()
+        .parse(request.body);
+      const c = await loadContactRow(request, id);
+
+      const studentName = String(c.student_name ?? "").trim();
+      const targets = [...new Set(b.to)].map((who) => ({
+        who,
+        phone: String(who === "parent" ? c.parent_phone ?? "" : c.student_phone ?? "").trim(),
+        name: String(who === "parent" ? c.parent_name ?? "" : c.student_name ?? "").trim(),
+      }));
+      const missing = targets.filter((t) => !t.phone).map((t) => t.who);
+      if (missing.length === targets.length) {
+        throw badRequest(`Add the ${missing.join(" and ")}'s phone number to the card first`);
+      }
+
+      const results: Array<{ to: string; status: "sent" | "queued" | "failed" | "unavailable"; error: string | null }> = [];
+      for (const t of targets) {
+        if (!t.phone) {
+          results.push({ to: t.who, status: "unavailable", error: "No phone number on the card" });
+          continue;
+        }
+        const sms = await sendSms({
+          to: t.phone,
+          body: contactTextBody(b.body, { who: t.who, name: t.name }, { counselorName: request.profile.full_name ?? null, studentName }),
+          template: "pipeline-text",
+          recipient_kind: t.who === "parent" ? "guardian" : "student",
+          counselorId: request.auth.userId,
+          logger: request.log,
+        });
+        results.push({ to: t.who, status: sms.status, error: sms.error });
+      }
+
+      // The timeline records what was texted. The text already left (or was held), so a
+      // failure to log it is reported, never raised.
+      const reached = results.filter((r) => r.status === "sent" || r.status === "queued");
+      if (reached.length > 0 && (await pipelineExtrasReady(request))) {
+        const { error: logError } = await request.db.from("pipeline_activities").insert({
+          contact_id: id,
+          kind: "sms",
+          body: `Texted the ${reached.map((r) => r.to).join(" and ")}: ${b.body}`.slice(0, 4000),
+        });
+        if (logError) request.log.warn({ err: logError }, "pipeline: could not log the text to the timeline");
+      }
+      return { results, sentCount: results.filter((r) => r.status === "sent").length, queuedCount: results.filter((r) => r.status === "queued").length };
     }
   );
 

@@ -124,3 +124,33 @@ export function alertFootnote(to: "guardian" | "student", studentName: string | 
     ? `Sent by ${counselorName ?? "your counselor"} through Meridies. Reply to your counselor directly with any questions.`
     : "Sent by your counselor through Meridies. Reply to your counselor directly with any questions.";
 }
+
+/**
+ * A text from the contact page, to the parent or the student on the card.
+ * A parent is told who it is from and which student it is about (they see only
+ * a number); a student is just told who. A body that already greets is left alone.
+ */
+export function contactTextBody(
+  body: string,
+  to: { who: "parent" | "student"; name: string },
+  ctx: CopyContext
+): string {
+  if (to.who === "parent") return parentTextBody(body, { name: to.name }, ctx);
+  const text = body.trim();
+  if (GREETING.test(text)) return text.slice(0, SMS_MAX_CHARS);
+  const first = firstWord(to.name);
+  const sender = ctx.counselorName ?? "your counselor";
+  return `${first ? `Hi ${first}, ` : "Hi, "}it's ${sender}: ${text}`.slice(0, SMS_MAX_CHARS);
+}
+
+const OPT_OUT_NOTICE = " Reply STOP to opt out.";
+
+/**
+ * The first text to a number carries the opt-out line the carriers expect.
+ * The message is trimmed to make room for it, never the other way round.
+ */
+export function withOptOutNotice(body: string, isFirstText: boolean): string {
+  if (!isFirstText) return body;
+  if (/reply stop/i.test(body)) return body.slice(0, SMS_MAX_CHARS);
+  return body.slice(0, SMS_MAX_CHARS - OPT_OUT_NOTICE.length).trimEnd() + OPT_OUT_NOTICE;
+}

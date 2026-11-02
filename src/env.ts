@@ -66,6 +66,9 @@ const envSchema = z.object({
   // to this origin instead of api.resend.com, so the integration suite can stand
   // in for Resend. Ignored in production (see `resendBase`).
   RESEND_API_BASE: blankIsUnset(z.string().url().optional()),
+  // Tests only, like RESEND_API_BASE: Twilio's REST calls (sending, searching and
+  // buying numbers, the Messaging Service) go to this origin. Ignored in production.
+  TWILIO_API_BASE: blankIsUnset(z.string().url().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 
@@ -191,6 +194,10 @@ export const hasImportWorker = Boolean(env.IMPORT_DATABASE_URL);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
 export const hasResend = Boolean(env.RESEND_API_KEY);
 export const devMailUrl = env.NODE_ENV === "production" ? undefined : env.DEV_MAIL_URL;
+/** Twilio's REST origins (api and messaging). Only a non-production process may point them elsewhere. */
+const twilioOverride = (env.NODE_ENV === "production" ? undefined : env.TWILIO_API_BASE)?.replace(/\/+$/, "");
+export const twilioBase = twilioOverride ?? "https://api.twilio.com";
+export const twilioMessagingBase = twilioOverride ?? "https://messaging.twilio.com";
 /** Resend's API origin. Only a non-production process may point it elsewhere. */
 export const resendBase = ((env.NODE_ENV === "production" ? undefined : env.RESEND_API_BASE) ?? "https://api.resend.com").replace(/\/+$/, "");
 export const hasCronSecret = Boolean(env.CRON_SECRET);

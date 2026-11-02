@@ -25,8 +25,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { env, resendBase } from "../env.js";
 import { isCounselorApproved } from "./access.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
+import { pgFailure } from "./errors.js";
 import { consumeRateLimit } from "./limits.js";
 import { extractText } from "./links.js";
+import { isResultsNotApplied } from "./resultsAvailability.js";
 
 type Row = Record<string, unknown>;
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -257,7 +259,7 @@ export async function handleInboundEmail(
   if (!token) return { status: "ignored", reason: "no-route" };
 
   const { data: routeRow, error: routeErr } = await svc.from("messaging_routes").select("*").eq("token", token).maybeSingle();
-  if (routeErr) throw new Error(`route lookup failed: ${routeErr.message}`);
+  if (routeErr) throw pgFailure(routeErr, "route lookup failed");
   if (!routeRow) return { status: "ignored", reason: "no-route" };
   const route = routeRow as Row;
   const counselorId = String(route.counselor_id);
@@ -306,7 +308,7 @@ export async function handleInboundEmail(
       { onConflict: "provider_message_id", ignoreDuplicates: true }
     )
     .select("id");
-  if (ins.error) throw new Error(`inbound insert failed: ${ins.error.message}`);
+  if (ins.error) throw pgFailure(ins.error, "inbound insert failed");
   const inboundId = (ins.data?.[0] as Row | undefined)?.id as string | undefined;
   if (!inboundId) return { status: "ignored", reason: "duplicate" };
 
@@ -320,9 +322,11 @@ export async function handleInboundEmail(
     });
     if (error) log.warn({ code: error.code }, "inbound email: could not add it to the contact timeline");
     else onTimeline = true;
+    await stopSequencesOnReply(svc, String(route.contact_id), log);
   }
 
   const forwarded = await forwardToCounselor(svc, counselorId, {
+    channel: "email",
     fromName: who.name,
     sender,
     senderKnown,
@@ -337,22 +341,41 @@ export async function handleInboundEmail(
   return { status: "stored", inboundId, onTimeline, forwarded };
 }
 
-/** A copy in the counselor's own inbox, so a reply is seen even when the app is closed. */
-async function forwardToCounselor(
-  svc: SupabaseClient,
-  counselorId: string,
-  m: {
-    fromName: string;
-    sender: string;
-    senderKnown: boolean;
-    studentName: string | null;
-    subject: string | null;
-    body: string;
-    contactId: string | null;
-    studentId: string | null;
-    log: Log;
-  }
-): Promise<boolean> {
+/**
+ * A family that answers has seen the drip; the next scheduled email would talk
+ * past them. Stops the contact's running enrollment with the reason `replied`
+ * (the counselor can enroll them again). A database without sequences, or any
+ * error, changes nothing: the reply is already safely recorded.
+ */
+export async function stopSequencesOnReply(svc: SupabaseClient, contactId: string, log: Log): Promise<void> {
+  const { error } = await svc
+    .from("pipeline_sequence_enrollments")
+    .update({ status: "stopped", stop_reason: "replied", claimed_at: null })
+    .eq("contact_id", contactId)
+    .eq("status", "active");
+  if (error && !isResultsNotApplied(error)) log.warn({ code: error.code }, "inbound: could not stop the contact's sequence after a reply");
+}
+
+export type CounselorNotice = {
+  channel: "email" | "sms";
+  fromName: string;
+  /** An email address, or a phone number for a text. */
+  sender: string;
+  senderKnown: boolean;
+  studentName: string | null;
+  subject: string | null;
+  body: string;
+  contactId: string | null;
+  studentId: string | null;
+  log: Log;
+};
+
+/**
+ * A copy in the counselor's own inbox, so a reply is seen even when the app is
+ * closed. For an email, replying to it answers the family directly (Reply-To is
+ * the sender); for a text it only points back at the app, where they can text.
+ */
+export async function forwardToCounselor(svc: SupabaseClient, counselorId: string, m: CounselorNotice): Promise<boolean> {
   const { data } = await svc.from("profiles").select("email").eq("id", counselorId).maybeSingle();
   const to = bareAddress((data as Row | null)?.email as string | undefined);
   if (!to) return false;
@@ -362,10 +385,13 @@ async function forwardToCounselor(
     ? `${base}/dashboard/counselor/students/${m.studentId}`
     : `${base}/dashboard/counselor/contact-pipeline${m.contactId ? `?contact=${m.contactId}` : ""}`;
   const about = m.studentName ? ` about ${m.studentName}` : "";
+  const isText = m.channel === "sms";
   const template = {
-    heading: `${m.fromName} replied${about}`,
+    heading: `${m.fromName} replied${isText ? " by text" : ""}${about}`,
     paragraphs: [
-      ...(m.senderKnown ? [] : [`This came from ${m.sender}, which isn't an address you have on file for them. Check it's who you expect.`]),
+      ...(m.senderKnown
+        ? []
+        : [`This came from ${m.sender}, which isn't ${isText ? "a number" : "an address"} you have on file for them. Check it's who you expect.`]),
       ...m.body
         .split(/\n{2,}/)
         .map((p) => p.trim())
@@ -373,18 +399,21 @@ async function forwardToCounselor(
         .slice(0, 12),
     ],
     cta: { label: "Open in Meridies", url: link },
-    footnote: `You can reply to this email to answer ${m.fromName} directly. It's also on their timeline in Meridies.`,
+    footnote: isText
+      ? `It's on their timeline in Meridies, where you can text ${m.fromName} back.`
+      : `You can reply to this email to answer ${m.fromName} directly. It's also on their timeline in Meridies.`,
   };
   const res = await sendEmail({
     to,
-    subject: `Re: ${m.subject ?? `Your message${about}`}`.slice(0, 300),
+    subject: isText
+      ? `${m.fromName} texted you${about}`.slice(0, 300)
+      : `Re: ${m.subject ?? `Your message${about}`}`.slice(0, 300),
     html: brandedEmail(template),
     text: brandedText(template),
-    template: "family-reply-forward",
+    template: isText ? "family-text-forward" : "family-reply-forward",
     recipient_kind: "counselor",
     recipient_id: counselorId,
-    // A reply to this goes straight to the family, from the counselor's own mail.
-    replyTo: m.sender,
+    ...(isText ? {} : { replyTo: m.sender }),
     fromName: m.fromName,
     logger: m.log,
   });

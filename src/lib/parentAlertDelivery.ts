@@ -179,7 +179,7 @@ export async function deliverParentAlert(
       if (!r.phone) {
         attempts.push({ recipient: r.kind, channel: "sms", status: "unavailable", error: "no phone number on file" });
       } else {
-        const res = await sendSms({ ...columns, to: r.phone, body: smsBody(alert) });
+        const res = await sendSms({ ...columns, to: r.phone, body: smsBody(alert), counselorId: sender?.id ?? null });
         attempts.push({ recipient: r.kind, channel: "sms", status: res.status, error: res.error });
       }
     }
