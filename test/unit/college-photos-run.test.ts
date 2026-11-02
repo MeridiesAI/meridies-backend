@@ -231,6 +231,30 @@ test("a stored file now missing or no longer free loses its row and objects", as
   assert.equal(out.counts.deleted, 2);
 });
 
+const lookedUp = (slug: string, source: "site" | "commons-search", sha1: string): StoredPhoto => ({
+  ...stored(slug, "File:X.jpg", sha1),
+  source,
+  commons_title: source === "site" ? null : "File:X.jpg",
+});
+
+test("a photo a counselor's lookup stored survives Wikidata's file being rejected", async () => {
+  // Same files as the test above (Union's is gone from Commons, Lehigh's is non-commercial), but looked-up rows.
+  const s = fakeStore({ stored: [lookedUp("union", "site", "1".repeat(40)), lookedUp("lehigh", "commons-search", "2".repeat(40))] });
+  const out = await runCollegePhotoIngest(s.store, fakeDeps().deps, log, { only: [196866, 213543] });
+  assert.equal(out.status, "succeeded");
+  assert.equal(s.rows.size, 2);
+  assert.equal(s.objects.size, 4);
+  assert.equal(out.counts.deleted ?? 0, 0);
+});
+
+test("a looked-up photo also survives a school Wikidata has nothing for, but a none pick still removes it", async () => {
+  const s = fakeStore({ stored: [lookedUp("notinwikidata", "site", "4".repeat(40)), lookedUp("stonybrook", "commons-search", "5".repeat(40))] });
+  const out = await runCollegePhotoIngest(s.store, fakeDeps().deps, log, { only: [100654, 196097] });
+  assert.equal(s.rows.has("c-notinwikidata"), true);
+  assert.equal(s.rows.has("c-stonybrook"), false, "picks.csv says none for Stony Brook");
+  assert.equal(out.counts.deleted, 1);
+});
+
 test("a moved file keeps its photo instead of reading as deleted", async () => {
   const title = "File:College Hall, University of Pennsylvania.jpg";
   const penn = stored("penn", "File:College Hall Penn old name.jpg", await sha1Of(title));
