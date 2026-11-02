@@ -43,6 +43,7 @@ import {
 } from "./parentCopy.js";
 import { badRequest, fromPostgrest, unauthorized, unavailable } from "./errors.js";
 import { isCounselorApproved } from "./access.js";
+import { replyAddressFor } from "./replyRouting.js";
 import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
@@ -720,7 +721,15 @@ export async function dispatchDueMessages(
     const counselor = names.get(row.counselor_id) ?? { name: null, email: null };
     const outcome = await deliverMessage({ ...row, recipients }, counselor.name, logger, {
       studentName: studentNames.get(row.student_id) ?? null,
-      replyToFor: () => counselor.email ?? undefined,
+      replyToFor: async (r) =>
+        (await replyAddressFor(
+          r.kind === "guardian"
+            ? { counselorId: row.counselor_id, party: "parent", studentId: row.student_id, guardianId: r.id }
+            : { counselorId: row.counselor_id, party: "student", studentId: row.student_id },
+          logger
+        )) ??
+        counselor.email ??
+        undefined,
     });
     await recordOutcome(svc, row.id, outcome, logger);
     tally[outcome.status] += 1;

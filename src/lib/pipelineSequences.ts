@@ -29,6 +29,7 @@ import { zonedToUtc } from "./eventsHub.js";
 import { HttpError, fromPostgrest } from "./errors.js";
 import { hashToken, unsubscribeBaseUrl } from "./kpi/monthly.js";
 import { consumeRateLimit } from "./limits.js";
+import { replyAddressFor } from "./replyRouting.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
 
 type Row = Record<string, unknown>;
@@ -322,7 +323,13 @@ export async function dispatchDueSequences(svc: SupabaseClient, logger: Log, max
           template: "pipeline-sequence",
           recipient_kind: t.who === "parent" ? "guardian" : "student",
           idempotencyKey: `pseq:${id}:${step.position}:${t.who}`,
-          replyTo,
+          // A family's reply lands on the contact's timeline in the app; with
+          // routing off, in the counselor's own inbox.
+          replyTo:
+            (await replyAddressFor(
+              { counselorId, party: t.who === "parent" ? "parent" : "student", contactId: String(contact.id) },
+              logger as never
+            )) ?? replyTo,
           headers: { "List-Unsubscribe": `<${url}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
           logger: logger as never,
         });

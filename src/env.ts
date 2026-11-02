@@ -62,6 +62,10 @@ const envSchema = z.object({
   // Supabase stack runs one at http://127.0.0.1:54324) instead of Resend, so
   // invites can be opened without mailing anyone. Ignored in production.
   DEV_MAIL_URL: blankIsUnset(z.string().url().optional()),
+  // Tests only: send Resend API calls (sending, and fetching a received email)
+  // to this origin instead of api.resend.com, so the integration suite can stand
+  // in for Resend. Ignored in production (see `resendBase`).
+  RESEND_API_BASE: blankIsUnset(z.string().url().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 
@@ -93,6 +97,18 @@ const envSchema = z.object({
   // told to report status there, and its signature is computed over that URL.
   RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
   PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
+  // Two-way email (lib/replyRouting.ts, lib/inboundEmail.ts). A domain whose MX
+  // record points at Resend's receiving service (e.g. reply.meridiesai.com).
+  // Mail a counselor sends then carries Reply-To r-<token>@<domain>, and a
+  // reply lands in the app. Unset, Reply-To is the counselor's own address:
+  // the reply reaches their inbox, just not the app's timeline.
+  REPLY_DOMAIN: blankIsUnset(
+    z
+      .string()
+      .toLowerCase()
+      .regex(/^(?=.{4,253}$)([a-z0-9-]+\.)+[a-z]{2,}$/, "REPLY_DOMAIN must be a bare domain, e.g. reply.example.com")
+      .optional()
+  ),
   // Payment Tracker card payments (Stripe Connect; lib/stripePractice.ts). Both
   // optional: unset, GET /pipeline/stripe answers `configured: false` and the
   // other Stripe routes 503 `stripe_unavailable`. STRIPE_SECRET_KEY is the
@@ -175,6 +191,8 @@ export const hasImportWorker = Boolean(env.IMPORT_DATABASE_URL);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
 export const hasResend = Boolean(env.RESEND_API_KEY);
 export const devMailUrl = env.NODE_ENV === "production" ? undefined : env.DEV_MAIL_URL;
+/** Resend's API origin. Only a non-production process may point it elsewhere. */
+export const resendBase = ((env.NODE_ENV === "production" ? undefined : env.RESEND_API_BASE) ?? "https://api.resend.com").replace(/\/+$/, "");
 export const hasCronSecret = Boolean(env.CRON_SECRET);
 export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
 /** Card payments need both Stripe keys, the service role (webhook, pay page) and a public API origin (pay links). */

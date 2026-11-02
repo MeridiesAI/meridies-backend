@@ -29,6 +29,7 @@ import {
   type SmsStatus,
 } from "./email.js";
 import { alertFootnote } from "./parentCopy.js";
+import { replyAddressFor } from "./replyRouting.js";
 
 type Logger = {
   warn: (obj: unknown, msg?: string) => void;
@@ -75,7 +76,7 @@ export async function deliverParentAlert(
   alert: ParentAlertRow,
   logger?: Logger,
   /** Who is sending: their name signs the email and their address takes the replies. */
-  sender?: { name: string | null; email: string | null }
+  sender?: { id?: string; name: string | null; email: string | null }
 ): Promise<AlertDeliveryResult> {
   const recipients: Recipient[] = [];
 
@@ -143,13 +144,26 @@ export async function deliverParentAlert(
         attempts.push({ recipient: r.kind, channel: "email", status: "unavailable", error: "no email address on file" });
       } else {
         const template = templateFor(r.kind);
+        // A reply lands on the family's thread in the app (the alert's sender,
+        // this student, this guardian); otherwise in the sender's own inbox.
+        const replyTo =
+          (sender?.id
+            ? await replyAddressFor(
+                r.kind === "guardian"
+                  ? { counselorId: sender.id, party: "parent", studentId: alert.student_id, guardianId: r.id }
+                  : { counselorId: sender.id, party: "student", studentId: alert.student_id },
+                logger
+              )
+            : undefined) ??
+          sender?.email ??
+          undefined;
         const res = await sendEmail({
           ...columns,
           to: r.email,
           subject: alert.subject,
           html: brandedEmail(template),
           text: brandedText(template),
-          ...(sender?.email ? { replyTo: sender.email } : {}),
+          ...(replyTo ? { replyTo } : {}),
           fromName: sender?.name ?? null,
         });
         attempts.push({

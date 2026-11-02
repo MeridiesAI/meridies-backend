@@ -2,7 +2,9 @@
  * Delivery webhooks: a message's status can move past "sent".
  *
  *   POST /webhooks/resend          Resend (Svix-signed): delivered, bounced,
- *                                  complained, delayed
+ *                                  complained, delayed; and email.received, a
+ *                                  family's reply to a routed Reply-To address
+ *                                  (lib/inboundEmail.ts)
  *   POST /webhooks/twilio/status   Twilio StatusCallback (X-Twilio-Signature):
  *                                  sent, delivered, undelivered, failed
  *
@@ -14,7 +16,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { env } from "../env.js";
-import { unauthorized, unavailable } from "../lib/errors.js";
+import { HttpError, unauthorized, unavailable } from "../lib/errors.js";
+import { fetchReceivedEmail, handleInboundEmail } from "../lib/inboundEmail.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { serviceClient } from "../lib/supabase.js";
 
 type Status = "sent" | "delivered" | "bounced" | "failed";
@@ -122,6 +126,25 @@ export default async function webhookRoutes(app: FastifyInstance) {
     } catch {
       return reply.code(400).send({ error: "Invalid JSON" });
     }
+    if (event.type === "email.received") {
+      // A reply to a routed Reply-To. Reply routing is off without REPLY_DOMAIN,
+      // so there is nothing to place. Any failure after this answers non-2xx and
+      // Resend retries; the provider id makes a retry write nothing twice.
+      const receivedId = event.data?.email_id;
+      if (!env.REPLY_DOMAIN || !receivedId) return { ignored: true };
+      const svc = serviceClient();
+      if (!svc) throw unavailable("Set SUPABASE_SERVICE_ROLE_KEY to accept replies");
+      try {
+        const email = await fetchReceivedEmail(receivedId);
+        const result = await handleInboundEmail(svc, email, env.REPLY_DOMAIN, request.log);
+        return result.status === "stored" ? { stored: true, onTimeline: result.onTimeline } : { ignored: result.reason };
+      } catch (err) {
+        if (isResultsNotApplied(err as { code?: string })) throw new HttpError(503, "Replies aren't switched on yet", "messaging_unavailable");
+        request.log.error({ err: err instanceof Error ? err.message : String(err) }, "inbound email: could not be handled");
+        throw err;
+      }
+    }
+
     const mapped = resendStatus(String(event.type ?? ""));
     const id = event.data?.email_id;
     if (!mapped || !id) return { ignored: true };

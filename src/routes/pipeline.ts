@@ -30,6 +30,7 @@ import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
 import { guardianFootnote } from "../lib/parentCopy.js";
+import { replyAddressFor } from "../lib/replyRouting.js";
 import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { activeStudentMessage, isValidPhone, missingForActiveStudent } from "../lib/contactRules.js";
@@ -425,14 +426,19 @@ type InvoiceDraft = {
 /** The invoice email, the same for the preview and the send. A pay link adds a "Pay by card" button. */
 /**
  * Who a family hears from and where a reply goes, for every email a counselor
- * sends from the pipeline: their name on the From line, their own address on
- * Reply-To. Both come from the signed-in account, never from the request.
+ * sends from the pipeline: their name on the From line, and a Reply-To that
+ * lands the family's answer on this contact's timeline (the counselor's own
+ * address when reply routing isn't switched on). The contact was just read on
+ * the caller's own client, so the route is theirs to mint.
  */
-function senderFields(request: { profile: { full_name?: string | null; email?: string | null } }) {
-  return {
-    fromName: request.profile.full_name ?? null,
-    ...(request.profile.email ? { replyTo: request.profile.email } : {}),
-  };
+async function senderFields(
+  request: FastifyRequest,
+  contactId: string,
+  party: "parent" | "student"
+): Promise<{ fromName: string | null; replyTo?: string }> {
+  const routed = await replyAddressFor({ counselorId: request.auth.userId, party, contactId }, request.log);
+  const replyTo = routed ?? request.profile.email ?? undefined;
+  return { fromName: request.profile.full_name ?? null, ...(replyTo ? { replyTo } : {}) };
 }
 
 function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null, payLink: string | null = null) {
@@ -924,7 +930,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
                 : "Sent through Meridies.",
         };
         const sent = await sendEmail({
-          ...senderFields(request),
+          ...(await senderFields(request, id, t.who)),
           to: t.email,
           subject,
           html: brandedEmail(template),
@@ -1117,7 +1123,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null, payLink);
       if (b.send && to) {
         const sent = await sendEmail({
-          ...senderFields(request),
+          ...(await senderFields(request, id, contact.parent_email ? "parent" : "student")),
           to,
           subject: mail.subject,
           html: mail.html,
@@ -1171,7 +1177,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       };
       const contact = await loadContactRow(request, String(invoice.contact_id));
       const sent = await sendEmail({
-        ...senderFields(request),
+        ...(await senderFields(request, String(invoice.contact_id), String(contact.parent_email ?? "").trim().toLowerCase() === String(invoice.sent_to).trim().toLowerCase() ? "parent" : "student")),
         to: String(invoice.sent_to),
         subject: `Invoice ${String(invoice.number)} cancelled`,
         html: brandedEmail(template),
@@ -1244,7 +1250,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       };
       const mail = invoiceEmail(contact, draft, dto.number, request.profile.full_name ?? null, payLink);
       const sent = await sendEmail({
-        ...senderFields(request),
+        ...(await senderFields(request, String(contact.id), contact.parent_email ? "parent" : "student")),
         to,
         subject: mail.subject,
         html: mail.html,

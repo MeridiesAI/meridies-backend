@@ -21,7 +21,7 @@
  */
 
 import { insertDelivery } from "./deliveryInsert.js";
-import { devMailUrl, env, hasResend, hasTwilio } from "../env.js";
+import { devMailUrl, env, hasResend, hasTwilio, resendBase } from "../env.js";
 import { serviceClient } from "./supabase.js";
 
 type Logger = {
@@ -29,7 +29,7 @@ type Logger = {
   error: (obj: unknown, msg?: string) => void;
 };
 
-const RESEND_ENDPOINT = "https://api.resend.com/emails";
+const RESEND_ENDPOINT = `${resendBase}/emails`;
 
 export type OutboundResult = {
   /** Provider message id, when the provider accepted it. */
