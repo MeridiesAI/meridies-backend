@@ -13,7 +13,7 @@ import { hasAnswers } from "../lib/studentSetup.js";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, sendItemBack } from "../lib/newStudentIntake.js";
+import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, markWaived, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
   addressStatuses,
@@ -80,8 +80,13 @@ const patchInviteSchema = z
       .object({ requestId: z.string().trim().min(1).max(100), note: z.string().trim().min(1).max(500) })
       .strict()
       .optional(),
-    /** Everything received: the card becomes a student. */
+    /** Everything received (or waived below): the card becomes a student. */
     confirmed: z.literal(true).optional(),
+    /**
+     * Requests the counselor confirms over without receiving. They stay open
+     * for the student to finish; only valid with `confirmed`.
+     */
+    waive: z.array(z.string().trim().min(1).max(100)).max(30).optional(),
   })
   .strict();
 
@@ -152,13 +157,18 @@ async function onboardingStep(
       await sendItemBack(request, { id, acceptedBy: inv.acceptedBy }, String(task.id), String(task.title), body.sendBack.note);
     }
   } else if (body.confirmed) {
-    if (!canConfirm({ status: inv.status, requests: inv.intakeRequests })) {
+    if (!canConfirm({ status: inv.status, requests: inv.intakeRequests }, body.waive)) {
       throw conflict("Check off everything you asked for first.");
     }
-    const { error: updateError } = await request.db
-      .from("invitations")
-      .update({ confirmed_at: new Date().toISOString() })
-      .eq("id", id);
+    // The waiver is stored with the confirmation, in one write: nothing is left half-marked.
+    const update: Record<string, unknown> = { confirmed_at: new Date().toISOString() };
+    if (body.waive?.length) {
+      update.intake_requests = markWaived(
+        Array.isArray(row.intake_requests) ? (row.intake_requests as Record<string, unknown>[]) : [],
+        body.waive
+      );
+    }
+    const { error: updateError } = await request.db.from("invitations").update(update).eq("id", id);
     if (updateError) throw fromPostgrest(updateError);
   }
 
@@ -208,15 +218,15 @@ const bulkSchema = z
  * Where each student stands on the wizard's Profile step: answered, skipped, or
  * not yet. Read on the counselor's client; a student it can't read is null.
  */
-async function profileStatuses(
+async function profileInfo(
   request: FastifyRequest,
   studentIds: string[]
-): Promise<Map<string, "not-started" | "skipped" | "completed">> {
-  const out = new Map<string, "not-started" | "skipped" | "completed">();
+): Promise<Map<string, { status: "not-started" | "skipped" | "completed"; name: string | null }>> {
+  const out = new Map<string, { status: "not-started" | "skipped" | "completed"; name: string | null }>();
   if (studentIds.length === 0) return out;
   const { data, error } = await request.db
     .from("profiles")
-    .select("id, skipped:profile->profileSkipped, answers:profile->intakeAnswers")
+    .select("id, full_name, skipped:profile->profileSkipped, answers:profile->intakeAnswers")
     .in("id", studentIds);
   if (error) {
     request.log.warn({ code: error.code }, "profile status unreadable");
@@ -224,10 +234,12 @@ async function profileStatuses(
   }
   for (const p of data ?? []) {
     const row = p as Record<string, unknown>;
-    out.set(
-      String(row.id),
-      hasAnswers(row.answers) ? "completed" : row.skipped === true ? "skipped" : "not-started"
-    );
+    out.set(String(row.id), {
+      status: hasAnswers(row.answers) ? "completed" : row.skipped === true ? "skipped" : "not-started",
+      // The name the student signed up with: the one they and the roster see. The
+      // invitation's `full_name` is only what the counselor typed before they joined.
+      name: typeof row.full_name === "string" && row.full_name.trim() ? row.full_name.trim() : null,
+    });
   }
   return out;
 }
@@ -341,7 +353,7 @@ export default async function inviteRoutes(app: FastifyInstance) {
         invitationDeliveries(request, rows.map((r) => String(r.id))),
       ]);
 
-      const profileStatus = await profileStatuses(
+      const profileById = await profileInfo(
         request,
         rows.map((r) => (r.accepted_by ? String(r.accepted_by) : "")).filter(Boolean)
       );
@@ -351,12 +363,15 @@ export default async function inviteRoutes(app: FastifyInstance) {
       return rows.map((r) => {
         const detail = toInvitationDetail(r);
         const byRequest = items.get(detail.id);
+        const profile = r.accepted_by ? profileById.get(String(r.accepted_by)) : undefined;
         return {
           ...detail,
+          // Once they have joined, their own name wins over the one typed on the invitation.
+          acceptedByName: profile?.name ?? detail.acceptedByName,
           // The CSV columns this student came in with; null for anyone else.
           importData: imported.get(detail.id) ?? null,
           studentId: r.accepted_by ? String(r.accepted_by) : null,
-          profileStatus: r.accepted_by ? profileStatus.get(String(r.accepted_by)) ?? null : null,
+          profileStatus: profile?.status ?? null,
           delivery: deliveries.get(detail.id) ?? null,
           intakeItems: detail.intakeRequests.map((q) => {
             const item = byRequest?.get(q.id) ?? null;

@@ -12,6 +12,10 @@ const REVIEWED = [
   // lib/eventsDiscovery.ts: the weekly job acts for no counselor; it writes only Meridies-wide hub_events
   // rows from colleges' public pages. routes/events.ts: "Refresh events" runs inside an approved
   // counselor's own request (requireRole) and writes only those same public rows.
+  // routes/collegesV10.ts: "Look up info & photo" (POST /:id/lookup) runs inside an approved counselor's own
+  // request (authenticate refuses an unapproved counselor; requireRole("counselor") ran) after their RLS client
+  // loaded the college; the service role reads and writes only that one Meridies-wide college_photos row (and
+  // the photo bucket copy of it), and never replaces a photo.
   // lib/imports/files.ts, mapping.ts, stage.ts: the import worker inside an approved counselor's own
   // request (authenticate + requireRole ran), p_actor = that counselor; every function re-checks
   // private.can_manage_import (which asks the approval gate). lib/imports/retention.ts: the sweep acts
@@ -55,7 +59,7 @@ const REVIEWED = [
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
-  "routes/collegeIntel.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
+  "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
   "routes/internal.ts", "routes/kpi.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 

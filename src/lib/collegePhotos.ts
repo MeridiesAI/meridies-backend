@@ -32,7 +32,7 @@ export type CollegePhoto = {
   license: string;
   /** The license deed, when Commons names one. */
   licenseUrl: string | null;
-  /** The file's page on Wikimedia Commons. */
+  /** The file's page on Wikimedia Commons, or the college page a site photo came from. */
   sourceUrl: string;
   /** "File:..." on Commons. */
   title: string;
@@ -48,7 +48,8 @@ export type CollegePhotoRow = {
   license: string;
   license_url: string | null;
   source_url: string;
-  commons_title: string;
+  /** Null for a photo taken from the college's own site. */
+  commons_title: string | null;
 };
 
 export const PHOTO_COLUMNS =
@@ -87,7 +88,7 @@ export function toCollegePhoto(r: CollegePhotoRow | undefined | null, collegeNam
     license: r.license,
     licenseUrl: r.license_url ?? null,
     sourceUrl: r.source_url,
-    title: r.commons_title,
+    title: r.commons_title ?? "",
   };
 }
 

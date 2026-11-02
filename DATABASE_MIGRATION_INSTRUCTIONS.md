@@ -398,7 +398,7 @@ KPI / Time saved files (`20261027000001`-`06`) and the 10/28 files (`20261028000
 | `20261029000001_payment_credits.sql` | Overpayment as credit and Mark refunded answer 409 `payment_credits_unavailable`; invoices apply no credit |
 | `20261029000002_gpa_within_scale.sql` | The database's GPA-within-scale check (NOT VALID; the routes apply the same rule in code). Before validating it, list rows with `scripts/migrations/gpa-scale-violations.sql` |
 | `20261029000003_invitation_import_data.sql` | A CSV import's extra columns are dropped from the invitation; cards read `importData: null` |
-| `20261030000001_stripe_connect.sql` | Card payments: `GET /pipeline/stripe` reads `configured: false`, the other Stripe routes 503 `stripe_unavailable` (section below) |
+| `20261102000001_stripe_connect.sql` | Card payments: `GET /pipeline/stripe` reads `configured: false`, the other Stripe routes 503 `stripe_unavailable` (section below) |
 
 Apply them through the Apply migrations workflow (manual mode: apply on, confirm the newest version the plan lists) after a backup.
 
@@ -965,7 +965,7 @@ select count(*) = 3 from pg_trigger
  where tgname in ('student_colleges_stamp_decision_date', 'student_colleges_one_enrolled', 'student_colleges_notify_counselor');  -- true
 ```
 
-## Payment Tracker card payments (Stripe Connect): `20261030000001`
+## Payment Tracker card payments (Stripe Connect): `20261102000001`
 
 New tables `practice_stripe_accounts` (one connected Stripe account per practice; clients may only read
 their own practice's row, the API's service role writes it), `pipeline_pay_tokens` (sha256 of each pay

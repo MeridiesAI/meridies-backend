@@ -81,14 +81,27 @@ export function accountMismatch(existingAccountId: string | null, newSub: string
   return newSub !== existingAccountId;
 }
 
+/** What a counselor can add to a Microsoft grant after Connect. */
+export type MicrosoftAddOn = "calendar" | "onedrive";
+
+/**
+ * Personal accounts only: the scope Microsoft's OneDrive picker takes. Consenting to Graph
+ * `Files.Read` doesn't cover it (Microsoft answers AADSTS70000 until the person agrees to it), and
+ * a work account's directory has no such scope, so it is never part of Connect: it is asked for
+ * on its own (`add: "onedrive"`, at the consumers endpoint) once the account is known to be personal.
+ */
+export const ONEDRIVE_CONSUMER_SCOPE = "OneDrive.ReadOnly";
+
 /**
  * Microsoft's consent parameters. Connect asks for files; `add: "calendar"`
  * adds Calendars.ReadWrite to the same account (login_hint), which the
- * completion then checks is the connected one.
+ * completion then checks is the connected one; `add: "onedrive"` adds the
+ * picker's scope for a personal account.
  */
-export function microsoftAuthorizeParams(input: { add: GoogleAddOn | null; loginHint: string | null }): Record<string, string> {
+export function microsoftAuthorizeParams(input: { add: MicrosoftAddOn | null; loginHint: string | null }): Record<string, string> {
+  const scopes = microsoftScopesFor({ calendar: input.add === "calendar" });
   return {
-    scope: microsoftScopesFor({ calendar: input.add === "calendar" }).join(" "),
+    scope: (input.add === "onedrive" ? [...scopes, ONEDRIVE_CONSUMER_SCOPE] : scopes).join(" "),
     response_mode: "query",
     ...(input.loginHint ? { login_hint: input.loginHint } : { prompt: "select_account" }),
   };
@@ -107,20 +120,20 @@ export function googleAuthorizeParams(input: { add: GoogleAddOn | null; loginHin
 }
 
 /**
- * Microsoft identity platform v2. `Files.Read.All` rather than `Files.Read`
- * because the file the tracker watches is usually the student's own Word
- * document shared with the counselor, and `Files.Read` only reaches the
- * counselor's own drive. It is still a delegated, read-only permission a user
- * can consent to without an admin. It is not shippable as is (it reads every
- * file in the drive): Microsoft stays off in production until browsing moves
- * to Microsoft's picker with the narrowest scope that works (PR B).
+ * Microsoft identity platform v2. `Files.Read`: the counselor's own OneDrive
+ * only, never files other people shared with them or SharePoint sites (decided
+ * 2026-10-25; spec docs/superpowers/specs/2026-11-01-onedrive-picker-design.md).
+ * Counselors choose files in Microsoft's picker (`pickerTokenFor`), and a file
+ * shared with them is imported by saving a copy to their own OneDrive first.
+ * `Files.Read.All` is also what work tenants' default consent policy stops
+ * staff approving themselves (since August 2025); `Files.Read` is not.
  *
  * Calendar is asked for only when the counselor turns it on
  * (`?add=calendar`), like Google. `Mail.Send` is gone: nothing sent mail
  * through Graph (email goes through Resend).
  */
 export const MICROSOFT_SCOPE = {
-  files: "Files.Read.All",
+  files: "Files.Read",
   calendar: "Calendars.ReadWrite",
 } as const;
 
@@ -248,6 +261,10 @@ type TokenResponse = {
   scope?: string;
   id_token?: string;
   error?: string;
+  /** Microsoft: the AADSTS numbers behind `error`, e.g. 65001 (no consent). */
+  error_codes?: number[];
+  /** Microsoft: a finer reason under `invalid_grant`, e.g. `consent_required`. */
+  suberror?: string;
 };
 
 async function readTokenResponse(res: Response): Promise<TokenResponse> {
@@ -260,12 +277,37 @@ async function readTokenResponse(res: Response): Promise<TokenResponse> {
 
 // ---- 1. Consent URL ---------------------------------------------------------
 
+/** The Microsoft account kind recorded at Connect (`integrations.config`), or null before one. */
+async function microsoftAccountKind(ownerId: string): Promise<"personal" | "work-or-school" | null> {
+  const db = serviceClient();
+  if (!db) return null;
+  const { data } = await db
+    .from("integrations")
+    .select("config")
+    .eq("owner_id", ownerId)
+    .eq("provider", "microsoft")
+    .maybeSingle();
+  const kind = (data?.config as { microsoftAccount?: unknown } | null)?.microsoftAccount;
+  return kind === "personal" || kind === "work-or-school" ? kind : null;
+}
+
+/** Microsoft's endpoints for personal accounts: an add-on for one is asked and completed there. */
+const CONSUMERS_AUTHORIZE = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+const CONSUMERS_TOKEN = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+
 export async function beginAuthorization(
   userId: string,
   provider: SuiteProvider,
-  opts: { add?: GoogleAddOn | null } = {}
+  opts: { add?: MicrosoftAddOn | null } = {}
 ): Promise<string> {
+  if (provider === "google" && opts.add === "onedrive") throw badRequest("OneDrive is a Microsoft permission.");
   const { config, db } = configured(provider);
+  let authorizeUrl = config.authorizeUrl;
+  if (provider === "microsoft" && opts.add === "onedrive") {
+    // Work and school accounts' picker needs no extra consent, and their directory has no such scope.
+    if ((await microsoftAccountKind(userId)) !== "personal") throw new HttpError(409, ONEDRIVE_UNSUPPORTED, "onedrive_unsupported");
+    authorizeUrl = CONSUMERS_AUTHORIZE;
+  }
 
   const state = randomBytes(32).toString("base64url");
   const verifier = randomBytes(48).toString("base64url"); // 64 chars, within 43–128
@@ -294,7 +336,7 @@ export async function beginAuthorization(
     provider === "google"
       ? new URLSearchParams({
           ...base,
-          ...googleAuthorizeParams({ add: opts.add ?? null, loginHint: await connectedAccountEmail(userId, "google") }),
+          ...googleAuthorizeParams({ add: opts.add === "calendar" ? "calendar" : null, loginHint: await connectedAccountEmail(userId, "google") }),
         })
       : new URLSearchParams({
           ...base,
@@ -303,7 +345,7 @@ export async function beginAuthorization(
             loginHint: await connectedAccountEmail(userId, "microsoft"),
           }),
         });
-  return `${config.authorizeUrl}?${params.toString()}`;
+  return `${authorizeUrl}?${params.toString()}`;
 }
 
 /** The connected account's email, for login_hint and messages. Null when not connected. */
@@ -383,7 +425,10 @@ export async function completeAuthorization(
     throw badRequest("That sign-in took longer than ten minutes. Start again.");
   }
 
-  const res = await postForm(config.tokenUrl, {
+  // A grant already known to be personal (its add-ons, OneDrive's included) completes at the
+  // consumers endpoint, where its OneDrive consent was asked.
+  const tokenUrl = provider === "microsoft" && (await microsoftAccountKind(ownerId)) === "personal" ? CONSUMERS_TOKEN : config.tokenUrl;
+  const res = await postForm(tokenUrl, {
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectUri(provider),
@@ -590,8 +635,17 @@ export async function accessTokenFor(
   const inFlight = refreshing.get(key);
   if (inFlight) return inFlight;
 
-  const row = await readTokenRow(db, ownerId, provider, config.label);
+  let row = await readTokenRow(db, ownerId, provider, config.label);
   if (!opts.force && isFresh(row)) return liveFromRow(row);
+
+  // A picker-token exchange spends the same refresh token: let it finish and
+  // read the row it rotated, rather than spend the token it is spending.
+  const exchange = exchanges.get(key);
+  if (exchange) {
+    await exchange.catch(() => undefined);
+    row = await readTokenRow(db, ownerId, provider, config.label);
+    if (!opts.force && isFresh(row)) return liveFromRow(row);
+  }
 
   // Re-check after the read: another caller may have started meanwhile.
   const joined = refreshing.get(key);
@@ -687,6 +741,172 @@ async function refreshGrant(
     ...live,
     scopes: (update.scopes as string[] | undefined) ?? live.scopes,
     accessToken: token.access_token,
+  };
+}
+
+// ---- 4. The OneDrive picker's token -------------------------------------------------
+
+/**
+ * Microsoft's file picker accepts only OneDrive/SharePoint tokens, never the
+ * Graph token the imports use. The stored refresh token can be exchanged for
+ * one (Microsoft refresh tokens aren't tied to one service), so the picker's
+ * token comes from here and the browser never signs in to Microsoft itself
+ * (spec §3). The token reaches what the grant's `Files.Read` reaches and
+ * nothing else (no Graph, mail or calendar), lasts about an hour, and is
+ * never stored or logged.
+ *
+ * The exchange spends the refresh token, which Microsoft rotates, so it is
+ * serialized with `accessTokenFor`'s refreshes for the same grant and saves
+ * the rotated token compare-and-swap on the one it spent.
+ */
+export type PickerTarget =
+  | { kind: "personal" }
+  /** `resource`: the origin of the account's own OneDrive, https://<name>-my.sharepoint.com. */
+  | { kind: "work"; tenantId: string; resource: string };
+
+export type PickerToken = { token: string; expiresAt: string };
+
+const TENANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A work or school account's own OneDrive: the only SharePoint host a picker token is ever asked for. */
+export const WORK_ONEDRIVE_ORIGIN = /^https:\/\/[a-z0-9][a-z0-9-]{0,62}-my\.sharepoint\.com$/i;
+
+export const ONEDRIVE_UNSUPPORTED =
+  "Meridies can't open this account's OneDrive. Use a personal Microsoft account or one from a standard Microsoft 365 school or business.";
+export const PICKER_CONSENT_NEEDED =
+  "Your school or company needs to approve Meridies before you can pick OneDrive files. Ask your IT admin, or connect a personal Microsoft account.";
+
+/** Microsoft's documented picker setup: the token endpoint and scope for each kind of account. */
+export function pickerTokenRequest(target: PickerTarget): { tokenUrl: string; scope: string } {
+  if (target.kind === "personal") {
+    return {
+      tokenUrl: "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+      scope: "OneDrive.ReadOnly offline_access",
+    };
+  }
+  if (!TENANT_ID.test(target.tenantId)) {
+    throw new HttpError(409, "Microsoft needs reconnecting before OneDrive can open. Reconnect it under Files.", "microsoft_reconnect");
+  }
+  if (!WORK_ONEDRIVE_ORIGIN.test(target.resource)) throw new HttpError(409, ONEDRIVE_UNSUPPORTED, "onedrive_unsupported");
+  return {
+    tokenUrl: `https://login.microsoftonline.com/${target.tenantId.toLowerCase()}/oauth2/v2.0/token`,
+    scope: `${target.resource.toLowerCase()}/.default offline_access`,
+  };
+}
+
+/** AADSTS65001 (no consent), 65004 (consent declined), 90094 (an admin must approve). */
+const CONSENT_CODES = new Set([65001, 65004, 90094]);
+
+/** Microsoft refused for want of consent, not because the grant is dead. */
+export function consentRefusal(t: { error?: string; error_codes?: number[]; suberror?: string }): boolean {
+  return t.suberror === "consent_required" || t.error === "consent_required" || (t.error_codes ?? []).some((c) => CONSENT_CODES.has(c));
+}
+
+export const ONEDRIVE_CONSENT_NEEDED =
+  "Meridies needs your OK to open OneDrive's file picker. Allow OneDrive access, then pick again.";
+
+/** Internal: the exchange's invalid_grant, before pickerTokenFor knows whether the grant is alive. */
+const SCOPE_REFUSED = "picker_scope_refused";
+
+/** Picker-token exchanges in flight, one per grant (see `accessTokenFor`). */
+const exchanges = new Map<string, Promise<PickerToken>>();
+
+type WarnLog = { warn: (obj: object, msg: string) => void };
+
+export async function pickerTokenFor(ownerId: string, target: PickerTarget, log: WarnLog): Promise<PickerToken> {
+  const { config, db } = configured("microsoft");
+  const request = pickerTokenRequest(target);
+  const key = `microsoft:${ownerId}`;
+
+  const joined = exchanges.get(key);
+  if (joined) return joined;
+
+  const run = (async () => {
+    // A refresh already spending the refresh token finishes first; the exchange reads the row it left.
+    const refresh = refreshing.get(key);
+    if (refresh) await refresh.catch(() => undefined);
+    return exchangePickerToken(db, config, ownerId, request, log, false);
+  })().finally(() => {
+    exchanges.delete(key);
+  });
+  exchanges.set(key, run);
+  try {
+    return await run;
+  } catch (err) {
+    if (!(err instanceof HttpError) || err.code !== SCOPE_REFUSED) throw err;
+    // Is the grant itself alive? A Graph refresh answers that, and marks it broken if it isn't
+    // (microsoft_reconnect). Run only after the exchange has left `exchanges`, which
+    // accessTokenFor waits on.
+    await accessTokenFor(ownerId, "microsoft", { force: true });
+    throw target.kind === "personal"
+      ? new HttpError(409, ONEDRIVE_CONSENT_NEEDED, "onedrive_consent_needed")
+      : new HttpError(409, PICKER_CONSENT_NEEDED, "picker_consent_needed");
+  }
+}
+
+async function exchangePickerToken(
+  db: NonNullable<ReturnType<typeof serviceClient>>,
+  config: ProviderConfig,
+  ownerId: string,
+  request: { tokenUrl: string; scope: string },
+  log: WarnLog,
+  retried: boolean
+): Promise<PickerToken> {
+  const row = await readTokenRow(db, ownerId, "microsoft", config.label);
+  if (!row.refresh_token_enc) {
+    throw new HttpError(409, "Microsoft access expired and can't be renewed. Reconnect Microsoft.", "microsoft_reconnect");
+  }
+
+  const res = await postForm(request.tokenUrl, {
+    grant_type: "refresh_token",
+    refresh_token: decryptToken(String(row.refresh_token_enc)),
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+    scope: request.scope,
+  });
+  const token = await readTokenResponse(res);
+
+  if (!res.ok || !token.access_token) {
+    // Codes only: Microsoft's description can echo the request.
+    log.warn(
+      { provider: "microsoft", status: res.status, error: token.error ?? null, codes: token.error_codes ?? [], suberror: token.suberror ?? null },
+      "picker token refused"
+    );
+    if (consentRefusal(token)) throw new HttpError(409, PICKER_CONSENT_NEEDED, "picker_consent_needed");
+    // AADSTS500011: no OneDrive service in that directory.
+    if ((token.error_codes ?? []).includes(500011)) throw new HttpError(409, ONEDRIVE_UNSUPPORTED, "onedrive_unsupported");
+    if (token.error === "interaction_required") {
+      throw new HttpError(409, "Microsoft wants you to sign in again. Reconnect Microsoft under Files.", "microsoft_reconnect");
+    }
+    // Another refresher may have rotated the token this request spent: try once with the stored one.
+    if (!retried) {
+      const latest = await readTokenRow(db, ownerId, "microsoft", config.label).catch(() => null);
+      if (latest && latest.refresh_token_enc !== row.refresh_token_enc) {
+        return exchangePickerToken(db, config, ownerId, request, log, true);
+      }
+    }
+    // invalid_grant here is ambiguous: a dead grant, or (AADSTS70000) a scope the person never
+    // agreed to. pickerTokenFor tells them apart with a Graph refresh once this exchange is over.
+    if (token.error === "invalid_grant") throw new HttpError(409, "OneDrive scope refused", SCOPE_REFUSED);
+    throw unavailable("Microsoft couldn't open OneDrive just now. Try again shortly.");
+  }
+
+  if (token.refresh_token) {
+    // Only the refresh token is saved, over the one spent. The picker token is never stored,
+    // and the stored Graph access token stays as it is. A lost race keeps the newer row.
+    const { error } = await db
+      .from("integration_tokens")
+      .update({ refresh_token_enc: encryptToken(token.refresh_token) })
+      .eq("owner_id", ownerId)
+      .eq("provider", "microsoft")
+      .eq("refresh_token_enc", String(row.refresh_token_enc))
+      .select("owner_id");
+    if (error) log.warn({ provider: "microsoft" }, "rotated refresh token from a picker exchange wasn't saved");
+  }
+
+  return {
+    token: token.access_token,
+    expiresAt: new Date(Date.now() + (token.expires_in ?? 3600) * 1000).toISOString(),
   };
 }
 

@@ -23,6 +23,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
 import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
+import { dispatchDueBlasts } from "../lib/blasts.js";
 import { dispatchDueSequences } from "../lib/pipelineSequences.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { recoverExtractions } from "../lib/documentExtraction.js";
@@ -77,6 +78,28 @@ export default async function internalRoutes(app: FastifyInstance) {
           return reply.code(200).send({ ran: false, reason: "Apply 20261028000004_pipeline_email_sequences.sql" });
         }
         await beat("pipeline-sequences", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
+  /**
+   * Every 10-15 minutes: send the scheduled email blasts that are due
+   * (lib/blasts.ts). Each blast is claimed before it is sent, so overlapping
+   * runs cannot send one twice; a yearly blast moves itself a year on.
+   */
+  app.post(
+    "/blasts/dispatch",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "Scheduled blasts need the service role key" });
+      try {
+        const tally = await dispatchDueBlasts(svc, request.log);
+        await beat("email-blasts", true, undefined, request.log);
+        return { ran: true, ...tally };
+      } catch (err) {
+        await beat("email-blasts", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;
       }
     }

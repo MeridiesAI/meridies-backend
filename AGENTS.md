@@ -88,6 +88,7 @@ src/
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
+│   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
@@ -227,7 +228,7 @@ invoices apply no credit, `paymentCreditsReady`), the GPA-within-scale check
 `scripts/migrations/gpa-scale-violations.sql`, fix those rows, then VALIDATE
 it in a later migration; the routes apply the same rule in code either way),
 CSV import extras on invitations (`20261029000003`) and card payments
-(`20261030000001`: without it `GET /pipeline/stripe` answers `configured:
+(`20261102000001`: without it `GET /pipeline/stripe` answers `configured:
 false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`).
 None is in `REQUIRED_SCHEMA`; each feature degrades without its file, never
 500s (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
@@ -440,7 +441,7 @@ forget it.
   PostgREST, under a lock on the package. `balanceCents` stays billed minus
   paid and Outstanding stays what open invoices ask for.
 - **Card payments are Stripe Connect, and the practice is paid directly**
-  (`20261030000001`; `lib/stripeConnect.ts`, `lib/stripePractice.ts`,
+  (`20261102000001`; `lib/stripeConnect.ts`, `lib/stripePractice.ts`,
   `routes/pipelineStripe.ts`, `routes/pay.ts`, `routes/stripeWebhook.ts`).
   Each practice (a firm, or a solo counselor; the practice id is
   `coalesce(firm_id, counselor_id)`, the same as an invoice's `number_scope`)
@@ -495,19 +496,39 @@ forget it.
   and the pay page answer 503, and the tracker is what it was. Not in
   `REQUIRED_SCHEMA`.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
-  `lib/gpaCheck.ts`, `20261029000002`): unweighted up to the number the scale
-  names, weighted up to it plus one; a scale with no number is checked by the
-  older 0-10 / 0-110 range only. `PATCH /student-page/:id/info` and `PUT
+  `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
+  the number the scale names, weighted up to it plus one, or up to 110 on a
+  100-point scale (honors and AP points); a scale with no number is checked
+  by the older 0-10 / 0-110 range only. The counselor picks the scale on the
+  Overview card (`gpaScale` on `PATCH /student-page/:id/info`: `4.0`, `5.0`,
+  `10`, `100`), refused when the GPAs on file wouldn't fit it. A save that
+  touches a GPA carries the scale on record into its upsert, because the
+  database checks an upsert's insert row before it finds the existing one. `PATCH /student-page/:id/info` and `PUT
   /academics` answer 400 in words; the import marks an over-scale GPA
   "Needs a fix" (flag `gpa_over_scale`) against the file's scale, else the
   student's scale on record, and holds a typed fix to the same rule, because
   one refusal at commit would fail the whole save.
-- **Email blast audiences** (`routes/blasts.ts`): `high-school` is the
-  students' own high school (`profiles.high_school`, any case;
-  `highSchools` on `GET /blasts/audiences`); `school` is a college on their
-  lists (AxIS's "students applying to"). A high-school blast is stored as a
-  `selection` with the school in its label, because `email_blasts`' CHECK
-  predates the kind; its recipients are frozen either way.
+- **Email blasts** (`routes/blasts.ts`, `lib/blasts.ts`, `20261030000001`). An audience is three filters that
+  combine (class year, a college on the students' lists, an application status; a college and a status are read
+  from the same list row), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
+  `students` (their sign-in email) or `parents` (guardians with an address and alerts on, one email per address,
+  a student nobody can reach kept as a skipped row). `{first}` and `{me}` are filled per recipient (the guardian's
+  first name for a parent); a body that doesn't already greet gets "Hi <first>,". `POST /blasts` sends now, or
+  with `scheduledFor` (an instant, 1 minute to 5 years ahead) and optionally `repeatYearly` queues a `scheduled`
+  row; `GET /blasts?status=scheduled` is the Queued list and `POST /blasts/:id/cancel` takes one out. **The cron**
+  is `POST /internal/blasts/dispatch` (`CRON_SECRET`, every 10-15 minutes; heartbeat `email-blasts`): it claims a
+  due row (`claimed_at`, reclaimed after 10 minutes), re-resolves recipients from the counselor's live roster at
+  send time (the row stores filters and ticked ids, never who the people are), gives Resend a stable
+  idempotency key (`blast:<id>[:<due time>]:<address>`), and a counselor gets at most 10 scheduled runs a day
+  (`BLAST_DAILY_CAP`, an hour's wait when over). A yearly blast writes each run as its own `email_blasts` row
+  and moves its own `scheduled_for` a year on in the counselor's time zone (Feb 29 becomes Feb 28); a year
+  where nobody can be reached is skipped, a one-off that reaches nobody ends `failed`. **Deploy order:** either;
+  not in `REQUIRED_SCHEMA`. `scheduleReady` (a zero-row probe) makes a scheduled blast answer `503
+  blast_schedule_unavailable` and the cron answer nothing to do until it is applied; a blast sent now still
+  works (stored as a `selection`). Then add the Railway cron service
+  (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/internal/blasts/dispatch"`, every 10-15
+  minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. Tests:
+  `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
@@ -775,7 +796,18 @@ the database (`20261010*`):
   (`PATCH /invites/:id { receive }`, which sets the request's `provided`) or
   sends it back with a note (`{ sendBack }`: the task returns to the student,
   the files come off it, `submitted_at` clears), then confirms (`{ confirmed:
-  true }`, only with every request received). A student never sets an intake
+  true }`, only with every request received, or named in `waive`: `{ confirmed: true, waive: [requestId, ...] }`
+  confirms over requests the counselor doesn't need yet; every open request must be received or waived, and an
+  id nobody asked for refuses the confirm). The waiver is **stored, never inferred**: in the same write that sets
+  `confirmed_at`, each waived request gets `"waived": true` in `invitations.intake_requests` (`markWaived`). It stays
+  an open task, never marked received, and `GET /me/intake` names those requests as `waivedRequestIds`
+  (`my_waived_requests()`), so the student's red card stays for those only; `submit_intake()` takes their Submit after
+  confirmation while a waived request is still open (`20261101000001`), and refuses it as before for anyone else
+  confirmed (a legacy backfill or a request removed after its task was made also leave open tasks, and must stay
+  closed). The counselor's notice about such a Submit links to the student's page, since the Building card is gone.
+  Before that migration a Submit answers 400 "Your counselor already has everything" and `waivedRequestIds` reads
+  empty. `GET /invites/building` carries `acceptedByName`, the name the student signed up
+  with, which the app prefers to the invitation's `fullName` (what the counselor typed before they joined). A student never sets an intake
   task `complete` (the guard trigger). `GET /invites/building` lists
   invitations with `confirmed_at` null, each request with its status, files,
   answer and AxIS's read.
@@ -940,8 +972,11 @@ Two layers, and they are not redundant:
    detected by its `RAILWAY_*` variables, and in development, 0 elsewhere in
    production with an error at boot), so the X-Forwarded-For entries a client
    writes to the left of the edge's own are ignored by the limiter and the
-   request log. Never set it back to `true`: that takes the leftmost,
-   client-written entry, and a fresh header per request was a fresh bucket.
+   request log. The count is handed to Fastify as a function
+   (`trustProxyOption`), because Fastify 5.12 reads a bare number as "trust
+   nothing" (every caller in the edge's one bucket). Never set it back to
+   `true`: that takes the leftmost, client-written entry, and a fresh header
+   per request was a fresh bucket.
    Behind Cloudflare and Railway set 2 (a request carrying Cloudflare headers
    while one hop is trusted logs that once): too few hops puts every caller in
    the proxy's one bucket.
@@ -1268,7 +1303,10 @@ there).
   202, 409 while running, 503 naming the migration before it is applied;
   lease `college-photos`, 3 hours; `ingest_runs` + `job_heartbeats`), or
   `npx tsx --env-file=.env scripts/ingest/college-photos.ts [--limit N]
-  [--only <unitids>] [--dry-run]`. It re-checks every stored file and
+  [--only <unitids>] [--dry-run]`, or the **College photos** workflow
+  (`.github/workflows/college-photos.yml`: monthly and by hand, behind the
+  `production-db` approval; it reads the project's keys from the Management API
+  with `SUPABASE_ACCESS_TOKEN` at run time). It re-checks every stored file and
   downloads only changed ones (same sha1: nothing downloaded, the text
   refreshed under the rule above); a deleted or relicensed file loses its row and objects. A
   Wikidata or picks failure ends the run before anything changes, and
@@ -1290,6 +1328,24 @@ there).
   or `/internal/status` reads the job overdue. `20261024000071` (the review
   queue and `ingest_runs.counts`) goes in after it, either order with the
   code; not in `REQUIRED_SCHEMA` either.
+- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookup.ts`, `20261031000002`, `…000003`): a
+  counselor's button on a College Search card. It reads the college's own site (`fetchPageMeta` in `lib/links.ts`:
+  title, description, og:image, through the same pinned opener) and, for a school with **no photo at all**, stores
+  one: first a Commons file found by the school's name (`titleNamesCollege`: every word of the name must be a **whole
+  word** of the file's title, bar *the/of/at/in/and/for* and *university/college/institute/school*; *State* and
+  *A&M* count as part of the name; the title may leave out "university"/"college" but may not name a different kind
+  (Boston College is not Boston University) or say *State* when the name doesn't (Ohio University is not Ohio
+  State); then `choosePhoto`'s rules; `source = 'commons-search'`), else the site's og:image from the college's own
+  host or a subdomain (JPEG, 3 MB, at least 800 px wide, landscape; `source = 'site'`, `license = 'University
+  website'`, credit = the school, `source_url` = the page, no Commons title; one copy serves both sizes since there
+  is no image library). It never replaces a photo and is not behind the 7-day review gate. The monthly loader
+  leaves these two sources alone when Wikidata has nothing **or its file is rejected** (`isLookupSource`) and
+  replaces them when Wikidata or a pick offers a usable photo; only a `none` pick removes one. `…000003` makes the
+  database enforce the title rule: a `site` row has no Commons title, every other source has a `File:` title. 30 an
+  hour per counselor; 400 with no website on file; 503 only without the service-role key or when the
+  `college_photos` table is missing (before `…000002` the refused insert is caught and the counselor reads "No usable
+  picture was found"). Tests: `test/unit/college-lookup.test.ts` (the lookalike table), `college-photos-run.test.ts`
+  (the loader keeps looked-up rows), `test/integration/college-photos.test.mjs` (the CHECK).
 - **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
   review gate, the version check, text holds, pins, the store without the
   migration, and `csvCell`), `test/integration/college-photos.test.mjs`
@@ -1781,8 +1837,8 @@ refused refresh re-reads the row first — if another replica already rotated it
 that token is used — and only then marks the grant `error` so the card says
 "reconnect".
 
-After connect: `GET /integrations/:provider/files?q=` lists OneDrive files (and, for Google, only what the app
-can already reach, below); `POST /integrations/:provider/files/import` copies one into the
+After connect: `GET /integrations/google/files?q=` lists what the app can already reach (below; OneDrive has
+no list, `/microsoft/files` answers 410 `use_picker`); `POST /integrations/:provider/files/import` copies one into the
 student's folder (Storage upload on the caller's client, `source:
 'integration'`, `external_*` pointer kept). `POST /meetings` (and `PATCH`) with
 `createConference: true` creates the event on the counselor's calendar with a
@@ -1794,17 +1850,34 @@ per Retry-After (twice, 10 s at most each); past that the check is
 `provider_rate_limited` and the tracker answers 429 instead of a "no activity"
 verdict.
 
-**Microsoft stays off in production** (no `MICROSOFT_*` vars) until browsing
-moves to Microsoft's picker with the narrowest scope that works (PR B, after
-the `Files.ReadWrite.Selected` vs `Files.Read` test). Today Connect asks for
-`openid email offline_access User.Read Files.Read.All`; Calendar
-(`Calendars.ReadWrite`) only with `?add=calendar`; no `Mail.Send`. A refresh
-asks for Calendar only when the grant already has it. Hardening in place:
+**Microsoft is the counselor's own OneDrive, picked in Microsoft's picker** (spec
+`docs/superpowers/specs/2026-11-01-onedrive-picker-design.md`). Connect asks for
+`openid email offline_access User.Read Files.Read` (own drive only; never
+`Files.Read.All`, which work tenants' default consent policy also stops staff
+approving); Calendar (`Calendars.ReadWrite`) only with `?add=calendar`; no
+`Mail.Send`. A refresh asks for Calendar only when the grant already has it.
+**The picker's token** comes from `GET /integrations/microsoft/picker-session`
+(counselor, 20 a minute, `Cache-Control: no-store`): it reads `/me/drive`,
+picks the picker by `driveType` (`pickerSetup`: personal posts to
+`https://onedrive.live.com/picker`; work only to the drive's own
+`https://<name>-my.sharepoint.com` origin, anything else 409
+`onedrive_unsupported`), and exchanges the stored refresh token for a
+OneDrive token (`pickerTokenFor`: personal at the `consumers` endpoint for
+`OneDrive.ReadOnly`, work at the directory kept at Connect for
+`<origin>/.default`). The exchange is serialized with `accessTokenFor`'s
+refreshes (the `exchanges` map), saves only the rotated refresh token,
+compare-and-swap, and never stores or logs the picker token. Missing consent
+(AADSTS65001/65004/90094) is 409 `picker_consent_needed` and leaves the grant
+alone; 500011 is `onedrive_unsupported`; `interaction_required` is
+`microsoft_reconnect`. **Imports are own-drive only:** a Microsoft item is
+always read at `/me/drive/items/{id}` (the client's `driveId` is ignored, the
+tracker reads the same path), and a 403/404 or a shortcut (`remoteItem`) is
+422 `shared_not_supported` ("save a copy to your OneDrive, then pick the
+copy"). Hardening in place:
 a reconnect as another account (Graph `/me` id) is 409
 `microsoft_other_account`, and an unreadable identity is refused; a rotated
 refresh token is saved compare-and-swap on the one it replaced, and the loser
-of a race uses the stored row; the OneDrive search literal is `''`-escaped
-and fully percent-encoded (`graphSearchUrl`); no search words, file names or
+of a race uses the stored row; no file names or
 fetch URLs reach a log or an error (`quietFetch`); `/content` redirects are
 followed by hand (`followDownload`: HTTPS, `MICROSOFT_DOWNLOAD_HOSTS` exact or
 dot-boundary suffix, at most 2, no Authorization after Graph); the bytes must
@@ -1815,7 +1888,9 @@ Docs/Sheets/Slides export); `DELETE
 /integrations/microsoft` returns `consentUrl` (account.live.com for the
 personal tenant `9188040d-…`, else My Apps, from the tenant kept in
 `integrations.config` at connect). `MICROSOFT_PICKER_MAX_FILES` (default 10)
-is served as `maxFiles` on `/integrations/providers`.
+is served as `maxFiles` on `/integrations/providers` and the picker session.
+Tests: `test/unit/onedrive-picker.test.ts`, `test/unit/microsoft-connector.test.ts`,
+`test/integration/onedrive-picker.test.mjs`.
 
 **Google is picked files only** (spec `docs/superpowers/specs/2026-10-14-google-connector-design.md`). Connect asks for
 `openid`, `email` and `drive.file`; turning Calendar on (`GET /integrations/google/authorize?add=calendar`) adds
@@ -2991,7 +3066,7 @@ npm run dev               # http://localhost:4000
 | `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 | `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |
-| `STRIPE_SECRET_KEY` | Optional; the Meridies platform account's secret key (`sk_live_…`, or a restricted `rk_live_…`). Payment Tracker card payments (Stripe Connect). Without it, or without the next one, the service role key, `PUBLIC_API_URL` or migration `20261030000001`, `GET /pipeline/stripe` answers `configured: false` and the other Stripe routes 503 `stripe_unavailable` |
+| `STRIPE_SECRET_KEY` | Optional; the Meridies platform account's secret key (`sk_live_…`, or a restricted `rk_live_…`). Payment Tracker card payments (Stripe Connect). Without it, or without the next one, the service role key, `PUBLIC_API_URL` or migration `20261102000001`, `GET /pipeline/stripe` answers `configured: false` and the other Stripe routes 503 `stripe_unavailable` |
 | `STRIPE_WEBHOOK_SECRET` | Optional; signing secret (`whsec_…`) of the Connect webhook endpoint `<PUBLIC_API_URL>/webhooks/stripe` ("Events on connected accounts": `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.refund.updated`, `account.updated`, `account.application.deauthorized`) |
 | `PUBLIC_API_URL` | This API's public origin: Twilio's status callback, the access review link, and card payments' pay links (`/pay/<token>`) |
 

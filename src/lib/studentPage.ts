@@ -18,7 +18,7 @@ import type { FastifyBaseLogger, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { rankPercentile, type RankRead } from "./classRank.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "./errors.js";
-import { fourPointGpa } from "./gpa.js";
+import { fourPointGpa, GPA_SCALE_CHOICES } from "./gpa.js";
 import { assertGpaFitsScale } from "./gpaCheck.js";
 import { resultsUnavailable } from "./resultsAvailability.js";
 import { loadIntakeFills, questionnaireFields, type QuestionnaireField } from "./intakeFills.js";
@@ -245,8 +245,11 @@ export const infoPatchSchema = z
       .trim()
       .regex(/^(20\d\d)?$/, "Use a four-digit year")
       .nullable(),
-    gpaWeighted: z.number().min(0).max(110).nullable(),
-    gpaUnweighted: z.number().min(0).max(110).nullable(),
+    // Past 110 the scale check answers in words (gpaOverScale).
+    gpaWeighted: z.number().min(0).max(1000).nullable(),
+    // The counselor's pick on the Overview card; other scales arrive by import or the questionnaire.
+    gpaScale: z.enum(GPA_SCALE_CHOICES).nullable(),
+    gpaUnweighted: z.number().min(0).max(1000).nullable(),
     classRank: optionalText(80),
     sat: z.number().int().min(400).max(1600).nullable(),
     act: z.number().int().min(1).max(36).nullable(),
@@ -309,15 +312,18 @@ export async function applyInfoPatch(
   const academics: Row = {};
   if (patch.gpaWeighted !== undefined) academics.gpa_weighted = patch.gpaWeighted;
   if (patch.gpaUnweighted !== undefined) academics.gpa_unweighted = patch.gpaUnweighted;
+  if (patch.gpaScale !== undefined) academics.gpa_scale = patch.gpaScale;
   if (patch.classRank !== undefined) academics.class_rank = patch.classRank;
   if (patch.sat !== undefined) academics.sat_superscore = patch.sat;
   if (patch.act !== undefined) academics.act_composite = patch.act;
   if (patch.rigor !== undefined) academics.rigor_context = patch.rigor;
   if (Object.keys(academics).length > 0) {
-    await assertGpaFitsScale(db, student, {
+    const scale = await assertGpaFitsScale(db, student, {
       ...(patch.gpaWeighted !== undefined ? { gpaWeighted: patch.gpaWeighted } : {}),
       ...(patch.gpaUnweighted !== undefined ? { gpaUnweighted: patch.gpaUnweighted } : {}),
+      ...(patch.gpaScale !== undefined ? { gpaScale: patch.gpaScale } : {}),
     });
+    if (scale !== undefined && academics.gpa_scale === undefined) academics.gpa_scale = scale;
     const { error } = await db
       .from("student_academics")
       .upsert({ ...academics, student_id: student }, { onConflict: "student_id" });

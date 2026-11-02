@@ -11,7 +11,7 @@
  * `?stripe=return`, where the Payment Tracker opens itself.
  *
  * Not switched on is calm: without the Stripe keys, the service role, a
- * PUBLIC_API_URL or the migration (20261030000001), GET answers
+ * PUBLIC_API_URL or the migration (20261102000001), GET answers
  * `configured: false` and Connect 503 `stripe_unavailable`.
  *
  * The account row is written with the service role (clients have no write

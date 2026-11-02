@@ -14,7 +14,7 @@
  * refunded automatically. An overpayment recorded before credits existed
  * shows as credit too, so it never reads as more to bill.
  *
- * Card payments (20261030000001): a payment taken through an invoice's Stripe
+ * Card payments (20261102000001): a payment taken through an invoice's Stripe
  * pay link is recorded by the webhook with `via_stripe`, and what the practice
  * refunds in Stripe lands as `refunded_cents`. A refunded amount stops
  * counting: it comes off the payment's held credit first, then off what it
@@ -68,6 +68,8 @@ export type AccountDTO = {
   packageName: string;
   totalCents: number;
   installments: number;
+  /** How long the package runs, in months; null when nobody said. */
+  durationMonths: number | null;
   invoices: InvoiceDTO[];
   payments: PaymentDTO[];
   refunds: RefundDTO[];
@@ -221,6 +223,7 @@ export function deriveAccount(pkg: Row, invoiceRows: Row[], paymentRows: Row[], 
     packageName: String(pkg.package_name),
     totalCents,
     installments,
+    durationMonths: pkg.duration_months == null ? null : num(pkg.duration_months),
     invoices: out,
     payments: payments.reverse(),
     refunds,
@@ -289,4 +292,20 @@ export function formatUsd(cents: number): string {
     currency: "USD",
     minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
   });
+}
+
+/** "6 months", "1 year", "2 years", "18 months". */
+export function describeDuration(months: number): string {
+  if (months % 12 === 0) {
+    const years = months / 12;
+    return `${years} year${years === 1 ? "" : "s"}`;
+  }
+  return `${months} month${months === 1 ? "" : "s"}`;
+}
+
+/** "Payment 2 of 6 for Senior package ($3,000 over 6 months)"; null for a one-payment package. */
+export function planLine(a: Pick<AccountDTO, "packageName" | "totalCents" | "installments" | "durationMonths">, nth: number): string | null {
+  if (a.installments <= 1) return null;
+  const span = a.durationMonths ? ` over ${describeDuration(a.durationMonths)}` : "";
+  return `Payment ${Math.min(nth, a.installments)} of ${a.installments} for ${a.packageName} (${formatUsd(a.totalCents)}${span}).`;
 }

@@ -61,7 +61,8 @@ const body = z
   .object({
     category: z.enum(CATEGORIES),
     title: z.string().trim().min(1).max(200),
-    url: z.string().trim().url().max(2000),
+    // Rendered as a link in the library: http(s) only (zod's .url() accepts javascript: and data:).
+    url: z.string().trim().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address"),
     description: z.string().trim().max(1200),
     opensOn: isoDate.nullable(),
     closesOn: isoDate.nullable(),

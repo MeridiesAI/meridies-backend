@@ -30,3 +30,17 @@ const db = await rest(c.token, "PATCH", `/rest/v1/student_academics?student_id=e
 check("the database refuses 9.9 on 4.0, even through PostgREST", db.status >= 400 && /gpa_within_scale/.test(JSON.stringify(db.body)), JSON.stringify(db.body));
 const ok = await rest(c.token, "PATCH", `/rest/v1/student_academics?student_id=eq.${s.id}`, { gpa_weighted: 4.6 });
 check("and takes 4.6", ok.status < 300, JSON.stringify(ok.body));
+
+// The counselor picks the scale on the Overview card (PATCH /student-page/:id/info gpaScale).
+r = await call(c.token, "PATCH", `/student-page/${s.id}/info`, { gpaScale: "100" });
+check("the counselor can set a 100-point scale", r.status === 200 && r.body.gpaScale === "100", JSON.stringify(r.body.gpaScale));
+r = await call(c.token, "PATCH", `/student-page/${s.id}/info`, { gpaWeighted: 107 });
+check("107 weighted on a 100-point scale is accepted", r.status === 200, JSON.stringify(r.body.error ?? r.body.gpaWeighted));
+r = await call(c.token, "PATCH", `/student-page/${s.id}/info`, { gpaWeighted: 111 });
+check("111 weighted on a 100-point scale is refused", r.status === 400 && /at most 110/.test(r.body.error ?? ""), JSON.stringify(r.body));
+r = await call(c.token, "PATCH", `/student-page/${s.id}/info`, { gpaScale: "4.0" });
+check("a scale the current GPA doesn't fit is refused", r.status === 400 && /4.0 scale/.test(r.body.error ?? ""), JSON.stringify(r.body));
+r = await call(c.token, "PATCH", `/student-page/${s.id}/info`, { gpaScale: "12-point" });
+check("only the scales the card offers", r.status === 400, JSON.stringify(r.body));
+const db100 = await rest(c.token, "PATCH", `/rest/v1/student_academics?student_id=eq.${s.id}`, { gpa_weighted: 109 });
+check("the database takes 109 weighted on a 100-point scale", db100.status < 300, JSON.stringify(db100.body));

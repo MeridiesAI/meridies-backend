@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Nothing here writes to the repository: a read-only token, as the other two workflows carry.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Typecheck, build, unit tests

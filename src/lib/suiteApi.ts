@@ -16,9 +16,13 @@ import {
   accessTokenFor,
   GOOGLE_SCOPE,
   MICROSOFT_SCOPE,
+  MSA_TENANT_ID,
+  ONEDRIVE_UNSUPPORTED,
   providerLabel,
   requireScope,
+  WORK_ONEDRIVE_ORIGIN,
   type LiveToken,
+  type PickerTarget,
   type SuiteProvider,
 } from "./oauth.js";
 
@@ -33,6 +37,7 @@ const GOOGLE_FILES = { name: GOOGLE_FILE_SCOPE, what: "reading the files you pic
 const GOOGLE_CALENDAR = { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calendar", code: "calendar_not_enabled" };
 const MS_FILES_SCOPE = MICROSOFT_SCOPE.files;
 const MS_CALENDAR_SCOPE = MICROSOFT_SCOPE.calendar;
+const MS_FILES = { name: MS_FILES_SCOPE, what: "reading OneDrive", code: "files_not_granted" };
 
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
 // Not "." or "..": encodeURIComponent keeps dots, and URL parsing would resolve them as path segments.
@@ -256,78 +261,57 @@ const GRAPH_SELECT =
   "id,name,size,webUrl,lastModifiedDateTime,file,folder,package,parentReference,lastModifiedBy,remoteItem";
 
 /**
- * A OneDrive name search. The words go inside an OData string literal, so a
- * quote is doubled (`'` -> `''`) and then the whole literal is
- * percent-encoded, quotes and parentheses included: `o'brien` and `') or (`
- * stay words to search for, never syntax.
+ * A OneDrive item, always in the counselor's own drive. `Files.Read` reaches
+ * nothing else, so the client's drive id is never used to build the URL:
+ * a file from someone else's drive simply isn't found there.
  */
-export function graphSearchUrl(q: string): string {
-  const literal = q.replace(/'/g, "''");
-  const encoded = encodeURIComponent(literal).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `https://graph.microsoft.com/v1.0/me/drive/root/search(q='${encoded}')?$top=50&$select=${GRAPH_SELECT}`;
+function graphItemUrl(fileId: string): string {
+  return `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(fileId)}`;
 }
 
-function graphItemUrl(fileId: string, driveId: string | null | undefined): string {
-  const base = driveId
-    ? `https://graph.microsoft.com/v1.0/drives/${encodeURIComponent(driveId)}`
-    : "https://graph.microsoft.com/v1.0/me/drive";
-  return `${base}/items/${encodeURIComponent(fileId)}`;
+export const SHARED_NOT_SUPPORTED =
+  "This file is shared with you, so Meridies can't open it. Save a copy to your OneDrive, then pick the copy.";
+
+/** What Microsoft's picker needs to know about the counselor's OneDrive. */
+export type OneDriveInfo = { driveId: string; driveType: string; webUrl: string | null };
+
+export async function oneDriveInfo(ownerId: string, log: Log): Promise<OneDriveInfo> {
+  const { res } = await call(
+    ownerId,
+    "microsoft",
+    "https://graph.microsoft.com/v1.0/me/drive?$select=id,driveType,webUrl",
+    {},
+    MS_FILES
+  );
+  if (!res.ok) throw providerFailure("microsoft", res, log, "OneDrive");
+  const body = (await res.json()) as { id?: unknown; driveType?: unknown; webUrl?: unknown };
+  if (typeof body.id !== "string" || typeof body.driveType !== "string") {
+    throw unavailable("OneDrive didn't say which drive is yours. Try again shortly.");
+  }
+  return { driveId: body.id, driveType: body.driveType, webUrl: typeof body.webUrl === "string" ? body.webUrl : null };
 }
 
 /**
- * Files the connected account can see, newest first; `q` filters by name.
- * Under Google's drive.file, files.list returns only files the app can reach
- * (earlier picks and supplement Docs): the app's "Recently added from Drive".
+ * Google Drive files the app can already reach, newest first; `q` filters by
+ * name. Under drive.file, files.list returns only earlier picks and supplement
+ * Docs: the app's "Recently added from Drive". OneDrive has no list here:
+ * counselors choose OneDrive files in Microsoft's picker.
  */
-export async function listRemoteFiles(
-  ownerId: string,
-  provider: SuiteProvider,
-  q: string | undefined,
-  log: Log
-): Promise<RemoteFile[]> {
-  if (provider === "google") {
-    const clauses = ["trashed = false", "mimeType != 'application/vnd.google-apps.folder'"];
-    if (q) clauses.push(`name contains '${q.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
-    const params = new URLSearchParams({
-      q: clauses.join(" and "),
-      pageSize: "50",
-      orderBy: "modifiedTime desc",
-      fields: `files(${GOOGLE_FIELDS})`,
-      supportsAllDrives: "true",
-      includeItemsFromAllDrives: "true",
-    });
-    const { res } = await call(
-      ownerId,
-      provider,
-      `https://www.googleapis.com/drive/v3/files?${params.toString()}`,
-      {},
-      GOOGLE_FILES
-    );
-    if (!res.ok) throw providerFailure(provider, res, log, "file list");
-    const body = (await res.json()) as { files?: GoogleFile[] };
-    return (body.files ?? []).map(fromGoogle);
-  }
-
-  const scope = { name: MS_FILES_SCOPE, what: "reading OneDrive" };
-  // Nothing about the search or its results is logged: the words and file
-  // names are the counselor's (and families'). providerFailure logs status only.
-  const url = q ? graphSearchUrl(q) : `https://graph.microsoft.com/v1.0/me/drive/recent?$top=50`;
-  let { res, token } = await call(ownerId, provider, url, {}, scope);
-  // `recent` is not served for every account type; fall back to the drive root.
-  if (!res.ok && !q) {
-    ({ res, token } = await call(
-      ownerId,
-      provider,
-      `https://graph.microsoft.com/v1.0/me/drive/root/children?$top=100&$select=${GRAPH_SELECT}`,
-      {},
-      scope
-    ));
-  }
-  if (!res.ok) throw providerFailure(provider, res, log, "file list");
-  const body = (await res.json()) as { value?: GraphItem[] };
-  return (body.value ?? [])
-    .map((i) => fromGraph(i, token.accountId))
-    .filter((f): f is RemoteFile => f !== null);
+export async function listGoogleFiles(ownerId: string, q: string | undefined, log: Log): Promise<RemoteFile[]> {
+  const clauses = ["trashed = false", "mimeType != 'application/vnd.google-apps.folder'"];
+  if (q) clauses.push(`name contains '${q.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
+  const params = new URLSearchParams({
+    q: clauses.join(" and "),
+    pageSize: "50",
+    orderBy: "modifiedTime desc",
+    fields: `files(${GOOGLE_FIELDS})`,
+    supportsAllDrives: "true",
+    includeItemsFromAllDrives: "true",
+  });
+  const { res } = await call(ownerId, "google", `https://www.googleapis.com/drive/v3/files?${params.toString()}`, {}, GOOGLE_FILES);
+  if (!res.ok) throw providerFailure("google", res, log, "file list");
+  const body = (await res.json()) as { files?: GoogleFile[] };
+  return (body.files ?? []).map(fromGoogle);
 }
 
 /** Current metadata for one file — what the tracker reads for activity. */
@@ -350,15 +334,30 @@ export async function getRemoteFile(
     if (!res.ok) throw providerFailure(provider, res, log, "file");
     return fromGoogle((await res.json()) as GoogleFile);
   }
-  const { res, token } = await call(
-    ownerId,
-    provider,
-    `${graphItemUrl(fileId, driveId)}?$select=${GRAPH_SELECT}`,
-    {},
-    { name: MS_FILES_SCOPE, what: "reading OneDrive" }
-  );
+  const { res, token } = await call(ownerId, provider, `${graphItemUrl(fileId)}?$select=${GRAPH_SELECT}`, {}, MS_FILES);
   if (!res.ok) throw providerFailure(provider, res, log, "file");
   const file = fromGraph((await res.json()) as GraphItem, token.accountId);
+  if (!file) throw badRequest("That item is a folder, not a file");
+  return file;
+}
+
+/**
+ * A file the counselor picked to import from OneDrive: it must be in their own
+ * drive. Anything else (a file shared with them, a shortcut to one) answers
+ * 422 `shared_not_supported` with the way round: save a copy and pick that.
+ */
+export async function getOwnOneDriveFile(ownerId: string, fileId: string, log: Log): Promise<RemoteFile> {
+  assertFileId("microsoft", fileId, null);
+  const { res, token } = await call(ownerId, "microsoft", `${graphItemUrl(fileId)}?$select=${GRAPH_SELECT}`, {}, MS_FILES);
+  if (res.status === 403 || res.status === 404) {
+    log.warn({ provider: "microsoft", status: res.status, what: "picked file" }, "picked file isn't in the counselor's own drive");
+    await res.body?.cancel().catch(() => undefined);
+    throw new HttpError(422, SHARED_NOT_SUPPORTED, "shared_not_supported");
+  }
+  if (!res.ok) throw providerFailure("microsoft", res, log, "file");
+  const item = (await res.json()) as GraphItem;
+  if (item.remoteItem) throw new HttpError(422, SHARED_NOT_SUPPORTED, "shared_not_supported");
+  const file = fromGraph(item, token.accountId);
   if (!file) throw badRequest("That item is a folder, not a file");
   return file;
 }
@@ -426,9 +425,9 @@ export async function downloadRemoteFile(
   const { res } = await call(
     ownerId,
     provider,
-    `${graphItemUrl(file.id, file.driveId)}/content`,
+    `${graphItemUrl(file.id)}/content`,
     { redirect: "manual" },
-    { name: MS_FILES_SCOPE, what: "reading OneDrive" }
+    MS_FILES
   );
   const final = await followDownload(res);
   if (!final.ok) throw providerFailure(provider, final, log, "file download");
@@ -439,9 +438,10 @@ export async function downloadRemoteFile(
 /**
  * Where a OneDrive / SharePoint download may be fetched from: the host itself
  * or a subdomain of it (a dot boundary, so `evil-sharepoint.com` is not
- * `sharepoint.com`). Commercial cloud only; sovereign clouds aren't supported.
+ * `sharepoint.com`). Commercial cloud only; sovereign clouds aren't supported. Personal
+ * OneDrive serves its downloads from my.microsoftpersonalcontent.com.
  */
-export const MICROSOFT_DOWNLOAD_HOSTS = ["sharepoint.com", "1drv.com", "livefilestore.com", "onedrive.live.com"] as const;
+export const MICROSOFT_DOWNLOAD_HOSTS = ["sharepoint.com", "1drv.com", "livefilestore.com", "onedrive.live.com", "microsoftpersonalcontent.com"] as const;
 export const MAX_DOWNLOAD_REDIRECTS = 2;
 
 export function isMicrosoftDownloadUrl(raw: string): boolean {
@@ -721,4 +721,46 @@ export async function deleteCalendarEvent(
   if (!res.ok && res.status !== 404 && res.status !== 410) {
     throw providerFailure(provider, res, log, "calendar event");
   }
+}
+
+// ---- OneDrive picker ------------------------------------------------------------------
+
+export type PickerSetup = {
+  accountType: "personal" | "work";
+  /** Where the picker page is posted: Microsoft's documented address for each account type. */
+  baseUrl: string;
+  /** The origin the picker's messages must come from. */
+  pickerOrigin: string;
+  target: PickerTarget;
+};
+
+/**
+ * Which picker the counselor's OneDrive uses, from the drive Graph reported and
+ * the directory kept at Connect. A work account's OneDrive must be on a standard
+ * `<name>-my.sharepoint.com` host, the only host a picker token is ever asked
+ * for; anything else (a government cloud, a document library) is refused.
+ */
+export function pickerSetup(drive: OneDriveInfo, tenantId: string | null): PickerSetup {
+  const unsupported = () => new HttpError(409, ONEDRIVE_UNSUPPORTED, "onedrive_unsupported");
+  if (drive.driveType === "personal") {
+    if (tenantId && tenantId.toLowerCase() !== MSA_TENANT_ID) throw unsupported();
+    return {
+      accountType: "personal",
+      baseUrl: "https://onedrive.live.com/picker",
+      pickerOrigin: "https://onedrive.live.com",
+      target: { kind: "personal" },
+    };
+  }
+  if (drive.driveType !== "business") throw unsupported();
+  let origin: string;
+  try {
+    origin = new URL(drive.webUrl ?? "").origin;
+  } catch {
+    throw unsupported();
+  }
+  if (!WORK_ONEDRIVE_ORIGIN.test(origin)) throw unsupported();
+  if (!tenantId || tenantId.toLowerCase() === MSA_TENANT_ID) {
+    throw new HttpError(409, "Microsoft needs reconnecting before OneDrive can open. Reconnect it under Files.", "microsoft_reconnect");
+  }
+  return { accountType: "work", baseUrl: origin, pickerOrigin: origin, target: { kind: "work", tenantId, resource: origin } };
 }

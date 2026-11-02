@@ -36,7 +36,7 @@ export function stripeClient(): Stripe | null {
   return cachedStripe;
 }
 
-// ---- Is the migration in? (20261030000001) -----------------------------------
+// ---- Is the migration in? (20261102000001) -----------------------------------
 // A zero-row probe, like paymentCreditsReady: ready is kept for the process,
 // missing is re-asked after 30 s. It also needs the credits migration, which
 // card payments build on (credit_cents).

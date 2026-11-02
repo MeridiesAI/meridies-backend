@@ -679,8 +679,10 @@ export function nextCandidate(
 
 export type StoredPhoto = {
   college_id: string;
-  source: "wikidata" | "pick";
-  commons_title: string;
+  /** commons-search and site rows come from a counselor's College Search lookup (lib/collegeLookup.ts). */
+  source: "wikidata" | "pick" | "commons-search" | "site";
+  /** Null only for a site photo. */
+  commons_title: string | null;
   commons_sha1: string;
   storage_path: string;
   thumb_path: string;
@@ -689,6 +691,11 @@ export type StoredPhoto = {
   license?: string;
   license_url?: string | null;
 };
+
+/** A photo a counselor's College Search lookup stored, not one the loader chose (Wikidata or a pick). */
+export function isLookupSource(source: StoredPhoto["source"]): boolean {
+  return source === "commons-search" || source === "site";
+}
 
 export type PhotoRow = StoredPhoto & {
   wikidata_id: string | null;
@@ -989,7 +996,9 @@ export async function runCollegePhotoIngest(
     const reason = sparql.ambiguous.has(c.unitid) ? "ambiguous" : wd ? "no-image" : "not-in-wikidata";
     bump(reason);
     skipped++;
-    if (storedBy.has(c.id)) deletions.push({ college: c, reason, suppressed: false });
+    // A photo a counselor's lookup found (not Wikidata's or a pick) stays until Wikidata or a pick offers one.
+    const prev = storedBy.get(c.id);
+    if (prev && !isLookupSource(prev.source)) deletions.push({ college: c, reason, suppressed: false });
   }
 
   // Commons metadata for every target title, 50 a request. A failed request
@@ -1045,7 +1054,8 @@ export async function runCollegePhotoIngest(
     if (!chosen.ok) {
       bump(chosen.reason);
       skipped++;
-      if (prev) deletions.push({ college: c, reason: chosen.reason, suppressed: false });
+      // A rejected file offers nothing, so a looked-up photo stays until Wikidata or a pick offers one.
+      if (prev && !isLookupSource(prev.source)) deletions.push({ college: c, reason: chosen.reason, suppressed: false });
       continue;
     }
     const plan: Plan = { college: c, target, photo: chosen.photo, prev };

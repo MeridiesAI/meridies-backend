@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { plainGradYear, plainName } from "../../src/lib/context/identity.js";
-import { proxyMismatch, proxyTrust } from "../../src/lib/proxyTrust.js";
+import { proxyMismatch, proxyTrust, trustProxyOption } from "../../src/lib/proxyTrust.js";
 
 test("a name keeps only name characters, at most six words and 60 characters", () => {
   assert.equal(plainName("Sophia Martinez"), "Sophia Martinez");
@@ -43,11 +43,32 @@ test("Cloudflare in front of one trusted hop is called out once seen", () => {
   assert.equal(proxyMismatch({}, 1), null, "Railway's health check sends no header: proves nothing");
 });
 
+test("the hop count becomes a trust function; zero trusts no header", () => {
+  assert.equal(trustProxyOption(0), false);
+  assert.equal(trustProxyOption(-1), false);
+  const one = trustProxyOption(1);
+  assert.ok(typeof one === "function");
+  assert.equal(one("198.51.100.7", 0), true, "the edge's own entry");
+  assert.equal(one("6.6.6.6", 1), false, "the entry the client wrote");
+  const two = trustProxyOption(2);
+  assert.ok(typeof two === "function" && two("x", 1) && !two("x", 2));
+});
+
 test("the API takes the address the trusted hop saw, never the client's own entry", async () => {
   const { default: Fastify } = await import("fastify");
-  const app = Fastify({ trustProxy: proxyTrust({ RAILWAY_PROJECT_ID: "p" }, undefined, "production").hops });
+  const app = Fastify({ trustProxy: trustProxyOption(proxyTrust({ RAILWAY_PROJECT_ID: "p" }, undefined, "production").hops) });
   app.get("/ip", async (req) => ({ ip: req.ip }));
   const r = await app.inject({ method: "GET", url: "/ip", headers: { "x-forwarded-for": "6.6.6.6, 198.51.100.7" } });
   assert.equal(JSON.parse(r.body).ip, "198.51.100.7");
-  await app.close();
+  // Two hops trusted: the entry behind the edge's own.
+  const two = Fastify({ trustProxy: trustProxyOption(2) });
+  two.get("/ip", async (req) => ({ ip: req.ip }));
+  const r2 = await two.inject({ method: "GET", url: "/ip", headers: { "x-forwarded-for": "6.6.6.6, 203.0.113.9, 198.51.100.7" } });
+  assert.equal(JSON.parse(r2.body).ip, "203.0.113.9");
+  // No hops trusted: the header is ignored and the socket's address is the caller's.
+  const none = Fastify({ trustProxy: trustProxyOption(0) });
+  none.get("/ip", async (req) => ({ ip: req.ip }));
+  const r3 = await none.inject({ method: "GET", url: "/ip", headers: { "x-forwarded-for": "6.6.6.6" } });
+  assert.equal(JSON.parse(r3.body).ip, "127.0.0.1");
+  await Promise.all([app.close(), two.close(), none.close()]);
 });

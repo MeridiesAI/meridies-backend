@@ -14,6 +14,16 @@ test("the account review token never reaches the logs", () => {
   assert.ok(!loggedUrl(`/access-review/${token}`).includes(token));
 });
 
+test("an unsubscribe token never reaches the logs", () => {
+  const token = "Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXU";
+  assert.equal(loggedUrl(`/kpi/unsubscribe/${token}`), "/kpi/unsubscribe/…");
+  assert.equal(loggedUrl(`/pipeline/unsubscribe/${token}`), "/pipeline/unsubscribe/…");
+  assert.equal(loggedUrl(`//pipeline/unsubscribe/${token}/?x=1`), "/pipeline/unsubscribe/…?x=…");
+  assert.ok(!loggedUrl(`/kpi/unsubscribe/${token}`).includes(token));
+  // Other paths are left alone.
+  assert.equal(loggedUrl("/pipeline/contacts"), "/pipeline/contacts");
+});
+
 test("redactText strips emails, tokens, keys, phones and query values", async () => {
   const { redactText } = await import("../../src/lib/requestLog.js");
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";

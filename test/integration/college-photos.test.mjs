@@ -63,6 +63,26 @@ await refused("an empty credit is refused", "credit", "'  '");
 await refused("a credit over 500 characters is refused", "credit", `repeat('x', 501)`);
 await refused("a storage path outside <unitid>/<sha1>-1280.jpg is refused", "storage_path", "'../other/x.jpg'");
 await refused("a source outside Commons is refused", "source_url", "'https://example.com/x.jpg'");
+// 20261031000003: only a lookup's 'site' photo may lack a Commons title, and it may not have one.
+await refused("a Wikimedia-sourced photo with no Commons title is refused", "commons_title", "null");
+try {
+  await sql(
+    `insert into college_photos (college_id, source, commons_title, commons_sha1, storage_path, thumb_path, width, height, credit, license, source_url)
+     values ('${yale}', 'site', null, '${sha}', '130794/${sha}-1280.jpg', '130794/${sha}-500.jpg', 1280, 853, 'Yale University', 'University website', 'https://www.example.edu/')`
+  );
+  check("a site photo with no Commons title is accepted", (await sql(`select count(*) from college_photos where college_id = '${yale}' and source = 'site'`)) === "1");
+  let titled = false;
+  try {
+    await sql(`update college_photos set commons_title = 'File:X.jpg' where college_id = '${yale}'`);
+  } catch {
+    titled = true;
+  }
+  check("a site photo can't be given a Commons title", titled);
+} catch (e) {
+  check("a site photo with no Commons title is accepted", false, String(e.message).slice(0, 200));
+} finally {
+  await sql(`delete from college_photos where college_id = '${yale}'`).catch(() => {});
+}
 await sql(`update college_photos set license = 'Public domain' where college_id = '${mit}'`);
 check("public domain is allowed", (await sql(`select license from college_photos where college_id = '${mit}'`)) === "Public domain");
 const before = await sql(`select updated_at from college_photos where college_id = '${mit}'`);

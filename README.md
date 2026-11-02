@@ -75,7 +75,7 @@ straight to the practice. It is off unless all of these are set:
 | `PUBLIC_API_URL` | This API's public origin; pay links are `<PUBLIC_API_URL>/pay/<token>` |
 | `SUPABASE_SERVICE_ROLE_KEY` | The webhook and the pay page run with nobody signed in |
 
-plus migration `20261030000001`. Without them `GET /pipeline/stripe` answers
+plus migration `20261102000001`. Without them `GET /pipeline/stripe` answers
 `configured: false` and the app shows nothing about cards. See `AGENTS.md`
 ("Card payments are Stripe Connect") and `DATABASE_MIGRATION_INSTRUCTIONS.md`.
 

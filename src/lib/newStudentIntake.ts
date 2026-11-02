@@ -33,9 +33,35 @@ export function itemStatus(task: { status: string; sentBackNote?: string | null 
   return "requested";
 }
 
-/** Every request received; with nothing requested, joining is enough. */
-export function canConfirm(inv: { status: string; requests: { provided: boolean }[] }): boolean {
-  return inv.status === "accepted" && inv.requests.every((r) => r.provided);
+/**
+ * Every request received; with nothing requested, joining is enough. The
+ * counselor may confirm over a request they don't need yet by naming it in
+ * `waived`: it stays open, so the student still owes it and keeps their red
+ * card for it. An id that isn't one of this invitation's requests waives
+ * nothing and refuses the whole confirm.
+ */
+export function canConfirm(
+  inv: { status: string; requests: { id?: string; provided: boolean }[] },
+  waived: string[] = []
+): boolean {
+  if (inv.status !== "accepted") return false;
+  const known = new Set(inv.requests.map((r) => r.id));
+  if (waived.some((id) => !known.has(id))) return false;
+  return inv.requests.every((r) => r.provided || (r.id !== undefined && waived.includes(r.id)));
+}
+
+/**
+ * What confirming over open requests writes: each request not yet received and
+ * named in `waived` gets `waived: true` on the invitation's own list. The
+ * waiver is stored, never inferred, so only these requests keep the student's
+ * red card and the Submit that follows confirmation; a task left open any
+ * other way (a request removed after its task was made, a legacy
+ * confirmation) never does.
+ */
+export function markWaived<T extends { id?: unknown; provided?: unknown }>(requests: T[], waived: string[] | undefined): T[] {
+  if (!waived?.length) return requests;
+  const named = new Set(waived);
+  return requests.map((q) => (!q.provided && named.has(String(q.id)) ? { ...q, waived: true } : q));
 }
 
 const oneLine = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
@@ -140,12 +166,22 @@ export async function loadMyIntake(request: FastifyRequest) {
   if (error) throw fromPostgrest(error);
   const row = ((data ?? []) as Row[])[0];
   if (!row) return null;
+  const confirmedAt = (row.confirmed_at as string | null) ?? null;
   return {
     invitationId: String(row.invitation_id),
     submittedAt: (row.submitted_at as string | null) ?? null,
-    confirmedAt: (row.confirmed_at as string | null) ?? null,
+    confirmedAt,
     counselorName: (row.counselor_name as string | null) ?? null,
+    // The requests the counselor confirmed over (20261101000001): the student's red card stays for these only.
+    // Before that migration there are none, which is the card as it was: gone once confirmed.
+    waivedRequestIds: confirmedAt ? await myWaivedRequestIds(request) : [],
   };
+}
+
+async function myWaivedRequestIds(request: FastifyRequest): Promise<string[]> {
+  const { data, error } = await request.db.rpc("my_waived_requests");
+  if (error) return [];
+  return Array.isArray(data) ? (data as unknown[]).map(String) : [];
 }
 
 /** The student types an answer instead of a file. Locked once it is with the counselor. */
@@ -242,7 +278,10 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
   const { data: tasks } = await request.db.from("deliverables").select("title").in("id", taskIds);
   const items = ((tasks ?? []) as Row[]).map((t) => String(t.title));
   const heading = intakeSubmittedHeading(request.profile.full_name);
-  const href = "/dashboard/counselor#student-profiles";
+  // Before confirmation the items are ticked off on the Building profile card; after it that card is gone,
+  // so a student who sends what the counselor confirmed over is read on their own page.
+  const confirmed = Boolean((await loadMyIntake(request).catch(() => null))?.confirmedAt);
+  const href = confirmed ? `/dashboard/counselor/students/${request.auth.userId}` : "/dashboard/counselor#student-profiles";
 
   const { error } = await svc.from("notifications").insert({
     recipient_id: counselorId,
@@ -250,7 +289,11 @@ async function tellCounselor(request: FastifyRequest, taskIds: string[]) {
     kind: "invite",
     urgency: "normal",
     title: heading,
-    body: items.length ? `Check each one off on Overview: ${items.join(", ")}.` : "Check it off on Overview.",
+    body: confirmed
+      ? `Open their page to look at ${items.length ? items.join(", ") : "it"}.`
+      : items.length
+        ? `Check each one off on Overview: ${items.join(", ")}.`
+        : "Check it off on Overview.",
     href,
     action_items: items.slice(0, 5),
     created_by: request.auth.userId,
