@@ -93,6 +93,18 @@ const envSchema = z.object({
   // told to report status there, and its signature is computed over that URL.
   RESEND_WEBHOOK_SECRET: blankIsUnset(z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, "RESEND_WEBHOOK_SECRET must look like whsec_...").optional()),
   PUBLIC_API_URL: blankIsUnset(z.string().url().optional()),
+  // Payment Tracker card payments (Stripe Connect; lib/stripePractice.ts). Both
+  // optional: unset, GET /pipeline/stripe answers `configured: false` and the
+  // other Stripe routes 503 `stripe_unavailable`. STRIPE_SECRET_KEY is the
+  // platform's secret (or restricted) key; STRIPE_WEBHOOK_SECRET is the signing
+  // secret of the Connect webhook endpoint <PUBLIC_API_URL>/webhooks/stripe.
+  // Pay links are built from PUBLIC_API_URL, so card payments need it too.
+  STRIPE_SECRET_KEY: blankIsUnset(
+    z.string().regex(/^(sk|rk)_(test|live)_[A-Za-z0-9]{10,}$/, "STRIPE_SECRET_KEY must look like sk_live_... or rk_live_...").optional()
+  ),
+  STRIPE_WEBHOOK_SECRET: blankIsUnset(
+    z.string().regex(/^whsec_[A-Za-z0-9+/=]{10,}$/, "STRIPE_WEBHOOK_SECRET must look like whsec_...").optional()
+  ),
   // How many proxies stand between the internet and this process (Railway's
   // edge: one). Unset: one on Railway and in development, none elsewhere in
   // production (lib/proxyTrust.ts). request.ip is the address the outermost
@@ -165,6 +177,10 @@ export const hasResend = Boolean(env.RESEND_API_KEY);
 export const devMailUrl = env.NODE_ENV === "production" ? undefined : env.DEV_MAIL_URL;
 export const hasCronSecret = Boolean(env.CRON_SECRET);
 export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
+/** Card payments need both Stripe keys, the service role (webhook, pay page) and a public API origin (pay links). */
+export const hasStripe = Boolean(
+  env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.SUPABASE_SERVICE_ROLE_KEY && env.PUBLIC_API_URL
+);
 export const hasTwilio = Boolean(
   env.TWILIO_ACCOUNT_SID &&
     env.TWILIO_AUTH_TOKEN &&
