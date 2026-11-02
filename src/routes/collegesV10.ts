@@ -31,10 +31,14 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { enforceNoProse, runStructured } from "../lib/anthropic.js";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { lookUpCollege } from "../lib/collegeLookup.js";
+import { supabasePhotoStore } from "../lib/ingest/collegePhotos.js";
+import { wikimediaClient } from "../lib/ingest/wikimedia.js";
+import { serviceClient } from "../lib/supabase.js";
 import { findOrCreateChild, practiceFolder } from "../lib/practiceFolders.js";
 import { fourPointGpa, gpaLabel } from "../lib/gpa.js";
 import { toAidBandRating, toAidRating } from "../lib/serialize.js";
@@ -583,6 +587,44 @@ export default async function collegeV10Routes(app: FastifyInstance) {
           official: st.get(id)?.[0] ? toOfficialStats(st.get(id)![0]) : null,
         };
       });
+  });
+
+  // ---- Look up a school's site and picture ---------------------------------------------
+
+  /**
+   * College Search's "Look up info & photo": reads the college's own site for
+   * its title and description, and stores a campus picture when it has none
+   * (lib/collegeLookup.ts). Catalog content, written with the service role;
+   * the caller only has to be a counselor, and is limited to 30 an hour.
+   */
+  app.post("/:id/lookup", { preHandler: [...counselor, limit("colleges:lookup", 30, 3600)] }, async (request) => {
+    const { id } = idParam.parse(request.params);
+    const svc = serviceClient();
+    if (!svc) throw unavailable("Lookup needs the service role key.");
+    const { data: college, error } = await request.db.from("colleges").select("id, name, unitid, website").eq("id", id).maybeSingle();
+    if (error) throw fromPostgrest(error);
+    if (!college) throw notFound("That college isn't in the catalog");
+    const c = college as Row;
+    if (!c.website) throw badRequest(`We don't have ${String(c.name)}'s website on file, so there's nowhere to look.`);
+
+    // Whether a photo exists, and the table being there at all: a missing table means the migration isn't applied.
+    const have = await svc.from("college_photos").select("college_id").eq("college_id", id).maybeSingle();
+    if (have.error) {
+      if (isMissingPhotoSchema(have.error.code)) throw unavailable("Campus photos aren't switched on yet.");
+      throw fromPostgrest(have.error);
+    }
+
+    const outcome = await lookUpCollege(
+      { id, name: String(c.name), unitid: c.unitid == null ? null : Number(c.unitid), website: String(c.website) },
+      { commons: wikimediaClient(), store: supabasePhotoStore(svc), hasPhoto: !!have.data, log: request.log }
+    );
+    const rows = outcome.photo ? await loadCollegePhotos(svc, [id], request.log) : new Map<string, CollegePhotoRow>();
+    return {
+      collegeId: id,
+      site: outcome.site,
+      photo: toCollegePhoto(rows.get(id), String(c.name)),
+      photoNote: outcome.photoNote,
+    };
   });
 
   // ---- Profile extras ---------------------------------------------------------------
