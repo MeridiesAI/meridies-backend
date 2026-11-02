@@ -692,6 +692,11 @@ export type StoredPhoto = {
   license_url?: string | null;
 };
 
+/** A photo a counselor's College Search lookup stored, not one the loader chose (Wikidata or a pick). */
+export function isLookupSource(source: StoredPhoto["source"]): boolean {
+  return source === "commons-search" || source === "site";
+}
+
 export type PhotoRow = StoredPhoto & {
   wikidata_id: string | null;
   width: number | null;
@@ -993,7 +998,7 @@ export async function runCollegePhotoIngest(
     skipped++;
     // A photo a counselor's lookup found (not Wikidata's or a pick) stays until Wikidata or a pick offers one.
     const prev = storedBy.get(c.id);
-    if (prev && prev.source !== "commons-search" && prev.source !== "site") deletions.push({ college: c, reason, suppressed: false });
+    if (prev && !isLookupSource(prev.source)) deletions.push({ college: c, reason, suppressed: false });
   }
 
   // Commons metadata for every target title, 50 a request. A failed request
@@ -1049,7 +1054,8 @@ export async function runCollegePhotoIngest(
     if (!chosen.ok) {
       bump(chosen.reason);
       skipped++;
-      if (prev) deletions.push({ college: c, reason: chosen.reason, suppressed: false });
+      // A rejected file offers nothing, so a looked-up photo stays until Wikidata or a pick offers one.
+      if (prev && !isLookupSource(prev.source)) deletions.push({ college: c, reason: chosen.reason, suppressed: false });
       continue;
     }
     const plan: Plan = { college: c, target, photo: chosen.photo, prev };

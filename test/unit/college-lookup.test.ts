@@ -79,6 +79,50 @@ test("a Commons title must name the school", () => {
   assert.ok(!titleNamesCollege("File:Anything.jpg", "The University"));
 });
 
+test("a Commons title must be this school's, not a lookalike", () => {
+  const yes = (t: string, n: string) => assert.ok(titleNamesCollege(t, n), `${t} should name ${n}`);
+  const no = (t: string, n: string) => assert.ok(!titleNamesCollege(t, n), `${t} should not name ${n}`);
+  no("File:University of Texas at Austin Main Building.jpg", "Texas A&M University");
+  yes("File:Texas A&M campus.jpg", "Texas A&M University");
+  no("File:University of Pennsylvania College Hall.jpg", "Pennsylvania State University");
+  yes("File:Pennsylvania State University Old Main.jpg", "Pennsylvania State University");
+  no("File:Pennsylvania State University Old Main.jpg", "University of Pennsylvania");
+  no("File:Boston University Photonics Center.jpg", "Boston College");
+  yes("File:Boston College Gasson Hall.jpg", "Boston College");
+  no("File:Boston College Gasson Hall.jpg", "Boston University");
+  no("File:Ohio State University Oval.jpg", "Ohio University");
+  no("File:Price Hall campus.jpg", "Rice University");
+  yes("File:Rice University Lovett Hall.jpg", "Rice University");
+});
+
+test("nameWords keeps State and A&M, drops filler and type words, and doesn't split accents", () => {
+  assert.deepEqual(nameWords("Texas A&M University"), ["texas", "am"]);
+  assert.deepEqual(nameWords("Saint Mary's College"), ["saint", "mary"]);
+  assert.deepEqual(nameWords("Montréal College"), ["montreal"]);
+  assert.deepEqual(nameWords("Ohio State University"), ["ohio", "state"]);
+});
+
+test("lookUpCollege never stores a Commons file named for another school", async () => {
+  let imageinfoCalls = 0;
+  const rows: Record<string, unknown>[] = [];
+  const out = await lookUpCollege(
+    { id: "c2", name: "Texas A&M University", unitid: 228723, website: "https://www.tamu.edu" },
+    {
+      commons: {
+        search: async () => ["File:University of Texas at Austin Main Building.jpg"],
+        imageinfo: async () => (imageinfoCalls++, {}),
+        download: async () => new Uint8Array(),
+      },
+      store: { upload: async () => {}, upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
+      fetchMeta: async () => ({ finalUrl: "https://www.tamu.edu/", title: "Texas A&M", description: null, image: null }),
+      hasPhoto: false,
+    }
+  );
+  assert.equal(out.photo, null);
+  assert.equal(rows.length, 0);
+  assert.equal(imageinfoCalls, 0);
+});
+
 test("onOwnHost allows the host and subdomains only", () => {
   assert.ok(onOwnHost("https://cdn.example.edu/a.jpg", "example.edu"));
   assert.ok(onOwnHost("https://www.example.edu/a.jpg", "example.edu"));

@@ -1250,16 +1250,24 @@ there).
   or `/internal/status` reads the job overdue. `20261024000071` (the review
   queue and `ingest_runs.counts`) goes in after it, either order with the
   code; not in `REQUIRED_SCHEMA` either.
-- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookup.ts`, `20261031000002`): a counselor's
-  button on a College Search card. It reads the college's own site (`fetchPageMeta` in `lib/links.ts`: title,
-  description, og:image, through the same pinned opener) and, for a school with **no photo at all**, stores one:
-  first a Commons file found by the school's name (every significant word of the name must be in the file's title,
-  then `choosePhoto`'s rules; `source = 'commons-search'`), else the site's og:image from the college's own host or a
-  subdomain (JPEG, 3 MB, at least 800 px wide, landscape; `source = 'site'`, `license = 'University website'`, credit
-  = the school, `source_url` = the page, no Commons title; one copy serves both sizes since there is no image
-  library). It never replaces a photo and is not behind the 7-day review gate; the monthly loader leaves these two
-  sources alone when Wikidata has nothing and replaces them when Wikidata or a pick offers a photo. 30 an hour per
-  counselor; 400 with no website on file; 503 while the migration is missing. Tests: `test/unit/college-lookup.test.ts`.
+- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookup.ts`, `20261031000002`, `…000003`): a
+  counselor's button on a College Search card. It reads the college's own site (`fetchPageMeta` in `lib/links.ts`:
+  title, description, og:image, through the same pinned opener) and, for a school with **no photo at all**, stores
+  one: first a Commons file found by the school's name (`titleNamesCollege`: every word of the name must be a **whole
+  word** of the file's title, bar *the/of/at/in/and/for* and *university/college/institute/school*; *State* and
+  *A&M* count as part of the name; the title may leave out "university"/"college" but may not name a different kind
+  (Boston College is not Boston University) or say *State* when the name doesn't (Ohio University is not Ohio
+  State); then `choosePhoto`'s rules; `source = 'commons-search'`), else the site's og:image from the college's own
+  host or a subdomain (JPEG, 3 MB, at least 800 px wide, landscape; `source = 'site'`, `license = 'University
+  website'`, credit = the school, `source_url` = the page, no Commons title; one copy serves both sizes since there
+  is no image library). It never replaces a photo and is not behind the 7-day review gate. The monthly loader
+  leaves these two sources alone when Wikidata has nothing **or its file is rejected** (`isLookupSource`) and
+  replaces them when Wikidata or a pick offers a usable photo; only a `none` pick removes one. `…000003` makes the
+  database enforce the title rule: a `site` row has no Commons title, every other source has a `File:` title. 30 an
+  hour per counselor; 400 with no website on file; 503 only without the service-role key or when the
+  `college_photos` table is missing (before `…000002` the refused insert is caught and the counselor reads "No usable
+  picture was found"). Tests: `test/unit/college-lookup.test.ts` (the lookalike table), `college-photos-run.test.ts`
+  (the loader keeps looked-up rows), `test/integration/college-photos.test.mjs` (the CHECK).
 - **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
   review gate, the version check, text holds, pins, the store without the
   migration, and `csvCell`), `test/integration/college-photos.test.mjs`
