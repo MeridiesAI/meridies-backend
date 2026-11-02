@@ -7,6 +7,8 @@
  *   POST /:id/draft              AxIS drafts subject and body from the student's data
  *   POST /:id/messages           send now, or schedule (quiet hours hold it)
  *   GET  /:id/messages           what the composer sent or scheduled
+ *   GET  /:id/replies            what the family answered (email replies), newest first
+ *   POST /:id/replies/read       mark those read
  *   POST /messages/:messageId/cancel   cancel a scheduled message
  *   POST /:id/file-as-report     file the draft as a family report to approve
  *   POST /internal/dispatch      CRON_SECRET: deliver scheduled messages that are due,
@@ -26,6 +28,8 @@ import { beat } from "../lib/heartbeat.js";
 import { toInviteDelivery, type InviteDelivery } from "../lib/inviteDelivery.js";
 import { plainName } from "../lib/context/identity.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { replyAddressFor } from "../lib/replyRouting.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import {
   alertThrottleReason,
@@ -325,7 +329,6 @@ export default async function communicationRoutes(app: FastifyInstance) {
       const db = request.db;
 
       const kind = b.kind ?? "message";
-      if (b.audience === "parent" && b.channel !== "email") throw badRequest("Messages to the parents go by email");
       if (b.channel === "email" && !b.subject) throw badRequest("Add a subject first");
       if (b.channel === "sms" && b.body.length > TEXT_LIMIT) {
         throw badRequest(`Texts are kept under ${TEXT_LIMIT} characters`);
@@ -381,10 +384,25 @@ export default async function communicationRoutes(app: FastifyInstance) {
         return reply.code(201).send({ ...toMessage(row), referralTracked });
       }
 
+      const studentContact = await loadStudentContact(db, student);
       const outcome = await deliverMessage(
         row as unknown as MessageRow,
         request.profile.full_name ?? null,
-        request.log
+        request.log,
+        {
+          studentName: studentContact?.name ?? null,
+          // A reply goes to a routed address that lands on the family's
+          // thread in the app; with routing off, to the counselor's own inbox.
+          replyToFor: async (r) =>
+            (await replyAddressFor(
+              r.kind === "guardian"
+                ? { counselorId: request.auth.userId, party: "parent", studentId: student, guardianId: r.id }
+                : { counselorId: request.auth.userId, party: "student", studentId: student },
+              request.log
+            )) ??
+            request.profile.email ??
+            undefined,
+        }
       );
       const written = await recordOutcome(db, String(row.id), outcome, request.log);
       return reply.code(201).send({
@@ -413,6 +431,65 @@ export default async function communicationRoutes(app: FastifyInstance) {
         const m = toMessage(r);
         return { ...m, attempts: m.attempts.map((a) => withLiveStatus(a, live)) };
       });
+    }
+  );
+
+  /**
+   * What the student's family has answered, newest first: replies to emails
+   * (`inbound_messages`, written by the Resend webhook) and, once texting is on,
+   * replies to texts. Read on the caller's own client, so RLS decides whose
+   * these are. A database without the migration answers `available: false`
+   * and an empty list, never an error.
+   */
+  app.get(
+    "/:id/replies",
+    { preHandler: [...counselorOnly, limit("communication:replies", 240, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const student = await resolveStudentId(request, id, "view");
+      const { data, error } = await request.db
+        .from("inbound_messages")
+        .select("id, channel, party, from_addr, subject, body, sender_known, authenticated, received_at, read_at, guardian:guardians(full_name)")
+        .eq("student_id", student)
+        .order("received_at", { ascending: false })
+        .limit(100);
+      if (error) {
+        if (isResultsNotApplied(error)) return { available: false, unread: 0, replies: [] };
+        throw fromPostgrest(error);
+      }
+      const rows = (data ?? []) as unknown as Row[];
+      const replies = rows.map((r) => ({
+        id: String(r.id),
+        channel: r.channel === "sms" ? ("sms" as const) : ("email" as const),
+        party: r.party === "student" ? ("student" as const) : ("parent" as const),
+        // Our own record of who they are when we have one, else the address they wrote from.
+        fromName: ((r.guardian as { full_name?: string } | null)?.full_name ?? null) || String(r.from_addr),
+        fromAddress: String(r.from_addr),
+        subject: (r.subject as string | null) ?? null,
+        body: String(r.body),
+        senderKnown: r.sender_known === true,
+        receivedAt: String(r.received_at),
+        read: r.read_at != null,
+      }));
+      return { available: true, unread: replies.filter((x) => !x.read).length, replies };
+    }
+  );
+
+  /** The counselor has seen these replies. */
+  app.post(
+    "/:id/replies/read",
+    { preHandler: [...counselorOnly, limit("communication:replies-read", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const student = await resolveStudentId(request, id, "view");
+      const { error } = await request.db
+        .from("inbound_messages")
+        .update({ read_at: new Date().toISOString() })
+        .eq("student_id", student)
+        .eq("counselor_id", request.auth.userId)
+        .is("read_at", null);
+      if (error && !isResultsNotApplied(error)) throw fromPostgrest(error);
+      return { ok: true };
     }
   );
 

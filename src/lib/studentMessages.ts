@@ -34,8 +34,16 @@ import {
   type AccountabilitySettings,
 } from "./accountability.js";
 import { brandedEmail, brandedText, sendEmail, sendSms } from "./email.js";
+import {
+  composerEmailTemplate,
+  normEmail,
+  normPhone,
+  parentTextBody,
+  pickParentRecipients,
+} from "./parentCopy.js";
 import { badRequest, fromPostgrest, unauthorized, unavailable } from "./errors.js";
 import { isCounselorApproved } from "./access.js";
+import { replyAddressFor } from "./replyRouting.js";
 import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
@@ -117,15 +125,6 @@ export async function loadFamily(db: SupabaseClient, studentId: string): Promise
   }));
 }
 
-const normEmail = (v: string | null | undefined): string | null => {
-  const t = (v ?? "").trim().toLowerCase();
-  return t ? t : null;
-};
-const normPhone = (v: string | null | undefined): string | null => {
-  const t = (v ?? "").replace(/[^\d+]/g, "");
-  return t ? t : null;
-};
-
 export type StudentContact = { id: string; name: string; email: string | null; phone: string | null };
 
 /**
@@ -177,22 +176,22 @@ export async function resolveRecipients(
   channel: Channel
 ): Promise<Recipient[]> {
   if (audience === "parent") {
-    if (channel !== "email") throw badRequest("Messages to the parents go by email");
     // Fails closed: an errored read throws rather than defaulting to "on".
     const prefs = await loadAlertPrefs({ db }, studentId);
     if (!prefs.copy_parents) {
       throw badRequest("Messages to the parents are switched off for this student");
     }
     const family = await loadFamily(db, studentId);
-    const reachable = family.filter((g) => g.receivesMessages && g.email);
+    const reachable = pickParentRecipients(family, channel);
     if (reachable.length === 0) {
+      const what = channel === "sms" ? "phone number" : "email address";
       throw badRequest(
         family.length === 0
-          ? "Add a parent or guardian with an email address first"
-          : "No parent on file with an email address who receives messages"
+          ? `Add a parent or guardian with a ${what} first`
+          : `No parent on file with a ${what} who receives messages`
       );
     }
-    return reachable.map((g) => ({ kind: "guardian", id: g.id, name: g.name, email: g.email, phone: g.phone }));
+    return reachable;
   }
 
   const student = await loadStudentContact(db, studentId);
@@ -304,23 +303,26 @@ export type DeliveryOutcome = { status: "sent" | "queued" | "failed"; attempts: 
  * truth: `sent` when at least one provider accepted it, `queued` when a text
  * waits on an SMS provider that is not configured, `failed` otherwise.
  */
+/** What `deliverMessage` needs beyond the row: who is writing, and about whom. */
+export type DeliverContext = {
+  /** The student the message is about, for a parent's greeting, heading and text opener. */
+  studentName?: string | null;
+  /**
+   * Where a reply to an email goes, per recipient. A server-chosen address
+   * (never from the request): the counselor's own, or a routed reply address.
+   * Return undefined for none.
+   */
+  replyToFor?: (r: Recipient) => Promise<string | undefined> | string | undefined;
+};
+
 export async function deliverMessage(
   row: MessageRow,
   counselorName: string | null,
-  logger?: Log
+  logger?: Log,
+  extra: DeliverContext = {}
 ): Promise<DeliveryOutcome> {
   const attempts: Attempt[] = [];
-  const paragraphs = row.body
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-  const template = {
-    heading: row.subject ?? "A note from your counselor",
-    paragraphs,
-    footnote: counselorName
-      ? `Sent by ${counselorName} through Meridies. Reply to your counselor directly with any questions.`
-      : "Sent by your counselor through Meridies. Reply to your counselor directly with any questions.",
-  };
+  const copy = { counselorName, studentName: extra.studentName ?? "" };
 
   for (const r of row.recipients) {
     const columns = {
@@ -336,12 +338,24 @@ export async function deliverMessage(
         attempts.push({ recipient: r.name, recipientKind: r.kind, channel: "email", status: "unavailable", deliveryId: null, error: "no email address on file" });
         continue;
       }
+      // Each recipient reads it in their own words: a parent is greeted by name
+      // and told replying reaches the counselor; the student keeps theirs.
+      const template = composerEmailTemplate({ subject: row.subject, body: row.body }, r, copy);
+      let replyTo: string | undefined;
+      try {
+        replyTo = await extra.replyToFor?.(r);
+      } catch (err) {
+        // A reply address is a courtesy; the message must still go.
+        logger?.warn({ err: err instanceof Error ? err.message : String(err) }, "composer: reply-to lookup failed");
+      }
       const res = await sendEmail({
         ...columns,
         to: r.email,
         subject: template.heading,
         html: brandedEmail(template),
         text: brandedText(template),
+        replyTo,
+        fromName: counselorName,
       });
       attempts.push({
         recipient: r.name,
@@ -356,7 +370,8 @@ export async function deliverMessage(
         attempts.push({ recipient: r.name, recipientKind: r.kind, channel: "sms", status: "unavailable", deliveryId: null, error: "no phone number on file" });
         continue;
       }
-      const res = await sendSms({ ...columns, to: r.phone, body: row.body });
+      const body = r.kind === "guardian" ? parentTextBody(row.body, r, copy) : row.body;
+      const res = await sendSms({ ...columns, to: r.phone, body, counselorId: row.counselor_id });
       attempts.push({
         recipient: r.name,
         recipientKind: r.kind,
@@ -620,7 +635,8 @@ export async function dispatchDueMessages(
   if (error) throw fromPostgrest(error);
 
   const tally = { sent: 0, queued: 0, failed: 0, held: 0 };
-  const names = new Map<string, string | null>();
+  const names = new Map<string, { name: string | null; email: string | null }>();
+  const studentNames = new Map<string, string | null>();
   const settingsByKey = new Map<string, AccountabilitySettings>();
 
   for (const raw of (data ?? []) as Row[]) {
@@ -695,10 +711,26 @@ export async function dispatchDueMessages(
     if (claim.error || !claim.data) continue;
 
     if (!names.has(row.counselor_id)) {
-      const { data: c } = await svc.from("profiles").select("full_name").eq("id", row.counselor_id).maybeSingle();
-      names.set(row.counselor_id, s((c as Row | null)?.full_name));
+      const { data: c } = await svc.from("profiles").select("full_name, email").eq("id", row.counselor_id).maybeSingle();
+      names.set(row.counselor_id, { name: s((c as Row | null)?.full_name), email: s((c as Row | null)?.email) });
     }
-    const outcome = await deliverMessage({ ...row, recipients }, names.get(row.counselor_id) ?? null, logger);
+    if (!studentNames.has(row.student_id)) {
+      const { data: st } = await svc.from("profiles").select("full_name").eq("id", row.student_id).maybeSingle();
+      studentNames.set(row.student_id, s((st as Row | null)?.full_name));
+    }
+    const counselor = names.get(row.counselor_id) ?? { name: null, email: null };
+    const outcome = await deliverMessage({ ...row, recipients }, counselor.name, logger, {
+      studentName: studentNames.get(row.student_id) ?? null,
+      replyToFor: async (r) =>
+        (await replyAddressFor(
+          r.kind === "guardian"
+            ? { counselorId: row.counselor_id, party: "parent", studentId: row.student_id, guardianId: r.id }
+            : { counselorId: row.counselor_id, party: "student", studentId: row.student_id },
+          logger
+        )) ??
+        counselor.email ??
+        undefined,
+    });
     await recordOutcome(svc, row.id, outcome, logger);
     tally[outcome.status] += 1;
   }
@@ -782,14 +814,18 @@ export function allowedRecipients(
     if (row.channel !== "email" && row.channel !== "sms") return [];
     return [{ kind: "student", id: st.id, name: st.name, email: st.email, phone: st.phone }];
   }
-  if (row.audience !== "parent" || row.channel !== "email") return [];
-  const byId = new Map(onFile.family.filter((g) => g.receivesMessages && normEmail(g.email)).map((g) => [g.id, g]));
+  if (row.audience !== "parent" || (row.channel !== "email" && row.channel !== "sms")) return [];
+  // The address the row froze must still be the one on file: a message is
+  // never re-addressed, only dropped, for email and for a text alike.
+  type Reachable = { email: string | null; phone: string | null };
+  const reach = (g: Reachable) => (row.channel === "email" ? normEmail(g.email) : normPhone(g.phone));
+  const byId = new Map(onFile.family.filter((g) => g.receivesMessages && reach(g)).map((g) => [g.id, g]));
   const out: Recipient[] = [];
   const seen = new Set<string>();
   for (const r of frozen) {
     if (!r || r.kind !== "guardian" || seen.has(r.id)) continue;
     const g = byId.get(r.id);
-    if (!g || normEmail(g.email) !== normEmail(r.email)) continue;
+    if (!g || reach(g) !== reach(r)) continue;
     seen.add(g.id);
     out.push({ kind: "guardian", id: g.id, name: g.name, email: g.email, phone: g.phone });
   }

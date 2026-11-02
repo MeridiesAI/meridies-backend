@@ -52,3 +52,7 @@ export function fromPostgrest(error: { code?: string; message?: string } | null)
       return new HttpError(500, "Database error");
   }
 }
+
+/** A database failure re-thrown with its Postgres code kept, so a caller can tell "not applied yet" from a real fault. */
+export const pgFailure = (e: { code?: string; message: string }, what: string): Error =>
+  Object.assign(new Error(`${what}: ${e.message}`), { code: e.code });

@@ -65,6 +65,7 @@ import applicationAiRoutes from "./routes/applicationAi.js";
 import studentPageRoutes from "./routes/studentPage.js";
 import studentAidRoutes from "./routes/studentAid.js";
 import communicationRoutes from "./routes/communication.js";
+import messagingRoutes from "./routes/messaging.js";
 // v10 sync imports: colleges-events
 import collegeV10Routes from "./routes/collegesV10.js";
 import collegeAiRoutes from "./routes/collegeAi.js";
@@ -201,6 +202,7 @@ export function buildApp() {
   app.register(studentPageRoutes, { prefix: "/student-page" });
   app.register(studentAidRoutes, { prefix: "/student-aid" });
   app.register(communicationRoutes, { prefix: "/communication" });
+  app.register(messagingRoutes, { prefix: "/messaging" });
   // v10 sync routes: colleges-events
   app.register(collegeV10Routes, { prefix: "/colleges" });
   app.register(collegeIntelRoutes, { prefix: "/colleges" });

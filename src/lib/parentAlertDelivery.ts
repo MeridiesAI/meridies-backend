@@ -28,6 +28,8 @@ import {
   sendSms,
   type SmsStatus,
 } from "./email.js";
+import { alertFootnote } from "./parentCopy.js";
+import { replyAddressFor } from "./replyRouting.js";
 
 type Logger = {
   warn: (obj: unknown, msg?: string) => void;
@@ -72,7 +74,9 @@ function smsBody(alert: ParentAlertRow): string {
 export async function deliverParentAlert(
   ctx: { db: SupabaseClient },
   alert: ParentAlertRow,
-  logger?: Logger
+  logger?: Logger,
+  /** Who is sending: their name signs the email and their address takes the replies. */
+  sender?: { id?: string; name: string | null; email: string | null }
 ): Promise<AlertDeliveryResult> {
   const recipients: Recipient[] = [];
 
@@ -116,14 +120,12 @@ export async function deliverParentAlert(
   const wantEmail = alert.channel === "email" || alert.channel === "both";
   const wantSms = alert.channel === "sms" || alert.channel === "both";
 
-  const template = {
+  const templateFor = (kind: "guardian" | "student") => ({
     heading: alert.subject,
     paragraphs: alert.body.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean),
     bullets: alert.action_items?.length ? alert.action_items : undefined,
-    footnote: studentName
-      ? `Sent by ${studentName}'s counselor through Meridies. Contact your counselor directly with any questions.`
-      : "Sent by your counselor through Meridies. Contact your counselor directly with any questions.",
-  };
+    footnote: alertFootnote(kind, studentName, sender?.name ?? null),
+  });
 
   const attempts: AlertDeliveryAttempt[] = [];
 
@@ -141,12 +143,28 @@ export async function deliverParentAlert(
       if (!r.email) {
         attempts.push({ recipient: r.kind, channel: "email", status: "unavailable", error: "no email address on file" });
       } else {
+        const template = templateFor(r.kind);
+        // A reply lands on the family's thread in the app (the alert's sender,
+        // this student, this guardian); otherwise in the sender's own inbox.
+        const replyTo =
+          (sender?.id
+            ? await replyAddressFor(
+                r.kind === "guardian"
+                  ? { counselorId: sender.id, party: "parent", studentId: alert.student_id, guardianId: r.id }
+                  : { counselorId: sender.id, party: "student", studentId: alert.student_id },
+                logger
+              )
+            : undefined) ??
+          sender?.email ??
+          undefined;
         const res = await sendEmail({
           ...columns,
           to: r.email,
           subject: alert.subject,
           html: brandedEmail(template),
           text: brandedText(template),
+          ...(replyTo ? { replyTo } : {}),
+          fromName: sender?.name ?? null,
         });
         attempts.push({
           recipient: r.kind,
@@ -161,7 +179,7 @@ export async function deliverParentAlert(
       if (!r.phone) {
         attempts.push({ recipient: r.kind, channel: "sms", status: "unavailable", error: "no phone number on file" });
       } else {
-        const res = await sendSms({ ...columns, to: r.phone, body: smsBody(alert) });
+        const res = await sendSms({ ...columns, to: r.phone, body: smsBody(alert), counselorId: sender?.id ?? null });
         attempts.push({ recipient: r.kind, channel: "sms", status: res.status, error: res.error });
       }
     }

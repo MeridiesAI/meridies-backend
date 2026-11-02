@@ -28,7 +28,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
-import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
+import { brandedEmail, brandedText, sendEmail, sendSms } from "../lib/email.js";
+import { contactTextBody, guardianFootnote } from "../lib/parentCopy.js";
+import { replyAddressFor } from "../lib/replyRouting.js";
 import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { activeStudentMessage, isValidPhone, missingForActiveStudent } from "../lib/contactRules.js";
@@ -422,6 +424,23 @@ type InvoiceDraft = {
 };
 
 /** The invoice email, the same for the preview and the send. A pay link adds a "Pay by card" button. */
+/**
+ * Who a family hears from and where a reply goes, for every email a counselor
+ * sends from the pipeline: their name on the From line, and a Reply-To that
+ * lands the family's answer on this contact's timeline (the counselor's own
+ * address when reply routing isn't switched on). The contact was just read on
+ * the caller's own client, so the route is theirs to mint.
+ */
+async function senderFields(
+  request: FastifyRequest,
+  contactId: string,
+  party: "parent" | "student"
+): Promise<{ fromName: string | null; replyTo?: string }> {
+  const routed = await replyAddressFor({ counselorId: request.auth.userId, party, contactId }, request.log);
+  const replyTo = routed ?? request.profile.email ?? undefined;
+  return { fromName: request.profile.full_name ?? null, ...(replyTo ? { replyTo } : {}) };
+}
+
 function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null, payLink: string | null = null) {
   const to = String(contact.parent_email || contact.student_email || "");
   const name = String(contact.student_name ?? "").trim();
@@ -434,11 +453,16 @@ function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, 
   const cta = payLink && draft.amountDueCents > 0 ? { label: "Pay by card", url: payLink } : undefined;
   if (cta) lines.push("You can pay by card with the button below. The payment goes straight to the practice.");
   lines.push("Reply to this email with any questions about the invoice.");
+  const toParent = Boolean(contact.parent_email);
   const template = {
     heading: number ? `Invoice ${number}` : "Invoice",
     paragraphs: lines,
     ...(cta ? { cta } : {}),
-    footnote: senderName ? `Sent by ${senderName} through Meridies.` : "Sent through Meridies.",
+    footnote: toParent
+      ? guardianFootnote(senderName)
+      : senderName
+        ? `Sent by ${senderName} through Meridies.`
+        : "Sent through Meridies.",
   };
   return {
     to,
@@ -898,11 +922,15 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         const template = {
           heading: subject,
           paragraphs: paragraphs(body),
-          footnote: request.profile.full_name
-            ? `Sent by ${request.profile.full_name} through Meridies.`
-            : "Sent through Meridies.",
+          footnote:
+            t.who === "parent"
+              ? guardianFootnote(request.profile.full_name ?? null)
+              : request.profile.full_name
+                ? `Sent by ${request.profile.full_name} through Meridies. Reply to this email and ${request.profile.full_name} will receive it directly.`
+                : "Sent through Meridies.",
         };
         const sent = await sendEmail({
+          ...(await senderFields(request, id, t.who)),
           to: t.email,
           subject,
           html: brandedEmail(template),
@@ -925,6 +953,76 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         if (logError) request.log.warn({ err: logError }, "pipeline: could not log the email to the timeline");
       }
       return { results, sentCount: delivered.length };
+    }
+  );
+
+  /**
+   * Text a contact: the parent, the student, or both, at the phone numbers on
+   * the card (never from the request). It goes from the counselor's own number
+   * when they have one, skips a number that answered STOP, and is logged on the
+   * contact's timeline with what was said. A text recorded `queued` means
+   * texting isn't switched on for this deployment yet; it is never reported
+   * as sent.
+   */
+  app.post(
+    "/contacts/:id/text",
+    {
+      preHandler: [
+        ...counselor,
+        limit("pipeline:text", 30, 3600, "You've texted a lot of families this hour. Give it a moment."),
+      ],
+    },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const b = z
+        .object({
+          body: z.string().trim().min(1).max(1000),
+          to: z.array(z.enum(["student", "parent"])).min(1).max(2),
+        })
+        .strict()
+        .parse(request.body);
+      const c = await loadContactRow(request, id);
+
+      const studentName = String(c.student_name ?? "").trim();
+      const targets = [...new Set(b.to)].map((who) => ({
+        who,
+        phone: String(who === "parent" ? c.parent_phone ?? "" : c.student_phone ?? "").trim(),
+        name: String(who === "parent" ? c.parent_name ?? "" : c.student_name ?? "").trim(),
+      }));
+      const missing = targets.filter((t) => !t.phone).map((t) => t.who);
+      if (missing.length === targets.length) {
+        throw badRequest(`Add the ${missing.join(" and ")}'s phone number to the card first`);
+      }
+
+      const results: Array<{ to: string; status: "sent" | "queued" | "failed" | "unavailable"; error: string | null }> = [];
+      for (const t of targets) {
+        if (!t.phone) {
+          results.push({ to: t.who, status: "unavailable", error: "No phone number on the card" });
+          continue;
+        }
+        const sms = await sendSms({
+          to: t.phone,
+          body: contactTextBody(b.body, { who: t.who, name: t.name }, { counselorName: request.profile.full_name ?? null, studentName }),
+          template: "pipeline-text",
+          recipient_kind: t.who === "parent" ? "guardian" : "student",
+          counselorId: request.auth.userId,
+          logger: request.log,
+        });
+        results.push({ to: t.who, status: sms.status, error: sms.error });
+      }
+
+      // The timeline records what was texted. The text already left (or was held), so a
+      // failure to log it is reported, never raised.
+      const reached = results.filter((r) => r.status === "sent" || r.status === "queued");
+      if (reached.length > 0 && (await pipelineExtrasReady(request))) {
+        const { error: logError } = await request.db.from("pipeline_activities").insert({
+          contact_id: id,
+          kind: "sms",
+          body: `Texted the ${reached.map((r) => r.to).join(" and ")}: ${b.body}`.slice(0, 4000),
+        });
+        if (logError) request.log.warn({ err: logError }, "pipeline: could not log the text to the timeline");
+      }
+      return { results, sentCount: results.filter((r) => r.status === "sent").length, queuedCount: results.filter((r) => r.status === "queued").length };
     }
   );
 
@@ -1095,6 +1193,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null, payLink);
       if (b.send && to) {
         const sent = await sendEmail({
+          ...(await senderFields(request, id, contact.parent_email ? "parent" : "student")),
           to,
           subject: mail.subject,
           html: mail.html,
@@ -1144,10 +1243,11 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           `Invoice ${String(invoice.number)} (${String(invoice.label)}, ${formatUsd(Number(invoice.amount_cents))}) has been cancelled. You don't need to pay it.`,
           "Reply to this email with any questions.",
         ],
-        footnote: request.profile.full_name ? `Sent by ${request.profile.full_name} through Meridies.` : "Sent through Meridies.",
+        footnote: guardianFootnote(request.profile.full_name ?? null),
       };
       const contact = await loadContactRow(request, String(invoice.contact_id));
       const sent = await sendEmail({
+        ...(await senderFields(request, String(invoice.contact_id), String(contact.parent_email ?? "").trim().toLowerCase() === String(invoice.sent_to).trim().toLowerCase() ? "parent" : "student")),
         to: String(invoice.sent_to),
         subject: `Invoice ${String(invoice.number)} cancelled`,
         html: brandedEmail(template),
@@ -1220,6 +1320,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       };
       const mail = invoiceEmail(contact, draft, dto.number, request.profile.full_name ?? null, payLink);
       const sent = await sendEmail({
+        ...(await senderFields(request, String(contact.id), contact.parent_email ? "parent" : "student")),
         to,
         subject: mail.subject,
         html: mail.html,
