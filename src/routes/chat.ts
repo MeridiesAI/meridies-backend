@@ -27,6 +27,7 @@ import {
   ATTACHMENT_MAX_BYTES,
   ATTACHMENT_TYPES,
   attachmentUrl,
+  chatTurnsWithFiles,
   claimAttachments,
   extractChatFiles,
   fileBlocks,
@@ -34,7 +35,6 @@ import {
   MAX_FILES_PER_MESSAGE,
   removeChatFiles,
   startUpload,
-  withFiles,
   type Attachment,
 } from "../lib/axis/attachments.js";
 import { buildStudentContext } from "../lib/context/index.js";
@@ -337,12 +337,11 @@ export default async function chatRoutes(app: FastifyInstance) {
             sources = built?.sources ?? [];
           }
           const system = buildSystemPrompt(tool, studentContext, rosterContext, signerLine(request.profile));
-          // The chat's files, every turn: a reopened chat still knows what was in them.
-          const files = await fileBlocks(request, id);
-          const last = turns.at(-1);
-          if (files.blocks.length && last?.role === "user" && typeof last.content === "string") {
-            last.content = withFiles(last.content, files);
-          }
+          // The chat's files, every turn: earlier files as their stored text in one message ahead of the turns
+          // (lib/axis/attachments.ts), the new message's files with it.
+          const files = await fileBlocks(request, id, { currentMessageId: s(userMsg.id) });
+          const fileNames = [...files.earlierNames, ...files.names];
+          const sent = chatTurnsWithFiles(turns, files);
           const trace: { label: string }[] = [];
           if (sources.length > 0) send("sources", { sources });
           if (contextUsage) send("context", contextUsage);
@@ -358,7 +357,7 @@ export default async function chatRoutes(app: FastifyInstance) {
                 system +
                 "\n\nBefore answering, list the concrete steps you will take, grounded in this student's record.",
               prompt: `The counselor asked: "${body.content}"${
-                files.names.length ? `\nFiles attached to the chat (you will read them when answering): ${files.names.join(", ")}.` : ""
+                fileNames.length ? `\nFiles attached to the chat (you will read them when answering): ${fileNames.join(", ")}.` : ""
               }\nReturn 2–4 short planning steps.`,
               schema: REASONING_SCHEMA as unknown as Record<string, unknown>,
               toolName: "plan",
@@ -387,7 +386,7 @@ export default async function chatRoutes(app: FastifyInstance) {
             request,
             studentId,
             system,
-            messages: turns,
+            messages: sent,
             model: tool.model,
             maxTokens: 1400,
             onDelta: (t) => show(gate.push(t)),

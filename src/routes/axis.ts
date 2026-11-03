@@ -138,6 +138,7 @@ export default async function axisRoutes(app: FastifyInstance) {
         work: async ({ signal, emit, markDone }) => {
           const turn = await runAxisTurn({
             request, conversationId: id, studentId, content: body.content, emit, signal, prepaidCalls: 1, newFiles: attached.length > 0,
+            messageId: userMsg.id as string,
           });
           const { data: saved, error: saveErr } = await request.db
             .from("ai_messages")

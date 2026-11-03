@@ -21,7 +21,7 @@
  * The route then saves the answer, sends `done`, and runs the adjudicator
  * and the memory fold after the counselor can already type again.
  */
-import { fileBlocks, withFiles, type FileBlocks } from "./attachments.js";
+import { earlierFilesMessage, fileBlocks, fileTokens, noFiles, withFiles, type FileBlocks } from "./attachments.js";
 import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
@@ -164,12 +164,15 @@ async function loadContext(request: FastifyRequest, studentId: string | null, fo
   return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [], outside: r?.outside === true };
 }
 
-/** Drops the oldest turns until the prompt fits Haiku 5.5's lower rate card. */
-function fitHistory(turns: Anthropic.Beta.BetaMessageParam[], fixedChars: number): Anthropic.Beta.BetaMessageParam[] {
+/**
+ * Drops the oldest turns until the prompt fits Haiku 5.5's lower rate card. `fixedChars` is everything that always
+ * goes (the system prompt, the newest message, the files message); `fileTokens` the files still sent as files.
+ */
+function fitHistory(turns: Anthropic.Beta.BetaMessageParam[], fixedChars: number, filesTokens = 0): Anthropic.Beta.BetaMessageParam[] {
   const size = (m: Anthropic.Beta.BetaMessageParam) => (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length);
   let total = fixedChars + turns.reduce((n, m) => n + size(m), 0);
   const out = turns.slice();
-  while (out.length && estimateTokens(total) > PROMPT_TOKEN_BUDGET) {
+  while (out.length && estimateTokens(total) + filesTokens > PROMPT_TOKEN_BUDGET) {
     total -= size(out.shift()!);
     while (out[0]?.role === "assistant") total -= size(out.shift()!);
   }
@@ -225,6 +228,8 @@ export async function runAxisTurn(opts: {
   prepaidCalls?: number;
   /** This message brought files: it goes to the model, never to a direct answer from the record. */
   newFiles?: boolean;
+  /** The counselor's message this turn answers: its files go as files, earlier files as their stored text. */
+  messageId?: string;
 }): Promise<TurnResult> {
   const { request, studentId, content, emit, signal } = opts;
   let prepaid = opts.prepaidCalls ?? 0;
@@ -248,15 +253,16 @@ export async function runAxisTurn(opts: {
     loadContext(request, studentId, looksLikeChange(content)),
     loadHistory(request, opts.conversationId),
     getConnectors().connected(request).catch(() => []),
-    // The chat's files, every turn: a reopened chat still knows what was in them.
-    fileBlocks(request, opts.conversationId).catch((err): FileBlocks => {
+    // The chat's files, every turn: a reopened chat still knows what was in them. Earlier files come as their stored text.
+    fileBlocks(request, opts.conversationId, { currentMessageId: opts.messageId }).catch((err): FileBlocks => {
       request.log.warn({ err: errInfo(err) }, "axis attachments skipped");
-      return { blocks: [], names: [], texts: [] };
+      return noFiles();
     }),
   ]);
-  const hasFiles = files.blocks.length > 0;
+  const fileNames = [...files.earlierNames, ...files.names];
+  const hasFiles = fileNames.length > 0;
   // A PDF or an image can't be read back by the live grounding, so its figures aren't checked against it.
-  const opaqueFiles = files.blocks.some((b) => b.type !== "text" && !(b.type === "document" && b.source.type === "text"));
+  const opaqueFiles = files.opaque;
   // What the counselor confirmed, dismissed or undid since the last answer. Best effort.
   const recentActions = recentActionsText(request, opts.conversationId).catch(() => "");
 
@@ -380,9 +386,9 @@ export async function runAxisTurn(opts: {
   const kinds = new Set(ledger.all().map((p) => p.kind));
   const covered = (i: string) => (i === "documents" ? kinds.has("upload") || kinds.has("drive") || kinds.has("onedrive") : i === "email" ? kinds.has("outlook") || kinds.has("gmail") : true);
   const tasks = specialistTasks(u, covered);
-  if (hasFiles) step(`Reading ${files.names.length === 1 ? files.names[0] : `${files.names.length} attached files`}`);
+  if (hasFiles) step(`Reading ${fileNames.length === 1 ? fileNames[0] : `${fileNames.length} attached files`}`);
   const run: Run = await openRun(request, "axis", studentId, {
-    files: files.names.length,
+    files: fileNames.length,
     intent: u.intent, confidence: Math.round(u.confidence * 100) / 100, path: tasks ? "specialists" : "agent", effort,
     evidenceSteps: evidence.trace.length, skipped: evidence.skipped.length,
   });
@@ -418,9 +424,13 @@ export async function runAxisTurn(opts: {
       featureOn("systemMessages") ? "" : `(${modeLine(turnMode)})`,
       content,
     ].filter(Boolean);
-    const fixedChars = system.reduce((n, b) => n + b.text.length, 0) + userParts.join("\n\n").length;
+    // Earlier files' text: one message ahead of the history, the same every turn so the prompt cache keeps it.
+    const filesMessage = earlierFilesMessage(files) as Anthropic.Beta.BetaMessageParam | null;
+    const fixedChars =
+      system.reduce((n, b) => n + b.text.length, 0) + userParts.join("\n\n").length + (filesMessage ? JSON.stringify(filesMessage.content).length : 0);
     const messages: Anthropic.Beta.BetaMessageParam[] = [
-      ...fitHistory(history.turns.slice(0, history.turns.at(-1)?.role === "user" ? -1 : undefined), fixedChars),
+      ...(filesMessage ? [filesMessage] : []),
+      ...fitHistory(history.turns.slice(0, history.turns.at(-1)?.role === "user" ? -1 : undefined), fixedChars, fileTokens(files.blocks)),
       ...(featureOn("perMessageEffort") ? [effortMessage(turnEffort)] : []),
       { role: "user", content: withFiles(userParts.join("\n\n"), files) as Anthropic.Beta.BetaMessageParam["content"] },
       ...(featureOn("systemMessages") ? [modeMessage(modeLine(turnMode))] : []),
