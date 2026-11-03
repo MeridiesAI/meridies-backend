@@ -190,7 +190,7 @@ export function isIntakeRequest(task: Row): boolean {
 }
 
 /** Whether the student's practice lets AI read uploaded documents (Settings › Data & privacy). */
-async function documentReadingAllowed(svc: Svc, studentId: string): Promise<boolean> {
+export async function documentReadingAllowed(svc: Svc, studentId: string): Promise<boolean> {
   const { data: student } = await svc.from("profiles").select("counselor_id").eq("id", studentId).maybeSingle();
   const counselorId = (student?.counselor_id as string | null) ?? null;
   if (!counselorId) return false;
