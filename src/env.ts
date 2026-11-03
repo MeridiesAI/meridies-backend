@@ -141,6 +141,15 @@ const envSchema = z.object({
   // the colleges most listed across rosters it checks per run. Default 30.
   EVENTS_DISCOVERY_COLLEGES: blankIsUnset(z.coerce.number().int().min(1).max(100).optional()),
 
+  // The AI budget gate (lib/aiBudget.ts, 20261104000002): every model call reserves against these and settles
+  // after. Per user: calls and estimated spend per UTC day, output and weighted input tokens per calendar month.
+  // Company-wide: estimated spend per UTC day; at it, all AI pauses until midnight UTC.
+  AI_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(300)),
+  AI_USER_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(10)),
+  AI_MONTHLY_OUTPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(5_000_000)),
+  AI_MONTHLY_INPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(100_000_000)),
+  AI_DAILY_CEILING_USD: blankIsUnset(z.coerce.number().positive().default(100)),
+
   // Google / Microsoft OAuth (lib/oauth.ts). All optional: a provider whose
   // client id + secret are unset answers 503 on /integrations/:provider/*, and
   // nothing else in the API depends on it. The redirect URI registered with
