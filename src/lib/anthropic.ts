@@ -92,7 +92,9 @@ export type AiModule =
   // Resume builder: bullets drafted from a student's own activity rows (lib/resume.ts).
   | "resume"
   // A counselor's pasted meeting notes drafted into a summary and action items (lib/meetingSummary.ts).
-  | "meeting-summary";
+  | "meeting-summary"
+  // AI help filling the questionnaire's tables from typed words or a photo (lib/intakeFill.ts).
+  | "intake-fill";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an

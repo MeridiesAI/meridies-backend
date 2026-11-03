@@ -85,6 +85,7 @@ import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
+import intakeFillRoutes from "./routes/intakeFill.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -235,6 +236,8 @@ export function buildApp() {
   app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(stripeWebhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
+  // AI help for the questionnaire's tables (POST /me/intake/fill).
+  app.register(intakeFillRoutes);
   startSweepInterval(app);
   startExtractionRecovery(app);
 
