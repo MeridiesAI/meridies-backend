@@ -87,6 +87,7 @@ import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
+import intakeFillRoutes from "./routes/intakeFill.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -249,6 +250,8 @@ export function buildApp() {
   app.register(studentOwnRoutes, { prefix: "/me" });
   // QA round 10: a high school's published profile, found on request.
   app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
+  // AI help for the questionnaire's tables (POST /me/intake/fill).
+  app.register(intakeFillRoutes);
   startSweepInterval(app);
   startExtractionRecovery(app);
 
