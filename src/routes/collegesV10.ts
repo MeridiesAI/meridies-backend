@@ -13,7 +13,11 @@
  *                                          credits page
  *   GET    /colleges/:id/extras           profile facts, the curated admitted
  *                                          shape, CDS, rounds, programs, webinar
- *                                          advice
+ *                                          advice, and what the school's own site
+ *                                          says (siteInfo)
+ *   POST   /colleges/:id/lookup           "Look up info & photo": reads the school's
+ *                                          site, saves what it says about applying,
+ *                                          finds a campus picture
  *   GET    /colleges/:id/webinar-tips
  *   POST   /colleges/:id/webinar-tips
  *   PATCH  /colleges/webinar-tips/:tipId
@@ -30,12 +34,15 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { enforceNoProse, runStructured } from "../lib/anthropic.js";
+import { FAST_MODEL, enforceNoProse, runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { lookUpCollege } from "../lib/collegeLookup.js";
+import { runCollegeLookup } from "../lib/collegeLookupRun.js";
+import { SITE_INFO_COLUMNS, buildSiteInfo, toSiteInfo, type AiCall, type SiteInfoRow } from "../lib/collegeSiteInfo.js";
+import { fetchSitePage } from "../lib/links.js";
 import { supabasePhotoStore } from "../lib/ingest/collegePhotos.js";
 import { wikimediaClient } from "../lib/ingest/wikimedia.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -85,6 +92,8 @@ type Row = Record<string, unknown>;
 
 const idParam = z.object({ id: z.string().uuid() });
 const tipParam = z.object({ tipId: z.string().uuid() });
+/** An empty body is a plain lookup; `refresh` reads the school's site again whatever is saved. */
+const lookupBody = z.object({ refresh: z.boolean().optional() }).strict();
 
 const tipBody = z
   .object({
@@ -592,13 +601,18 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   // ---- Look up a school's site and picture ---------------------------------------------
 
   /**
-   * College Search's "Look up info & photo": reads the college's own site for
-   * its title and description, and stores a campus picture when it has none
-   * (lib/collegeLookup.ts). Catalog content, written with the service role;
-   * the caller only has to be a counselor, and is limited to 30 an hour.
+   * College Search's "Look up info & photo": reads a few pages of the college's
+   * own site, keeps what they say about applying (lib/collegeSiteInfo.ts, saved
+   * in college_site_info and reused for 30 days unless the body says
+   * `{ "refresh": true }`), and stores a campus picture when it has none
+   * (lib/collegeLookup.ts). The two run at the same time under one 45 second
+   * deadline (lib/collegeLookupRun.ts). Catalog content, written with the
+   * service role; the caller only has to be a counselor, and is limited to 30 an
+   * hour. The model call is the caller's own: their AI switch and daily quota.
    */
   app.post("/:id/lookup", { preHandler: [...counselor, limit("colleges:lookup", 30, 3600)] }, async (request) => {
     const { id } = idParam.parse(request.params);
+    const { refresh } = lookupBody.parse(request.body ?? {});
     const svc = serviceClient();
     if (!svc) throw unavailable("Lookup needs the service role key.");
     const { data: college, error } = await request.db.from("colleges").select("id, name, unitid, website").eq("id", id).maybeSingle();
@@ -606,6 +620,8 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     if (!college) throw notFound("That college isn't in the catalog");
     const c = college as Row;
     if (!c.website) throw badRequest(`We don't have ${String(c.name)}'s website on file, so there's nowhere to look.`);
+    const name = String(c.name);
+    const website = String(c.website);
 
     // Whether a photo exists, and the table being there at all: a missing table means the migration isn't applied.
     const have = await svc.from("college_photos").select("college_id").eq("college_id", id).maybeSingle();
@@ -613,17 +629,56 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       if (isMissingPhotoSchema(have.error.code)) throw unavailable("Campus photos aren't switched on yet.");
       throw fromPostgrest(have.error);
     }
+    const hasPhoto = !!have.data;
 
-    const outcome = await lookUpCollege(
-      { id, name: String(c.name), unitid: c.unitid == null ? null : Number(c.unitid), website: String(c.website) },
-      { commons: wikimediaClient(), store: supabasePhotoStore(svc), hasPhoto: !!have.data, log: request.log }
-    );
-    const rows = outcome.photo ? await loadCollegePhotos(svc, [id], request.log) : new Map<string, CollegePhotoRow>();
+    const ai: AiCall = (o) =>
+      runStructured({
+        request,
+        module: "link-digest",
+        system: o.system,
+        prompt: o.prompt,
+        schema: o.schema,
+        toolName: o.toolName,
+        maxTokens: o.maxTokens,
+        validate: o.validate,
+      });
+
+    const run = await runCollegeLookup({ id, name, website }, { refresh: refresh === true, hasPhoto }, {
+      // The facts' table may not be applied yet: that is "nothing saved", never an error.
+      readSiteInfo: async () => {
+        const { data, error: readError } = await svc.from("college_site_info").select(SITE_INFO_COLUMNS).eq("college_id", id).maybeSingle();
+        if (readError) {
+          const missing = isMissingPhotoSchema(readError.code);
+          if (!missing) request.log.warn({ code: readError.code }, "college lookup: saved facts not read");
+          return { row: null, missing };
+        }
+        return { row: (data as SiteInfoRow | null) ?? null, missing: false };
+      },
+      writeSiteInfo: async (row) => {
+        const { error: writeError } = await svc.from("college_site_info").upsert(row, { onConflict: "college_id" });
+        if (!writeError) return "ok";
+        if (isMissingPhotoSchema(writeError.code)) return "missing";
+        throw new Error(`save failed: ${writeError.code ?? "error"}`);
+      },
+      fetchHome: fetchSitePage,
+      buildInfo: (home) => buildSiteInfo({ name, website }, home, { fetchPage: fetchSitePage, ai, model: FAST_MODEL, log: request.log }),
+      lookUpPhoto: (fetchMeta) =>
+        lookUpCollege(
+          { id, name, unitid: c.unitid == null ? null : Number(c.unitid), website },
+          { commons: wikimediaClient(), store: supabasePhotoStore(svc), fetchMeta, hasPhoto, log: request.log }
+        ),
+      log: request.log,
+    });
+
+    const rows = run.photo ? await loadCollegePhotos(svc, [id], request.log) : new Map<string, CollegePhotoRow>();
     return {
       collegeId: id,
-      site: outcome.site,
-      photo: toCollegePhoto(rows.get(id), String(c.name)),
-      photoNote: outcome.photoNote,
+      site: run.site,
+      info: run.info,
+      cached: run.cached,
+      photo: toCollegePhoto(rows.get(id), name),
+      photoNote: run.photoNote,
+      infoNote: run.infoNote,
     };
   });
 
@@ -632,7 +687,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   app.get("/:id/extras", { preHandler: app.authenticate }, async (request) => {
     const { id } = idParam.parse(request.params);
     const counselorView = request.profile.role === "counselor";
-    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, associateMajors, policies, requirements, majorAdmits] = await Promise.all([
+    const [college, facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, associateMajors, policies, requirements, majorAdmits, siteInfo] = await Promise.all([
       request.db.from("colleges").select("id, name, website, deadlines").eq("id", id).maybeSingle(),
       request.db.from("college_profile_facts").select("*").eq("college_id", id).maybeSingle(),
       request.db.from("college_admitted_profiles").select("*").eq("college_id", id).maybeSingle(),
@@ -684,12 +739,16 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         .order("entry_year", { ascending: false })
         .order("major")
         .limit(300),
+      // What the school's own site says (Look up info & photo); its table may not be applied yet.
+      request.db.from("college_site_info").select(SITE_INFO_COLUMNS).eq("college_id", id).maybeSingle(),
     ]);
     if (college.error) throw fromPostgrest(college.error);
     if (!college.data) throw notFound("That college isn't in the catalog");
     for (const r of [facts, admitted, cds, programs, tips, listProfile, supplements, stats, factors, majors, associateMajors, policies, requirements, majorAdmits]) {
       if (r.error) throw fromPostgrest(r.error);
     }
+    // Best effort, like the photo: a missing table or a failed read is "nothing saved", never a failed profile.
+    if (siteInfo.error && !isMissingPhotoSchema(siteInfo.error.code)) request.log.warn({ code: siteInfo.error.code }, "college extras: saved site info not read");
     const supplementRows = (supplements.data ?? []) as Row[];
     const latestCycle = supplementRows[0]?.admission_cycle ?? null;
 
@@ -729,6 +788,8 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         ? null
         : `https://www.google.com/search?q=${encodeURIComponent(`${c.name} common data set${site ? ` site:${site}` : ""}`)}`,
       rounds: roundsFrom(c.deadlines),
+      // Read from the school's own site by a counselor's lookup; scraped, never curated, kept apart from `rounds` and `policies`.
+      siteInfo: siteInfo.error ? null : toSiteInfo(siteInfo.data as SiteInfoRow | null),
       programs: {
         combined: programRows.filter((p) => p.kind === "combined"),
         special: programRows.filter((p) => p.kind === "special"),
