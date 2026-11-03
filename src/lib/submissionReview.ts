@@ -239,7 +239,9 @@ export type ReviewStart = { status: "checking" } | { status: "skipped"; reason: 
  */
 export async function startSubmissionReview(
   request: FastifyRequest,
-  args: { taskId: string; documentId: string }
+  args: { taskId: string; documentId: string },
+  /** quiet: a re-check of a file already handed in (the student's own Check again, or after a name change): no notices, the card shows the verdict. */
+  opts: { quiet?: boolean } = {}
 ): Promise<ReviewStart> {
   const svc = serviceClient();
   if (!svc) return { status: "skipped", reason: "AxIS can't check files on this server yet." };
@@ -262,7 +264,7 @@ export async function startSubmissionReview(
   }
 
   if (prepared.status === "skipped") {
-    if (task) await notify(request, svc, task, prepared).catch((err) => request.log.error({ err }, "submission notify failed"));
+    if (task && !opts.quiet) await notify(request, svc, task, prepared).catch((err) => request.log.error({ err }, "submission notify failed"));
     return prepared;
   }
 
@@ -289,6 +291,7 @@ export async function startSubmissionReview(
       request.log.error({ err, taskId: args.taskId }, "submission review failed");
       outcome = { status: "skipped", reason: "AxIS couldn't check this file just now." };
     }
+    if (opts.quiet) return;
     await notify(request, svc, reviewed, outcome).catch((err) => request.log.error({ err }, "submission notify failed"));
   })();
   return { status: "checking" };
@@ -563,4 +566,60 @@ async function counselorNoticeAllowed(request: FastifyRequest, task: Row): Promi
     return false;
   }
   return true;
+}
+
+/** How many handed-back files a name change re-checks at most. */
+export const NAME_CHANGE_RECHECKS = 5;
+
+/**
+ * A student changed their display name: AxIS compared their handed-in files
+ * to the old one, so a file it handed back ("this transcript belongs to
+ * someone else") may be fine now. Re-check the latest file on each task whose
+ * newest verdict is AxIS's "needs a fix", quietly, under the same hand-in
+ * limits as an upload. Reads run on the student's own client, so a task they
+ * can't see (hidden) is never touched. Never throws.
+ */
+export async function recheckAfterNameChange(request: FastifyRequest, studentId: string): Promise<number> {
+  try {
+    const { data: checks, error } = await request.db
+      .from("deliverable_tracker_checks")
+      .select("deliverable_id, document_id, verdict, source, created_at")
+      .eq("student_id", studentId)
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error || !checks) return 0;
+    const latest = new Map<string, Row>();
+    for (const c of checks as Row[]) {
+      const id = String(c.deliverable_id ?? "");
+      if (id && !latest.has(id)) latest.set(id, c);
+    }
+    const due = [...latest.values()]
+      .filter((c) => c.verdict === "below-the-brief" && c.source === "ai" && typeof c.document_id === "string")
+      .slice(0, NAME_CHANGE_RECHECKS);
+    let started = 0;
+    for (const c of due) {
+      const taskId = String(c.deliverable_id);
+      const documentId = String(c.document_id);
+      const { data: task } = await request.db.from("deliverables").select("id, status").eq("id", taskId).maybeSingle();
+      if (!task || task.status === "complete") continue;
+      // The file must still be handed in on the task.
+      const { data: sub } = await request.db
+        .from("deliverable_documents")
+        .select("document_id")
+        .eq("deliverable_id", taskId)
+        .eq("document_id", documentId)
+        .eq("role", "submission")
+        .maybeSingle();
+      if (!sub) continue;
+      const perTask = await consumeRateLimit(`hand-in:task:${taskId}`, HAND_INS_PER_TASK_HOUR, 3600, request.log);
+      const perStudent = perTask && (await consumeRateLimit(`hand-in:student:${studentId}`, HAND_INS_PER_STUDENT_DAY, 86_400, request.log));
+      if (!perTask || !perStudent) continue;
+      const res = await startSubmissionReview(request, { taskId, documentId }, { quiet: true });
+      if (res.status === "checking") started++;
+    }
+    return started;
+  } catch (err) {
+    request.log.error({ err }, "name change re-check failed");
+    return 0;
+  }
 }

@@ -896,7 +896,7 @@ the database (`20261010*`):
   student is told what to upload instead. The counselor gets one
   notification and one email per hand-in; the student gets both when AxIS
   hands it back (profile email, like task assignments; each send is a
-  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (counselor).
+  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (the counselor; or the student on their own unfinished task, under the hand-in limits and with no notices). A student who changes their display name (`PATCH /me/settings`) gets the latest file on up to 5 tasks AxIS handed back re-checked quietly (`recheckAfterNameChange`), since AxIS compares a file to the name on file.
   Tracker verdicts are counselor and service-role writes only; a student
   could write one through PostgREST before this migration.
 - **A student can't archive or restore themselves.** Archiving takes a

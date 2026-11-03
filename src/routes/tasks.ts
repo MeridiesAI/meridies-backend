@@ -916,20 +916,32 @@ export default async function taskRoutes(app: FastifyInstance) {
     }
   );
 
-  /** The counselor asks AxIS to check the latest handed-in file again. */
+  /**
+   * AxIS checks the latest handed-in file again: the counselor on any task,
+   * the student on their own task whose file was handed back (after fixing
+   * their name, say), under the same limits as a hand-in and with no notices.
+   */
   app.post(
     "/:id/review",
     {
       preHandler: [
         app.authenticate,
-        requireRole("counselor"),
         limit("ai:submission-review", 20, 60, "You're running checks very fast."),
       ],
     },
     async (request) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const b = z.object({ documentId: z.string().uuid().optional() }).strict().parse(request.body ?? {});
-      await loadTaskForSubmission(request, id);
+      const role = request.profile.role;
+      if (role !== "counselor" && role !== "student") throw forbidden("Only counselors and students can do that");
+      const task = await loadTaskForSubmission(request, id);
+      const quiet = role === "student";
+      if (quiet) {
+        if (String(task.student_id) !== request.auth.userId) throw forbidden("Only your own tasks");
+        if (task.status === "complete") throw conflict("This task is already done.");
+        await enforceRateLimit(`hand-in:task:${id}`, HAND_INS_PER_TASK_HOUR, 3600, "That's a lot of checks for one task. Try again in an hour.");
+        await enforceRateLimit(`hand-in:student:${request.auth.userId}`, HAND_INS_PER_STUDENT_DAY, 86_400, "That's a lot of checks for one day. Try again tomorrow.");
+      }
 
       let builder = request.db
         .from("deliverable_documents")
@@ -942,7 +954,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       const latest = subs?.[0];
       if (!latest) throw badRequest("Nothing has been handed in on this task yet");
 
-      const review = await startSubmissionReview(request, { taskId: id, documentId: String(latest.document_id) });
+      const review = await startSubmissionReview(request, { taskId: id, documentId: String(latest.document_id) }, { quiet });
       return { task: await freshTask(request, id), review };
     }
   );
