@@ -7,6 +7,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { loadProfileBlob } from "../lib/ownProfile.js";
 import { z } from "zod";
 import {
   DEEP_MODEL,
@@ -81,11 +82,13 @@ export default async function aiRoutes(app: FastifyInstance) {
         },
       });
 
+      // The student's own blob, not the caller's: this row is the student's.
+      const current = await loadProfileBlob(request, studentId);
       await request.db
         .from("profiles")
         .update({
           profile: {
-            ...(request.profile.profile ?? {}),
+            ...(current ?? {}),
             aiSummary: result.aiSummary,
             aiSuggestions: result.aiSuggestions,
           },
