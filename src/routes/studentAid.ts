@@ -26,6 +26,7 @@ import {
   DEFAULT_PREFS,
   loadAidOverview,
   loadPrefs,
+  passesPrefs,
   scanScholarships,
   setChecklistCell,
   type ScholarshipPrefs,
@@ -220,11 +221,14 @@ export default async function studentAidRoutes(app: FastifyInstance) {
   );
 
   /**
-   * "Ask AxIS about these scholarships". The model reads the request and
-   * proposes new answers for the same form, plus at most three short points
-   * about the result. Nothing is saved: the page applies the proposal (with
-   * an undo) through `PUT .../prefs`, so the counselor's form stays the single
-   * place the answers live.
+   * "Ask AxIS about these scholarships". AxIS searches the whole catalog the
+   * student is eligible for and can apply to now (not only the list on
+   * screen), picks the ones that fit the request, and may propose new answers
+   * for the matching form, plus at most three short points. The picks are
+   * checked against that pool in code (an id it wasn't shown is dropped), so
+   * nothing is invented. Nothing is saved: "Add to my list" is the existing
+   * recommend route, and a proposal is applied (with an undo) through
+   * `PUT .../prefs`.
    */
   app.post(
     "/:id/scholarships/ask",
@@ -238,16 +242,23 @@ export default async function studentAidRoutes(app: FastifyInstance) {
       const student = await resolveStudentId(request, id, "edit");
 
       const current = await scanScholarships(request.db, student);
+      const pool = await scanScholarships(request.db, student, current.prefs, { wholeCatalog: true });
+      const shown = new Set(current.matches.map((m) => m.id));
+      // Small, stable keys for the model; real ids never leave the server.
+      const candidates = pool.matches.slice(0, 150);
+      const keyOf = new Map(candidates.map((m, i) => [`s${i + 1}`, m]));
       const summary = {
         today: current.today,
         answers: current.prefs,
-        matches: current.matches.map((m) => ({
+        catalog: candidates.map((m, i) => ({
+          key: `s${i + 1}`,
           name: m.name,
           amountCents: m.amountCents,
           deadline: m.deadline,
           basis: m.basis,
           essayRequired: m.essayRequired,
-          recommended: m.recommended,
+          onTheirList: m.recommended,
+          shownNow: shown.has(m.id),
         })),
         heldBackByTiming: current.held.length,
       };
@@ -258,19 +269,21 @@ export default async function studentAidRoutes(app: FastifyInstance) {
         studentId: student,
         system: [
           "You are AxIS, the assistant inside Meridies, software for independent college counselors.",
-          "The counselor is refining a scholarship search for one student. You change the search's answers; you never invent scholarships, amounts or deadlines.",
-          "Answers you may set: minAwardCents (0 = any; 100000 = $1,000+; 500000 = $5,000+; 1000000 = $10,000+), essaysOk (false hides awards that ask for an essay), basis ('any' | 'merit' | 'need'), maxApplications (3, 8, 15 or 99), audience (family circumstances: " +
+          "You search the scholarship catalog below for one student. Every entry is one the student is eligible for and can apply to now. You never invent scholarships, amounts or deadlines.",
+          "picks: the keys of the catalog entries that best answer the request, best first, at most 10. Empty when none fit.",
+          "Answers you may set on the matching form: minAwardCents (0 = any; 100000 = $1,000+; 500000 = $5,000+; 1000000 = $10,000+), essaysOk (false hides awards that ask for an essay), basis ('any' | 'merit' | 'need'), maxApplications (3, 8, 15 or 99), audience (family circumstances: " +
             AUDIENCES.join(", ") +
             ").",
           "Set prefs only to the fields the request changes; null when it changes none.",
-          "points: at most three short bullet fragments for the counselor, each under 160 characters, naming only scholarships, figures and dates present in the data you were given.",
+          "points: at most three short bullet fragments, each under 160 characters, naming only scholarships, figures and dates present in the data you were given.",
         ].join("\n"),
-        prompt: [`Request: ${question}`, "", `Current search:\n${JSON.stringify(summary).slice(0, 12000)}`].join("\n"),
+        prompt: [`Request: ${question}`, "", `Catalog and current answers:\n${JSON.stringify(summary).slice(0, 30000)}`].join("\n"),
         toolName: "scholarship_search",
-        maxTokens: 800,
+        maxTokens: 900,
         schema: {
           type: "object",
           properties: {
+            picks: { type: "array", items: { type: "string", maxLength: 8 }, maxItems: 10 },
             prefs: {
               type: ["object", "null"],
               properties: {
@@ -297,7 +310,24 @@ export default async function studentAidRoutes(app: FastifyInstance) {
         .filter(Boolean)
         .slice(0, 3);
 
-      return { prefs, points, previous: current.prefs ?? DEFAULT_PREFS };
+      // The picks, checked against the pool. With none, the proposed answers
+      // applied to the whole catalog stand in, so a request like "only $10k+"
+      // still lists what it finds.
+      const pickedKeys = Array.isArray((raw as { picks?: unknown } | null)?.picks)
+        ? ((raw as { picks: unknown[] }).picks.filter((k): k is string => typeof k === "string"))
+        : [];
+      let found = [...new Set(pickedKeys)].map((k) => keyOf.get(k)).filter((m): m is NonNullable<typeof m> => Boolean(m));
+      if (found.length === 0 && prefs) found = pool.matches.filter((m) => passesPrefs(m, prefs));
+      found = found.slice(0, 10);
+
+      return {
+        prefs,
+        points,
+        previous: current.prefs ?? DEFAULT_PREFS,
+        /** What the search found, from the whole catalog; `isNew` = not in the list shown before. */
+        found: found.map((m) => ({ ...m, isNew: !shown.has(m.id) })),
+        searched: pool.matches.length,
+      };
     }
   );
 }
