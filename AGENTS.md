@@ -178,6 +178,12 @@ src/
   writes, outbound message delivery. **Never** hand it a client-supplied id
   without checking the relationship first.
 
+**`request.profile` has no `profile` jsonb.** `authenticate` loads the
+caller's row without the onboarding blob (up to 300 KB); a route that needs it
+reads it with `loadProfileBlob` (`lib/ownProfile.ts`). A cheap point write may
+start its limiter with `startLimit` (`lib/limits.ts`) so the limiter's round
+trip overlaps the first reads; it must be awaited before anything is written.
+
 Authorize in code *and* let RLS enforce it. A route that skips its check leaks
 the shape of the answer (404 vs 403 vs empty list) even when RLS blocks the row.
 
