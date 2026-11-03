@@ -1399,6 +1399,24 @@ there).
   `college_photos` table is missing (before `…000002` the refused insert is caught and the counselor reads "No usable
   picture was found"). Tests: `test/unit/college-lookup.test.ts` (the lookalike table), `college-photos-run.test.ts`
   (the loader keeps looked-up rows), `test/integration/college-photos.test.mjs` (the CHECK).
+- **Logos, and lookups nobody has to click** (`lib/collegeLogos.ts`, `lib/collegeMediaLookup.ts`,
+  `20261105000001`). A school's logo is the icon its own site declares (`<link rel="apple-touch-icon" | "icon">`,
+  read by `parsePageMeta`), fetched through `fetchIconImage` (lib/links.ts: PNG/JPEG/WebP by magic bytes, 512 KB,
+  own host or subdomain, never SVG or ICO, at least 48 px), copied into the public `college-logos` bucket at
+  `<unitid>/logo-<sha1>.<ext>` and recorded in `college_logos` (a row with no path = looked, none found;
+  `checked_at` keeps the automatic lookup off for a week). Served as `logoUrl` on search cards, `/colleges/suggest`,
+  event college refs, and `collegeLogoUrl` on board rows and recommendations (which also carry `collegePhoto`
+  now). We copy rather than hotlink or use a favicon service so viewers' browsers never tell a third party which
+  schools they look at. `POST /:id/lookup` now does photo and logo from one page read (`lookUpMedia`). `GET
+  /colleges/media?ids=` (any signed-in user, 30 a minute) answers each school's photo and logo and queues up to six
+  missing ones for a background lookup (`lookUpMediaSoon`: two at a time per instance, 100 waiting at most, no
+  model, so no AI budget), naming them in `lookingUp`. **Backfill:** `npx tsx --env-file=.env
+  scripts/ingest/college-media.ts [--dry-run] [--limit N] [--only ids] [--retry]` looks up every school missing
+  either, most-listed first, a second apart. **Deploy order:** either; a missing table reads as no logos (five
+  minutes), not in `REQUIRED_SCHEMA`. Tests: `test/unit/college-logos.test.ts`.
+- **`GET /colleges/suggest?q=`**: the "Add a school" typeahead. One `search_colleges` call (8 rows) and three
+  small reads (name/place/acceptance rate, Scorecard's admit rate, photo, logo), instead of the full search's
+  card extras.
 - **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
   review gate, the version check, text holds, pins, the store without the
   migration, and `csvCell`), `test/integration/college-photos.test.mjs`

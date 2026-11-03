@@ -63,6 +63,11 @@ const REVIEWED = [
   // caller's own consultant_phone_numbers row, keyed by request.auth.userId (never a request value), after buying
   // the number they picked, and releases the number if that write fails. lib/inboundSms.ts is handed the client by
   // routes/webhooks.ts (Twilio's signature decides) and asks isCounselorApproved for the number's counselor.
+  // lib/collegeMediaLookup.ts: the automatic photo/logo lookup acts for no counselor; it reads a school's public
+  // home page and writes only Meridies-wide college_photos / college_logos rows (and their public bucket copies),
+  // never replacing what a school has. Queued from GET /colleges/media inside a signed-in request, bounded by a
+  // small in-process queue and a week between tries per school.
+  "lib/collegeMediaLookup.ts",
   "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",

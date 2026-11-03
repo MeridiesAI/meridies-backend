@@ -18,6 +18,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { collegeLogoUrls } from "../lib/collegeLogos.js";
 import { loadCollegePhotos, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
@@ -45,7 +46,12 @@ type Row = Record<string, unknown>;
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
 
-async function hydrate(request: FastifyRequest, rows: Row[], photos?: Map<string, CollegePhotoRow>): Promise<HubEvent[]> {
+async function hydrate(
+  request: FastifyRequest,
+  rows: Row[],
+  photos?: Map<string, CollegePhotoRow>,
+  logos?: Map<string, string>
+): Promise<HubEvent[]> {
   const collegeIds = [...new Set(rows.map((r) => String(r.college_id ?? "")).filter(Boolean))];
   const eventIds = rows.map((r) => String(r.id));
   const [colleges, saves] = await Promise.all([
@@ -58,7 +64,7 @@ async function hydrate(request: FastifyRequest, rows: Row[], photos?: Map<string
   ]);
   if (colleges.error) throw fromPostgrest(colleges.error);
   if (saves.error) throw fromPostgrest(saves.error);
-  const byCollege = new Map<string, CollegeRef>(((colleges.data ?? []) as Row[]).map((r) => [String(r.id), toCollegeRef(r, photos)]));
+  const byCollege = new Map<string, CollegeRef>(((colleges.data ?? []) as Row[]).map((r) => [String(r.id), toCollegeRef(r, photos, logos)]));
   const bySave = new Map<string, SavedState>(((saves.data ?? []) as Row[]).map((r) => [String(r.event_id), toSave(r)]));
   return rows.map((r) =>
     toHubEvent(r, request.auth.userId, r.college_id ? (byCollege.get(String(r.college_id)) ?? null) : null, bySave.get(String(r.id)) ?? null)
@@ -133,8 +139,9 @@ export default async function myEventRoutes(app: FastifyInstance) {
     const similarIds = await similarColleges(request.db, [...mine]);
     const allIds = [...mine, ...similarIds.map((x) => x.id)];
     // One photo read for every college the page names. Never throws.
-    const photos = await loadCollegePhotos(request.db, [...allIds, ...rows.map((r) => String(r.college_id ?? ""))], request.log);
-    const events = (await hydrate(request, rows, photos)).filter(
+    const named = [...allIds, ...rows.map((r) => String(r.college_id ?? ""))];
+    const [photos, logos] = await Promise.all([loadCollegePhotos(request.db, named, request.log), collegeLogoUrls(request.db, named, request.log)]);
+    const events = (await hydrate(request, rows, photos, logos)).filter(
       (e) => (!q.kind || q.kind === "all" || e.kind === q.kind) && matches(e, needle)
     );
 
@@ -156,7 +163,7 @@ export default async function myEventRoutes(app: FastifyInstance) {
       if (colleges.error) throw fromPostgrest(colleges.error);
       if (offered.error) throw fromPostgrest(offered.error);
       const byId = new Map(((colleges.data ?? []) as Row[]).map((r) => [String(r.id), r]));
-      const refOf = (id: string) => (byId.get(id) ? toCollegeRef(byId.get(id)!, photos) : null);
+      const refOf = (id: string) => (byId.get(id) ? toCollegeRef(byId.get(id)!, photos, logos) : null);
       const allOfferings = ((offered.data ?? []) as Row[])
         .map((r) => toOffering(r, refOf(String(r.college_id))))
         .filter((o) => (!q.kind || q.kind === "all" || o.kind === q.kind) && offeringMatches(o, needle));
@@ -166,7 +173,7 @@ export default async function myEventRoutes(app: FastifyInstance) {
       visitPages = [...mine]
         .map((id) => byId.get(id))
         .filter((r): r is Row => Boolean(r?.visit_url))
-        .map((r) => ({ college: toCollegeRef(r, photos), url: String(r.visit_url), checkedAt: (r.visit_url_checked_at as string | null) ?? null }))
+        .map((r) => ({ college: toCollegeRef(r, photos, logos), url: String(r.visit_url), checkedAt: (r.visit_url_checked_at as string | null) ?? null }))
         .sort((a, b) => a.college.shortName.localeCompare(b.college.shortName));
       offerings = allOfferings.filter((o) => mine.has(o.collegeId));
 
@@ -175,7 +182,7 @@ export default async function myEventRoutes(app: FastifyInstance) {
           const r = byId.get(id);
           if (!r) return null;
           return {
-            college: toCollegeRef(r, photos),
+            college: toCollegeRef(r, photos, logos),
             similarTo: refOf(similarTo),
             visitUrl: (r.visit_url as string | null) ?? null,
             events: events.filter((e) => e.college?.id === id),

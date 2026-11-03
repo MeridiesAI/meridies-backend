@@ -80,7 +80,8 @@ export function catalogDeadline(deadlines: unknown, round: string | null, cycle 
 export function toListCollege(
   r: Row,
   supplementCounts: Map<string, number> = new Map(),
-  photos: Map<string, CollegePhotoRow> = new Map()
+  photos: Map<string, CollegePhotoRow> = new Map(),
+  logos: Map<string, string> = new Map()
 ) {
   const c = (r.college ?? null) as Row | null;
   const status = str(r.status) || "not-started";
@@ -92,6 +93,8 @@ export function toListCollege(
     collegeSlug: c ? nstr(c.slug) : null,
     /** The catalog college's campus photo (lib/collegePhotos.ts), or null. */
     collegePhoto: collegeId ? toCollegePhoto(photos.get(collegeId), str(c?.name) || str(r.name)) : null,
+    /** The school's own icon, copied into the college-logos bucket (lib/collegeLogos.ts), or null. */
+    collegeLogoUrl: collegeId ? logos.get(collegeId) ?? null : null,
     name: str(r.name),
     initials: str(r.initials) || initialsOf(str(r.name)),
     color: str(r.brand_color) || "#176b45",
@@ -121,10 +124,13 @@ export function toListCollege(
   };
 }
 
-export function toRecommendation(r: Row) {
+export function toRecommendation(r: Row, photos: Map<string, CollegePhotoRow> = new Map(), logos: Map<string, string> = new Map()) {
+  const collegeId = nstr(r.college_id);
   return {
     id: str(r.id),
-    collegeId: nstr(r.college_id),
+    collegeId,
+    collegePhoto: collegeId ? toCollegePhoto(photos.get(collegeId), str(r.name)) : null,
+    collegeLogoUrl: collegeId ? logos.get(collegeId) ?? null : null,
     name: str(r.name),
     fit: nstr(r.fit) as "reach" | "target" | "likely" | null,
     suggestedBy: (str(r.suggested_by) || "counselor") as "counselor" | "axis",
