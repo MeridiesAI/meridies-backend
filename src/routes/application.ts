@@ -19,6 +19,7 @@ import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
 import { canReadDocumentText, maxReadBytes, readDocumentText } from "../lib/documentText.js";
 import { downloadCapped } from "../lib/storageDownload.js";
+import { collegeLogoUrls } from "../lib/collegeLogos.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
@@ -120,8 +121,12 @@ async function loadListRow(request: FastifyRequest, id: string): Promise<Row> {
  */
 async function serializeOne(request: FastifyRequest, row: Row) {
   const ids = row.college_id ? [String(row.college_id)] : [];
-  const [counts, photos] = await Promise.all([supplementCounts(request, ids), loadCollegePhotos(request.db, ids, request.log)]);
-  return toListCollege(row, counts, photos);
+  const [counts, photos, logos] = await Promise.all([
+    supplementCounts(request, ids),
+    loadCollegePhotos(request.db, ids, request.log),
+    collegeLogoUrls(request.db, ids, request.log),
+  ]);
+  return toListCollege(row, counts, photos, logos);
 }
 
 /** The student's name and email, for a Doc's title and who it is shared with. */
@@ -401,13 +406,17 @@ export default async function applicationRoutes(app: FastifyInstance) {
             String(l.name).trim().toLowerCase() === String(r.name).trim().toLowerCase()
         );
 
+      const openRecs = (recs.data ?? []).filter((r) => !onList(r as Row));
+      const recIds = openRecs.map((r) => r.college_id).filter((v): v is string => typeof v === "string");
+      const [recPhotos, logos] = await Promise.all([
+        loadCollegePhotos(request.db, recIds, request.log),
+        collegeLogoUrls(request.db, [...collegeIds, ...recIds], request.log),
+      ]);
       return {
-        rows: rows.map((r) => toListCollege(r, counts, photos)),
-        recommendations: (recs.data ?? [])
-          .filter((r) => !onList(r as Row))
-          .map((r) =>
-            toRecommendation({ ...(r as Row), recommended_by_name: names.get(String(r.recommended_by)) ?? null })
-          ),
+        rows: rows.map((r) => toListCollege(r, counts, photos, logos)),
+        recommendations: openRecs.map((r) =>
+          toRecommendation({ ...(r as Row), recommended_by_name: names.get(String(r.recommended_by)) ?? null }, recPhotos, logos)
+        ),
       };
     }
   );
