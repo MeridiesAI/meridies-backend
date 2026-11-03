@@ -51,6 +51,7 @@ import { STUDENT_STEPS, openSteps, setupFacts } from "../lib/studentSetup.js";
 import { acceptMyInvitation, listMyInvitations } from "../lib/myInvitations.js";
 import { toMeridiesUser } from "../lib/serialize.js";
 import { hydrate } from "./tasks.js";
+import { recheckAfterNameChange } from "../lib/submissionReview.js";
 
 const settingsPatch = z
   .object({
@@ -165,6 +166,7 @@ export default async function meRoutes(app: FastifyInstance) {
       const me = request.auth.userId;
 
       let fullName = request.profile.full_name;
+      let recheckedFiles = 0;
       if (patch.fullName !== undefined) {
         const { data, error } = await request.db
           .from("profiles")
@@ -174,7 +176,10 @@ export default async function meRoutes(app: FastifyInstance) {
           .maybeSingle();
         if (error) throw fromPostgrest(error);
         if (!data) throw notFound("Profile not found");
+        const before = String(request.profile.full_name ?? "").trim();
         fullName = String(data.full_name);
+        // AxIS checked handed-in files against the old name: look again.
+        if (before !== fullName.trim()) recheckedFiles = await recheckAfterNameChange(request, me);
       }
 
       const preferences =
@@ -182,7 +187,7 @@ export default async function meRoutes(app: FastifyInstance) {
           ? await savePreferences(request.db, me, { theme: patch.theme })
           : await loadPreferences(request.db, me);
 
-      return { fullName, theme: preferences.theme };
+      return { fullName, theme: preferences.theme, recheckedFiles };
     }
   );
 

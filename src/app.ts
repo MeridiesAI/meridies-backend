@@ -86,6 +86,7 @@ import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
+import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -246,6 +247,8 @@ export function buildApp() {
   app.register(internalRoutes, { prefix: "/internal" });
   // A student messaging their counselor, and their own calendar events (QA round 10).
   app.register(studentOwnRoutes, { prefix: "/me" });
+  // QA round 10: a high school's published profile, found on request.
+  app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
   startSweepInterval(app);
   startExtractionRecovery(app);
 

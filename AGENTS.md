@@ -757,7 +757,16 @@ the database (`20261010*`):
   (the description is capped at 150 characters) and files it as a row of
   `activities` or `awards` (`source = 'ai'`) plus a `profile_updates` log row
   the counselor reads at `GET /students/:id/profile-updates`. It never writes
-  essay prose.
+  essay prose. AxIS coaches the entry before it is filed (QA round 10): it asks
+  for scope, numbers, role and dates, may suggest how to frame it, and files
+  only when the record is complete in code *and* the model says the student
+  confirmed the read-back (`readyToFile`); luck or a purchase ("won the
+  lottery") is never filed (`listable: false`, and `notAnAchievement` in code).
+  `POST /profile-updates/from-document { documentId }` reads one of the
+  student's own files (PDF, image, .docx/.txt, .xlsx/.csv in the capped parse
+  process; the hand-in's document rules and byte cap) and returns proposed
+  rows, storing nothing; `POST /profile-updates/file { draft }` files one the
+  student confirmed, under the same checks.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
@@ -902,7 +911,7 @@ the database (`20261010*`):
   student is told what to upload instead. The counselor gets one
   notification and one email per hand-in; the student gets both when AxIS
   hands it back (profile email, like task assignments; each send is a
-  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (counselor).
+  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (the counselor; or the student on their own unfinished task, under the hand-in limits and with no notices). A student who changes their display name (`PATCH /me/settings`) gets the latest file on up to 5 tasks AxIS handed back re-checked quietly (`recheckAfterNameChange`), since AxIS compares a file to the name on file.
   Tracker verdicts are counselor and service-role writes only; a student
   could write one through PostgREST before this migration.
 - **A student can't archive or restore themselves.** Archiving takes a
@@ -916,6 +925,18 @@ the database (`20261010*`):
   counselor-written. The banner image lives in the private `student-banners`
   bucket under `<student id>/`, uploaded through a signed URL minted on the
   student's own token.
+- **The banner can be any colour** (`20261105400001`): `bannerColor` ("#rrggbb" or null) on
+  `PATCH /me/preferences`, stored in `student_preferences.banner_color` (CHECK on the hex shape); a colour
+  wins over the preset, a photo over both. Before the migration `bannerColor` reads null and saving one
+  answers 503 `banner_color_unavailable`; other preferences keep saving.
+- **A high school's published profile** (`POST /high-school-profile/find { studentId? }`,
+  `lib/highSchoolProfile.ts`, `20261105400002`): the student's own school, or a student a counselor can
+  view. The catalog's `school_profile_url` when on file; otherwise cited research
+  (`runWebResearch` on `DISCOVERY_MODEL`, module `college-research`, the school's name and town only, no
+  student) keeps a URL only when it was cited, seen in the run, reads as a profile, and `checkLink` says
+  ok. A catalog school stores it (an empty field only) and `profile_lookup_at`, so a school with no
+  profile isn't searched again for 30 days. 5 an hour per user plus the daily AI quota. A school not in
+  the catalog gets the link back, unstored. Before the migration nothing is remembered.
 - **Settings is the display name and the theme** (`PATCH /me/settings`). The
   theme defaults to `light` (`20261013000001`); "Device" (`system`) is a
   choice, never the default.
