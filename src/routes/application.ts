@@ -17,8 +17,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { canReadDocumentText, maxReadBytes, readDocumentText } from "../lib/documentText.js";
-import { downloadCapped } from "../lib/storageDownload.js";
+import { essayOnly, readStoredText } from "../lib/applicationText.js";
+import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
@@ -307,6 +307,8 @@ const fromDocumentBody = z
     studentCollegeId: uuid.nullable().optional(),
     collegeSupplementId: uuid.nullable().optional(),
     title: trimmed(300).nullable().optional(),
+    /** Attach the file to this essay row (a prompt's row, or a record with no file yet) instead of adding a row. */
+    essayId: uuid.optional(),
   })
   .strict();
 
@@ -844,20 +846,42 @@ export default async function applicationRoutes(app: FastifyInstance) {
         const file = await getRemoteFile(request.auth.userId, "google", String(doc.external_file_id), null, request.log).catch(() => null);
         text = file ? await exportGoogleDocText(request.auth.userId, file, request.log).catch(() => null) : null;
       }
-      const filename = String(doc.filename ?? "");
-      const mimeType = (doc.mime_type as string | null) ?? null;
-      // A format it can't read stays unreadable without a download. The size
-      // the client registered (documents.size_bytes) only skips an obvious
-      // over-cap file: the download itself stops reading past the cap, so a
-      // row that claims 0 bytes can't make the server buffer a 50 MB object.
-      if (text === null && doc.storage_path && canReadDocumentText(filename, mimeType, doc.size_bytes)) {
-        const dl = await downloadCapped(
-          request.db,
-          String(doc.bucket ?? "student-documents"),
-          String(doc.storage_path),
-          maxReadBytes(filename, mimeType)
-        );
-        if (dl.status === "ok") text = readDocumentText(dl.bytes, filename, mimeType);
+      // A format it can't read stays unreadable without a download; the
+      // download itself stops past the cap (documents.size_bytes is the
+      // client's word). A PDF is read in the capped worker (lib/pdfText.ts).
+      if (text === null) text = await readStoredText(request, doc as Row);
+
+      // Only the essay counts: AxIS finds where it starts and ends among a
+      // title, the prompt and notes, and code takes that verbatim slice.
+      // Under the document rules (a confirmed file the AI may read) and the
+      // practice's document-reading switch (runStructured checks it).
+      if (text) {
+        const aiAllowed = documentReadableForTask(toAiDoc(doc as Row), true).allowed;
+        text = (await essayOnly(request, studentId, text, { aiAllowed })).text;
+      }
+
+      if (b.essayId) {
+        const { data: current, error: curError } = await request.db
+          .from("essays")
+          .select("id, student_id, title")
+          .eq("id", b.essayId)
+          .maybeSingle();
+        if (curError) throw fromPostgrest(curError);
+        if (!current || current.student_id !== studentId) throw notFound("That essay isn't on this student's list");
+        const update: Row = {
+          document_id: b.documentId,
+          external_url: null,
+          body: text ?? "",
+          text_status: text === null ? "unreadable" : "read",
+          text_synced_at: new Date().toISOString(),
+          status: text ? "drafting" : "not-started",
+        };
+        if (b.title) update.title = b.title;
+        const { data, error } = await request.db.from("essays").update(update).eq("id", b.essayId).select(ESSAY_SELECT).maybeSingle();
+        if (error) throw fromPostgrest(error);
+        if (!data) throw notFound();
+        await logEssayProgress(request, studentId, data as Row, "update");
+        return reply.code(200).send(essayDto(request, data as Row));
       }
 
       const defaults = await essayDefaults(request, studentId, {
