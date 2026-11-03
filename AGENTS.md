@@ -941,6 +941,25 @@ the database (`20261010*`):
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
+### A student's own messages and calendar events (QA round 10, `20261105000017`)
+
+`routes/studentOwn.ts` (student only, under `/me`). **`POST /me/messages/counselor`** `{ body }` (4,000
+characters, 10 an hour and 30 a day) emails the student's own counselor (`profiles.counselor_id` from the
+row `authenticate` loaded, approved only, fail closed) at their sign-in email with Reply-To the student's
+sign-in email (`lib/studentToCounselor.ts`, template `student-to-counselor`), and keeps a copy as an
+`inbound_messages` row (channel email, party student, `provider_message_id` `app-student:<uuid>`) through the
+service role, so it lists on the counselor's `GET /communication/:id/replies`. `GET /me/messages/counselor`
+reads those rows back for the caller. Email-backed, not an inbox. Without `20261103000002` the email still goes
+and nothing is listed. **`POST/PATCH/DELETE /me/calendar/events`**: `student_calendar_events` (student writes
+their own; anyone who can view the student reads), shown in the calendar feed as kind `milestone`, type
+`personal`, `personal: true`, for the student and for a counselor scoped to that student; 503
+`student_events_unavailable` and no feed rows before the migration. **Deploy order:** either; not in
+`REQUIRED_SCHEMA`. The feed also carries each `student_colleges` deadline (`college:<id>`, kind `deadline`)
+while the school is not decided, skipping one the counselor entered by hand as a deadline with the same school
+and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) now searches the whole eligible,
+open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
+against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
+
 ### CSV import extras (`20261029000003`)
 
 `POST /invites/bulk` recipients take optional `extras` (label -> value; at most 30 entries, labels to 80 characters,
