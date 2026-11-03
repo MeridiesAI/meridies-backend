@@ -8,10 +8,15 @@ import type { MessagesApi, StreamLike, StreamParams } from "../../src/lib/axis/l
 type Row = Record<string, unknown>;
 type Filter = (r: Row) => boolean;
 
-export function fakeDb(tables: Record<string, Row[]>) {
+/** One query the fake ran: what it did and which columns it filtered on (an update's filters say which rows it may touch). */
+export type DbCall = { table: string; op: "select" | "update"; patch?: Row; filters: string[] };
+
+export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
   return {
     from(table: string) {
       const filters: Filter[] = [];
+      const cols: string[] = [];
+      let patch: Row | null = null;
       let orderBy: { col: string; asc: boolean } | null = null;
       let lim: number | null = null;
       let range: [number, number] | null = null;
@@ -25,15 +30,30 @@ export function fakeDb(tables: Record<string, Row[]>) {
           head = !!opts?.head;
           return chain;
         },
-        eq: (c: string, v: unknown) => (filters.push((r) => r[c] === v), chain),
+        update: (p: Row) => ((patch = p), chain),
+        eq: (c: string, v: unknown) => (filters.push((r) => r[c] === v), cols.push(c), chain),
         neq: (c: string, v: unknown) => (filters.push((r) => r[c] !== v), chain),
         in: (c: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[c])), chain),
         lte: (c: string, v: unknown) => (filters.push((r) => r[c] != null && cmp(r[c], v) <= 0), chain),
         lt: (c: string, v: unknown) => (filters.push((r) => r[c] != null && cmp(r[c], v) < 0), chain),
         gte: (c: string, v: unknown) => (filters.push((r) => r[c] != null && cmp(r[c], v) >= 0), chain),
         gt: (c: string, v: unknown) => (filters.push((r) => r[c] != null && cmp(r[c], v) > 0), chain),
-        is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), chain),
-        not: (c: string, op: string, v: unknown) => (filters.push((r) => (op === "is" ? (r[c] ?? null) !== v : true)), chain),
+        is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), cols.push(c), chain),
+        not: (c: string, op: string, v: unknown) => (filters.push((r) => (op === "is" ? (r[c] ?? null) !== v : true)), cols.push(c), chain),
+        // PostgREST's or=(a.is.null,a.lt."<value>"): enough of it for is, eq and lt.
+        or: (expr: string) => {
+          const parts = expr.split(",").map((part) => {
+            const [c, op, ...rest] = part.split(".");
+            return { c: c!, op: op!, v: rest.join(".").replace(/^"|"$/g, "") };
+          });
+          filters.push((r) =>
+            parts.some(({ c, op, v }) =>
+              op === "is" ? (r[c] ?? null) === (v === "null" ? null : v) : op === "eq" ? String(r[c]) === v : op === "lt" ? r[c] != null && cmp(r[c], v) < 0 : false
+            )
+          );
+          cols.push(...parts.map((p) => p.c));
+          return chain;
+        },
         ilike: (c: string, p: string) => (filters.push((r) => new RegExp(`^${p.replace(/%/g, ".*")}$`, "i").test(String(r[c] ?? ""))), chain),
         order: (c: string, o?: { ascending?: boolean }) => ((orderBy = { col: c, asc: o?.ascending !== false }), chain),
         limit: (n: number) => ((lim = n), chain),
@@ -48,6 +68,8 @@ export function fakeDb(tables: Record<string, Row[]>) {
           }
           if (range) rows = rows.slice(range[0], range[1] + 1);
           if (lim !== null) rows = rows.slice(0, lim);
+          calls?.push({ table, op: patch ? "update" : "select", ...(patch ? { patch } : {}), filters: cols.slice() });
+          if (patch) for (const r of rows) Object.assign(r, patch);
           let result: unknown;
           if (countMode && head) result = { data: null, count: rows.length, error: null };
           else if (single === "maybe") result = { data: rows[0] ?? null, error: null };

@@ -17,7 +17,7 @@
 import { PassThrough } from "node:stream";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { claimAttachments, MAX_FILES_PER_MESSAGE } from "../lib/axis/attachments.js";
+import { claimAttachments, extractChatFiles, MAX_FILES_PER_MESSAGE } from "../lib/axis/attachments.js";
 import { TtlLru } from "../lib/axis/cache.js";
 import { runAxisTurn, warmInputs } from "../lib/axis/engine.js";
 import { chargeCall, prewarm } from "../lib/axis/llm.js";
@@ -130,7 +130,11 @@ export default async function axisRoutes(app: FastifyInstance) {
           },
         },
         log: request.log,
-        onSettled: () => void foldIfLong(request, id).catch((err) => request.log.warn({ err }, "axis memory fold skipped")),
+        // After the answer: the memory fold, then the chat's new files are read once (later turns send their text).
+        onSettled: () =>
+          void foldIfLong(request, id)
+            .catch((err) => request.log.warn({ err }, "axis memory fold skipped"))
+            .then(() => extractChatFiles(request, id)),
         work: async ({ signal, emit, markDone }) => {
           const turn = await runAxisTurn({
             request, conversationId: id, studentId, content: body.content, emit, signal, prepaidCalls: 1, newFiles: attached.length > 0,

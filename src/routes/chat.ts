@@ -28,6 +28,7 @@ import {
   ATTACHMENT_TYPES,
   attachmentUrl,
   claimAttachments,
+  extractChatFiles,
   fileBlocks,
   listAttachments,
   MAX_FILES_PER_MESSAGE,
@@ -415,6 +416,8 @@ export default async function chatRoutes(app: FastifyInstance) {
           send("error", { message: publicMessage(err, AXIS_UNAVAILABLE).slice(0, 300) });
         } finally {
           sse.end();
+          // The chat's new files are read once, after the answer; later turns send their text.
+          void extractChatFiles(request, id);
         }
       })();
 

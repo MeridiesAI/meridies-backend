@@ -14,9 +14,13 @@
  */
 import { randomUUID } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyRequest } from "fastify";
 import { badRequest, fromPostgrest, HttpError, notFound } from "../errors.js";
-import { isSchemaMissing } from "./failsafe.js";
+import { extractPdfText, PDF_LIMITS } from "../pdfText.js";
+import { serviceClient } from "../supabase.js";
+import { errInfo, isSchemaMissing } from "./failsafe.js";
+import { transcribe } from "./llm.js";
 
 export const ATTACHMENT_BUCKET = "axis-attachments";
 export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -265,4 +269,109 @@ export function filesPreamble(names: string[]): string {
 export function withFiles(text: string, files: FileBlocks): string | Anthropic.Messages.ContentBlockParam[] {
   if (files.blocks.length === 0) return text;
   return [{ type: "text", text: filesPreamble(files.names) }, ...files.blocks, { type: "text", text }];
+}
+
+// ---- Reading a file once (20261104000001) ----
+
+/** The most text stored for one file; past it the text is cut and marked so. */
+export const STORED_TEXT_MAX = 200_000;
+/** A PDF with less text than this (not counting spaces) is a scan: it gets a transcription instead. */
+const PDF_TEXT_MIN = 200;
+/** A claim this old belongs to a reading that died; the file is free to read again. */
+const CLAIM_STALE_MS = 10 * 60 * 1000;
+
+type Extracted = { text: string | null; kind: "text" | "transcript" | "failed"; cut: boolean };
+const FAILED: Extracted = { text: null, kind: "failed", cut: false };
+
+/** Postgres text can't hold NUL, and a cut keeps at most STORED_TEXT_MAX characters. */
+function storable(raw: string, alreadyCut = false): Extracted {
+  const text = raw.replace(/\u0000/g, "");
+  const over = text.length > STORED_TEXT_MAX;
+  return { text: over ? text.slice(0, STORED_TEXT_MAX) : text, kind: "text", cut: over || alreadyCut };
+}
+
+type ExtractDeps = { pdf?: typeof extractPdfText; transcribe?: typeof transcribe; db?: SupabaseClient };
+
+async function readOne(request: FastifyRequest, row: Row, deps: ExtractDeps): Promise<Extracted> {
+  const { data: blob, error } = await request.db.storage.from(ATTACHMENT_BUCKET).download(row.storage_path);
+  if (error || !blob) return FAILED;
+  const buf = Buffer.from(await blob.arrayBuffer());
+  const read = deps.transcribe ?? transcribe;
+  const transcript = async (block: Anthropic.Messages.ContentBlockParam): Promise<Extracted> => {
+    const t = await read({ request, name: row.file_name, block });
+    return t ? { text: t.text.replace(/\u0000/g, ""), kind: "transcript", cut: t.cut } : FAILED;
+  };
+  if (row.mime_type === "application/pdf") {
+    const pdf = await (deps.pdf ?? extractPdfText)(new Uint8Array(buf));
+    if (!pdf.ok) return FAILED;
+    if (pdf.text.replace(/\s+/g, "").length >= PDF_TEXT_MIN) {
+      // The reader stops at its page and character limits without saying so: reaching either counts as cut.
+      return storable(pdf.text, pdf.pages >= PDF_LIMITS.maxPages || pdf.text.length >= PDF_LIMITS.maxChars);
+    }
+    return transcript({ type: "document", source: { type: "base64", media_type: "application/pdf", data: buf.toString("base64") }, title: row.file_name });
+  }
+  if (IMAGE_TYPES.has(row.mime_type)) {
+    return transcript({
+      type: "image",
+      source: { type: "base64", media_type: row.mime_type as "image/png" | "image/jpeg" | "image/webp" | "image/gif", data: buf.toString("base64") },
+    });
+  }
+  if (TEXT_TYPES.has(row.mime_type)) return storable(buf.toString("utf8"));
+  return FAILED;
+}
+
+/**
+ * Reads this chat's sent files that have no stored text yet, once each, and stores the text (PR A1). Runs after
+ * the turn's answer has streamed, on AxIS and /chat alike. Never throws.
+ *
+ * The caller's own client reads the rows, so RLS returns only their files: that is the ownership check. The
+ * columns written have no client grant, so the service client writes them, and every one of its updates is
+ * keyed on the row's id, owner_id = the caller and this chat. A file is claimed first (extracted_at, free again
+ * after 10 minutes), so two turns never read it twice. A file whose reading fails is marked failed and keeps
+ * going to the model as a file, never retried.
+ */
+export async function extractChatFiles(request: FastifyRequest, conversationId: string, deps: ExtractDeps = {}): Promise<void> {
+  try {
+    const svc = deps.db ?? serviceClient();
+    if (!svc) return;
+    const { data, error } = await request.db
+      .from("ai_attachments")
+      .select(COLUMNS)
+      .eq("conversation_id", conversationId)
+      .not("message_id", "is", null)
+      .is("extract_kind", null)
+      .order("created_at")
+      .limit(MAX_FILES_IN_TURN);
+    if (error) {
+      if (!isSchemaMissing(error)) request.log.warn({ code: error.code }, "axis attachments: files to read not listed");
+      return;
+    }
+    const owner = request.auth.userId;
+    const mine = (q: ReturnType<ReturnType<SupabaseClient["from"]>["update"]>, id: string) =>
+      q.eq("id", id).eq("owner_id", owner).eq("conversation_id", conversationId);
+    for (const row of (data ?? []) as Row[]) {
+      const now = new Date();
+      const stale = new Date(now.getTime() - CLAIM_STALE_MS).toISOString();
+      const { data: claimed, error: claimErr } = await mine(svc.from("ai_attachments").update({ extracted_at: now.toISOString() }), row.id)
+        .is("extract_kind", null)
+        .or(`extracted_at.is.null,extracted_at.lt."${stale}"`)
+        .select("id")
+        .maybeSingle();
+      if (claimErr || !claimed) continue;
+      const out = await readOne(request, row, deps).catch((err): Extracted => {
+        request.log.warn({ err: errInfo(err), id: row.id }, "axis attachment not read");
+        return FAILED;
+      });
+      const { error: saveErr } = await mine(
+        svc.from("ai_attachments").update({ extracted_text: out.text, extract_kind: out.kind, extract_cut: out.cut }),
+        row.id
+      );
+      if (saveErr) {
+        request.log.warn({ code: saveErr.code, id: row.id }, "axis attachment text not stored");
+        await mine(svc.from("ai_attachments").update({ extracted_text: null, extract_kind: "failed", extract_cut: false }), row.id);
+      }
+    }
+  } catch (err) {
+    request.log.warn({ err: errInfo(err) }, "axis attachments: reading skipped");
+  }
 }
