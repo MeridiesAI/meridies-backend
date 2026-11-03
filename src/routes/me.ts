@@ -89,10 +89,11 @@ async function assertCounselorShowsPolygon(request: FastifyRequest): Promise<voi
 
 async function overview(request: FastifyRequest, info?: StudentInfo) {
   const me = request.auth.userId;
-  const [card, counselor, preferences] = await Promise.all([
+  const [card, counselor, preferences, hidden] = await Promise.all([
     info ? Promise.resolve(info) : loadStudentInfo(request.db, me, request.log),
     counselorOf(request),
     loadPreferences(request.db, me),
+    hiddenByCounselor(request.db, me),
   ]);
   if (!card) throw notFound("Your profile isn't set up yet");
   return {
@@ -105,7 +106,7 @@ async function overview(request: FastifyRequest, info?: StudentInfo) {
     preferences,
     // Whether the strength profile shows on the student's dashboard: their own
     // switch and their counselor's (20261028000005).
-    strengthProfile: visibilityOf(await hiddenByCounselor(request.db, me), preferences.showStrengthProfile),
+    strengthProfile: visibilityOf(hidden, preferences.showStrengthProfile),
   };
 }
 
