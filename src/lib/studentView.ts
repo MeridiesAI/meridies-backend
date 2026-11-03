@@ -11,7 +11,7 @@
 import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import { badRequest, fromPostgrest } from "./errors.js";
+import { HttpError, badRequest, fromPostgrest } from "./errors.js";
 import { visibilityUnavailable } from "./polygonVisibility.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
 
@@ -32,6 +32,8 @@ export type Theme = (typeof THEMES)[number];
 
 export type StudentPreferences = {
   bannerPreset: BannerPreset;
+  /** A colour of the student's own ("#rrggbb", lowercase), shown instead of the preset; null for the preset (20261105400001). */
+  bannerColor: string | null;
   /** The Storage path of an uploaded banner, or null for the preset. */
   bannerImagePath: string | null;
   /** A one-hour signed URL for that image; null when there is none or it can't be read. */
@@ -66,6 +68,12 @@ export const e164 = z
 export const preferencesPatch = z
   .object({
     bannerPreset: z.enum(BANNER_PRESETS),
+    bannerColor: z
+      .string()
+      .trim()
+      .regex(/^#[0-9a-fA-F]{6}$/, "Use a colour like #1f6f4a")
+      .transform((v) => v.toLowerCase())
+      .nullable(),
     bannerImagePath: z.string().trim().max(300).nullable(),
     theme: z.enum(THEMES),
     showStrengthProfile: z.boolean(),
@@ -114,6 +122,7 @@ async function toDto(db: SupabaseClient, r: Row): Promise<StudentPreferences> {
     bannerPreset: (BANNER_PRESETS as readonly string[]).includes(String(r.banner_preset))
       ? (r.banner_preset as BannerPreset)
       : "pattern",
+    bannerColor: typeof r.banner_color === "string" && /^#[0-9a-f]{6}$/.test(r.banner_color) ? r.banner_color : null,
     bannerImagePath: path,
     bannerImageUrl: await signedBannerUrl(db, path),
     theme: (THEMES as readonly string[]).includes(String(r.theme)) ? (r.theme as Theme) : "light",
@@ -189,6 +198,9 @@ export async function savePreferences(
         student_id: studentId,
         banner_preset: next.banner_preset,
         banner_image_path: next.banner_image_path ?? null,
+        // Named only when the save is about the colour, so a database without
+        // the column (20261105400001) keeps saving everything else.
+        ...(patch.bannerColor !== undefined ? { banner_color: patch.bannerColor } : {}),
         theme: next.theme,
         // Named only when the student changed it, so a database without the
         // column keeps saving everything else.
@@ -204,6 +216,9 @@ export async function savePreferences(
     .single();
   if (error) {
     if (patch.showStrengthProfile !== undefined && isResultsNotApplied(error)) throw visibilityUnavailable();
+    if (patch.bannerColor !== undefined && isResultsNotApplied(error)) {
+      throw new HttpError(503, "Banner colours aren't switched on yet", "banner_color_unavailable");
+    }
     throw fromPostgrest(error);
   }
 

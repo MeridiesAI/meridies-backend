@@ -1,6 +1,6 @@
 import "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Profile } from "../lib/serialize.js";
+import type { AuthProfile } from "../lib/serialize.js";
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -17,7 +17,10 @@ declare module "fastify" {
     auth: { userId: string; email?: string; token: string };
     /** Supabase client bound to the caller's JWT, so RLS applies to every query. */
     db: SupabaseClient;
-    /** The caller's own profiles row. */
-    profile: Profile;
+    /**
+     * The caller's own profiles row, without the `profile` jsonb (onboarding
+     * answers, up to 300 KB): read that with `loadOwnProfileBlob` where needed.
+     */
+    profile: AuthProfile;
   }
 }

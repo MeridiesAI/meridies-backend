@@ -125,7 +125,7 @@ function pump(log: Log): void {
   }
 }
 
-async function textOf(kind: "pdf" | "text" | "sheet", bytes: Uint8Array, filename: string, mimeType: string | null): Promise<{ text: string | null; from: string }> {
+export async function textOf(kind: "pdf" | "text" | "sheet", bytes: Uint8Array, filename: string, mimeType: string | null): Promise<{ text: string | null; from: string }> {
   if (kind === "pdf") {
     const r = await extractPdfText(bytes);
     return { text: r.ok ? r.text : null, from: "pdf" };

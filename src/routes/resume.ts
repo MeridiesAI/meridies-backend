@@ -4,6 +4,7 @@
  *   GET  /resume               the student's saved resume (a counselor reads one with ?studentId=)
  *   PUT  /resume               save it (student only)
  *   POST /resume/draft         bullets drafted from named activity entries (student only)
+ *   POST /resume/adjust        suggested edits to the student's own resume file (lib/resumeAdjust.ts)
  *
  * The student builds and keeps their own resume; the counselor who can see
  * the student reads it. Drafting stores nothing: the student chooses what to
@@ -26,6 +27,18 @@ import {
   resumeBody,
 } from "../lib/resume.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
+import { canReadStoredText, readStoredText } from "../lib/applicationText.js";
+import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
+import {
+  MAX_RESUME_CHARS,
+  RESUME_ADJUST_SCHEMA,
+  RESUME_ADJUST_SYSTEM,
+  adjustBody,
+  adjustPrompt,
+  cleanSuggestions,
+  resumeLines,
+  sheetFacts,
+} from "../lib/resumeAdjust.js";
 
 type Row = Record<string, unknown>;
 
@@ -100,5 +113,53 @@ export default async function resumeRoutes(app: FastifyInstance) {
       validate: (v) => ({ items: cleanDraft(v, entries) }),
     });
     return out;
+  });
+
+  /**
+   * Resume adjuster: suggested edits to the resume the student already has
+   * (a file in their documents). The student, or a counselor who can edit
+   * them. Reads the file on the caller's client; stores nothing.
+   */
+  app.post("/adjust", { preHandler: [app.authenticate, limit("ai:resume-adjust", 10, 60, "Give it a minute before asking again.")] }, async (request) => {
+    const b = adjustBody.parse(request.body);
+    if (!hasAnthropic) throw new HttpError(503, "The Resume adjuster isn't switched on yet", "resume_adjust_unavailable");
+    const studentId = await resolveStudentId(request, b.studentId, "edit");
+
+    const { data: doc, error: docError } = await request.db.from("documents").select("*").eq("id", b.documentId).maybeSingle();
+    if (docError) throw fromPostgrest(docError);
+    if (!doc || doc.student_id !== studentId) throw badRequest("Pick a resume from this student's documents");
+    const row = doc as Row;
+    if (!canReadStoredText(String(row.filename ?? ""), (row.mime_type as string | null) ?? null)) {
+      throw badRequest("Upload the resume as a PDF or Word (.docx) file.");
+    }
+    const rule = documentReadableForTask(toAiDoc(row), true);
+    if (!rule.allowed) {
+      throw new HttpError(409, rule.reason === "not-categorized" ? "Choose a type for this file first." : "This file is kept out of AI.", "resume_not_readable");
+    }
+
+    const text = await readStoredText(request, row);
+    if (!text) throw badRequest("Couldn't read the text in that file. A scanned resume has no text to read; upload the original PDF or Word file.");
+    if (text.length > MAX_RESUME_CHARS) throw badRequest("That file is too long to be a resume.");
+    const lines = resumeLines(text);
+
+    const [acts, hons] = await Promise.all([
+      request.db.from("activities").select("organization, name, position, category, description, hours_per_week, weeks_per_year, grade_levels").eq("student_id", studentId).order("sort_order").limit(30),
+      request.db.from("awards").select("name, recognition_levels, grade_levels").eq("student_id", studentId).order("sort_order").limit(30),
+    ]);
+    const facts = sheetFacts((acts.data ?? []) as Row[], (hons.data ?? []) as Row[]);
+
+    const suggestions = await runStructured({
+      request,
+      module: "resume-adjust",
+      studentId,
+      model: FAST_MODEL,
+      system: RESUME_ADJUST_SYSTEM,
+      prompt: adjustPrompt(lines, facts),
+      toolName: "resume_edits",
+      schema: RESUME_ADJUST_SCHEMA as unknown as Record<string, unknown>,
+      maxTokens: 2500,
+      validate: (v) => cleanSuggestions(v, lines, facts),
+    });
+    return { lines, suggestions };
   });
 }

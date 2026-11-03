@@ -104,7 +104,9 @@ check("another student can't hand in on this task", intruder.status === 404 || i
 const foreign = await call(s.token, "POST", `/tasks/${transcript.id}/submissions`, { documentId: otherDoc.id });
 check("a student can't hand in someone else's file", foreign.status === 400 || foreign.status === 404, `status ${foreign.status}`);
 const studentRecheck = await call(s.token, "POST", `/tasks/${transcript.id}/review`, {});
-check("only the counselor asks AxIS to re-check", studentRecheck.status === 403, `status ${studentRecheck.status}`);
+check("a student's Check again needs a file handed in first", studentRecheck.status === 400, `status ${studentRecheck.status}`);
+const strangerRecheck = await call(other.token, "POST", `/tasks/${transcript.id}/review`, {});
+check("another student can't ask AxIS to re-check this task", strangerRecheck.status === 403 || strangerRecheck.status === 404, `status ${strangerRecheck.status}`);
 const forged = await fetch(`${SB}/rest/v1/deliverable_tracker_checks`, {
   method: "POST",
   headers: { apikey: ANON, Authorization: `Bearer ${s.token}`, "Content-Type": "application/json" },

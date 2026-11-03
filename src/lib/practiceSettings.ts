@@ -68,6 +68,8 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
  */
 const DOCUMENT_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   "file-filing", "document-tracker", "submission-review", "import-mapping", "import-cleanup",
+  // The Application page reads a student's uploaded essay (where the essay is) and resume (suggested edits).
+  "essay-body", "resume-adjust",
 ]);
 
 /** Which Data & privacy switch gates a module, if any. */

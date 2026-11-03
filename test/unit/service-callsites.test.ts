@@ -8,6 +8,13 @@ import { fileURLToPath } from "node:url";
 // one means deciding whether it acts for a counselor outside their own request
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
+  // lib/profileUpdateDocument.ts: inside a student's own request; the service role only reads their counselor's
+  // practice switch (documentReadingAllowed) to decide whether AI may read the file. The file itself is read on
+  // the student's own client.
+  // lib/highSchoolProfile.ts: inside an approved user's own request (authenticate refuses an unapproved
+  // counselor) after resolveStudentId and their RLS client loaded the school; the service role only fills a
+  // Meridies-wide high_schools.school_profile_url left empty, with a URL the research cited and checkLink
+  // passed, and stamps profile_lookup_at.
   // lib/axis/llm.ts: writes only the ai_runs audit rows for the caller's own AxIS turn, inside their request.
   // lib/eventsDiscovery.ts: the weekly job acts for no counselor; it writes only Meridies-wide hub_events
   // rows from colleges' public pages. routes/events.ts: "Refresh events" runs inside an approved
@@ -64,7 +71,16 @@ const REVIEWED = [
   // caller's own consultant_phone_numbers row, keyed by request.auth.userId (never a request value), after buying
   // the number they picked, and releases the number if that write fails. lib/inboundSms.ts is handed the client by
   // routes/webhooks.ts (Twilio's signature decides) and asks isCounselorApproved for the number's counselor.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  // lib/collegeMediaLookup.ts: the automatic photo/logo lookup acts for no counselor; it reads a school's public
+  // home page and writes only Meridies-wide college_photos / college_logos rows (and their public bucket copies),
+  // never replacing what a school has. Queued from GET /colleges/media inside a signed-in request, bounded by a
+  // small in-process queue and a week between tries per school.
+  "lib/collegeMediaLookup.ts",
+  // lib/studentToCounselor.ts: inside a student's own request (authenticate + requireRole("student")): reads the
+  // address of the caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request
+  // value) after asking isCounselorApproved, and writes or reads only inbound_messages rows keyed by the caller's id.
+  "lib/studentToCounselor.ts",
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",

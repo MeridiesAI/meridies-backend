@@ -17,8 +17,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
-import { canReadDocumentText, maxReadBytes, readDocumentText } from "../lib/documentText.js";
-import { downloadCapped } from "../lib/storageDownload.js";
+import { collegeLogoUrls } from "../lib/collegeLogos.js";
+import { essayOnly, readStoredText } from "../lib/applicationText.js";
+import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
@@ -120,8 +121,12 @@ async function loadListRow(request: FastifyRequest, id: string): Promise<Row> {
  */
 async function serializeOne(request: FastifyRequest, row: Row) {
   const ids = row.college_id ? [String(row.college_id)] : [];
-  const [counts, photos] = await Promise.all([supplementCounts(request, ids), loadCollegePhotos(request.db, ids, request.log)]);
-  return toListCollege(row, counts, photos);
+  const [counts, photos, logos] = await Promise.all([
+    supplementCounts(request, ids),
+    loadCollegePhotos(request.db, ids, request.log),
+    collegeLogoUrls(request.db, ids, request.log),
+  ]);
+  return toListCollege(row, counts, photos, logos);
 }
 
 /** The student's name and email, for a Doc's title and who it is shared with. */
@@ -307,12 +312,14 @@ const fromDocumentBody = z
     studentCollegeId: uuid.nullable().optional(),
     collegeSupplementId: uuid.nullable().optional(),
     title: trimmed(300).nullable().optional(),
+    /** Attach the file to this essay row (a prompt's row, or a record with no file yet) instead of adding a row. */
+    essayId: uuid.optional(),
   })
   .strict();
 
 // Sheet bodies, snake_case like every registerCollection body. Every field can
 // be cleared, so a cell edited back to empty saves as empty.
-const activityBody = z
+export const activityBody = z
   .object({
     category: trimmed(100).nullable(),
     grade_levels: z.array(z.enum(GRADES)).max(5),
@@ -331,7 +338,7 @@ const activityBody = z
   .partial()
   .strict();
 
-const honorBody = z
+export const honorBody = z
   .object({
     name: z.string().trim().max(300).nullable().transform((v) => (v ? v : null)),
     grade_levels: z.array(z.enum(GRADES)).max(5),
@@ -401,13 +408,17 @@ export default async function applicationRoutes(app: FastifyInstance) {
             String(l.name).trim().toLowerCase() === String(r.name).trim().toLowerCase()
         );
 
+      const openRecs = (recs.data ?? []).filter((r) => !onList(r as Row));
+      const recIds = openRecs.map((r) => r.college_id).filter((v): v is string => typeof v === "string");
+      const [recPhotos, logos] = await Promise.all([
+        loadCollegePhotos(request.db, recIds, request.log),
+        collegeLogoUrls(request.db, [...collegeIds, ...recIds], request.log),
+      ]);
       return {
-        rows: rows.map((r) => toListCollege(r, counts, photos)),
-        recommendations: (recs.data ?? [])
-          .filter((r) => !onList(r as Row))
-          .map((r) =>
-            toRecommendation({ ...(r as Row), recommended_by_name: names.get(String(r.recommended_by)) ?? null })
-          ),
+        rows: rows.map((r) => toListCollege(r, counts, photos, logos)),
+        recommendations: openRecs.map((r) =>
+          toRecommendation({ ...(r as Row), recommended_by_name: names.get(String(r.recommended_by)) ?? null }, recPhotos, logos)
+        ),
       };
     }
   );
@@ -844,20 +855,48 @@ export default async function applicationRoutes(app: FastifyInstance) {
         const file = await getRemoteFile(request.auth.userId, "google", String(doc.external_file_id), null, request.log).catch(() => null);
         text = file ? await exportGoogleDocText(request.auth.userId, file, request.log).catch(() => null) : null;
       }
-      const filename = String(doc.filename ?? "");
-      const mimeType = (doc.mime_type as string | null) ?? null;
-      // A format it can't read stays unreadable without a download. The size
-      // the client registered (documents.size_bytes) only skips an obvious
-      // over-cap file: the download itself stops reading past the cap, so a
-      // row that claims 0 bytes can't make the server buffer a 50 MB object.
-      if (text === null && doc.storage_path && canReadDocumentText(filename, mimeType, doc.size_bytes)) {
-        const dl = await downloadCapped(
-          request.db,
-          String(doc.bucket ?? "student-documents"),
-          String(doc.storage_path),
-          maxReadBytes(filename, mimeType)
-        );
-        if (dl.status === "ok") text = readDocumentText(dl.bytes, filename, mimeType);
+      // A format it can't read stays unreadable without a download; the
+      // download itself stops past the cap (documents.size_bytes is the
+      // client's word). A PDF is read in the capped worker (lib/pdfText.ts).
+      if (text === null) text = await readStoredText(request, doc as Row);
+
+      // Only the essay counts: AxIS finds where it starts and ends among a
+      // title, the prompt and notes, and code takes that verbatim slice.
+      // Under the document rules (a confirmed file the AI may read) and the
+      // practice's document-reading switch (runStructured checks it).
+      let current: Row | null = null;
+      if (b.essayId) {
+        const { data, error: curError } = await request.db
+          .from("essays")
+          .select("id, student_id, essay_kind")
+          .eq("id", b.essayId)
+          .maybeSingle();
+        if (curError) throw fromPostgrest(curError);
+        if (!data || data.student_id !== studentId) throw notFound("That essay isn't on this student's list");
+        current = data as Row;
+      }
+      // Materials (a resume, a portfolio: essay_kind "other") are counted whole.
+      const kind = current ? String(current.essay_kind ?? "supplement") : (b.essayKind ?? "supplement");
+      if (text && kind !== "other") {
+        const aiAllowed = documentReadableForTask(toAiDoc(doc as Row), true).allowed;
+        text = (await essayOnly(request, studentId, text, { aiAllowed })).text;
+      }
+
+      if (b.essayId) {
+        const update: Row = {
+          document_id: b.documentId,
+          external_url: null,
+          body: text ?? "",
+          text_status: text === null ? "unreadable" : "read",
+          text_synced_at: new Date().toISOString(),
+          status: text ? "drafting" : "not-started",
+        };
+        if (b.title) update.title = b.title;
+        const { data, error } = await request.db.from("essays").update(update).eq("id", b.essayId).select(ESSAY_SELECT).maybeSingle();
+        if (error) throw fromPostgrest(error);
+        if (!data) throw notFound();
+        await logEssayProgress(request, studentId, data as Row, "update");
+        return reply.code(200).send(essayDto(request, data as Row));
       }
 
       const defaults = await essayDefaults(request, studentId, {
