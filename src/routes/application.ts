@@ -312,7 +312,7 @@ const fromDocumentBody = z
 
 // Sheet bodies, snake_case like every registerCollection body. Every field can
 // be cleared, so a cell edited back to empty saves as empty.
-const activityBody = z
+export const activityBody = z
   .object({
     category: trimmed(100).nullable(),
     grade_levels: z.array(z.enum(GRADES)).max(5),
@@ -331,7 +331,7 @@ const activityBody = z
   .partial()
   .strict();
 
-const honorBody = z
+export const honorBody = z
   .object({
     name: z.string().trim().max(300).nullable().transform((v) => (v ? v : null)),
     grade_levels: z.array(z.enum(GRADES)).max(5),
