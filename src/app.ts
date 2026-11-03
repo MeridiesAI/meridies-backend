@@ -136,7 +136,15 @@ export function buildApp() {
   });
 
   // Paged lists (GET /colleges/search) carry their total and next cursor in headers.
-  app.register(cors, { origin: corsOrigins, credentials: true, exposedHeaders: ["X-Total-Count", "X-Next-Cursor"] });
+  // maxAge: the browser keeps a preflight answer for 10 minutes, so the app's
+  // direct PATCH/DELETE calls don't pay an OPTIONS round trip each time
+  // (browsers otherwise keep it for about 5 seconds).
+  app.register(cors, {
+    origin: corsOrigins,
+    credentials: true,
+    exposedHeaders: ["X-Total-Count", "X-Next-Cursor"],
+    maxAge: 600,
+  });
   app.register(rateLimitPlugin);
   // Interactive API reference at /docs (spec at /docs/json). Registered before
   // the routes so every route lands in the spec. Most routes validate with zod
