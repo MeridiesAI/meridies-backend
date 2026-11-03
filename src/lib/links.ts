@@ -545,7 +545,11 @@ export type PageMeta = {
   description: string | null;
   /** The page's og:image (or twitter:image) as an absolute http(s) URL, unchecked. */
   image: string | null;
+  /** The icons the page declares (`<link rel="apple-touch-icon" | "icon">`), absolute http(s) URLs, unchecked. */
+  icons?: PageIcon[];
 };
+
+export type PageIcon = { href: string; rel: string; sizes: string | null; type: string | null };
 
 /** One `<meta ...>` tag's attributes, read character by character so a `>` inside quotes doesn't end it. */
 function readTag(html: string, from: number): { attrs: Map<string, string>; end: number } {
@@ -594,6 +598,24 @@ export function parsePageMeta(html: string, base: URL): PageMeta {
     const content = attrs.get("content");
     if (key && content && !tags.has(key)) tags.set(key, decodeEntities(content).trim());
   }
+  const icons: PageIcon[] = [];
+  from = 0;
+  for (let n = 0; n < 200 && icons.length < 20; n += 1) {
+    const start = lower.indexOf("<link", from);
+    if (start < 0) break;
+    const { attrs, end } = readTag(head, start + 5);
+    from = end + 1;
+    const rel = (attrs.get("rel") ?? "").toLowerCase().trim();
+    const href = attrs.get("href");
+    if (!href || !(rel.includes("icon"))) continue;
+    try {
+      const u = new URL(decodeEntities(href).trim(), base);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      icons.push({ href: u.toString(), rel, sizes: attrs.get("sizes")?.toLowerCase().trim() || null, type: attrs.get("type")?.toLowerCase().trim() || null });
+    } catch {
+      // not a URL
+    }
+  }
   const rawTitle = findTitle(head, lower);
   const clip = (v: string | undefined | null, n: number) => (v ? v.replace(/\s+/g, " ").trim().slice(0, n) || null : null);
 
@@ -616,6 +638,7 @@ export function parsePageMeta(html: string, base: URL): PageMeta {
     title: clip(tags.get("og:title") ?? (rawTitle === null ? null : decodeEntities(rawTitle)), 200),
     description: clip(tags.get("og:description") ?? tags.get("description"), 400),
     image,
+    icons,
   };
 }
 
@@ -636,6 +659,30 @@ export async function fetchJpeg(rawUrl: string, maxBytes: number): Promise<{ fin
   const b = img.bytes;
   if (b.length < 3 || b[0] !== 0xff || b[1] !== 0xd8 || b[2] !== 0xff) throw badRequest("That image isn't a JPEG");
   return { finalUrl: img.finalUrl.toString(), bytes: b };
+}
+
+/** One small image (a site's icon): PNG, JPEG or WebP by its bytes, at most `maxBytes`, through the same validation and pinning. */
+export async function fetchIconImage(
+  rawUrl: string,
+  maxBytes: number
+): Promise<{ finalUrl: string; bytes: Buffer; type: "png" | "jpg" | "webp" }> {
+  const img = await fetchBytes(rawUrl, {
+    accept: "image/png,image/webp,image/jpeg;q=0.9,*/*;q=0.1",
+    types: ["image/png", "image/jpeg", "image/webp"],
+    maxBytes,
+    truncate: false,
+  });
+  const b = img.bytes;
+  const type =
+    b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47
+      ? "png"
+      : b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff
+        ? "jpg"
+        : b.length > 12 && b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP"
+          ? "webp"
+          : null;
+  if (!type) throw badRequest("That image isn't a PNG, JPEG or WebP");
+  return { finalUrl: img.finalUrl.toString(), bytes: b, type };
 }
 
 export type LinkCheck = {
