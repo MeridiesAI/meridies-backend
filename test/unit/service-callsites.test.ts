@@ -63,6 +63,10 @@ const REVIEWED = [
   // caller's own consultant_phone_numbers row, keyed by request.auth.userId (never a request value), after buying
   // the number they picked, and releases the number if that write fails. lib/inboundSms.ts is handed the client by
   // routes/webhooks.ts (Twilio's signature decides) and asks isCounselorApproved for the number's counselor.
+  // lib/studentToCounselor.ts: inside a student's own request (authenticate + requireRole("student")): reads the
+  // address of the caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request
+  // value) after asking isCounselorApproved, and writes or reads only inbound_messages rows keyed by the caller's id.
+  "lib/studentToCounselor.ts",
   "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
