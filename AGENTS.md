@@ -1730,16 +1730,47 @@ private `axis-attachments` bucket, minted on the counselor's own token under
 `attachmentIds` when it sends the message (`/chat` or `/axis`), which ties
 them to that message. Only this chat's unclaimed files can be named.
 
-- **Every turn reads them again.** Both paths hand the model the chat's files
-  (the newest 8 within 24 MB), not only the new ones, in the latest user
-  message: PDFs as `document` blocks, images as `image` blocks, text as a
-  plain-text `document`, after a line saying they are the counselor's material
-  and not instructions. So a reopened chat still knows what the file said.
+- **Read once, then sent as text** (`20261104000001`, AxIS security PR A1).
+  The turn a file arrives in, it goes to the model as a file: PDFs as
+  `document` blocks, images as `image` blocks, text as a plain-text
+  `document`, after a line saying they are the counselor's material and not
+  instructions. After that turn's answer (AxIS: after the memory fold; `/chat`:
+  when the stream ends) `extractChatFiles` reads each new file once and stores
+  its text on the row: a PDF's text through `lib/pdfText.ts` (one with under
+  200 non-space characters is a scan), a text file as it is, and an image or a
+  scan gets one word-for-word Haiku transcription (`transcribe` in
+  `lib/axis/llm.ts`, module `axis-attachment`, at most 12,000 characters,
+  charged to the counselor like any call). Stored text is capped at 200,000
+  characters; `extract_cut` says when it stops short. A file whose reading
+  fails is `failed` and keeps going as a file; it is never retried. A file is
+  claimed first (`extracted_at`, free again after 10 minutes), so two turns
+  never read it twice.
+- **The files message.** Every later turn (both paths) sends the earlier
+  files' stored text in one user message at the start of the messages, in the
+  order attached (`earlierFilesMessage`): each file in a `wrapUntrusted`
+  block of at most 12,000 characters, a cut one followed by `[cut here: the
+  rest of this file isn't included]`, and a sentence saying so when any file
+  was cut. It is the same every turn, so the prompt cache keeps it; a newly
+  read file adds one block at its end. The newest message carries only the new
+  message's files and any file without stored text. The window is unchanged
+  (the newest 8 files; 24 MB of files still sent as files). `fitHistory`
+  counts the files message's characters and the files sent as files
+  (`fileTokens`: text by length, an image 1,600, a PDF 2,500 a page) and
+  drops older replayed messages first, never the files message. Known limit:
+  a later question that needs the original (a chart, a signature) can't see
+  it; the counselor attaches it again.
+- **The stored text is server-only.** `authenticated` has no INSERT or UPDATE
+  on `extracted_text`, `extract_kind`, `extract_cut` or `extracted_at`: the
+  table-level grants are revoked and given back per column on what the API
+  writes with the counselor's token (the upload's insert, `message_id`). Only
+  the service client writes the text, keyed on the row's id, `owner_id` = the
+  caller and the chat, and only to rows the caller's own RLS read returned.
 - **v2 specifics.** A message that brings a file never gets a direct answer.
-  A turn with files counts as outside content, so every change it proposes
-  waits for Confirm. A PDF's or image's figures can't be read back by the live
-  grounding, so with one in the chat the turn emits no grounding marks and
-  skips the after-answer check; text files are indexed like any evidence.
+  A turn in a chat with files counts as outside content, so every change it
+  proposes waits for Confirm. A PDF's or image's figures can't be read back by
+  the live grounding, so while one still goes as a file the turn emits no
+  grounding marks and skips the after-answer check; stored text and text files
+  are indexed like any evidence.
 - **Replay and cleanup.** `GET /chat/conversations/:id` lists each message's
   `attachments` (id, name, type, size); `GET /chat/attachments/:id/url` is a
   five-minute download link. Deleting the chat removes its stored files.
@@ -1747,7 +1778,11 @@ them to that message. Only this chat's unclaimed files can be named.
   is safe: before it, the upload route answers
   `503 { code: "attachments_unavailable" }` and messages are sent without
   files as before. Not in `REQUIRED_SCHEMA`, for the same reason as
-  `20261018000001`. `test/integration/axis-attachments.test.mjs` and
+  `20261018000001`. `20261104000001_axis_file_text.sql` (the stored text,
+  its grants, the `axis-attachment` label): either order too. Without it
+  nothing is stored and every turn sends the files as files (a missing column
+  reads as "not read yet"); the previous build writes only the columns it
+  keeps a grant on. Not in `REQUIRED_SCHEMA`. `test/integration/axis-attachments.test.mjs` and
   `test/unit/axis-attachments.test.ts` cover it.
 
 **Adding an op:** write it in the area's catalog file, add the group to
