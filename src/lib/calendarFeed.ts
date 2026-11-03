@@ -10,7 +10,11 @@
  *   meeting    `meetings`, by start time. Cancelled sessions only on request.
  *   task       each dated stage of an assigned task; a task without stages
  *              by its own due date.
- *   milestone  the counselor's own practice events (`calendar_events`).
+ *   milestone  the counselor's own practice events (`calendar_events`), and a
+ *              student's own events (`student_calendar_events`, `personal`).
+ *   deadline   also each school's application deadline on the student's
+ *              college list (`student_colleges.deadline`), id `college:<row>`,
+ *              until a decision is in.
  *
  * Saved Events Hub events ("Professional events", kind `event`) are owned by
  * the Events Hub routes and merged by the client; the type reassignments that
@@ -61,6 +65,8 @@ export type CalendarFeedItem = {
   taskId: string | null;
   /** Deadlines only: the school it is for. */
   school: string | null;
+  /** A student's own event (`student_calendar_events`): theirs to edit and delete. */
+  personal?: boolean;
 };
 
 export type EventTypeDto = {
@@ -175,6 +181,57 @@ export async function loadEventTypes(request: FastifyRequest): Promise<EventType
   return (data ?? []).map((r) => toEventType(r as Row));
 }
 
+const ROUND_NAMES: Record<string, string> = {
+  ED: "Early Decision",
+  ED2: "Early Decision II",
+  EA: "Early Action",
+  REA: "Restrictive Early Action",
+  SCEA: "Single-Choice Early Action",
+  RD: "Regular Decision",
+  rolling: "Rolling",
+  priority: "Priority",
+};
+
+/** Postgres / PostgREST answers for a table that isn't there yet. */
+export function isMissingTable(error: { code?: string } | null | undefined): boolean {
+  return error?.code === "42P01" || error?.code === "PGRST205";
+}
+
+export const toPersonalEvent = (r: Row) => ({
+  id: s(r.id),
+  studentId: s(r.student_id),
+  title: s(r.title),
+  detail: ns(r.detail),
+  onDate: s(r.on_date),
+  startsAt: ns(r.starts_at),
+  endsAt: ns(r.ends_at),
+  createdAt: s(r.created_at),
+  updatedAt: s(r.updated_at),
+});
+
+/**
+ * A student's own events in a window (`student_calendar_events`, migration
+ * 20261105000017). A database without the table answers nothing, not an error.
+ */
+async function loadPersonalEvents(request: FastifyRequest, studentId: string, from: string, to: string): Promise<Row[]> {
+  const { data, error } = await request.db
+    .from("student_calendar_events")
+    .select("id, student_id, title, detail, on_date, starts_at, ends_at")
+    .eq("student_id", studentId)
+    .gte("on_date", addDays(from, -1))
+    .lte("on_date", addDays(to, 1))
+    .order("on_date")
+    .limit(1000);
+  if (error) {
+    if (isMissingTable(error)) return [];
+    throw fromPostgrest(error);
+  }
+  return ((data ?? []) as Row[]).filter((r) => {
+    const d = s(r.on_date);
+    return d >= addDays(from, -1) && d <= addDays(to, 1);
+  });
+}
+
 /**
  * Build the feed. `q.studentId` is set only after the route proved the caller
  * may view that student; a student caller is always scoped to themselves.
@@ -250,6 +307,15 @@ export async function buildCalendarFeed(
     if (scopeStudent) practice = practice.eq("student_id", scopeStudent);
   }
 
+  // ---- college list deadlines (the school's own date, until a decision) ----
+  let colleges = request.db
+    .from("student_colleges")
+    .select("id, student_id, name, round, deadline, status")
+    .gte("deadline", q.from)
+    .lte("deadline", q.to)
+    .in("status", q.includeDone ? ["not-started", "in-progress", "submitted"] : ["not-started", "in-progress"]);
+  if (scopeStudent) colleges = colleges.eq("student_id", scopeStudent);
+
   // A counselor's whole calendar: name their students, so the two reads that
   // span students use the index instead of RLS-checking every practice's rows.
   if (!scopeStudent) {
@@ -257,18 +323,22 @@ export async function buildCalendarFeed(
     if (caseload) {
       deadlines = deadlines.in("student_id", caseload);
       tasks = tasks.in("student_id", caseload);
+      colleges = colleges.in("student_id", caseload);
     }
   }
 
-  const [dl, mt, tk, pe, eventTypes, assignments] = await Promise.all([
+  const [dl, mt, tk, pe, eventTypes, assignments, cl, personal] = await Promise.all([
     deadlines.order("due_date").limit(3000),
     meetings.order("starts_at").limit(2000),
     tasks.limit(1000),
     practice.order("on_date").limit(2000),
     loadEventTypes(request),
     loadAssignments(request),
+    colleges.order("deadline").limit(3000),
+    // One student's own events: the student themselves, or a counselor looking at that student.
+    scopeStudent ? loadPersonalEvents(request, scopeStudent, q.from, q.to) : Promise.resolve([] as Row[]),
   ]);
-  for (const r of [dl, mt, tk, pe]) if (r.error) throw fromPostgrest(r.error);
+  for (const r of [dl, mt, tk, pe, cl]) if (r.error) throw fromPostgrest(r.error);
 
   const moved = new Map(assignments.map((a) => [`${a.eventKind}:${a.eventRef}`, a.type]));
   const typeOf = (kind: FeedKind, ref: string) => moved.get(`${kind}:${ref}`) ?? kind;
@@ -354,6 +424,57 @@ export async function buildCalendarFeed(
       detail: ns(r.description),
       done: Boolean(r.done),
       school: ns(r.school),
+    });
+  }
+
+  // A school's deadline the counselor also entered by hand as a deadline is shown once.
+  const handEntered = new Set(
+    ((dl.data ?? []) as Row[]).map((r) => `${s(r.student_id)}|${s(r.due_date)}|${s(r.school).toLowerCase()}`)
+  );
+  for (const r of (cl.data ?? []) as Row[]) {
+    const ref = s(r.id);
+    const name = s(r.name);
+    const date = s(r.deadline);
+    if (handEntered.has(`${s(r.student_id)}|${date}|${name.toLowerCase()}`)) continue;
+    const round = ns(r.round);
+    items.push({
+      ...base,
+      id: `college:${ref}`,
+      kind: "deadline",
+      ref,
+      type: typeOf("deadline", ref),
+      title: `${name} application due`,
+      date,
+      startsAt: null,
+      endsAt: null,
+      allDay: true,
+      studentId: s(r.student_id),
+      detail: round ? `${ROUND_NAMES[round] ?? round} deadline` : null,
+      done: s(r.status) === "submitted",
+      school: name,
+    });
+  }
+
+  for (const r of personal) {
+    const ref = s(r.id);
+    const startsAt = ns(r.starts_at);
+    const date = startsAt ? dayIn(startsAt, q.tz) : s(r.on_date);
+    if (date < q.from || date > q.to) continue;
+    items.push({
+      ...base,
+      id: `personal:${ref}`,
+      kind: "milestone",
+      ref,
+      type: "personal",
+      title: s(r.title),
+      date,
+      startsAt,
+      endsAt: ns(r.ends_at),
+      allDay: startsAt === null,
+      studentId: s(r.student_id),
+      detail: ns(r.detail),
+      done: false,
+      personal: true,
     });
   }
 
