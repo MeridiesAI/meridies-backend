@@ -976,6 +976,27 @@ read `importData: null`. Not in `REQUIRED_SCHEMA`. Test: `test/integration/overv
   bullet is dropped unless it is 8-160 characters, has no first-person word and states no figure the row did not.
   It drafts bullets only, no summary or story, so the essay rule holds; nothing is stored until the student saves.
   Without the migration the routes answer 503 `resume_unavailable`. Tests: `test/unit/resume-draft.test.ts`.
+- **Resume adjuster** (`POST /resume/adjust`, `lib/resumeAdjust.ts`, `lib/applicationText.ts`; the app replaced the
+  builder with it, `student_resumes` is untouched). Body `{ documentId, studentId? }` (strict): the student, or a
+  counselor who can edit them, names a resume file in the student's documents; it is read on the caller's client
+  (`readStoredText`: documents bucket and a safe path only; .txt/.md/.docx through `lib/documentText.ts`, a PDF in
+  the capped worker of `lib/pdfText.ts`, a scan is unreadable) under the task document rule
+  (`documentReadableForTask`). AxIS (`resume-adjust`, Haiku, 10 a minute, under the practice's document-reading
+  switch) gets the resume's lines and the student's Activities and Honors rows as untrusted data and returns line
+  edits; `cleanSuggestions` keeps only an edit whose original is one of the resume's lines (the resume's own text is
+  returned, not the model's copy), adds no number the resume or the rows don't hold, has no first person (unless the
+  line did), and is one per line, at most 15. Answers `{ lines, suggestions }`; nothing stored. Without
+  `ANTHROPIC_API_KEY`, 503 `resume_adjust_unavailable`. Tests: `test/unit/resume-adjust.test.ts`.
+- **Essay files are counted from the essay** (`POST /application/essays/from-document`). PDFs are read too (the capped
+  worker), and AxIS (`essay-body`, Haiku, the document-reading switch, only for a confirmed file the AI may read and
+  not for `essay_kind = 'other'` materials) quotes the first and last words of the essay among a title, the prompt
+  and notes; `locateEssay` finds the quotes in the text (whitespace-loose, never a model offset) and keeps that
+  verbatim slice only when it holds 30+ words and a quarter of the document, else the whole text. The body is that
+  slice, so the database's word count counts the essay; nothing is rewritten. `essayId` fills an existing row (a
+  prompt's row, an empty record) instead of adding one. The app no longer calls `POST /application/supplement-docs`
+  (the route stays). Migration `20261105000071` sets Stanford's eight prompts (unverified, so the app says to check
+  the school's page) and adds both `ai_runs` labels; either deploy order. Tests: `test/unit/application-text.test.ts`,
+  `test/unit/application-sheet-fields.test.ts` (every sheet cell's patch is accepted and reads back).
 - **Coherence's activity alignment** (`lib/activityAlignment.ts`). `GET /application/coherence` adds `alignment`:
   the Activities and Honors sheets sorted into Research, Service and Competitions (by category and by the row's own
   words; hours per year from hours per week x weeks per year), the declared majors, which entries connect to a major
