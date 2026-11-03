@@ -30,6 +30,7 @@ import { isIP, type LookupFunction } from "node:net";
 import { Readable } from "node:stream";
 import zlib from "node:zlib";
 import { badRequest } from "./errors.js";
+import { sniffImage } from "./imageConvert.js";
 import { asciiLower, replaceBlocks, replaceTags } from "./linearText.js";
 
 const MAX_BYTES = 2_000_000;
@@ -543,9 +544,20 @@ export type PageMeta = {
   finalUrl: string;
   title: string | null;
   description: string | null;
-  /** The page's og:image (or twitter:image) as an absolute http(s) URL, unchecked. */
+  /** The page's og:image (or twitter:image) as an absolute http(s) URL, unchecked. The first of `images`. */
   image: string | null;
+  /**
+   * Every image the head declares, best first, each once, as absolute http(s)
+   * URLs, unchecked: og:image:secure_url, og:image, og:image:url,
+   * twitter:image(:src), then <link rel="image_src">. At most MAX_IMAGE_CANDIDATES.
+   */
+  images?: string[];
 };
+
+const IMAGE_KEYS = ["og:image:secure_url", "og:image", "og:image:url", "twitter:image", "twitter:image:src"];
+const MAX_IMAGE_CANDIDATES = 8;
+const MAX_VALUES_PER_KEY = 6;
+const MAX_LINK_TAGS = 100;
 
 /** One `<meta ...>` tag's attributes, read character by character so a `>` inside quotes doesn't end it. */
 function readTag(html: string, from: number): { attrs: Map<string, string>; end: number } {
@@ -584,6 +596,8 @@ export function parsePageMeta(html: string, base: URL): PageMeta {
   const head = html.slice(0, 400_000);
   const lower = asciiLower(head);
   const tags = new Map<string, string>();
+  // Every value of an image tag, not just the first: pages often list several.
+  const imageValues = new Map<string, string[]>();
   let from = 0;
   for (let n = 0; n < 300; n += 1) {
     const start = lower.indexOf("<meta", from);
@@ -593,29 +607,41 @@ export function parsePageMeta(html: string, base: URL): PageMeta {
     const key = (attrs.get("property") ?? attrs.get("name") ?? "").toLowerCase();
     const content = attrs.get("content");
     if (key && content && !tags.has(key)) tags.set(key, decodeEntities(content).trim());
+    if (content && IMAGE_KEYS.includes(key)) {
+      const list = imageValues.get(key) ?? [];
+      if (list.length < MAX_VALUES_PER_KEY) imageValues.set(key, [...list, decodeEntities(content).trim()]);
+    }
+  }
+  // <link rel="image_src" href="..."> is the older way to name a share image.
+  const linkImages: string[] = [];
+  let linkFrom = 0;
+  for (let n = 0; n < MAX_LINK_TAGS && linkImages.length < MAX_VALUES_PER_KEY; n += 1) {
+    const start = lower.indexOf("<link", linkFrom);
+    if (start < 0) break;
+    const { attrs, end } = readTag(head, start + 5);
+    linkFrom = end + 1;
+    const href = attrs.get("href");
+    if (href && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("image_src")) linkImages.push(decodeEntities(href).trim());
   }
   const rawTitle = findTitle(head, lower);
   const clip = (v: string | undefined | null, n: number) => (v ? v.replace(/\s+/g, " ").trim().slice(0, n) || null : null);
 
-  let image: string | null = null;
-  for (const k of ["og:image:secure_url", "og:image", "twitter:image", "twitter:image:src"]) {
-    const v = tags.get(k);
-    if (!v) continue;
+  const images: string[] = [];
+  for (const v of [...IMAGE_KEYS.flatMap((k) => imageValues.get(k) ?? []), ...linkImages]) {
+    if (images.length >= MAX_IMAGE_CANDIDATES) break;
     try {
       const u = new URL(v, base);
-      if (u.protocol === "http:" || u.protocol === "https:") {
-        image = u.toString();
-        break;
-      }
+      if ((u.protocol === "http:" || u.protocol === "https:") && !images.includes(u.toString())) images.push(u.toString());
     } catch {
-      // not a URL; try the next tag
+      // not a URL; skip it
     }
   }
   return {
     finalUrl: base.toString(),
     title: clip(tags.get("og:title") ?? (rawTitle === null ? null : decodeEntities(rawTitle)), 200),
     description: clip(tags.get("og:description") ?? tags.get("description"), 400),
-    image,
+    image: images[0] ?? null,
+    images,
   };
 }
 
@@ -735,6 +761,22 @@ export async function fetchSitePage(rawUrl: string): Promise<SitePage> {
     meta: parsePageMeta(html, page.finalUrl),
     links: extractLinks(html, page.finalUrl),
   };
+}
+
+/**
+ * One picture a college's page names, at most `maxBytes`: a JPEG, PNG or WebP
+ * by Content-Type and, because a type is only a claim, by its first bytes.
+ * The same validation and pinning as everything else here.
+ */
+export async function fetchImageAny(rawUrl: string, maxBytes: number): Promise<{ finalUrl: string; bytes: Buffer }> {
+  const img = await fetchBytes(rawUrl, {
+    accept: "image/jpeg,image/png,image/webp,*/*;q=0.1",
+    types: ["image/jpeg", "image/jpg", "image/png", "image/webp"],
+    maxBytes,
+    truncate: false,
+  });
+  if (!sniffImage(img.bytes)) throw badRequest("That isn't a JPEG, PNG or WebP image");
+  return { finalUrl: img.finalUrl.toString(), bytes: img.bytes };
 }
 
 /** One JPEG, at most `maxBytes`, through the same validation and pinning. */

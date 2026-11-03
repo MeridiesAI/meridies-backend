@@ -11,10 +11,13 @@
  *      passes the same rules as the monthly loader (`choosePhoto`: JPEG, big
  *      enough, CC0 / public domain / CC BY / CC BY-SA, a credit). Stored as
  *      source `commons-search`, with the Commons credit and license.
- *   2. The college site's own share image (og:image), from the college's host
- *      or a subdomain of it, a JPEG of at most 3 MB. Stored as source `site`,
- *      credited to the university's website with a link back to the page. It
- *      is not freely licensed; the credit says whose it is.
+ *   2. The college site's own share images (og:image and its siblings, up to
+ *      three tried), from the college's host or a subdomain of it, a JPEG, PNG
+ *      or WebP of at most 3 MB, at least 800 px wide and landscape. Each is
+ *      converted to a 1280 px and a real 500 px JPEG (lib/imageConvert.ts).
+ *      Stored as source `site`, credited to the university's website with a
+ *      link back to the page. It is not freely licensed; the credit says whose
+ *      it is.
  *
  * Both are copied into the public college-photos bucket (never hotlinked) and
  * written with the service role, like the loader's. A school that already has
@@ -22,8 +25,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { fetchJpeg, fetchPageMeta, type PageMeta } from "./links.js";
+import { fetchImageAny, fetchPageMeta, type PageMeta } from "./links.js";
 import { collegeHost } from "./eventsDiscovery.js";
+import { jpegSize, toStoredJpegs, type StoredImage } from "./imageConvert.js";
 import {
   WIDTHS,
   choosePhoto,
@@ -38,6 +42,8 @@ import type { WikimediaClient } from "./ingest/wikimedia.js";
 import { MAX_BYTES } from "./ingest/wikimedia.js";
 
 const MIN_SITE_WIDTH = 800;
+/** How many of a page's declared images are tried before giving up. */
+const SITE_CANDIDATES = 3;
 const COMMONS_CANDIDATES = 6;
 /** Words that don't tell one school from another. */
 const FILLER = new Set(["the", "of", "at", "in", "and", "for"]);
@@ -62,6 +68,8 @@ export type LookupDeps = {
   store: Pick<PhotoStore, "upsert" | "upload">;
   fetchMeta?: (url: string) => Promise<PageMeta>;
   fetchImage?: (url: string, maxBytes: number) => Promise<{ finalUrl: string; bytes: Buffer }>;
+  /** Bytes to the stored sizes; null when they can't be one (lib/imageConvert.ts). */
+  convert?: (bytes: Buffer) => Promise<StoredImage | null>;
   hasPhoto: boolean;
   log?: { warn: (o: object, m?: string) => void };
 };
@@ -101,34 +109,7 @@ export function titleNamesCollege(title: string, name: string): boolean {
   return !(have.has("state") && !named.has("state"));
 }
 
-/** Width and height from a baseline or progressive JPEG's frame header; null if unreadable. */
-export function jpegSize(b: Uint8Array): { width: number; height: number } | null {
-  let i = 2;
-  while (i + 9 < b.length) {
-    if (b[i] !== 0xff) {
-      i += 1;
-      continue;
-    }
-    const marker = b[i + 1]!;
-    if (marker === 0xff) {
-      i += 1;
-      continue;
-    }
-    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
-      i += 2;
-      continue;
-    }
-    const len = (b[i + 2]! << 8) | b[i + 3]!;
-    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      const height = (b[i + 5]! << 8) | b[i + 6]!;
-      const width = (b[i + 7]! << 8) | b[i + 8]!;
-      return width > 0 && height > 0 ? { width, height } : null;
-    }
-    if (len < 2) return null;
-    i += 2 + len;
-  }
-  return null;
-}
+export { jpegSize };
 
 /** The URL's host is the college's host or one of its subdomains. */
 export function onOwnHost(url: string, host: string): boolean {
@@ -198,33 +179,44 @@ async function fromSite(
   meta: PageMeta,
   d: LookupDeps
 ): Promise<LookupPhoto | null> {
-  if (!meta.image || !onOwnHost(meta.image, host)) return null;
-  const img = await (d.fetchImage ?? fetchJpeg)(meta.image, MAX_BYTES);
-  const size = jpegSize(img.bytes);
-  if (!size || size.width < MIN_SITE_WIDTH || size.width < size.height) return null;
+  const declared = meta.images ?? (meta.image ? [meta.image] : []);
+  const candidates = declared.filter((u) => onOwnHost(u, host)).slice(0, SITE_CANDIDATES);
+  for (const url of candidates) {
+    let img: { finalUrl: string; bytes: Buffer };
+    let stored: StoredImage | null;
+    try {
+      img = await (d.fetchImage ?? fetchImageAny)(url, MAX_BYTES);
+      stored = await (d.convert ?? toStoredJpegs)(img.bytes);
+    } catch (err) {
+      // One bad candidate (a 404, a type we don't take) doesn't end the search.
+      d.log?.warn({ err: err instanceof Error ? err.message : "failed" }, "college lookup: site image skipped");
+      continue;
+    }
+    if (!stored || stored.srcWidth < MIN_SITE_WIDTH || stored.srcWidth < stored.srcHeight) continue;
 
-  const sha1 = sha1Of(img.bytes);
-  const paths = storagePaths(college.unitid, sha1);
-  // One copy under both names: there is no image library here to make a 500 px one.
-  await d.store.upload(paths.full, img.bytes);
-  await d.store.upload(paths.thumb, img.bytes);
-  await d.store.upsert({
-    college_id: college.id,
-    source: "site",
-    wikidata_id: null,
-    commons_title: null,
-    commons_sha1: sha1,
-    storage_path: paths.full,
-    thumb_path: paths.thumb,
-    width: size.width,
-    height: size.height,
-    credit: college.name,
-    license: "University website",
-    license_url: null,
-    source_url: meta.finalUrl,
-    checked_at: new Date().toISOString(),
-  } satisfies PhotoRow);
-  return { source: "site", storagePath: paths.full };
+    const sha1 = sha1Of(img.bytes);
+    const paths = storagePaths(college.unitid, sha1);
+    await d.store.upload(paths.full, stored.full);
+    await d.store.upload(paths.thumb, stored.thumb);
+    await d.store.upsert({
+      college_id: college.id,
+      source: "site",
+      wikidata_id: null,
+      commons_title: null,
+      commons_sha1: sha1,
+      storage_path: paths.full,
+      thumb_path: paths.thumb,
+      width: stored.width,
+      height: stored.height,
+      credit: college.name,
+      license: "University website",
+      license_url: null,
+      source_url: meta.finalUrl,
+      checked_at: new Date().toISOString(),
+    } satisfies PhotoRow);
+    return { source: "site", storagePath: paths.full };
+  }
+  return null;
 }
 
 export async function lookUpCollege(college: LookupCollege, d: LookupDeps): Promise<LookupOutcome> {
