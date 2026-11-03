@@ -212,6 +212,11 @@ export function normalizeForQuote(s: string): string {
     .replace(/[“”„‟″]/g, '"')
     .replace(/[‐-―−]/g, "-")
     .replace(/\s+/g, " ")
+    // Stripping tags leaves a space where one ended and punctuation began ("January 4 ."): the
+    // words are the page's, the gap isn't. Close it on both sides so a quote written "January 4."
+    // still matches the page. Only white space moves; every word and mark must still be there.
+    .replace(/ +([.,;:!?%)\]])/g, "$1")
+    .replace(/([(\[]) +/g, "$1")
     .trim()
     .toLowerCase();
 }

@@ -238,6 +238,28 @@ test("a rolling deadline needs no digit, any other date does", () => {
 });
 
 
+test("a quote matches page text that has a stray space before punctuation, as stripping tags leaves it", () => {
+  // Hamilton's page text reads "...November 15 and January 4 ." (the date is in its own tag), and a model copying the
+  // sentence writes "January 4.". Run to run the deadline was kept or dropped by that one space.
+  const text = "Hamilton has two Early Decision plans, with application deadlines on November 15 and January 4 . (See the dates ) below.";
+  const f = groundFacts(
+    {
+      deadlines: [
+        { plan: "ED", date: "November 15", evidence: "Hamilton has two Early Decision plans, with application deadlines on November 15 and January 4." },
+        { plan: "ED2", date: "January 4", evidence: "Hamilton has two Early Decision plans, with application deadlines on November 15 and January 4 ." },
+      ],
+      about: { text: "Two early plans.", evidence: "(See the dates) below." },
+      programs: [],
+    },
+    [text]
+  );
+  assert.deepEqual(f.deadlines.map((d) => d.plan), ["ED", "ED2"]);
+  assert.equal(f.about, "Two early plans.");
+  assert.equal(normalizeForQuote("a ( b ) , c ; d !"), "a (b), c; d!");
+  // Only whitespace moves: a different word still doesn't match.
+  assert.equal(groundFacts({ deadlines: [{ plan: "ED", date: "January 4", evidence: "Hamilton has three Early Decision plans on January 4." }], programs: [] }, [text]).deadlines.length, 0);
+});
+
 test("groundFacts drops a deadline whose plan the quote contradicts: an early plan needs 'early' in its quote, a regular date can't be labelled early", () => {
   const text =
     "Regular Decision applications are due January 5. Early Action applications are due November 1. " +

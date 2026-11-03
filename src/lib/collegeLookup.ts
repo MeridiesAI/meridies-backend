@@ -120,6 +120,14 @@ const JUNK_WORDS = new Set([
 
 /** A year before 1990 in a title is an old print or a historic photograph. */
 const OLD_YEAR = /^(1[0-8]\d\d|19[0-8]\d)$/;
+/** Words for scans of old prints: Hamilton's only free Commons pictures are 1870s stereographs from the NYPL. */
+const HISTORIC_WORDS = new Set(["stereograph", "stereoview", "stereoscopic", "nypl", "lithograph", "aquatint", "engraving", "daguerreotype", "tintype"]);
+
+/** Whether a Commons title names an old print or a photograph from before 1990 rather than the campus as it is. */
+export function isHistoricTitle(title: string): boolean {
+  const words = tokens(title.replace(/^File:/i, "").replace(/\.[a-z0-9]{2,4}$/i, ""));
+  return words.some((w) => OLD_YEAR.test(w) || HISTORIC_WORDS.has(w));
+}
 
 /**
  * The name-matched Commons titles, best first. `choosePhoto` is strict (a large
@@ -135,7 +143,7 @@ export function rankCommonsTitles(titles: string[], name: string): string[] {
     const words = tokens(title.replace(/^File:/i, "").replace(/\.[a-z0-9]{2,4}$/i, ""));
     let n = ` ${words.join(" ")} `.includes(phrase) ? 3 : 0;
     if (words.some((w) => JUNK_WORDS.has(w))) n -= 5;
-    if (words.some((w) => OLD_YEAR.test(w))) n -= 2;
+    if (isHistoricTitle(title)) n -= 6;
     return n;
   };
   return titles
@@ -160,7 +168,15 @@ export function onOwnHost(url: string, host: string): boolean {
 
 const sha1Of = (bytes: Uint8Array): string => createHash("sha1").update(bytes).digest("hex");
 
-async function fromCommons(college: LookupCollege & { unitid: number }, d: LookupDeps): Promise<LookupPhoto | null> {
+/**
+ * `modern` leaves out a historic print (and says so with "historic-only" when it passed over one that would
+ * have been taken, so the caller can come back to it); `any` takes the best of everything.
+ */
+async function fromCommons(
+  college: LookupCollege & { unitid: number },
+  d: LookupDeps,
+  mode: "modern" | "any" = "any"
+): Promise<LookupPhoto | "historic-only" | null> {
   const found = await d.commons.search(`${college.name} campus`, COMMONS_SEARCH_LIMIT);
   const titles = rankCommonsTitles(
     found.filter((t) => titleNamesCollege(t, college.name)),
@@ -170,14 +186,18 @@ async function fromCommons(college: LookupCollege & { unitid: number }, d: Looku
 
   const pages = resolvePages(await d.commons.imageinfo(titles, WIDTHS.full, true), titles);
   let chosen: ReturnType<typeof choosePhoto> | null = null;
+  let skippedHistoric = false;
   for (const t of titles) {
     const c = choosePhoto(pages.get(t));
-    if (c.ok) {
-      chosen = c;
-      break;
+    if (!c.ok) continue;
+    if (mode === "modern" && isHistoricTitle(t)) {
+      skippedHistoric = true;
+      continue;
     }
+    chosen = c;
+    break;
   }
-  if (!chosen || !chosen.ok) return null;
+  if (!chosen || !chosen.ok) return skippedHistoric ? "historic-only" : null;
   const photo = chosen.photo;
 
   const small = resolvePages(await d.commons.imageinfo([photo.title], WIDTHS.thumb, false), [photo.title]).get(photo.title);
@@ -273,9 +293,15 @@ export async function lookUpCollege(college: LookupCollege, d: LookupDeps): Prom
   if (college.unitid === null) return { site, photo: null, photoNote: "This school has no federal id on file, so a photo can't be stored for it." };
   const withId = { ...college, unitid: college.unitid };
 
+  // A modern Commons photo (freely licensed) first, then the school's own picture, and a historic print from
+  // Commons only when nothing else is there: a school whose only free pictures are 1870s stereographs is
+  // better shown by its own homepage image.
   let photo: LookupPhoto | null = null;
+  let historicOnly = false;
   try {
-    photo = await fromCommons(withId, d);
+    const found = await fromCommons(withId, d, "modern");
+    if (found === "historic-only") historicOnly = true;
+    else photo = found;
   } catch (err) {
     d.log?.warn({ err: err instanceof Error ? err.message : "failed" }, "college lookup: Commons failed");
   }
@@ -284,6 +310,14 @@ export async function lookUpCollege(college: LookupCollege, d: LookupDeps): Prom
       photo = await fromSite(withId, host, meta, d);
     } catch (err) {
       d.log?.warn({ err: err instanceof Error ? err.message : "failed" }, "college lookup: site image failed");
+    }
+  }
+  if (!photo && historicOnly) {
+    try {
+      const found = await fromCommons(withId, d, "any");
+      if (found !== "historic-only") photo = found;
+    } catch (err) {
+      d.log?.warn({ err: err instanceof Error ? err.message : "failed" }, "college lookup: Commons failed");
     }
   }
   return {

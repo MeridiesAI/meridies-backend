@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { test } from "node:test";
 import sharp from "sharp";
 import { fetchImageAny, fetchJpeg, fetchPageMeta, linkTesting, parsePageMeta, type PinnedResponse } from "../../src/lib/links.js";
-import { jpegSize, lookUpCollege, nameWords, onOwnHost, rankCommonsTitles, titleNamesCollege, type LookupDeps } from "../../src/lib/collegeLookup.js";
+import { isHistoricTitle, jpegSize, lookUpCollege, nameWords, onOwnHost, rankCommonsTitles, titleNamesCollege, type LookupDeps } from "../../src/lib/collegeLookup.js";
 import { toStoredJpegs, type StoredImage } from "../../src/lib/imageConvert.js";
 
 const PUBLIC = async () => [{ address: "93.184.215.14", family: 4 }];
@@ -224,6 +224,83 @@ test("lookUpCollege asks Commons about every name-matched title (up to a dozen),
   assert.ok(!asked.includes("File:Some Other School hall.jpg"));
   assert.ok(!asked.includes("File:Example University campus map 1901.jpg"), "the map is ranked below twelve better titles");
   assert.equal(asked[0], "File:Example University hall 1.jpg");
+});
+
+// ---- Modern photos first, the school's own picture next, a historic print last ---------------------
+
+test("isHistoricTitle: a year before 1990, or a stereograph, lithograph or NYPL scan", () => {
+  for (const t of [
+    "File:Hamilton College campus view no. 3, by Seward, H. W. (H. Walton), d. 1871.jpg",
+    "File:Massachusetts Institute of Technology campus aerial 1921 US Army.jpg",
+    "File:Hamilton College stereograph.jpg",
+    "File:Hamilton College (NYPL b11707960-G91F107 002F).jpg",
+  ]) assert.equal(isHistoricTitle(t), true, t);
+  for (const t of ["File:Syracuse University Aerial view.jpg", "File:Terrace Apartments, Vassar College, June 2026.jpg", "File:Tufts campus 1999.jpg", "File:Example University hall 2004.jpg"]) {
+    assert.equal(isHistoricTitle(t), false, t);
+  }
+});
+
+/** A Commons imageinfo answer that choosePhoto accepts: a big landscape CC0 JPEG, thumbnails on thumb.wikimedia.org. */
+function commonsAnswer(titles: string[]): unknown {
+  return {
+    query: {
+      pages: titles.map((title, i) => ({
+        title,
+        revisions: [{ timestamp: "2024-01-01T00:00:00Z" }],
+        imageinfo: [
+          {
+            mime: "image/jpeg",
+            width: 4000,
+            height: 2600,
+            sha1: String(i + 1).repeat(40).slice(0, 40),
+            timestamp: "2024-01-01T00:00:00Z",
+            descriptionurl: `https://commons.wikimedia.org/wiki/${encodeURIComponent(title)}`,
+            url: "https://upload.wikimedia.org/wikipedia/commons/a/ab/X.jpg",
+            thumburl: "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ab/X.jpg/1280px-X.jpg",
+            thumbwidth: 1280,
+            thumbheight: 832,
+            extmetadata: { LicenseShortName: { value: "CC0" }, Artist: { value: "A. Photographer" } },
+          },
+        ],
+      })),
+    },
+  };
+}
+
+const photoRun = (search: string[], images: string[]) => {
+  const rows: Record<string, unknown>[] = [];
+  const fetched: string[] = [];
+  const deps: LookupDeps = {
+    commons: { search: async () => search, imageinfo: async (titles: string[]) => commonsAnswer(titles), download: async () => new Uint8Array([1, 2, 3]) },
+    store: { upload: async () => {}, upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
+    fetchMeta: metaWith(images),
+    fetchImage: async (url) => (fetched.push(url), { finalUrl: url, bytes: Buffer.from([1]) }),
+    convert: async (bytes: Buffer): Promise<StoredImage> => ({ full: bytes, thumb: bytes, width: 1280, height: 720, srcWidth: 1600, srcHeight: 900 }),
+    hasPhoto: false,
+  };
+  return { deps, rows, fetched };
+};
+
+test("lookUpCollege takes a modern Commons photo and never asks the school's site", async () => {
+  const { deps, rows, fetched } = photoRun(["File:Example University hall 1871.jpg", "File:Example University library.jpg"], ["https://www.example.edu/hero.jpg"]);
+  const out = await lookUpCollege(exampleCollege, deps);
+  assert.equal(out.photo?.source, "commons-search");
+  assert.equal(rows[0]!.commons_title, "File:Example University library.jpg");
+  assert.deepEqual(fetched, []);
+});
+
+test("lookUpCollege prefers the school's own picture to a historic Commons print, and uses the print only when the site has nothing", async () => {
+  const historic = ["File:Example University campus view no. 3, by Seward, d. 1871.jpg"];
+  const withSite = photoRun(historic, ["https://www.example.edu/hero.jpg"]);
+  const a = await lookUpCollege(exampleCollege, withSite.deps);
+  assert.equal(a.photo?.source, "site");
+  assert.equal(withSite.rows.length, 1);
+  assert.equal(withSite.rows[0]!.source, "site");
+
+  const noSite = photoRun(historic, []);
+  const b = await lookUpCollege(exampleCollege, noSite.deps);
+  assert.equal(b.photo?.source, "commons-search");
+  assert.equal(noSite.rows[0]!.commons_title, historic[0]);
 });
 
 // ---- Every image a page declares, in any format a browser shows ------------------------------
