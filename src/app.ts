@@ -85,6 +85,7 @@ import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
+import studentOwnRoutes from "./routes/studentOwn.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -243,6 +244,8 @@ export function buildApp() {
   app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(stripeWebhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
+  // A student messaging their counselor, and their own calendar events (QA round 10).
+  app.register(studentOwnRoutes, { prefix: "/me" });
   startSweepInterval(app);
   startExtractionRecovery(app);
 

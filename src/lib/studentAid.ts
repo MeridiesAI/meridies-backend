@@ -578,10 +578,25 @@ export function matchOne(
   }
 }
 
+/** The counselor's answers: award size, essays, merit or need. */
+export function passesPrefs(dto: Pick<ScholarshipDto, "amountCents" | "essayRequired" | "basis">, prefs: ScholarshipPrefs): boolean {
+  if (prefs.minAwardCents > 0 && (dto.amountCents ?? 0) < prefs.minAwardCents) return false;
+  if (!prefs.essaysOk && dto.essayRequired === true) return false;
+  if (prefs.basis === "merit" && dto.basis !== "merit" && dto.basis !== "both") return false;
+  if (prefs.basis === "need" && dto.basis !== "need" && dto.basis !== "both") return false;
+  return true;
+}
+
 export async function scanScholarships(
   db: SupabaseClient,
   studentId: string,
-  prefsOverride?: ScholarshipPrefs
+  prefsOverride?: ScholarshipPrefs,
+  /**
+   * `wholeCatalog`: every scholarship the student is eligible for and can
+   * apply to now, before the counselor's answers (award size, essays, basis)
+   * and without the cap on how many to show. What "Ask AxIS" searches.
+   */
+  opts: { wholeCatalog?: boolean } = {}
 ): Promise<ScholarshipScan> {
   const prefs = prefsOverride ?? (await loadPrefs(db, studentId));
   const today = todayIso();
@@ -613,11 +628,8 @@ export async function scanScholarships(
     const fit = matchOne(r, attrs);
     if (!fit.ok) continue;
 
-    // The counselor's answers.
-    if (prefs.minAwardCents > 0 && (dto.amountCents ?? 0) < prefs.minAwardCents) continue;
-    if (!prefs.essaysOk && dto.essayRequired === true) continue;
-    if (prefs.basis === "merit" && dto.basis !== "merit" && dto.basis !== "both") continue;
-    if (prefs.basis === "need" && dto.basis !== "need" && dto.basis !== "both") continue;
+    // The counselor's answers (a whole-catalog search applies them itself).
+    if (!opts.wholeCatalog && !passesPrefs(dto, prefs)) continue;
 
     // Time. A listing whose deadline passed is worse than no result.
     if (dto.deadline && dto.deadline < today) {
@@ -654,7 +666,7 @@ export async function scanScholarships(
   return {
     today,
     prefs,
-    matches: out.slice(0, prefs.maxApplications),
+    matches: opts.wholeCatalog ? out : out.slice(0, prefs.maxApplications),
     held: held.sort((x, y) => (x.deadline ?? "").localeCompare(y.deadline ?? "")),
     missing,
   };
