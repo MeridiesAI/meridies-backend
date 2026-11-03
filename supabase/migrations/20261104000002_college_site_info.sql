@@ -24,10 +24,11 @@
 -- service_role (the lookup route, after an approved counselor asked) writes.
 --
 -- Deploy order: either. Before this file the lookup still reads the site and
--- finds a photo; it answers info: null, and GET /colleges/:id/extras answers
--- siteInfo: null (the missing table is remembered for five minutes). Not in
--- REQUIRED_SCHEMA. No AI label is added: the model call is logged under the
--- existing 'link-digest' module.
+-- finds a photo, but nothing can be saved: it answers the facts it just read
+-- (or info: null when it could not read any) and the next lookup reads again,
+-- and GET /colleges/:id/extras answers siteInfo: null. Not in REQUIRED_SCHEMA.
+-- No AI label is added: the model call is logged under the existing
+-- 'link-digest' module.
 
 -- ---------------------------------------------------------------------------
 -- 1. college_site_info
