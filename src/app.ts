@@ -85,6 +85,7 @@ import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
+import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -235,6 +236,8 @@ export function buildApp() {
   app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(stripeWebhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
+  // QA round 10: a high school's published profile, found on request.
+  app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
   startSweepInterval(app);
   startExtractionRecovery(app);
 

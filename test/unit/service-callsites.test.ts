@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 // one means deciding whether it acts for a counselor outside their own request
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
+  // lib/highSchoolProfile.ts: inside an approved user's own request (authenticate refuses an unapproved
+  // counselor) after resolveStudentId and their RLS client loaded the school; the service role only fills a
+  // Meridies-wide high_schools.school_profile_url left empty, with a URL the research cited and checkLink
+  // passed, and stamps profile_lookup_at.
   // lib/axis/llm.ts: writes only the ai_runs audit rows for the caller's own AxIS turn, inside their request.
   // lib/eventsDiscovery.ts: the weekly job acts for no counselor; it writes only Meridies-wide hub_events
   // rows from colleges' public pages. routes/events.ts: "Refresh events" runs inside an approved
@@ -63,7 +67,7 @@ const REVIEWED = [
   // caller's own consultant_phone_numbers row, keyed by request.auth.userId (never a request value), after buying
   // the number they picked, and releases the number if that write fails. lib/inboundSms.ts is handed the client by
   // routes/webhooks.ts (Twilio's signature decides) and asks isCounselorApproved for the number's counselor.
-  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/imports/jobs.ts",
+  "lib/accountability.ts", "lib/anthropic.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
