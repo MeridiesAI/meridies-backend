@@ -49,11 +49,19 @@ const intakeRequestSchema = z
   })
   .strict();
 
+/**
+ * A blank text field means "not given". The new-student page asks for an email
+ * only now, and the student fills in their own name, grade and time zone in
+ * onboarding; a client that still sends "" must not hit the invitation's
+ * length/format CHECKs (a blank `full_name` fails `length(btrim(..)) >= 1`).
+ */
+const blankToNull = (v: unknown): unknown => (typeof v === "string" && v.trim() === "" ? null : v);
+
 const basicsShape = {
-  fullName: z.string().trim().min(1).max(200).nullable().optional(),
-  gradeLevel: z.string().trim().max(40).nullable().optional(),
+  fullName: z.preprocess(blankToNull, z.string().trim().min(1).max(200).nullable().optional()),
+  gradeLevel: z.preprocess(blankToNull, z.string().trim().max(40).nullable().optional()),
   gradYear: z.number().int().min(2000).max(2100).nullable().optional(),
-  timezone: z.string().trim().max(80).nullable().optional(),
+  timezone: z.preprocess(blankToNull, z.string().trim().max(80).nullable().optional()),
   intakeRequests: z.array(intakeRequestSchema).max(30).optional(),
 };
 
@@ -194,7 +202,7 @@ const bulkSchema = z
         z
           .object({
             email: z.string().trim().toLowerCase().email().max(320),
-            name: z.string().trim().max(200).nullable().optional(),
+            name: z.preprocess(blankToNull, z.string().trim().min(1).max(200).nullable().optional()),
             // New student, several at once: each row's own basics.
             gradeLevel: basicsShape.gradeLevel,
             gradYear: basicsShape.gradYear,
