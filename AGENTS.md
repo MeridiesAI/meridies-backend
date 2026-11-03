@@ -1741,10 +1741,14 @@ them to that message. Only this chat's unclaimed files can be named.
   scan gets one word-for-word Haiku transcription (`transcribe` in
   `lib/axis/llm.ts`, module `axis-attachment`, at most 12,000 characters,
   charged to the counselor like any call). Stored text is capped at 200,000
-  characters; `extract_cut` says when it stops short. A file whose reading
-  fails is `failed` and keeps going as a file; it is never retried. A file is
-  claimed first (`extracted_at`, free again after 10 minutes), so two turns
-  never read it twice.
+  characters; `extract_cut` says when it stops short. A file that can't be
+  read (unreadable, a refusal, nothing read) is `failed` and keeps going as a
+  file; it is never retried. A failure that may not happen again (a rate
+  limit or the daily quota, an overload, a lost connection, a busy PDF
+  reader) leaves it unread under its claim. A file is claimed first
+  (`extracted_at`, free again after 10 minutes), so two turns never read it
+  twice and a retry comes at most every 10 minutes, on a later turn. Cuts
+  never split a character (`cutAt` in `lib/axis/text.ts`).
 - **The files message.** Every later turn (both paths) sends the earlier
   files' stored text in one user message at the start of the messages, in the
   order attached (`earlierFilesMessage`): each file in a `wrapUntrusted`

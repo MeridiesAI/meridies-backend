@@ -11,15 +11,17 @@
  * numeric bounds, additionalProperties false on every object).
  */
 import { errInfo } from "./failsafe.js";
-import type Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import type { z } from "zod";
 import { anthropicClient, type AiModule } from "../anthropic.js";
 import { UNTRUSTED_DATA_RULE } from "../context/pack.js";
+import { HttpError } from "../errors.js";
 import { enforceQuota } from "../limits.js";
 import { assertAiAllowed } from "../practiceSettings.js";
 import { serviceClient } from "../supabase.js";
 import type { MessagesApi, StreamLike, Usage } from "./loop.js";
+import { cutAt } from "./text.js";
 import { AXIS_MODEL, featureOn, MAX_TOKENS, PER_MESSAGE_EFFORT_BETA, PINNED_EFFORT, THINKING, type Effort } from "./models.js";
 
 const DAILY_AI_CALL_LIMIT = 300;
@@ -153,27 +155,39 @@ export function transcriptFromMessage(msg: Pick<Anthropic.Message, "content" | "
   const text = msg.content.map((b) => (b.type === "text" ? b.text : "")).join("").trim();
   if (!text) return null;
   const over = text.length > TRANSCRIPT_MAX_CHARS;
-  return { text: over ? text.slice(0, TRANSCRIPT_MAX_CHARS) : text, cut: over || msg.stop_reason === "max_tokens" };
+  return { text: over ? cutAt(text, TRANSCRIPT_MAX_CHARS) : text, cut: over || msg.stop_reason === "max_tokens" };
+}
+
+/** A failure that may not happen again: a rate limit or the counselor's daily quota, an overload, a lost connection. */
+function mayWorkLater(err: unknown): boolean {
+  if (err instanceof HttpError) return err.statusCode === 429;
+  if (err instanceof Anthropic.APIConnectionError || err instanceof Anthropic.APIUserAbortError) return true;
+  if (err instanceof Anthropic.APIError) return err.status === 429 || (typeof err.status === "number" && err.status >= 500);
+  return false;
 }
 
 /**
  * A word-for-word transcription of an image or a scanned PDF in an AxIS chat, read once after the turn it
  * arrived in (lib/axis/attachments.ts). Plain text, no thinking, low effort. Charged and audited like the
- * structured calls. Null on a refusal or any error: the file then keeps going to the model as a file.
+ * structured calls. Null when it can't be read (a refusal, nothing read, a request the API refuses): the file
+ * then keeps going to the model as a file. "retry" when the failure may not happen again (a rate limit, the
+ * daily quota, an overload, a lost connection): the file is tried again on a later turn.
  */
 export async function transcribe(o: {
   request: FastifyRequest;
   name: string;
   block: Anthropic.Messages.ContentBlockParam;
   signal?: AbortSignal;
-}): Promise<{ text: string; cut: boolean } | null> {
+  /** The Messages API; the live client unless a test hands in its own. */
+  client?: Pick<Anthropic, "messages">;
+}): Promise<{ text: string; cut: boolean } | "retry" | null> {
   const empty: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let run: Run | null = null;
   try {
     await assertAiAllowed(o.request, "axis-attachment");
     await chargeCall(o.request);
     run = await openRun(o.request, "axis-attachment", null, { kind: o.block.type });
-    const msg = await anthropicClient().messages.create(
+    const msg = await (o.client ?? anthropicClient()).messages.create(
       {
         model: AXIS_MODEL,
         max_tokens: TRANSCRIBE_MAX_TOKENS,
@@ -191,8 +205,9 @@ export async function transcribe(o: {
     return out;
   } catch (err) {
     if (run) await closeRun(run, "failed", empty, {}, err instanceof Error ? err.message : "unknown error");
-    o.request.log.warn({ err: errInfo(err), module: "axis-attachment" }, "axis transcription failed");
-    return null;
+    const retry = mayWorkLater(err);
+    o.request.log.warn({ err: errInfo(err), module: "axis-attachment", retry }, "axis transcription failed");
+    return retry ? "retry" : null;
   }
 }
 

@@ -29,6 +29,7 @@ import { extractPdfText, PDF_LIMITS } from "../pdfText.js";
 import { serviceClient } from "../supabase.js";
 import { errInfo, isSchemaMissing } from "./failsafe.js";
 import { transcribe } from "./llm.js";
+import { cutAt } from "./text.js";
 
 export const ATTACHMENT_BUCKET = "axis-attachments";
 export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
@@ -269,7 +270,7 @@ export async function fileBlocks(request: FastifyRequest, conversationId: string
   for (const r of earlier) {
     const full = r.extracted_text as string;
     const cut = r.extract_cut === true || full.length > EARLIER_FILE_MAX_CHARS;
-    const body = wrapUntrusted(`attachment:${r.file_name}`, full.slice(0, EARLIER_FILE_MAX_CHARS));
+    const body = wrapUntrusted(`attachment:${r.file_name}`, cutAt(full, EARLIER_FILE_MAX_CHARS));
     out.earlier.push({ type: "text", text: cut ? `${body}\n${CUT_MARKER}` : body });
     out.earlierNames.push(r.file_name);
     out.texts.push(full);
@@ -394,23 +395,29 @@ const FAILED: Extracted = { text: null, kind: "failed", cut: false };
 function storable(raw: string, alreadyCut = false): Extracted {
   const text = raw.replace(/\u0000/g, "");
   const over = text.length > STORED_TEXT_MAX;
-  return { text: over ? text.slice(0, STORED_TEXT_MAX) : text, kind: "text", cut: over || alreadyCut };
+  return { text: over ? cutAt(text, STORED_TEXT_MAX) : text, kind: "text", cut: over || alreadyCut };
 }
 
 type ExtractDeps = { pdf?: typeof extractPdfText; transcribe?: typeof transcribe; db?: SupabaseClient };
 
-async function readOne(request: FastifyRequest, row: Row, deps: ExtractDeps): Promise<Extracted> {
+/** A reading that may work on a later turn (a rate limit, an overload, a busy PDF reader): the file stays unread. */
+const RETRY = "retry" as const;
+/** The PDF reader's failures that come from load, not from the file. */
+const PDF_BUSY = new Set(["timeout", "memory", "busy"]);
+
+async function readOne(request: FastifyRequest, row: Row, deps: ExtractDeps): Promise<Extracted | typeof RETRY> {
   const { data: blob, error } = await request.db.storage.from(ATTACHMENT_BUCKET).download(row.storage_path);
   if (error || !blob) return FAILED;
   const buf = Buffer.from(await blob.arrayBuffer());
   const read = deps.transcribe ?? transcribe;
-  const transcript = async (block: Anthropic.Messages.ContentBlockParam): Promise<Extracted> => {
+  const transcript = async (block: Anthropic.Messages.ContentBlockParam): Promise<Extracted | typeof RETRY> => {
     const t = await read({ request, name: row.file_name, block });
+    if (t === RETRY) return RETRY;
     return t ? { text: t.text.replace(/\u0000/g, ""), kind: "transcript", cut: t.cut } : FAILED;
   };
   if (row.mime_type === "application/pdf") {
     const pdf = await (deps.pdf ?? extractPdfText)(new Uint8Array(buf));
-    if (!pdf.ok) return FAILED;
+    if (!pdf.ok) return PDF_BUSY.has(pdf.reason) ? RETRY : FAILED;
     if (pdf.text.replace(/\s+/g, "").length >= PDF_TEXT_MIN) {
       // The reader stops at its page and character limits without saying so: reaching either counts as cut.
       return storable(pdf.text, pdf.pages >= PDF_LIMITS.maxPages || pdf.text.length >= PDF_LIMITS.maxChars);
@@ -434,8 +441,10 @@ async function readOne(request: FastifyRequest, row: Row, deps: ExtractDeps): Pr
  * The caller's own client reads the rows, so RLS returns only their files: that is the ownership check. The
  * columns written have no client grant, so the service client writes them, and every one of its updates is
  * keyed on the row's id, owner_id = the caller and this chat. A file is claimed first (extracted_at, free again
- * after 10 minutes), so two turns never read it twice. A file whose reading fails is marked failed and keeps
- * going to the model as a file, never retried.
+ * after 10 minutes), so two turns never read it twice. A file that can't be read is marked failed and keeps
+ * going to the model as a file, never retried. A failure that may not happen again (a rate limit, the daily
+ * quota, an overload, a busy PDF reader) leaves the file unread under its claim, so a turn at least 10 minutes
+ * later tries once more.
  */
 export async function extractChatFiles(request: FastifyRequest, conversationId: string, deps: ExtractDeps = {}): Promise<void> {
   try {
@@ -469,6 +478,8 @@ export async function extractChatFiles(request: FastifyRequest, conversationId: 
         request.log.warn({ err: errInfo(err), id: row.id }, "axis attachment not read");
         return FAILED;
       });
+      // Left claimed and unread: the claim expires in 10 minutes and a later turn tries once more.
+      if (out === RETRY) continue;
       const { error: saveErr } = await mine(
         svc.from("ai_attachments").update({ extracted_text: out.text, extract_kind: out.kind, extract_cut: out.cut }),
         row.id
