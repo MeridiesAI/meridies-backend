@@ -85,6 +85,8 @@ export type AiModule =
   | "research-match"
   // AxIS on Claude Haiku 5.5 (lib/axis): the turn, the adjudicator, the memory fold, the cache pre-warm.
   | "axis" | "axis-verify" | "axis-memory" | "axis-warm"
+  // AxIS reading a chat file once: the transcription of an image or a scanned PDF (20261104000001).
+  | "axis-attachment"
   // Events Hub: finding a college's upcoming events on its own site (lib/eventsDiscovery.ts).
   | "events-discovery"
   // Import pipeline step 2: the column mapping (lib/imports/aiPlan.ts); cell cleanup is deferred.
