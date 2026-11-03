@@ -855,19 +855,25 @@ export default async function applicationRoutes(app: FastifyInstance) {
       // title, the prompt and notes, and code takes that verbatim slice.
       // Under the document rules (a confirmed file the AI may read) and the
       // practice's document-reading switch (runStructured checks it).
-      if (text) {
+      let current: Row | null = null;
+      if (b.essayId) {
+        const { data, error: curError } = await request.db
+          .from("essays")
+          .select("id, student_id, essay_kind")
+          .eq("id", b.essayId)
+          .maybeSingle();
+        if (curError) throw fromPostgrest(curError);
+        if (!data || data.student_id !== studentId) throw notFound("That essay isn't on this student's list");
+        current = data as Row;
+      }
+      // Materials (a resume, a portfolio: essay_kind "other") are counted whole.
+      const kind = current ? String(current.essay_kind ?? "supplement") : (b.essayKind ?? "supplement");
+      if (text && kind !== "other") {
         const aiAllowed = documentReadableForTask(toAiDoc(doc as Row), true).allowed;
         text = (await essayOnly(request, studentId, text, { aiAllowed })).text;
       }
 
       if (b.essayId) {
-        const { data: current, error: curError } = await request.db
-          .from("essays")
-          .select("id, student_id, title")
-          .eq("id", b.essayId)
-          .maybeSingle();
-        if (curError) throw fromPostgrest(curError);
-        if (!current || current.student_id !== studentId) throw notFound("That essay isn't on this student's list");
         const update: Row = {
           document_id: b.documentId,
           external_url: null,
