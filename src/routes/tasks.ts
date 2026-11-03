@@ -368,6 +368,12 @@ export default async function taskRoutes(app: FastifyInstance) {
           throw forbidden("Only your counselor can choose what you see");
         }
         const sb = studentTaskBody.parse(request.body);
+        // A new to-do can't be due in the past. The day before UTC's is allowed,
+        // so a student west of UTC can still pick their own today.
+        if (sb.dueDate) {
+          const earliest = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+          if (sb.dueDate < earliest) throw badRequest("Pick today or a later date");
+        }
         const studentId = request.auth.userId;
         const { data, error } = await request.db
           .from("deliverables")
