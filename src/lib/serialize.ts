@@ -34,6 +34,9 @@ export type Profile = {
   counselor_approved_at: string | null;
 };
 
+/** `request.profile`: the row `authenticate` loads, without the `profile` jsonb. */
+export type AuthProfile = Omit<Profile, "profile">;
+
 export type MeridiesUser = {
   id: string;
   fullName: string;

@@ -47,7 +47,7 @@ import { documentReadableForTask, toAiDoc, unconfirmedAttachedNote } from "../li
 import { essayBodyReadable } from "../lib/context/sections.js";
 import { composeTrackerNote } from "../lib/trackerNote.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
-import { enforceRateLimit, limit } from "../lib/limits.js";
+import { enforceRateLimit, limit, startLimit } from "../lib/limits.js";
 import { checkLiveDocuments, holdsNoActivity, isGrantProblem, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
@@ -537,8 +537,10 @@ export default async function taskRoutes(app: FastifyInstance) {
 
   app.patch(
     "/:id",
-    { preHandler: [app.authenticate, limit("tasks:update", 240, 60)] },
+    { preHandler: app.authenticate },
     async (request) => {
+      // The limiter's round trip runs alongside the reads; it answers before the update.
+      const withinLimit = startLimit(request, "tasks:update", 240, 60);
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const b = patchTaskBody.parse(request.body);
 
@@ -601,6 +603,8 @@ export default async function taskRoutes(app: FastifyInstance) {
         }
       }
 
+      await withinLimit();
+
       const update: Row = {};
       if (b.title !== undefined) update.title = b.title;
       if (b.instructions !== undefined) update.instructions = b.instructions;
@@ -621,16 +625,18 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
 
-      await request.db.from("progress_events").insert({
-        student_id: studentId,
-        deliverable_id: id,
-        entity_type: "deliverable",
-        entity_id: id,
-        event: b.status ? "status-changed" : "edited",
-        actor_id: request.auth.userId,
-      });
-
-      const [dto] = await hydrate(request, [data as Row]);
+      // The activity log and the answer's stages and files are independent reads and writes: side by side.
+      const [, [dto]] = await Promise.all([
+        request.db.from("progress_events").insert({
+          student_id: studentId,
+          deliverable_id: id,
+          entity_type: "deliverable",
+          entity_id: id,
+          event: b.status ? "status-changed" : "edited",
+          actor_id: request.auth.userId,
+        }),
+        hydrate(request, [data as Row]),
+      ]);
 
       // Sharing a hidden task is the moment it is assigned: do what creating
       // a visible one does (mirror its dated stages, tell the student).

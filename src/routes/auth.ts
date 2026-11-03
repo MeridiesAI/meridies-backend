@@ -12,6 +12,7 @@ import { badRequest, forbidden, fromPostgrest, notFound, unavailable } from "../
 import { limit } from "../lib/limits.js";
 import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
 import { toMeridiesUser } from "../lib/serialize.js";
+import { loadProfileBlob } from "../lib/ownProfile.js";
 import { serviceClient } from "../lib/supabase.js";
 
 const updateMeSchema = z
@@ -45,17 +46,20 @@ export default async function authRoutes(app: FastifyInstance) {
   app.get("/me", { preHandler: app.authenticate, config: { allowPending: true } }, async (request) => {
     const p = request.profile;
 
-    let counselorName: string | null = null;
-    if (p.counselor_id) {
-      const { data } = await request.db
-        .from("profiles")
-        .select("full_name")
-        .eq("id", p.counselor_id)
-        .maybeSingle();
-      counselorName = data?.full_name ?? null;
-    }
+    // The blob and the counselor's name are two independent reads: side by side.
+    const [blob, counselorName] = await Promise.all([
+      loadProfileBlob(request),
+      p.counselor_id
+        ? request.db
+            .from("profiles")
+            .select("full_name")
+            .eq("id", p.counselor_id)
+            .maybeSingle()
+            .then(({ data }) => (data?.full_name as string | null | undefined) ?? null)
+        : Promise.resolve(null),
+    ]);
 
-    return toMeridiesUser(p, { counselorName });
+    return toMeridiesUser({ ...p, profile: blob }, { counselorName });
   });
 
   app.patch(
@@ -77,7 +81,7 @@ export default async function authRoutes(app: FastifyInstance) {
       if (patch.highSchool !== undefined) update.high_school = patch.highSchool;
       if (patch.gradYear !== undefined) update.grad_year = patch.gradYear;
       if (patch.profile !== undefined) {
-        const { merged, tooLarge } = mergeProfile(request.profile.profile, patch.profile);
+        const { merged, tooLarge } = mergeProfile(await loadProfileBlob(request), patch.profile);
         if (tooLarge) throw badRequest("Profile is too large");
         update.profile = merged;
       }
