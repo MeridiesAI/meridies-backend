@@ -230,9 +230,10 @@ transfer, campus photos, the Scorecard columns, meeting invites, every
 applied:** Payment Tracker credits (`20261029000001`: without it an
 overpayment and Mark refunded answer 409 `payment_credits_unavailable` and
 invoices apply no credit, `paymentCreditsReady`), the GPA-within-scale check
-(`20261029000002`, NOT VALID: new writes only; list what breaks it with
-`scripts/migrations/gpa-scale-violations.sql`, fix those rows, then VALIDATE
-it in a later migration; the routes apply the same rule in code either way),
+on existing rows (`20261104000001` VALIDATEs the constraint `20261029000002`
+added NOT VALID; it fails if any row breaks the rule, so run
+`scripts/migrations/gpa-scale-violations.sql` first; the routes apply the same
+rule in code either way),
 CSV import extras on invitations (`20261029000003`) and card payments
 (`20261102000001`: without it `GET /pipeline/stripe` answers `configured:
 false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`).
