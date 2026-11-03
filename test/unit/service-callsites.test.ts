@@ -22,7 +22,8 @@ const REVIEWED = [
   // routes/collegesV10.ts: "Look up info & photo" (POST /:id/lookup) runs inside an approved counselor's own
   // request (authenticate refuses an unapproved counselor; requireRole("counselor") ran) after their RLS client
   // loaded the college; the service role reads and writes only that one Meridies-wide college_photos row (and
-  // the photo bucket copy of it), and never replaces a photo.
+  // the photo bucket copy of it) and that one college_site_info row (what the school's own site says about
+  // applying; the library code is handed these reads and writes and holds no client), and never replaces a photo.
   // lib/imports/files.ts, mapping.ts, stage.ts: the import worker inside an approved counselor's own
   // request (authenticate + requireRole ran), p_actor = that counselor; every function re-checks
   // private.can_manage_import (which asks the approval gate). lib/imports/retention.ts: the sweep acts

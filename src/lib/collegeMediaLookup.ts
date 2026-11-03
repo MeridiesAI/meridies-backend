@@ -152,3 +152,22 @@ function drain(svc: SupabaseClient, log: Log) {
     })();
   }
 }
+
+/**
+ * The logo half alone, for POST /colleges/:id/lookup, whose photo and site
+ * facts run through lib/collegeLookupRun.ts. Reads the home page once more
+ * only when the school has no stored logo; never throws.
+ */
+export async function lookUpLogoOnly(svc: SupabaseClient, college: MediaCollege, log?: Log): Promise<{ logoUrl: string | null; logoNote: string | null }> {
+  try {
+    const now = await current(svc, college.id);
+    if (now.logoPath) return { logoUrl: logoPublicUrl(now.logoPath), logoNote: null };
+    if (!now.logosReady || !college.website) return { logoUrl: null, logoNote: null };
+    const meta = await fetchPageMeta(/^https?:\/\//i.test(college.website) ? college.website : `https://${college.website}`);
+    const o = await lookUpLogo(college, meta, collegeHost(college.website), { ...supabaseLogoStore(svc), log });
+    return { logoUrl: o.storagePath ? logoPublicUrl(o.storagePath) : null, logoNote: o.note };
+  } catch (err) {
+    log?.warn({ err: err instanceof Error ? err.message : "failed" }, "college lookup: logo not stored");
+    return { logoUrl: null, logoNote: null };
+  }
+}

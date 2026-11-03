@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
-import { fetchJpeg, fetchPageMeta, linkTesting, parsePageMeta, type PinnedResponse } from "../../src/lib/links.js";
-import { jpegSize, lookUpCollege, nameWords, onOwnHost, titleNamesCollege } from "../../src/lib/collegeLookup.js";
+import sharp from "sharp";
+import { fetchImageAny, fetchJpeg, fetchPageMeta, linkTesting, parsePageMeta, type PinnedResponse } from "../../src/lib/links.js";
+import { isHistoricTitle, jpegSize, lookUpCollege, nameWords, onOwnHost, rankCommonsTitles, titleNamesCollege, type LookupDeps } from "../../src/lib/collegeLookup.js";
+import { toStoredJpegs, type StoredImage } from "../../src/lib/imageConvert.js";
 
 const PUBLIC = async () => [{ address: "93.184.215.14", family: 4 }];
 const base = new URL("https://www.example.edu/about/");
@@ -146,6 +148,8 @@ test("lookUpCollege stores the site image when Commons has nothing, and leaves a
     store: { upload: async (p: string) => void uploads.push(p), upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
     fetchMeta: async () => ({ finalUrl: "https://www.example.edu/", title: "Example", description: "d", image: "https://cdn.example.edu/c.jpg" }),
     fetchImage: async () => ({ finalUrl: "https://cdn.example.edu/c.jpg", bytes: jpeg }),
+    // The bytes above are only a frame header; this stands in for the conversion.
+    convert: async (bytes: Buffer): Promise<StoredImage> => ({ full: bytes, thumb: bytes, width: 1024, height: 600, srcWidth: 1024, srcHeight: 600 }),
     hasPhoto,
   });
   const college = { id: "c1", name: "Example University", unitid: 123456, website: "https://www.example.edu" };
@@ -170,4 +174,290 @@ test("lookUpCollege stores the site image when Commons has nothing, and leaves a
   });
   assert.equal(other.photo, null);
   assert.equal(rows.length, 0);
+});
+
+
+// ---- Which Commons files to look at, best first ----------------------------------------------
+
+test("rankCommonsTitles puts the school's full name first and maps, signs, logos and old prints last, keeping search order otherwise", () => {
+  const ranked = rankCommonsTitles(
+    [
+      "File:Northern Vermont University Lyndon campus September 2017.jpg",
+      "File:University of Vermont campus map 1924.jpg",
+      "File:University of Vermont sign.jpg",
+      "File:University of Vermont Billings Library.jpg",
+      "File:UVM campus aerial.jpg",
+      "File:University of Vermont University Green.jpg",
+      "File:University of Vermont logo.svg.png",
+      "File:University of Vermont campus painting.jpg",
+    ],
+    "University of Vermont"
+  );
+  assert.deepEqual(ranked, [
+    "File:University of Vermont Billings Library.jpg",
+    "File:University of Vermont University Green.jpg",
+    "File:Northern Vermont University Lyndon campus September 2017.jpg",
+    "File:UVM campus aerial.jpg",
+    "File:University of Vermont sign.jpg",
+    "File:University of Vermont logo.svg.png",
+    "File:University of Vermont campus painting.jpg",
+    "File:University of Vermont campus map 1924.jpg",
+  ]);
+  assert.deepEqual(rankCommonsTitles([], "X University"), []);
+});
+
+test("lookUpCollege asks Commons about every name-matched title (up to a dozen), best first, not just the first six", async () => {
+  const found = Array.from({ length: 14 }, (_, i) => `File:Example University hall ${i + 1}.jpg`);
+  found.splice(1, 0, "File:Example University campus map 1901.jpg", "File:Some Other School hall.jpg");
+  let asked: string[] = [];
+  await lookUpCollege(exampleCollege, {
+    commons: {
+      search: async () => found,
+      imageinfo: async (titles: string[]) => ((asked = asked.length ? asked : titles), {}),
+      download: async () => new Uint8Array(),
+    },
+    store: { upload: async () => {}, upsert: async () => {} } as never,
+    fetchMeta: metaWith([]),
+    hasPhoto: false,
+  });
+  assert.equal(asked.length, 12);
+  assert.ok(!asked.includes("File:Some Other School hall.jpg"));
+  assert.ok(!asked.includes("File:Example University campus map 1901.jpg"), "the map is ranked below twelve better titles");
+  assert.equal(asked[0], "File:Example University hall 1.jpg");
+});
+
+// ---- Modern photos first, the school's own picture next, a historic print last ---------------------
+
+test("isHistoricTitle: a year before 1990, or a stereograph, lithograph or NYPL scan", () => {
+  for (const t of [
+    "File:Hamilton College campus view no. 3, by Seward, H. W. (H. Walton), d. 1871.jpg",
+    "File:Massachusetts Institute of Technology campus aerial 1921 US Army.jpg",
+    "File:Hamilton College stereograph.jpg",
+    "File:Hamilton College (NYPL b11707960-G91F107 002F).jpg",
+  ]) assert.equal(isHistoricTitle(t), true, t);
+  for (const t of ["File:Syracuse University Aerial view.jpg", "File:Terrace Apartments, Vassar College, June 2026.jpg", "File:Tufts campus 1999.jpg", "File:Example University hall 2004.jpg"]) {
+    assert.equal(isHistoricTitle(t), false, t);
+  }
+});
+
+/** A Commons imageinfo answer that choosePhoto accepts: a big landscape CC0 JPEG, thumbnails on thumb.wikimedia.org. */
+function commonsAnswer(titles: string[]): unknown {
+  return {
+    query: {
+      pages: titles.map((title, i) => ({
+        title,
+        revisions: [{ timestamp: "2024-01-01T00:00:00Z" }],
+        imageinfo: [
+          {
+            mime: "image/jpeg",
+            width: 4000,
+            height: 2600,
+            sha1: String(i + 1).repeat(40).slice(0, 40),
+            timestamp: "2024-01-01T00:00:00Z",
+            descriptionurl: `https://commons.wikimedia.org/wiki/${encodeURIComponent(title)}`,
+            url: "https://upload.wikimedia.org/wikipedia/commons/a/ab/X.jpg",
+            thumburl: "https://thumb.wikimedia.org/wikipedia/commons/thumb/a/ab/X.jpg/1280px-X.jpg",
+            thumbwidth: 1280,
+            thumbheight: 832,
+            extmetadata: { LicenseShortName: { value: "CC0" }, Artist: { value: "A. Photographer" } },
+          },
+        ],
+      })),
+    },
+  };
+}
+
+const photoRun = (search: string[], images: string[]) => {
+  const rows: Record<string, unknown>[] = [];
+  const fetched: string[] = [];
+  const deps: LookupDeps = {
+    commons: { search: async () => search, imageinfo: async (titles: string[]) => commonsAnswer(titles), download: async () => new Uint8Array([1, 2, 3]) },
+    store: { upload: async () => {}, upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
+    fetchMeta: metaWith(images),
+    fetchImage: async (url) => (fetched.push(url), { finalUrl: url, bytes: Buffer.from([1]) }),
+    convert: async (bytes: Buffer): Promise<StoredImage> => ({ full: bytes, thumb: bytes, width: 1280, height: 720, srcWidth: 1600, srcHeight: 900 }),
+    hasPhoto: false,
+  };
+  return { deps, rows, fetched };
+};
+
+test("lookUpCollege takes a modern Commons photo and never asks the school's site", async () => {
+  const { deps, rows, fetched } = photoRun(["File:Example University hall 1871.jpg", "File:Example University library.jpg"], ["https://www.example.edu/hero.jpg"]);
+  const out = await lookUpCollege(exampleCollege, deps);
+  assert.equal(out.photo?.source, "commons-search");
+  assert.equal(rows[0]!.commons_title, "File:Example University library.jpg");
+  assert.deepEqual(fetched, []);
+});
+
+test("lookUpCollege prefers the school's own picture to a historic Commons print, and uses the print only when the site has nothing", async () => {
+  const historic = ["File:Example University campus view no. 3, by Seward, d. 1871.jpg"];
+  const withSite = photoRun(historic, ["https://www.example.edu/hero.jpg"]);
+  const a = await lookUpCollege(exampleCollege, withSite.deps);
+  assert.equal(a.photo?.source, "site");
+  assert.equal(withSite.rows.length, 1);
+  assert.equal(withSite.rows[0]!.source, "site");
+
+  const noSite = photoRun(historic, []);
+  const b = await lookUpCollege(exampleCollege, noSite.deps);
+  assert.equal(b.photo?.source, "commons-search");
+  assert.equal(noSite.rows[0]!.commons_title, historic[0]);
+});
+
+// ---- Every image a page declares, in any format a browser shows ------------------------------
+
+test("parsePageMeta lists every image candidate once, in order, and keeps `image` the first", () => {
+  const m = parsePageMeta(
+    `<head>
+     <meta property="og:image:url" content="/img/b.webp">
+     <meta property="og:image" content="/img/a.jpg">
+     <meta property="og:image" content="/img/a2.jpg">
+     <meta name="twitter:image" content="https://cdn.example.edu/t.png">
+     <meta property="og:image:secure_url" content="https://www.example.edu/img/a.jpg">
+     <link rel="image_src" href="/img/l.jpg">
+     <link rel="stylesheet" href="/not-an-image.css">
+     <meta property="og:image" content="javascript:alert(1)"></head>`,
+    base
+  );
+  assert.equal(m.image, "https://www.example.edu/img/a.jpg");
+  assert.deepEqual(m.images, [
+    "https://www.example.edu/img/a.jpg",
+    "https://www.example.edu/img/a2.jpg",
+    "https://www.example.edu/img/b.webp",
+    "https://cdn.example.edu/t.png",
+    "https://www.example.edu/img/l.jpg",
+  ]);
+  assert.deepEqual(parsePageMeta("<head></head>", base).images, []);
+});
+
+test("parsePageMeta reads at most a handful of candidates and stays linear on hostile input", () => {
+  const many = Array.from({ length: 50 }, (_, i) => `<meta property="og:image" content="/i${i}.jpg">`).join("");
+  assert.ok(parsePageMeta(many, base).images!.length <= 8);
+  const t0 = Date.now();
+  parsePageMeta("<link rel=image_src ".repeat(100_000), base);
+  assert.ok(Date.now() - t0 < 2000);
+});
+
+test("fetchImageAny takes a JPEG, a PNG or a WebP within the cap and nothing that only claims to be one", async () => {
+  const undo = linkTesting.useResolver(PUBLIC);
+  const png = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#123" } }).png().toBuffer();
+  const webp = await sharp({ create: { width: 4, height: 4, channels: 3, background: "#123" } }).webp().toBuffer();
+  let body: Buffer = png;
+  let type = "image/png";
+  const undoOpen = linkTesting.useOpener(async () => ({ status: 200, headers: { "content-type": type }, body: Readable.from([body]) }));
+  try {
+    assert.equal((await fetchImageAny("https://b.test/p.png", 100_000)).bytes.length, png.length);
+    type = "image/webp";
+    body = webp;
+    assert.equal((await fetchImageAny("https://b.test/p.webp", 100_000)).bytes.length, webp.length);
+    type = "image/jpg";
+    body = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]);
+    assert.equal((await fetchImageAny("https://b.test/p.jpg", 100_000)).bytes.length, 8);
+    type = "text/html";
+    await assert.rejects(fetchImageAny("https://b.test/p.png", 100_000));
+    type = "image/svg+xml";
+    await assert.rejects(fetchImageAny("https://b.test/p.svg", 100_000));
+    type = "image/png";
+    body = Buffer.from("<html>a page that says it is a png</html>");
+    await assert.rejects(fetchImageAny("https://b.test/p.png", 100_000), /image/i);
+    body = Buffer.alloc(2000, 0x89);
+    await assert.rejects(fetchImageAny("https://b.test/p.png", 1000), /too large/);
+  } finally {
+    undoOpen();
+    undo();
+  }
+});
+
+// ---- The site photo: several candidates, any format, a real thumbnail ---------------------------
+
+const noCommons: LookupDeps["commons"] = { search: async () => [], imageinfo: async () => ({}), download: async () => new Uint8Array() };
+const exampleCollege = { id: "c1", name: "Example University", unitid: 123456, website: "https://www.example.edu" };
+const metaWith = (images: string[]) => async () => ({
+  finalUrl: "https://www.example.edu/",
+  title: "Example",
+  description: null,
+  image: images[0] ?? null,
+  images,
+});
+
+test("lookUpCollege turns a WebP share image into a 1280 px and a 500 px JPEG", async () => {
+  const webp = await sharp({ create: { width: 2000, height: 1100, channels: 3, background: "#456" } }).webp().toBuffer();
+  const uploads = new Map<string, Buffer>();
+  const rows: Record<string, unknown>[] = [];
+  const out = await lookUpCollege(exampleCollege, {
+    commons: noCommons,
+    store: { upload: async (p: string, b: Uint8Array) => void uploads.set(p, Buffer.from(b)), upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
+    fetchMeta: metaWith(["https://cdn.example.edu/share.webp"]),
+    fetchImage: async (url) => ({ finalUrl: url, bytes: webp }),
+    hasPhoto: false,
+  });
+  assert.equal(out.photo?.source, "site");
+  const names = [...uploads.keys()];
+  assert.ok(names.some((n) => n.endsWith("-1280.jpg")) && names.some((n) => n.endsWith("-500.jpg")));
+  const fullBytes = uploads.get(names.find((n) => n.endsWith("-1280.jpg"))!)!;
+  const thumbBytes = uploads.get(names.find((n) => n.endsWith("-500.jpg"))!)!;
+  assert.equal(jpegSize(fullBytes)?.width, 1280);
+  assert.equal(jpegSize(thumbBytes)?.width, 500);
+  assert.equal(rows[0]!.width, 1280);
+  assert.equal(rows[0]!.height, 704);
+  assert.equal(rows[0]!.license, "University website");
+});
+
+test("lookUpCollege tries the next candidate when one can't be fetched or is too small, and stops after three", async () => {
+  const good = await sharp({ create: { width: 1600, height: 900, channels: 3, background: "#456" } }).png().toBuffer();
+  const small = await sharp({ create: { width: 400, height: 300, channels: 3, background: "#456" } }).jpeg().toBuffer();
+  const portrait = await sharp({ create: { width: 900, height: 1400, channels: 3, background: "#456" } }).jpeg().toBuffer();
+  const asked: string[] = [];
+  const rows: Record<string, unknown>[] = [];
+  const deps = (images: string[], answer: (url: string) => Buffer | Error): LookupDeps => ({
+    commons: noCommons,
+    store: { upload: async () => {}, upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
+    fetchMeta: metaWith(images),
+    fetchImage: async (url) => {
+      asked.push(url);
+      const a = answer(url);
+      if (a instanceof Error) throw a;
+      return { finalUrl: url, bytes: a };
+    },
+    hasPhoto: false,
+  });
+
+  const out = await lookUpCollege(
+    exampleCollege,
+    deps(
+      [
+        "https://www.example.edu/404.jpg",
+        "https://evil.test/off-host.jpg",
+        "https://www.example.edu/small.jpg",
+        "https://www.example.edu/portrait.jpg",
+        "https://cdn.example.edu/good.png",
+        "https://cdn.example.edu/never-asked.png",
+      ],
+      (url) => (url.includes("404") ? new Error("That page returned 404") : url.includes("small") ? small : url.includes("portrait") ? portrait : good)
+    )
+  );
+  // The off-host one is never fetched; the three on-host candidates before the good one are all tried.
+  assert.deepEqual(asked, ["https://www.example.edu/404.jpg", "https://www.example.edu/small.jpg", "https://www.example.edu/portrait.jpg"]);
+  assert.equal(out.photo, null);
+  assert.equal(rows.length, 0);
+
+  asked.length = 0;
+  const second = await lookUpCollege(exampleCollege, deps(["https://www.example.edu/404.jpg", "https://cdn.example.edu/good.png"], (url) => (url.includes("404") ? new Error("gone") : good)));
+  assert.deepEqual(asked, ["https://www.example.edu/404.jpg", "https://cdn.example.edu/good.png"]);
+  assert.equal(second.photo?.source, "site");
+  assert.equal(rows.length, 1);
+});
+
+test("lookUpCollege's default conversion refuses bytes sharp can't read, and the school keeps no photo", async () => {
+  const rows: Record<string, unknown>[] = [];
+  const out = await lookUpCollege(exampleCollege, {
+    commons: noCommons,
+    store: { upload: async () => {}, upsert: async (r: Record<string, unknown>) => void rows.push(r) } as never,
+    fetchMeta: metaWith(["https://www.example.edu/broken.jpg"]),
+    // A frame header with no image behind it.
+    fetchImage: async (url) => ({ finalUrl: url, bytes: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, 0x02, 0x58, 0x04, 0x00, 3, 0, 0, 0]) }),
+    hasPhoto: false,
+  });
+  assert.equal(out.photo, null);
+  assert.equal(rows.length, 0);
+  assert.equal(await toStoredJpegs(Buffer.alloc(3)), null);
 });

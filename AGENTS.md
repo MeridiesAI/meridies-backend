@@ -84,6 +84,10 @@ src/
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
 │   ├── collegePhotos.ts   # a college's campus photo as every college surface serves it; null without the migration
+│   ├── collegeLookup.ts   # Look up info & photo, the picture half: Commons by name, then the site's share images (up to 3)
+│   ├── collegeSiteInfo.ts # Look up info & photo, the facts half: pages picked, one Haiku read, every fact kept only with a quote the pages contain
+│   ├── collegeLookupRun.ts # the lookup's order and rules: 30-day cache, refresh, facts + picture at once, 45 s deadline; no db, no model client
+│   ├── imageConvert.ts    # PNG/WebP/JPEG to a 1280 px and a 500 px JPEG with sharp 0.35.5 (loaded lazily; JPEG-only without it)
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
@@ -1442,24 +1446,52 @@ there).
   or `/internal/status` reads the job overdue. `20261024000071` (the review
   queue and `ingest_runs.counts`) goes in after it, either order with the
   code; not in `REQUIRED_SCHEMA` either.
-- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookup.ts`, `20261031000002`, `…000003`): a
-  counselor's button on a College Search card. It reads the college's own site (`fetchPageMeta` in `lib/links.ts`:
-  title, description, og:image, through the same pinned opener) and, for a school with **no photo at all**, stores
-  one: first a Commons file found by the school's name (`titleNamesCollege`: every word of the name must be a **whole
-  word** of the file's title, bar *the/of/at/in/and/for* and *university/college/institute/school*; *State* and
-  *A&M* count as part of the name; the title may leave out "university"/"college" but may not name a different kind
-  (Boston College is not Boston University) or say *State* when the name doesn't (Ohio University is not Ohio
-  State); then `choosePhoto`'s rules; `source = 'commons-search'`), else the site's og:image from the college's own
-  host or a subdomain (JPEG, 3 MB, at least 800 px wide, landscape; `source = 'site'`, `license = 'University
-  website'`, credit = the school, `source_url` = the page, no Commons title; one copy serves both sizes since there
-  is no image library). It never replaces a photo and is not behind the 7-day review gate. The monthly loader
-  leaves these two sources alone when Wikidata has nothing **or its file is rejected** (`isLookupSource`) and
-  replaces them when Wikidata or a pick offers a usable photo; only a `none` pick removes one. `…000003` makes the
-  database enforce the title rule: a `site` row has no Commons title, every other source has a `File:` title. 30 an
-  hour per counselor; 400 with no website on file; 503 only without the service-role key or when the
-  `college_photos` table is missing (before `…000002` the refused insert is caught and the counselor reads "No usable
-  picture was found"). Tests: `test/unit/college-lookup.test.ts` (the lookalike table), `college-photos-run.test.ts`
-  (the loader keeps looked-up rows), `test/integration/college-photos.test.mjs` (the CHECK).
+- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookupRun.ts`, `lib/collegeSiteInfo.ts`,
+  `lib/collegeLookup.ts`, `lib/imageConvert.ts`; `20261031000002`, `…000003`, `20261104000002`): a counselor's button on
+  a College Search card and on the college's page. Body `{ "refresh": true }` is optional; an empty body is a plain
+  lookup. Answers `{ collegeId, site, info, cached, photo, photoNote, infoNote }`. 30 an hour per counselor; 400 with
+  no website on file; 503 only without the service-role key or when `college_photos` is missing.
+  **The facts** (`info`, a `CollegeSiteInfo`; also `siteInfo` on `GET /colleges/:id/extras`): the home page is read once
+  (`fetchSitePage` in `lib/links.ts`: text, links and head from one pinned fetch), then up to three pages of the
+  college's own site are picked from its links (`pickSubpages`: an apply/deadlines page, an admissions page, an
+  academics page; same host or a subdomain, no files, no long query strings, no news/giving/visit pages), read in
+  parallel, and one `runStructured` call (module `link-digest`, Haiku; the practice's AI-summaries switch and the 300/day
+  quota apply) pulls out `about`, `deadlines` by plan (ED, ED2, EA, REA, RD, Rolling, Transfer, Other), `testPolicy`,
+  `essaysRecs` and `programs`. Page text is untrusted: angle brackets are defanged so a page can't close its `<page>`
+  block, and the prompt says so. **The model's word is never taken**: `groundFacts` keeps a fact only when its
+  `evidence` quote (12+ characters) is in the page text after folding case, quotes, dashes and white space, a deadline's
+  date is inside its own quote (and has a digit unless Rolling), and a program name is itself in the text; everything
+  else is dropped, not repaired. With no model (AI off, quota spent, an error) the school's own description is kept
+  and nothing else, and the row says so (`model` null; `infoNote` gives the reason). Saved in `college_site_info`
+  (scraped, apart from the curated `colleges.deadlines` / `college_policies`, which a lookup never touches): fresh for 30
+  days (a day for a no-model row), so a repeat lookup for a school with a photo costs nothing; a no-model result never
+  replaces a row a model read. The facts and the picture hunt run at the same time under one 45 s deadline; each step's
+  failure costs only itself. `lib/collegeLookupRun.ts` holds that order and is unit tested with stand-ins.
+  **The picture**, for a school with **no photo at all**: first a Commons file found by the school's name
+  (`titleNamesCollege`: every word of the name must be a **whole word** of the file's title, bar
+  *the/of/at/in/and/for* and *university/college/institute/school*; *State* and *A&M* count as part of the name; the
+  title may leave out "university"/"college" but may not name a different kind (Boston College is not Boston
+  University) or say *State* when the name doesn't (Ohio University is not Ohio State); then `choosePhoto`'s rules;
+  `source = 'commons-search'`), else the site's share images: every image the head declares (`og:image:secure_url`,
+  `og:image`, `og:image:url`, `twitter:image`, `<link rel="image_src">`), the first three on the college's own host or a
+  subdomain, as a JPEG, PNG or WebP of at most 3 MB (by Content-Type and by magic bytes; `fetchImageAny`), at least
+  800 px wide and landscape as shown (EXIF orientation applied). Each is converted with `sharp` to a real 1280 px and a
+  real 500 px JPEG (transparency flattened, never enlarged, 40 MP input limit, `failOn: "error"`); sharp is loaded
+  lazily and, if it can't load, a JPEG is stored as before (one copy under both names) and a PNG/WebP is refused, so a
+  bad native install can't take the lookup down. `source = 'site'`, `license = 'University website'`, credit = the
+  school, `source_url` = the page, no Commons title. File names stay `-1280.jpg` / `-500.jpg` and the bucket stays
+  JPEG-only, so there is no storage migration. It never replaces a photo and is not behind the 7-day review gate. The
+  monthly loader leaves these two sources alone when Wikidata has nothing **or its file is rejected** (`isLookupSource`)
+  and replaces them when Wikidata or a pick offers a usable photo; only a `none` pick removes one. `…000003` makes the
+  database enforce the title rule: a `site` row has no Commons title, every other source has a `File:` title.
+  **Deploy order:** `20261104000002` either order with the code (without it the lookup still reads the site and finds a
+  photo but saves nothing, and `siteInfo` reads null); not in `REQUIRED_SCHEMA`. Known limits: some university sites
+  block bots by User-Agent (the lookup reads `Meridies-LinkReader/1.0`, identifies itself, honours no robots.txt, and
+  fetches at most four pages a click); a scraped fact is only as right as the school's page, which is why the app says
+  "scraped, check the school's site". Tests: `test/unit/college-site-info.test.ts`, `college-lookup-run.test.ts`,
+  `image-convert.test.ts`, `college-lookup.test.ts` (the lookalike table, candidates, any-format fetch),
+  `college-photos-run.test.ts` (the loader keeps looked-up rows), `test/integration/college-lookup.test.mjs` (the table's
+  RLS and CHECKs, and the route's cache), `college-photos.test.mjs` (the CHECK).
 - **Logos, and lookups nobody has to click** (`lib/collegeLogos.ts`, `lib/collegeMediaLookup.ts`,
   `20261105000001`). A school's logo is the icon its own site declares (`<link rel="apple-touch-icon" | "icon">`,
   read by `parsePageMeta`), fetched through `fetchIconImage` (lib/links.ts: PNG/JPEG/WebP by magic bytes, 512 KB,
@@ -1468,7 +1500,7 @@ there).
   `checked_at` keeps the automatic lookup off for a week). Served as `logoUrl` on search cards, `/colleges/suggest`,
   event college refs, and `collegeLogoUrl` on board rows and recommendations (which also carry `collegePhoto`
   now). We copy rather than hotlink or use a favicon service so viewers' browsers never tell a third party which
-  schools they look at. `POST /:id/lookup` now does photo and logo from one page read (`lookUpMedia`). `GET
+  schools they look at. `POST /:id/lookup` also stores the logo (`lookUpLogoOnly`) and answers `logoUrl`. `GET
   /colleges/media?ids=` (any signed-in user, 30 a minute) answers each school's photo and logo and queues up to six
   missing ones for a background lookup (`lookUpMediaSoon`: two at a time per instance, 100 waiting at most, no
   model, so no AI budget), naming them in `lookingUp`. **Backfill:** `npx tsx --env-file=.env
