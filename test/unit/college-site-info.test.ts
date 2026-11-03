@@ -120,6 +120,43 @@ test("pickSubpages never repeats the page it came from, counts a path once, and 
   assert.equal(pickSubpages([L("/admissions"), L("/apply"), L("/academics"), L("/deadlines")], "https://www.example.edu/", 2).length, 2);
 });
 
+
+test("pickSubpages leaves out graduate, medical and law sites, news articles and words that only contain 'apply'", () => {
+  // What a live sweep found: Brown's graduate and medical-school admissions sites, UVM's graduate programs page,
+  // and a news article about "applying" a stitch on MIT's news site were all picked over the undergraduate pages.
+  const picked = pickSubpages(
+    [
+      L("/", "Graduate programs", "graduateprograms.example.edu"),
+      L("/", "Medical school admissions", "admission.med.example.edu"),
+      L("/graduate/academic-programs", "Academic programs"),
+      L("/law/admissions", "Law admissions"),
+      L("/2026/sanaheal-makes-surgical-stitching-more-like-applying", "Applying a better stitch", "news.example.edu"),
+      L("/news/how-we-are-applying-new-ideas-to-campus-housing-and-dining", "Admissions news"),
+      L("/mba/admissions", "MBA admissions"),
+      L("/", "Undergraduate admission", "admission.example.edu"),
+      L("/academics/majors", "Majors"),
+    ],
+    "https://www.example.edu/"
+  );
+  assert.deepEqual([...picked].sort(), ["https://admission.example.edu/", "https://www.example.edu/academics/majors"]);
+});
+
+test("pickSubpages prefers the first-year pages over a transfer applicant's page", () => {
+  // UVM's "how to apply" link went to its transfer page, and the essay and recommendation rules read
+  // there were a transfer applicant's, not a first-year's.
+  const picked = pickSubpages(
+    [L("/admissions/undergraduate/how-apply-transfer-students", "How to apply: transfer students"), L("/admissions/first-year/apply", "Apply as a first-year student")],
+    "https://www.example.edu/"
+  );
+  assert.deepEqual(picked, ["https://www.example.edu/admissions/first-year/apply"]);
+});
+
+test("pickSubpages matches whole words: 'applying' and 'applicant' are not an apply page, 'apply' and 'applications' are", () => {
+  assert.deepEqual(pickSubpages([L("/applying-for-parking", "Parking permits"), L("/applicant-faq-archive", "Archive")], "https://www.example.edu/"), []);
+  const picked = pickSubpages([L("/apply", "Apply"), L("/admission/applications", "Applications"), L("/first-year/deadlines", "Deadlines")], "https://www.example.edu/");
+  assert.equal(picked.length, 3);
+});
+
 // ---- groundFacts ----------------------------------------------------------------------
 
 const PAGE =
@@ -198,6 +235,55 @@ test("a rolling deadline needs no digit, any other date does", () => {
     [text]
   );
   assert.deepEqual(f.deadlines.map((d) => d.plan), ["Rolling"]);
+});
+
+
+test("groundFacts drops a deadline whose plan the quote contradicts: an early plan needs 'early' in its quote, a regular date can't be labelled early", () => {
+  const text =
+    "Regular Decision applications are due January 5. Early Action applications are due November 1. " +
+    "Early Decision II applications are due January 3. Transfer applications are due March 15. Applications are read on a rolling basis.";
+  const f = groundFacts(
+    {
+      deadlines: [
+        // a regular date mislabelled as an early plan
+        { plan: "ED", date: "January 5", evidence: "Regular Decision applications are due January 5." },
+        { plan: "EA", date: "January 5", evidence: "Regular Decision applications are due January 5." },
+        // an early date mislabelled regular
+        { plan: "RD", date: "November 1", evidence: "Early Action applications are due November 1." },
+        // right labels
+        { plan: "RD", date: "January 5", evidence: "Regular Decision applications are due January 5." },
+        { plan: "EA", date: "November 1", evidence: "Early Action applications are due November 1." },
+        { plan: "ED2", date: "January 3", evidence: "Early Decision II applications are due January 3." },
+        { plan: "Transfer", date: "March 15", evidence: "Transfer applications are due March 15." },
+        // transfer / rolling need their word
+        { plan: "Transfer", date: "January 5", evidence: "Regular Decision applications are due January 5." },
+        { plan: "Rolling", date: "rolling basis", evidence: "Applications are read on a rolling basis" },
+        { plan: "Other", date: "March 15", evidence: "Transfer applications are due March 15." },
+      ],
+      programs: [],
+    },
+    [text]
+  );
+  assert.deepEqual(
+    f.deadlines.map((d) => `${d.plan} ${d.date}`),
+    ["RD January 5", "EA November 1", "ED2 January 3", "Transfer March 15", "Rolling rolling basis", "Other March 15"]
+  );
+});
+
+test("groundFacts drops a statement that states a figure the page doesn't", () => {
+  const text = "Founded in 1870, we are a private university. We are test-optional for all applicants. Class sizes are small.";
+  const f = groundFacts(
+    {
+      about: { text: "Founded in 1870, a private university.", evidence: "Founded in 1870, we are a private university." },
+      testPolicy: { text: "Test-optional since 2020.", evidence: "We are test-optional for all applicants." },
+      essaysRecs: { text: "Class sizes are small.", evidence: "Class sizes are small." },
+      programs: [],
+    },
+    [text]
+  );
+  assert.equal(f.about, "Founded in 1870, a private university.");
+  assert.equal(f.testPolicy, null); // "2020" is nowhere on the page
+  assert.equal(f.essaysRecs, "Class sizes are small.");
 });
 
 // ---- buildSiteInfo --------------------------------------------------------------------

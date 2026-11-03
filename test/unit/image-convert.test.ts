@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import sharp from "sharp";
-import { imageTesting, jpegSize, sniffImage, toStoredJpegs } from "../../src/lib/imageConvert.js";
+import { imageTesting, jpegSize, pixelLimitFor, sniffImage, toStoredJpegs } from "../../src/lib/imageConvert.js";
 
 const solid = (width: number, height: number, channels: 3 | 4 = 3) =>
   sharp({ create: { width, height, channels, background: channels === 4 ? { r: 20, g: 60, b: 120, alpha: 0.5 } : { r: 20, g: 60, b: 120 } } });
@@ -99,4 +99,19 @@ test("a sharp that fails to load is remembered as unavailable, not retried on ev
   } finally {
     undo();
   }
+});
+
+test("a camera-original JPEG above 40 megapixels is taken (a JPEG shrinks as it loads); PNG and WebP keep the 40 MP limit", async () => {
+  // Syracuse's share image is 7952 x 5304 = 42.2 MP in 2.8 MB, and was refused for being "too large".
+  assert.ok(pixelLimitFor("jpeg") >= 100_000_000);
+  assert.equal(pixelLimitFor("png"), 40_000_000);
+  assert.equal(pixelLimitFor("webp"), 40_000_000);
+
+  const big = await solid(8000, 5400).jpeg({ quality: 30 }).toBuffer(); // 43.2 MP, flat colour: a small file
+  assert.ok(big.length < 3_145_728);
+  const out = await toStoredJpegs(big);
+  assert.ok(out, "a 43 MP JPEG is converted");
+  assert.equal(out.width, 1280);
+  assert.equal(out.srcWidth, 8000);
+  assert.equal(sniffImage(out.thumb), "jpeg");
 });

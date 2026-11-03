@@ -39,6 +39,17 @@ export const FULL_WIDTH = 1280;
 export const THUMB_WIDTH = 500;
 /** About 40 megapixels: a large camera frame; bigger is refused before it is decoded. */
 export const MAX_INPUT_PIXELS = 40_000_000;
+/**
+ * A JPEG is decoded shrunk (libjpeg scales it by 1/2, 1/4 or 1/8 as it loads), so a
+ * camera original costs little to resize: a 42 MP, 2.8 MB share image converted in 64 ms
+ * and about 23 MB. The 40 MP guard refused those. A PNG or WebP can't shrink on load, and
+ * a flat-colour one is a few KB that inflates to hundreds of MB, so those keep 40 MP.
+ */
+export const MAX_INPUT_PIXELS_JPEG = 100_000_000;
+
+export function pixelLimitFor(kind: ImageKind): number {
+  return kind === "jpeg" ? MAX_INPUT_PIXELS_JPEG : MAX_INPUT_PIXELS;
+}
 
 /** The format a file's first bytes name, or null. */
 export function sniffImage(b: Uint8Array): ImageKind | null {
@@ -136,7 +147,7 @@ export async function toStoredJpegs(bytes: Buffer, o: { maxPixels?: number } = {
   }
 
   try {
-    const open = () => sharp(bytes, { limitInputPixels: o.maxPixels ?? MAX_INPUT_PIXELS, failOn: "error" });
+    const open = () => sharp(bytes, { limitInputPixels: o.maxPixels ?? pixelLimitFor(kind), failOn: "error" });
     const meta = await open().metadata();
     if (!meta.width || !meta.height) return null;
     // EXIF orientation 5-8 turns the picture a quarter: what is shown is the other way round.

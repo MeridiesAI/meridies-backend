@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { test } from "node:test";
 import sharp from "sharp";
 import { fetchImageAny, fetchJpeg, fetchPageMeta, linkTesting, parsePageMeta, type PinnedResponse } from "../../src/lib/links.js";
-import { jpegSize, lookUpCollege, nameWords, onOwnHost, titleNamesCollege, type LookupDeps } from "../../src/lib/collegeLookup.js";
+import { jpegSize, lookUpCollege, nameWords, onOwnHost, rankCommonsTitles, titleNamesCollege, type LookupDeps } from "../../src/lib/collegeLookup.js";
 import { toStoredJpegs, type StoredImage } from "../../src/lib/imageConvert.js";
 
 const PUBLIC = async () => [{ address: "93.184.215.14", family: 4 }];
@@ -174,6 +174,56 @@ test("lookUpCollege stores the site image when Commons has nothing, and leaves a
   });
   assert.equal(other.photo, null);
   assert.equal(rows.length, 0);
+});
+
+
+// ---- Which Commons files to look at, best first ----------------------------------------------
+
+test("rankCommonsTitles puts the school's full name first and maps, signs, logos and old prints last, keeping search order otherwise", () => {
+  const ranked = rankCommonsTitles(
+    [
+      "File:Northern Vermont University Lyndon campus September 2017.jpg",
+      "File:University of Vermont campus map 1924.jpg",
+      "File:University of Vermont sign.jpg",
+      "File:University of Vermont Billings Library.jpg",
+      "File:UVM campus aerial.jpg",
+      "File:University of Vermont University Green.jpg",
+      "File:University of Vermont logo.svg.png",
+      "File:University of Vermont campus painting.jpg",
+    ],
+    "University of Vermont"
+  );
+  assert.deepEqual(ranked, [
+    "File:University of Vermont Billings Library.jpg",
+    "File:University of Vermont University Green.jpg",
+    "File:Northern Vermont University Lyndon campus September 2017.jpg",
+    "File:UVM campus aerial.jpg",
+    "File:University of Vermont sign.jpg",
+    "File:University of Vermont logo.svg.png",
+    "File:University of Vermont campus painting.jpg",
+    "File:University of Vermont campus map 1924.jpg",
+  ]);
+  assert.deepEqual(rankCommonsTitles([], "X University"), []);
+});
+
+test("lookUpCollege asks Commons about every name-matched title (up to a dozen), best first, not just the first six", async () => {
+  const found = Array.from({ length: 14 }, (_, i) => `File:Example University hall ${i + 1}.jpg`);
+  found.splice(1, 0, "File:Example University campus map 1901.jpg", "File:Some Other School hall.jpg");
+  let asked: string[] = [];
+  await lookUpCollege(exampleCollege, {
+    commons: {
+      search: async () => found,
+      imageinfo: async (titles: string[]) => ((asked = asked.length ? asked : titles), {}),
+      download: async () => new Uint8Array(),
+    },
+    store: { upload: async () => {}, upsert: async () => {} } as never,
+    fetchMeta: metaWith([]),
+    hasPhoto: false,
+  });
+  assert.equal(asked.length, 12);
+  assert.ok(!asked.includes("File:Some Other School hall.jpg"));
+  assert.ok(!asked.includes("File:Example University campus map 1901.jpg"), "the map is ranked below twelve better titles");
+  assert.equal(asked[0], "File:Example University hall 1.jpg");
 });
 
 // ---- Every image a page declares, in any format a browser shows ------------------------------

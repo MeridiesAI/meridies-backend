@@ -44,7 +44,9 @@ import { MAX_BYTES } from "./ingest/wikimedia.js";
 const MIN_SITE_WIDTH = 800;
 /** How many of a page's declared images are tried before giving up. */
 const SITE_CANDIDATES = 3;
-const COMMONS_CANDIDATES = 6;
+const COMMONS_CANDIDATES = 12;
+/** How many Commons results to ask for before the name check and the ranking pick the best twelve. */
+const COMMONS_SEARCH_LIMIT = 20;
 /** Words that don't tell one school from another. */
 const FILLER = new Set(["the", "of", "at", "in", "and", "for"]);
 /** The kind of institution: a title may leave it out, but may not name a different kind. */
@@ -109,6 +111,39 @@ export function titleNamesCollege(title: string, name: string): boolean {
   return !(have.has("state") && !named.has("state"));
 }
 
+/** Title words that mark a picture that isn't a photograph of the campus as it is. */
+const JUNK_WORDS = new Set([
+  "map", "maps", "plan", "logo", "seal", "sign", "signs", "signage", "plaque", "flag", "diagram", "crest", "emblem",
+  "poster", "stamp", "postcard", "print", "engraving", "drawing", "sketch", "store", "bookstore", "rock", "wordmark", "icon",
+  "painting", "paintings", "aquatint", "lithograph", "illustration", "vintage",
+]);
+
+/** A year before 1990 in a title is an old print or a historic photograph. */
+const OLD_YEAR = /^(1[0-8]\d\d|19[0-8]\d)$/;
+
+/**
+ * The name-matched Commons titles, best first. `choosePhoto` is strict (a large
+ * landscape JPEG under a free licence), so which few files are tried matters:
+ * a title that holds the school's whole name as a phrase comes first ("University
+ * of Vermont Billings Library" before "Northern Vermont University Lyndon"), and
+ * maps, signs, logos and pre-1990 prints go last. Equal scores keep Commons'
+ * own order. Pure; drops nothing.
+ */
+export function rankCommonsTitles(titles: string[], name: string): string[] {
+  const phrase = ` ${tokens(name).join(" ")} `;
+  const score = (title: string): number => {
+    const words = tokens(title.replace(/^File:/i, "").replace(/\.[a-z0-9]{2,4}$/i, ""));
+    let n = ` ${words.join(" ")} `.includes(phrase) ? 3 : 0;
+    if (words.some((w) => JUNK_WORDS.has(w))) n -= 5;
+    if (words.some((w) => OLD_YEAR.test(w))) n -= 2;
+    return n;
+  };
+  return titles
+    .map((title, order) => ({ title, order, score: score(title) }))
+    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .map((x) => x.title);
+}
+
 export { jpegSize };
 
 /** The URL's host is the college's host or one of its subdomains. */
@@ -126,8 +161,11 @@ export function onOwnHost(url: string, host: string): boolean {
 const sha1Of = (bytes: Uint8Array): string => createHash("sha1").update(bytes).digest("hex");
 
 async function fromCommons(college: LookupCollege & { unitid: number }, d: LookupDeps): Promise<LookupPhoto | null> {
-  const found = await d.commons.search(`${college.name} campus`, 12);
-  const titles = found.filter((t) => titleNamesCollege(t, college.name)).slice(0, COMMONS_CANDIDATES);
+  const found = await d.commons.search(`${college.name} campus`, COMMONS_SEARCH_LIMIT);
+  const titles = rankCommonsTitles(
+    found.filter((t) => titleNamesCollege(t, college.name)),
+    college.name
+  ).slice(0, COMMONS_CANDIDATES);
   if (!titles.length) return null;
 
   const pages = resolvePages(await d.commons.imageinfo(titles, WIDTHS.full, true), titles);

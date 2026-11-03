@@ -92,17 +92,37 @@ const MAX_PROGRAMS = 15;
 type Category = "apply" | "admissions" | "academics";
 const CATEGORY_ORDER: Category[] = ["apply", "admissions", "academics"];
 
-/** Words in a link's path or text, and what each is worth toward the category. */
+/**
+ * Words in a link's path or text, and what each is worth toward the category. Each is a
+ * whole word (a letter on either side doesn't count): "applying" and "applicant" say
+ * nothing about how to apply, and a news story about "applying" a stitch is not an apply page.
+ */
+const W = (alternatives: string) => new RegExp(`(?<![a-z])(?:${alternatives})(?![a-z])`);
 const WORDS: Array<{ re: RegExp; category: Category; weight: number }> = [
-  { re: /deadline/, category: "apply", weight: 6 },
-  { re: /apply|application/, category: "apply", weight: 5 },
-  { re: /first-?year|freshman/, category: "apply", weight: 4 },
-  { re: /requirement/, category: "apply", weight: 4 },
-  { re: /admission/, category: "admissions", weight: 5 },
-  { re: /academics|majors|programs|areas-of-study|degrees/, category: "academics", weight: 4 },
+  { re: W("deadlines?"), category: "apply", weight: 6 },
+  { re: W("apply|applications?"), category: "apply", weight: 5 },
+  { re: W("first-?year|freshman"), category: "apply", weight: 4 },
+  { re: W("requirements?"), category: "apply", weight: 4 },
+  { re: W("admissions?"), category: "admissions", weight: 5 },
+  { re: W("academics|majors|programs|areas-of-study|degrees"), category: "academics", weight: 4 },
 ];
 /** Pages that talk about the school without saying how to get in. */
-const NOISE = /\b(news|events?|alumni|giving|donate|athletics?|careers?|jobs|login|signin|calendar|blog|press|visit|tours?|parents?|campus-life|shop|store)\b/;
+const NOISE = /\b(news|events?|alumni|giving|donate|athletics?|careers?|jobs|login|signin|calendar|blog|press|visit|tours?|parents?|campus-life|shop|store|transfer)\b/;
+/**
+ * Pages for people who are not first-year applicants: graduate, medical, law, business and
+ * professional schools, online and continuing education. A sweep of real sites found Brown's
+ * graduate and medical-school admissions sites and UVM's graduate programs page picked over
+ * the undergraduate pages, and a counselor would have read M.S. programs as the school's majors.
+ */
+const NOT_UNDERGRAD = new RegExp(
+  `(?<![a-z])(?:grad|graduate|gradschool|postgraduate|masters?|phd|doctoral|med|medical|medicine|md|law|jd|mba|business-school|` +
+    `dental|pharmacy|veterinary|professional|executive|extension|continuing|online|summer|precollege|pre-college)(?![a-z])`
+);
+/** A host that is a school's news, giving, alumni or athletics site, or one of its graduate or professional schools. */
+const NOISE_HOST = /^(?:news|newsroom|giving|alumni|athletics|sports|events|calendar|careers|jobs|library|libraries|shop|store|blog|press|magazine)\b|(?:^|\.)(?:grad[a-z]*|med|medicine|law|mba|online|extension|professional)(?:\.|$)/;
+/** A dated news URL (/2026/...) or a long hyphenated story slug is an article, not an admissions page. */
+const DATED_PATH = /\/(?:19|20)\d\d(?:\/|$)/;
+const MAX_SLUG_WORDS = 6;
 const SKIP_EXTENSIONS = /\.(pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|webp|svg|mp4|mov|mp3)$/;
 const MIN_LINK_SCORE = 4;
 const MAX_QUERY_CHARS = 30;
@@ -150,7 +170,13 @@ export function pickSubpages(links: SiteLink[], base: string, max = MAX_SUBPAGES
     const key = pageKey(u);
     if (seen.has(key)) return;
 
+    // An article, or a site for graduate, medical, law or news readers, is never an applicant's page.
+    if (DATED_PATH.test(path) || NOISE_HOST.test(u.hostname.toLowerCase())) return;
+    const lastSegment = path.split("/").filter(Boolean).pop() ?? "";
+    if (lastSegment.split(/[-_]/).length > MAX_SLUG_WORDS) return;
+
     const haystack = `${path} ${link.text.toLowerCase()}`;
+    if (NOT_UNDERGRAD.test(path) || NOT_UNDERGRAD.test(u.hostname.toLowerCase().replace(/\./g, " ")) || NOT_UNDERGRAD.test(link.text.toLowerCase())) return;
     const totals: Record<Category, number> = { apply: 0, admissions: 0, academics: 0 };
     for (const w of WORDS) if (w.re.test(haystack)) totals[w.category] += w.weight;
     const category = CATEGORY_ORDER.reduce((best, c) => (totals[c] > totals[best] ? c : best), "apply" as Category);
@@ -194,6 +220,39 @@ const clean = (s: string) => s.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
+ * Whether a deadline's label fits the words of its own quote. The quote proves the date is
+ * on the page; this proves the page calls it that. An early plan (ED, ED2, EA, REA) needs
+ * "early" decision/action in its quote, a regular deadline can't be quoted from an early
+ * one unless the quote also says "regular", and Rolling and Transfer need their word. Other
+ * fits anything. Without this a model could read "Regular Decision: January 5" and file it as ED.
+ */
+export function planFitsEvidence(plan: DeadlinePlan, evidence: string): boolean {
+  const e = normalizeForQuote(evidence);
+  const early = /early (?:decision|action)|single-choice early|(?<![a-z])(?:ed|ed1|ed2|ea|rea|scea)(?![a-z0-9])/.test(e);
+  switch (plan) {
+    case "ED":
+    case "ED2":
+      return /early decision|(?<![a-z])(?:ed|ed1|ed2)(?![a-z0-9])/.test(e);
+    case "EA":
+    case "REA":
+      return /early action|single-choice early|(?<![a-z])(?:ea|rea|scea)(?![a-z0-9])/.test(e);
+    case "RD":
+      return !early || /regular/.test(e);
+    case "Rolling":
+      return e.includes("rolling");
+    case "Transfer":
+      return e.includes("transfer");
+    default:
+      return true;
+  }
+}
+
+/** The figures in a sentence: "1870", "40,000", "3.5". */
+function figures(text: string): string[] {
+  return (text.match(/\d[\d,.]*\d|\d/g) ?? []).map((f) => f.replace(/[,.]+$/, ""));
+}
+
+/**
  * Keep only the facts the pages state. A fact stays when its `evidence` is a
  * verbatim (normalised) piece of the page text of at least 12 characters, a
  * deadline's date is inside its own evidence (and has a digit unless it is
@@ -210,7 +269,10 @@ export function groundFacts(raw: unknown, pageTexts: string[]): SiteFacts {
   const statement = (v: unknown): string | null => {
     if (!isRecord(v) || typeof v.text !== "string" || !quoted(v.evidence)) return null;
     const text = clean(v.text).slice(0, MAX_TEXT_FIELD);
-    return text || null;
+    // The quote is on the page, but the sentence is the model's own words: a figure in it
+    // (a year, a count, a percentage) must be on the pages too, or it was made up.
+    if (!text || figures(text).some((f) => !hay.includes(f))) return null;
+    return text;
   };
   out.about = statement(raw.about);
   out.testPolicy = statement(raw.testPolicy);
@@ -226,6 +288,7 @@ export function groundFacts(raw: unknown, pageTexts: string[]): SiteFacts {
       if (!plan || date.length === 0 || date.length > 60) continue;
       if (plan !== "Rolling" && !/\d/.test(date)) continue;
       if (!normalizeForQuote(d.evidence).includes(normalizeForQuote(date))) continue;
+      if (!planFitsEvidence(plan, d.evidence)) continue;
       const key = `${plan}|${normalizeForQuote(date)}`;
       if (have.has(key)) continue;
       have.add(key);

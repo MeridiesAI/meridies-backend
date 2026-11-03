@@ -445,9 +445,21 @@ test("storagePaths match the migration's CHECKs", () => {
 
 // ---- The network client --------------------------------------------------------------
 
-test("isAllowedDownloadUrl: upload.wikimedia.org over https and nothing else", () => {
+test("isAllowedDownloadUrl: upload.wikimedia.org and thumb.wikimedia.org over https and nothing else", () => {
   assert.equal(isAllowedDownloadUrl("https://upload.wikimedia.org/wikipedia/commons/a/ab/X.jpg"), true);
+  // Commons' imageinfo now answers thumbnails from thumb.wikimedia.org (200, image/jpeg, no redirect). With only
+  // upload.wikimedia.org allowed, every real thumbnail was refused as bad metadata and no photo was ever stored.
+  assert.equal(
+    isAllowedDownloadUrl("https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d5/X.jpg/1280px-X.jpg?utm_source=commons.wikimedia.org"),
+    true
+  );
   for (const bad of [
+    "https://thumb.wikimedia.org.evil.com/x.jpg",
+    "http://thumb.wikimedia.org/x.jpg",
+    "https://user:pw@thumb.wikimedia.org/x.jpg",
+    "https://thumb.wikimedia.org:8443/x.jpg",
+    "https://evil.thumb.wikimedia.org/x.jpg",
+    "https://maps.wikimedia.org/x.jpg",
     "http://upload.wikimedia.org/x.jpg",
     "https://upload.wikimedia.org.evil.com/x.jpg",
     "https://evil.com/upload.wikimedia.org/x.jpg",
