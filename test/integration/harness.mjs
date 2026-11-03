@@ -72,6 +72,15 @@ export async function rest(token, method, path, body, headers = {}) {
   return { status: r.status, body: json };
 }
 
+/** A PostgREST RPC as the service role (the API's own budget calls, for instance). */
+export async function serviceRpc(name, args = {}) {
+  const r = await fetch(`${SB}/rest/v1/rpc/${name}`, { method: "POST", headers: svc, body: JSON.stringify(args) });
+  const text = await r.text();
+  let json;
+  try { json = JSON.parse(text); } catch { json = text; }
+  return { status: r.status, body: json };
+}
+
 /** Like sql(), but async, so two statements can race (concurrency tests). */
 export async function sqlAsync(query) {
   const { execFile } = await import("node:child_process");
