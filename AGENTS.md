@@ -909,8 +909,28 @@ the database (`20261010*`):
   counselor's email subject carries the student's name, not the task title;
   the client polls `GET /tasks/:id`. AxIS (`submission-review`, Haiku) decides
   only whether this is what was asked for and usable, never grades or
-  rewrites it, and copies printed facts (a GPA) into the findings without
-  writing them anywhere. Accepted: an `on-track` check and the task complete.
+  rewrites it. The task title and instructions, the student's name, the file
+  name and the file's text each reach it in an untrusted-data block
+  (`reviewPrompt`). **Hand-in values** (`20261108000005`, `lib/handInValues.ts`):
+  the GPAs, class rank and a test score it copies off the file, as printed,
+  are a list on the check (`extracted_values`, no client grant: the table's
+  insert/update grants are per column, so a new column needs its own grant),
+  unverified until a counselor who can edit the student confirms them with
+  `POST /tasks/:id/checks/:checkId/values/confirm` (`{ values: [{ key,
+  printed, profileWas }] }`, 1-4 keys; 409 "This hand-in changed. Reload to see
+  it." when a printed value isn't the stored one). Confirm also writes each to
+  the profile under the info card's rules (`infoPatchFrom`: a GPA 0-6, "N of M",
+  an SAT total 400-1600 by 10, an ACT composite 1-36, never a section score;
+  then `assertGpaFitsScale`, 400) through `apply_hand_in_values` on the
+  counselor's client, only where the profile still holds `profileWas` (a newer
+  edit is kept and reported in `kept`); a value the profile can't take is
+  confirmed without being saved. Reads (`GET /tasks`, `/tasks/:id/tracker`, the
+  New student card) carry each value with the profile's value now
+  (`current`). Before the migration the values stay in the findings, each
+  "Weighted GPA (unverified, from the student's file): 4.3", and Confirm is a
+  503; the counselor's email always labels them that way. Accepted only
+  completes the task: an `on-track` check and the task complete, nothing
+  written to the record.
   Needs a fix: `below-the-brief`, the task back to `in-progress`, and the
   student is told what to upload instead. The counselor gets one
   notification and one email per hand-in; the student gets both when AxIS

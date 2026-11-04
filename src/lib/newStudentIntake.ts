@@ -15,6 +15,7 @@
 import type { FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
+import { academicsFor, storedValues, withCurrent, type HandInValueRead } from "./handInValues.js";
 import { badRequest, conflict, fromPostgrest, notFound } from "./errors.js";
 import { serviceClient } from "./supabase.js";
 import { startSubmissionReview } from "./submissionReview.js";
@@ -84,7 +85,7 @@ export type IntakeItem = {
   sentBackNote: string | null;
   files: IntakeFile[];
   /** AxIS's latest read of a handed-in file: advice, never a decision. */
-  axis: { verdict: "accepted" | "needs-fix"; note: string; findings: string[] } | null;
+  axis: { verdict: "accepted" | "needs-fix"; note: string; findings: string[]; values: HandInValueRead[] | null } | null;
 };
 
 /**
@@ -117,7 +118,8 @@ export async function intakeItemsByInvitation(
         .eq("role", "submission"),
       request.db
         .from("deliverable_tracker_latest")
-        .select("deliverable_id, verdict, note, findings, source")
+        // `*`: extracted_values is there only after 20261108000005.
+        .select("*")
         .in("deliverable_id", ids),
     ]);
     if (docs.error) throw fromPostgrest(docs.error);
@@ -134,12 +136,15 @@ export async function intakeItemsByInvitation(
         externalWebUrl: (doc.external_web_url as string | null) ?? null,
       });
     }
+    const academics = await academicsFor(request.db, (checks.data ?? []) as Row[]);
     for (const c of (checks.data ?? []) as Row[]) {
       if (c.source !== "ai") continue;
+      const values = storedValues(c.extracted_values);
       verdicts.set(String(c.deliverable_id), {
         verdict: c.verdict === "on-track" ? "accepted" : "needs-fix",
         note: String(c.note ?? ""),
         findings: Array.isArray(c.findings) ? (c.findings as string[]) : [],
+        values: values ? withCurrent(values, academics.get(String(c.student_id)) ?? null) : null,
       });
     }
   }

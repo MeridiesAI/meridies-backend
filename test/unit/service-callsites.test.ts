@@ -89,6 +89,11 @@ const REVIEWED = [
   // 30 days; account deletion (DELETE /account, the caller's own id) deletes the trash it made and about it. Both
   // remove only the student-documents objects the database hands back as needed by nothing.
   "lib/axisTrash.ts",
+  // lib/handInValues.ts: stampConfirmed marks hand-in values confirmed on one tracker check, from
+  // POST /tasks/:id/checks/:checkId/values/confirm after requireRole("counselor"), resolveStudentId(..., "edit"),
+  // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
+  // has no client grant (20261108000005); the profile write itself runs on the caller's client.
+  "lib/handInValues.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
