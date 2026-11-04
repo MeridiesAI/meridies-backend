@@ -16,8 +16,7 @@
  *
  * Prices come from `private.ai_prices` through `ai_budget_prices()`, read on first use and every 10 minutes.
  */
-import type Anthropic from "@anthropic-ai/sdk";
-import type { FastifyBaseLogger } from "fastify";
+import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../env.js";
 import { priceTableFrom, spendUsd, weightedInput, type CallUsage, type PriceTable } from "./aiPricing.js";
 import { isSchemaMissing } from "./axis/failsafe.js";
@@ -26,6 +25,9 @@ import { escapeHtml, sendEmail } from "./email.js";
 import { HttpError } from "./errors.js";
 import { consumeQuota, consumeRateLimit } from "./limits.js";
 import { serviceClient } from "./supabase.js";
+
+/** What the gate logs through: a request's logger, or a job's. */
+export type BudgetLog = { warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
 
 export type SystemSubject = "events-discovery";
 export const SYSTEM_CALLS_PER_MONTH: Record<SystemSubject, number> = { "events-discovery": 2000 };
@@ -177,7 +179,7 @@ async function readiness(b: BudgetBackend, ms = CHECK_TIMEOUT_MS): Promise<"read
   }
 }
 
-async function priceTable(b: BudgetBackend, log: FastifyBaseLogger, ms = CHECK_TIMEOUT_MS): Promise<PriceTable> {
+async function priceTable(b: BudgetBackend, log: BudgetLog, ms = CHECK_TIMEOUT_MS): Promise<PriceTable> {
   if (prices && Date.now() - prices.at < PRICES_TTL_MS) return prices.table;
   try {
     const table = priceTableFrom(await withTimeout(b.prices(), ms));
@@ -223,7 +225,7 @@ function refusalFor(r: { subject: string; metric: string }, now: Date): HttpErro
 }
 
 /** Sends a ceiling alert once per UTC day per threshold (this process, then the database decides), never in the caller's way. */
-function alertOnce(pct: CeilingAlert["pct"], day: string, spend: number | (() => Promise<number>), log: FastifyBaseLogger): void {
+function alertOnce(pct: CeilingAlert["pct"], day: string, spend: number | (() => Promise<number>), log: BudgetLog): void {
   const memo = `${day}:${pct}`;
   if (alerted.has(memo)) return;
   alerted.add(memo);
@@ -258,7 +260,7 @@ function memoryReserve(subject: BudgetSubject, est: CallEstimate, now: Date): Ho
   return { subject, model: est.model, mode: "memory", lines, settled: false };
 }
 
-async function fallbackReserve(subject: BudgetSubject, est: CallEstimate, now: Date, log: FastifyBaseLogger): Promise<Hold> {
+async function fallbackReserve(subject: BudgetSubject, est: CallEstimate, now: Date, log: BudgetLog): Promise<Hold> {
   if (lastFallbackWarn === null || Date.now() - lastFallbackWarn >= FALLBACK_WARN_EVERY_MS) {
     lastFallbackWarn = Date.now();
     log.warn(`AI budget fallback active: migration ${MIGRATION} not applied, caps not enforced`);
@@ -269,7 +271,7 @@ async function fallbackReserve(subject: BudgetSubject, est: CallEstimate, now: D
 }
 
 /** Reserves one model call for `subject`, or throws: 429 at a cap (the cap's own words), 503 when it can't check. */
-export async function reserve(subject: BudgetSubject, est: CallEstimate, log: FastifyBaseLogger): Promise<Hold> {
+export async function reserve(subject: BudgetSubject, est: CallEstimate, log: BudgetLog): Promise<Hold> {
   const now = new Date();
   const deadline = Date.now() + CHECK_TIMEOUT_MS;
   const left = () => deadline - Date.now();
@@ -330,7 +332,7 @@ export async function reserve(subject: BudgetSubject, est: CallEstimate, log: Fa
  * - null: not known (the stream was stopped or failed after it started, which Anthropic may still bill): the whole
  *   reservation stays, over-counted rather than under.
  */
-export async function settle(hold: Hold, actual: CallUsage | "unused" | null, log: FastifyBaseLogger): Promise<void> {
+export async function settle(hold: Hold, actual: CallUsage | "unused" | null, log: BudgetLog): Promise<void> {
   if (hold.settled) return;
   hold.settled = true;
   if (actual === null) return;
@@ -369,9 +371,33 @@ export async function settle(hold: Hold, actual: CallUsage | "unused" | null, lo
   }
 }
 
+// ---- Helpers for the call sites ----
+
+/** A response's usage as the gate settles it (web searches included). */
+export function usageOf(m: {
+  usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; server_tool_use?: { web_search_requests?: number | null } | null };
+}): CallUsage {
+  return {
+    input: m.usage.input_tokens,
+    output: m.usage.output_tokens,
+    cacheRead: m.usage.cache_read_input_tokens ?? 0,
+    cacheWrite: m.usage.cache_creation_input_tokens ?? 0,
+    webSearches: m.usage.server_tool_use?.web_search_requests ?? 0,
+  };
+}
+
+/**
+ * How a call that threw settles: "unused" when the API answered nothing (an HTTP error, a lost connection), null
+ * when it may have billed (stopped mid-call, aborted, an error after a stream started).
+ */
+export function usageAfterError(err: unknown, o: { signal?: AbortSignal; started?: boolean } = {}): "unused" | null {
+  if (o.signal?.aborted || o.started) return null;
+  return err instanceof Anthropic.APIError && !(err instanceof Anthropic.APIUserAbortError) ? "unused" : null;
+}
+
 // ---- Status, account deletion, estimates ----
 
-export async function budgetMode(log: FastifyBaseLogger): Promise<"enforced" | "fallback"> {
+export async function budgetMode(log: BudgetLog): Promise<"enforced" | "fallback"> {
   const b = backend();
   if (!b) return "fallback";
   try {
@@ -417,7 +443,7 @@ export function estimatePromptTokens(p: { system?: unknown; tools?: unknown; mes
 
 // ---- The ceiling email ----
 
-async function sendCeilingEmail(a: CeilingAlert, log: FastifyBaseLogger): Promise<void> {
+async function sendCeilingEmail(a: CeilingAlert, log: BudgetLog): Promise<void> {
   const svc = serviceClient();
   let top: { subject: string; amount: number; role: string }[] = [];
   let modules: [string, number][] = [];

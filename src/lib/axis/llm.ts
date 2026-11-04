@@ -17,7 +17,7 @@ import type { z } from "zod";
 import { anthropicClient, type AiModule } from "../anthropic.js";
 import { UNTRUSTED_DATA_RULE } from "../context/pack.js";
 import { HttpError } from "../errors.js";
-import { estimatePromptTokens, reserve, settle, type BudgetSubject, type Hold } from "../aiBudget.js";
+import { estimatePromptTokens, reserve, settle, usageAfterError, type BudgetSubject, type Hold } from "../aiBudget.js";
 import { assertAiAllowed } from "../practiceSettings.js";
 import { serviceClient } from "../supabase.js";
 import type { CallGate, MessagesApi, StreamLike, Usage } from "./loop.js";
@@ -32,9 +32,8 @@ export function messagesApi(): MessagesApi {
 
 const subjectOf = (request: FastifyRequest): BudgetSubject => ({ userId: request.auth.userId });
 
-/** How a failed call settles: an HTTP error or a lost connection billed nothing; anything else (a stop mid-call) may have. */
-const failedUsage = (err: unknown, signal?: AbortSignal): "unused" | null =>
-  !signal?.aborted && err instanceof Anthropic.APIError && !(err instanceof Anthropic.APIUserAbortError) ? "unused" : null;
+/** How a failed call settles (lib/aiBudget.ts): an HTTP error or a lost connection billed nothing; a stop mid-call may have. */
+const failedUsage = (err: unknown, signal?: AbortSignal): "unused" | null => usageAfterError(err, { signal });
 
 /**
  * The AxIS loop's budget gate (lib/aiBudget.ts): every model call reserves and settles with its own usage. The

@@ -44,11 +44,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { env, hasAnthropic } from "../env.js";
 import { runSystemResearch, type ResearchResult } from "./anthropic.js";
+import { HttpError } from "./errors.js";
 import { EVENT_KINDS, isTimeZone, todayIn, type EventKind } from "./eventsHub.js";
 import { eventKey } from "./ingest/events.js";
 import { beat } from "./heartbeat.js";
 import { checkLink } from "./links.js";
-import { consumeQuota } from "./limits.js";
 import { isBlocked, keepCandidates } from "./research/citations.js";
 import { collegesOnLists, listRowsFor, rankColleges, type ListRow } from "./rosterColleges.js";
 import { serviceClient } from "./supabase.js";
@@ -83,8 +83,6 @@ const NOT_UNDERGRADUATE =
 const HORIZON_DAYS = 183;
 /** Per college per run. */
 const MAX_PER_COLLEGE = 12;
-/** The system budget: research calls per month, across every college (weekly job and background lookups). */
-const SYSTEM_MONTHLY_CALLS = 2000;
 
 /**
  * Finding a college's events on its own site doesn't need the research
@@ -92,8 +90,6 @@ const SYSTEM_MONTHLY_CALLS = 2000;
  * (and the ones like them) can be covered.
  */
 export const DISCOVERY_MODEL = "claude-sonnet-5-5";
-/** The quota subject for runs nobody started (consume_quota keys on a uuid). */
-const SYSTEM_SUBJECT = "00000000-0000-0000-0000-00000000e7e1";
 
 export type DiscoveryCollege = { id: string; name: string; website: string | null };
 
@@ -573,15 +569,22 @@ export async function blockedDomains(svc: SupabaseClient): Promise<string[]> {
   return ((data ?? []) as Row[]).map((r) => String(r.domain));
 }
 
-/** The weekly job's research: no user, the system budget, the discovery prompt. */
+/**
+ * The weekly job's research: no user, the events-discovery system budget (2,000 calls a month across every college,
+ * the weekly job and background lookups; lib/aiBudget.ts), the discovery prompt. A refusal from the budget gate (the
+ * month's calls used, AI paused for the day, the budget unreadable) comes back naming the budget, which stops the run.
+ */
 export function systemResearch(log: Log): ResearchFn {
   return async ({ domains, question }) => {
-    const allowed = await consumeQuota(SYSTEM_SUBJECT, "ai_calls", "month", SYSTEM_MONTHLY_CALLS);
-    if (!allowed) throw new Error("the monthly discovery budget is spent");
-    return runSystemResearch(
-      { module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4, model: DISCOVERY_MODEL },
-      log
-    );
+    try {
+      return await runSystemResearch(
+        { module: "events-discovery", question, domains, system: DISCOVERY_SYSTEM, maxSearches: 4, model: DISCOVERY_MODEL },
+        log
+      );
+    } catch (err) {
+      if (err instanceof HttpError && (err.statusCode === 429 || err.statusCode === 503)) throw new Error(`the AI budget stopped discovery: ${err.message}`);
+      throw err;
+    }
   };
 }
 
