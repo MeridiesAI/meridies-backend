@@ -14,6 +14,7 @@
  * (ai_runs, audit_log) are not part of anyone's record.
  */
 
+import { forgetUser } from "../lib/aiBudget.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, unavailable } from "../lib/errors.js";
@@ -150,6 +151,8 @@ export default async function accountRoutes(app: FastifyInstance) {
     }
 
     await svc.from("audit_log").insert({ actor_id: null, action: "account.deleted", entity_type: "profile", entity_id: me, metadata: { role: request.profile.role } });
+    // The account's AI budget counters (numbers keyed by its id) go too. Best effort: never what stops a deletion.
+    await forgetUser(me).catch((err) => request.log.warn({ err: err instanceof Error ? err.message : String(err) }, "AI budget rows not removed"));
     const { error } = await svc.auth.admin.deleteUser(me);
     if (error) {
       request.log.error({ status: error.status }, "account delete failed");

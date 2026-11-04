@@ -806,7 +806,8 @@ export default async function taskRoutes(app: FastifyInstance) {
 
   app.post(
     "/:id/submissions",
-    { preHandler: [app.authenticate, limit("tasks:submit", 30, 60)] },
+    // A hand-in starts an AxIS check: the AI per-minute limit too, shared with Re-run check.
+    { preHandler: [app.authenticate, limit("tasks:submit", 30, 60), limit("ai:hand-in", 20, 60, "You're handing in files very fast. Give it a minute.")] },
     async (request, reply) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const { documentId } = z.object({ documentId: z.string().uuid() }).strict().parse(request.body);
@@ -939,6 +940,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       preHandler: [
         app.authenticate,
         limit("ai:submission-review", 20, 60, "You're running checks very fast."),
+        limit("ai:hand-in", 20, 60, "You're handing in files very fast. Give it a minute."),
       ],
     },
     async (request) => {

@@ -392,6 +392,8 @@ export function usageOf(m: {
  */
 export function usageAfterError(err: unknown, o: { signal?: AbortSignal; started?: boolean } = {}): "unused" | null {
   if (o.signal?.aborted || o.started) return null;
+  // Our own refusal before the call (no API key configured, say) reached nobody.
+  if (err instanceof HttpError) return "unused";
   return err instanceof Anthropic.APIError && !(err instanceof Anthropic.APIUserAbortError) ? "unused" : null;
 }
 

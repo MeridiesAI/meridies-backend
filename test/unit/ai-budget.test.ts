@@ -16,7 +16,9 @@ import {
   type ReserveLine,
   type ReserveResult,
   type SettleLine,
+  usageAfterError,
 } from "../../src/lib/aiBudget.js";
+import Anthropic from "@anthropic-ai/sdk";
 import { HttpError } from "../../src/lib/errors.js";
 
 const PRICES = [
@@ -436,4 +438,16 @@ test("estimatePromptTokens counts text, PDFs and images", () => {
   // the 30,000 characters of base64 are not counted as text.
   assert.ok(est >= 200 + 1_600 + 7_500, String(est));
   assert.ok(est < 200 + 1_600 + 7_500 + 200, String(est));
+});
+
+test("usageAfterError: only a call the API never saw releases its reservation", () => {
+  assert.equal(usageAfterError(new HttpError(503, "AI features aren't configured yet.")), "unused", "our own refusal before the call");
+  assert.equal(usageAfterError(new Anthropic.APIConnectionError({ message: "socket hang up" })), "unused");
+  assert.equal(usageAfterError(new Anthropic.InternalServerError(529, undefined, "overloaded", new Headers())), "unused");
+  assert.equal(usageAfterError(new Anthropic.APIUserAbortError()), null, "stopped: may have been billed");
+  assert.equal(usageAfterError(new Anthropic.APIConnectionError({ message: "reset" }), { started: true }), null, "after the stream started");
+  const ctl = new AbortController();
+  ctl.abort();
+  assert.equal(usageAfterError(new HttpError(503, "x"), { signal: ctl.signal }), null);
+  assert.equal(usageAfterError(new Error("something else")), null);
 });
