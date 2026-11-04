@@ -5,6 +5,13 @@ import { randomUUID } from "node:crypto";
 import { API, CLIENT, CRON_SECRET, call, check, sql, user } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 
+// It pauses AI for the whole database for a moment and revokes a function, so it runs on its own in CI, after the
+// parallel suites (ci.yml "AI budget suite"), never alongside them.
+if (process.env.AI_BUDGET_SUITE !== "1") {
+  console.log("SKIP  AI budget suite (set AI_BUDGET_SUITE=1 against a freshly started API)");
+  process.exit(0);
+}
+
 const MAILPIT = process.env.MAILPIT_URL ?? "http://127.0.0.1:54324";
 const today = new Date().toISOString().slice(0, 10);
 const notes = "Met with Maya about her fall plan. She will retake the SAT in October and finish the activities list.";

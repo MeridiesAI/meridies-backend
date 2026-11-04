@@ -11,7 +11,7 @@ const files = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith(".ts") ? [join(dir, e.name)] : []));
 const rel = (f: string) => relative(src, f).split("\\").join("/");
 const MODEL_FILES = ["lib/anthropic.ts", "lib/axis/llm.ts"];
-const MODEL_CALL = /\.messages\.(create|stream|countTokens)\b|\.batches\.|new Anthropic\(/g;
+const MODEL_CALL = /\.messages\.(create|stream|countTokens)\b|\.batches\.|new Anthropic\(/;
 
 test("only lib/anthropic.ts and lib/axis/llm.ts call the model", () => {
   const callers = files(src)

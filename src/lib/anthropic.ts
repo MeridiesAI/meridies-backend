@@ -27,7 +27,7 @@ export const DEEP_MODEL = "claude-sonnet-4-5";
 
 let client: Anthropic | null = null;
 
-/** The shared client, for callers that run their own loop (AxIS). They keep the audit and quota discipline themselves. */
+/** The shared client, for callers that run their own loop (AxIS). They keep the audit and the AI budget gate (lib/aiBudget.ts) themselves. */
 export const anthropicClient = (): Anthropic => anthropic();
 
 function anthropic(): Anthropic {
@@ -262,9 +262,9 @@ const turnChars = (c: ChatTurn["content"]) =>
 
 /**
  * Streaming chat completion. Unlike runStructured this is multi-turn, free-form
- * text, and streams token deltas via `onDelta` — but it keeps the same audit +
- * quota discipline: a daily-call gate, an `ai_runs` row, and output-token
- * accounting on completion. Callers are responsible for transport (SSE).
+ * text, and streams token deltas via `onDelta` — but it keeps the same audit
+ * and budget discipline: the AI budget gate (reserve, then settle with the final
+ * usage), and an `ai_runs` row. Callers are responsible for transport (SSE).
  */
 export async function streamChat(opts: {
   request: FastifyRequest;
@@ -553,8 +553,8 @@ const RESEARCH_SYSTEM = [
 ].join("\n");
 
 /**
- * One cited research answer. Same audit and quota discipline as runStructured:
- * a daily-call gate, an ai_runs row, output-token accounting. A refusal or a
+ * One cited research answer. Same audit and budget discipline as runStructured:
+ * the AI budget gate on every API call, an ai_runs row. A refusal or a
  * pause is handled here; the caller gets parts with their citations.
  */
 type ResearchOptions = {
@@ -582,8 +582,8 @@ export function researchSubject(actorId: string | null): BudgetSubject {
 }
 
 /**
- * Cited research for a signed-in user: their AI switch and daily quota first,
- * then the call, audited under their name.
+ * Cited research for a signed-in user: their AI switch first, then each API
+ * call through the AI budget gate on their budget, audited under their name.
  */
 export async function runWebResearch(opts: ResearchOptions & { request: FastifyRequest }): Promise<ResearchResult> {
   // A programming mistake, not a user error: refuse before anything is audited or sent.

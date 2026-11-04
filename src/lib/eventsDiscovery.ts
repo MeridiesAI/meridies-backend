@@ -582,7 +582,8 @@ export function systemResearch(log: Log): ResearchFn {
         log
       );
     } catch (err) {
-      if (err instanceof HttpError && (err.statusCode === 429 || err.statusCode === 503)) throw new Error(`the AI budget stopped discovery: ${err.message}`);
+      // Only the gate's own refusals stop the run; a failed research call is that one college's outcome.
+      if (err instanceof HttpError && (err.statusCode === 429 || err.code === "ai_budget_unavailable")) throw new Error(`the AI budget stopped discovery: ${err.message}`);
       throw err;
     }
   };

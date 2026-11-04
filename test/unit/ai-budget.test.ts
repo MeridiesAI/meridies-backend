@@ -445,9 +445,16 @@ test("usageAfterError: only a call the API never saw releases its reservation", 
   assert.equal(usageAfterError(new Anthropic.APIConnectionError({ message: "socket hang up" })), "unused");
   assert.equal(usageAfterError(new Anthropic.InternalServerError(529, undefined, "overloaded", new Headers())), "unused");
   assert.equal(usageAfterError(new Anthropic.APIUserAbortError()), null, "stopped: may have been billed");
+  assert.equal(usageAfterError(new Anthropic.APIConnectionTimeoutError()), null, "timed out: the request reached the API and may have been billed");
   assert.equal(usageAfterError(new Anthropic.APIConnectionError({ message: "reset" }), { started: true }), null, "after the stream started");
   const ctl = new AbortController();
   ctl.abort();
   assert.equal(usageAfterError(new HttpError(503, "x"), { signal: ctl.signal }), null);
   assert.equal(usageAfterError(new Error("something else")), null);
+});
+
+test("budgetMode says unavailable when the budget can't be checked", async () => {
+  const { b, log } = setup();
+  b.probeError = { code: "XX000", message: "something else" };
+  assert.equal(await budgetMode(log), "unavailable");
 });

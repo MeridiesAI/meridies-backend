@@ -394,19 +394,22 @@ export function usageAfterError(err: unknown, o: { signal?: AbortSignal; started
   if (o.signal?.aborted || o.started) return null;
   // Our own refusal before the call (no API key configured, say) reached nobody.
   if (err instanceof HttpError) return "unused";
+  // A timeout means the request reached the API, which may still bill it.
+  if (err instanceof Anthropic.APIConnectionTimeoutError) return null;
   return err instanceof Anthropic.APIError && !(err instanceof Anthropic.APIUserAbortError) ? "unused" : null;
 }
 
 // ---- Status, account deletion, estimates ----
 
-export async function budgetMode(log: BudgetLog): Promise<"enforced" | "fallback"> {
+/** "enforced", "fallback" (the migration isn't in, or development without a service key), or "unavailable" (every AI call is refused). */
+export async function budgetMode(log: BudgetLog): Promise<"enforced" | "fallback" | "unavailable"> {
   const b = backend();
-  if (!b) return "fallback";
+  if (!b) return isProduction() ? "unavailable" : "fallback";
   try {
     return (await readiness(b)) === "ready" ? "enforced" : "fallback";
   } catch (err) {
     log.warn({ err }, "AI budget probe failed");
-    return "enforced";
+    return "unavailable";
   }
 }
 

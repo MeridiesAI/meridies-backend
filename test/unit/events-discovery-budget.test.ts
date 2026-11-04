@@ -28,3 +28,28 @@ test("events discovery stops on the gate's refusal: the system budget, or AI pau
     assert.equal(b.reserves[0]![0]!.subject, "system:events-discovery", "the job reserves on its own system budget");
   }
 });
+
+test("a research failure that isn't the gate's doesn't stop the run", async () => {
+  // The gate lets the call through; the call itself fails (no API key here: a plain 503 from the model wrapper).
+  setBudgetBackend({
+    probe: async () => undefined,
+    prices: async () => prices,
+    reserve: async () => ({ ok: true, totals: {} }),
+    settle: async () => undefined,
+    total: async () => 0,
+  });
+  await assert.rejects(systemResearch(log)({ domains: ["stanford.edu"], question: "events?" } as never), (e: Error) => !/budget/.test(e.message));
+});
+
+test("a budget that can't be checked stops the run too", async () => {
+  setBudgetBackend({
+    probe: async () => undefined,
+    prices: async () => prices,
+    reserve: async () => {
+      throw new Error("connection reset");
+    },
+    settle: async () => undefined,
+    total: async () => 0,
+  });
+  await assert.rejects(systemResearch(log)({ domains: ["stanford.edu"], question: "events?" } as never), (e: Error) => /budget/.test(e.message));
+});
