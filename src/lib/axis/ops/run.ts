@@ -15,6 +15,7 @@
  * AxIS change anything without a click, and after five auto writes in one
  * turn, so a runaway loop stops at a card. A turn holds twenty writes at most.
  */
+import { restoreUntil, TRASH_COVERED, TRASH_MISSING, trashReady } from "./trash.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { ZodError } from "zod";
@@ -114,7 +115,13 @@ export type OperationPayload = {
   /** Why an action that normally runs at once is waiting: AxIS read outside content, or made many changes. */
   reason: "outside-content" | "many-changes" | null;
   message?: string | null;
+  /** A confirmed delete kept in the trash: until when its Undo (Restore) works. */
+  restoreUntil?: string | null;
 };
+
+/** A confirmed delete whose rows are in the trash (lib/axis/ops/trash.ts): its Undo is a Restore. */
+export const isTrashResult = (result: unknown): boolean =>
+  !!result && typeof result === "object" && (result as Record<string, unknown>).trash === true;
 
 export type OperationEvent = { id: string; type: "operation"; studentId: string | null; payload: OperationPayload };
 
@@ -403,7 +410,7 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
 // ---- The counselor's click ---------------------------------------------------------
 
 export type DecisionResult =
-  | { status: "confirmed"; result: { ok: true; summary: string; undoable: boolean; undo?: UndoStep } }
+  | { status: "confirmed"; result: { ok: true; summary: string; undoable: boolean; undo?: UndoStep; trash?: true; restoreUntil?: string } }
   | { status: "failed"; result: { ok: false; message: string } };
 
 /** A failure the counselor may simply retry: the route releases its claim and answers with this. */
@@ -418,10 +425,13 @@ export class TransientOperationError extends HttpError {
  * operation must still exist, its stored input must still validate, and the
  * counselor must still be able to edit the student.
  */
-export async function confirmOperation(request: FastifyRequest, row: { student_id: string | null; payload: unknown }): Promise<DecisionResult> {
+export async function confirmOperation(request: FastifyRequest, row: { id?: string; student_id: string | null; payload: unknown }): Promise<DecisionResult> {
   const p = (row.payload ?? {}) as Partial<StoredPayload>;
   const def = typeof p.op === "string" ? getOp(p.op) : undefined;
   if (!def || def.kind !== "write") return { status: "failed", result: { ok: false, message: "AxIS can no longer do that. Ask again." } };
+  // A covered delete keeps its rows in the trash; without the trash it doesn't run (the claim is handed back).
+  const trashed = TRASH_COVERED.has(def.name) && typeof row.id === "string";
+  if (trashed && !(await trashReady(request.db))) throw new HttpError(503, TRASH_MISSING, "axis_trash_unavailable");
   const parsed = def.input.safeParse(p.input ?? {});
   if (!parsed.success) return { status: "failed", result: { ok: false, message: "That proposal no longer fits. Ask AxIS again." } };
   const input = parsed.data as Record<string, unknown>;
@@ -442,10 +452,13 @@ export async function confirmOperation(request: FastifyRequest, row: { student_i
   }
   const h = helpers(request, null);
   const before = def.snapshot ? await safely(() => def.snapshot!(input, h)) : undefined;
-  const res = await dispatch(request, call);
+  const res = await dispatch(request, call, trashed ? { actionId: row.id } : {});
   if (isTransient(res.status)) throw new TransientOperationError(counselorMessage(res));
   if (res.status >= 400) return { status: "failed", result: { ok: false, message: counselorMessage(res) } };
   // The change has happened. A throw from here would release the claim and let a second Confirm run it again.
+  if (trashed) {
+    return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: true, trash: true, restoreUntil: restoreUntil(new Date()) } };
+  }
   const undo = reversalOf(def, input, res.body, before);
   return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}) } };
 }

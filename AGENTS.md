@@ -1884,6 +1884,29 @@ anyone copying it.
   binary uploads, OAuth, imports, account export/deletion, catalog-editor
   routes, and essay prose.
 
+**Deletes are kept 30 days and restorable** (`20261108000003`, `lib/axis/ops/trash.ts`, AxIS security PR B).
+A Confirm-tier delete on `TRASH_COVERED` (32 ops; `axis-trash.test.ts` fails on a DELETE op that is in neither
+`TRASH_COVERED` nor `TRASH_EXCLUDED`, which gives each exclusion its reason) runs with a mark: `dispatch` sends
+`x-meridies-axis-mark` (an HMAC of the action id under a key made fresh in each process), and `supabaseAuth` turns a
+valid one into `request.axisActionId` and the `x-meridies-axis-action` header on `request.db`. In the database a
+`zz_axis_trash_*` trigger on every covered table (60, each with a row in `private.axis_trash_rules`) keeps the
+deleted row, every row it cascades to and every key it sets null in `private.axis_trash` (no client grants).
+Confirm's result is `{ trash: true, restoreUntil }` and the card's Undo runs `axis_trash_restore` on the counselor's
+own client: only the counselor who confirmed the delete, still an approved counselor, within 30 days, all or nothing,
+the same ids, parents first, each row checked against its table's access rule after it is put back (deny by default:
+a table with no rule restores nothing). Refusals are 409 with the card's sentence (`restoreSentence`), 403 when
+the caller's access isn't active and 404 when the action isn't theirs. A restore sends nothing and rewrites nothing:
+18 triggers on covered tables skip while it runs (`meridies.axis_restore = 'on'`, listed in the migration), so a
+sequence enrollment comes back `paused` at its own step, never back at step 1. A document AxIS deletes keeps its
+Storage object until the trash's purge. A client can set the database header itself (straight to PostgREST), but
+that only keeps a copy of its own deletes, which only it can restore. Run a restore by hand as `postgres`: `select
+public.axis_trash_restore('<action id>');` (the caller is taken to be the deleter; every other check applies).
+Not covered: roster imports and removing a firm member (both left the catalog: AxIS can't make them restorable),
+and a delivery record's link to a restored meeting or task. Before the migration a covered delete is refused with
+"AxIS can't delete things until the database update 20261108000003_axis_trash is applied." **Deploy order:** either;
+not in `REQUIRED_SCHEMA`. Tests: `test/unit/axis-trash.test.ts`, `test/integration/axis-trash-db.test.mjs`,
+`test/integration/axis-trash.test.mjs` (every covered op through the API, a caseload move, nothing sent).
+
 **Deploy order.** Apply `20261019000001_axis_operations.sql` (widens the
 `axis_actions` type and status checks, payload cap 32 KB). Either order is
 safe: without it an auto change still runs and only its audit row is skipped

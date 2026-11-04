@@ -39,11 +39,13 @@ import {
   TransientOperationError,
   undoOperation,
   undoStepOf,
+  isTrashResult,
   type OperationPayload,
   type OperationStatus,
 } from "../lib/axis/ops/run.js";
+import { restoreSentence, TRASH_MISSING } from "../lib/axis/ops/trash.js";
 import { hasAnthropic } from "../env.js";
-import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
@@ -339,7 +341,8 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (was !== "executed" && was !== "confirmed") throw conflict(was === "undone" ? "That change was already undone." : "Only a change that went through can be undone.");
     // Before claiming: a row with no reversal (one whose Confirm is still running has none yet) is refused
     // without touching its status, so the claim can't race the Confirm that is about to write its outcome.
-    if (!undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
+    const trash = isTrashResult(row.result);
+    if (!trash && !undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
     // Claim, so two clicks can't run the reversal twice.
     const { data: claimed, error: claimErr } = await request.db
       .from("axis_actions")
@@ -350,11 +353,25 @@ export default async function axisRoutes(app: FastifyInstance) {
       .maybeSingle();
     if (claimErr) throw actionsError(claimErr);
     if (!claimed) throw conflict("That change was already undone.");
+    const handBack = () => request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
+    if (trash) {
+      // A confirmed delete: the database puts its rows back (axis_trash_restore, 20261108000003), as the counselor.
+      const { data: out, error: restoreErr } = await request.db.rpc("axis_trash_restore", { p_action: id });
+      const answer = (out ?? {}) as { ok?: boolean; reason?: string; restored?: number; paused?: string[] };
+      if (restoreErr || answer.ok !== true) {
+        await handBack();
+        if (restoreErr) throw isSchemaMissing(restoreErr) ? unavailable(TRASH_MISSING) : fromPostgrest(restoreErr);
+        if (answer.reason === "not-yours") throw notFound("That change isn't AxIS's to undo.");
+        if (answer.reason === "not-approved") throw forbidden(restoreSentence(answer.reason));
+        throw conflict(restoreSentence(String(answer.reason ?? "")));
+      }
+      return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [] };
+    }
     try {
       await undoOperation(request, row);
     } catch (err) {
       // Hand the claim back only if it is still ours.
-      await request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
+      await handBack();
       throw err;
     }
     return { id, status: "undone" };
@@ -383,7 +400,8 @@ function publicAction(r: Record<string, unknown>) {
     warning: typeof p.warning === "string" ? p.warning : null,
     reason: p.reason === "outside-content" || p.reason === "many-changes" ? p.reason : null,
     status,
-    undoable: (status === "executed" || status === "confirmed") && !!undoStepOf(res),
+    undoable: (status === "executed" || status === "confirmed") && (!!undoStepOf(res) || isTrashResult(res)),
+    restoreUntil: isTrashResult(res) && typeof res.restoreUntil === "string" ? res.restoreUntil : null,
     message: typeof res.message === "string" ? res.message : null,
   };
   return { id: r.id, conversation_id: r.conversation_id, message_id: r.message_id, student_id: r.student_id, type: r.type, payload, status, created_at: r.created_at };

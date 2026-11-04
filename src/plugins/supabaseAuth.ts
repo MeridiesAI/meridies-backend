@@ -20,6 +20,7 @@
 import fp from "fastify-plugin";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { env } from "../env.js";
+import { readMark } from "../lib/axis/ops/trash.js";
 import { userClient } from "../lib/supabase.js";
 import { blockedAsPending } from "../lib/access.js";
 import { accountPending, unauthorized } from "../lib/errors.js";
@@ -62,7 +63,10 @@ export default fp(async (app) => {
     }
 
     request.auth = { userId, email, token };
-    request.db = userClient(token);
+    // A delete AxIS runs for a confirmed card carries a mark only this process can make; its rows go to the trash.
+    const actionId = readMark(request.headers["x-meridies-axis-mark"]);
+    if (actionId) request.axisActionId = actionId;
+    request.db = actionId ? userClient(token, { "x-meridies-axis-action": actionId }) : userClient(token);
 
     // The role lives in the database, not the token — a token minted before a
     // role change would otherwise keep its old permissions.

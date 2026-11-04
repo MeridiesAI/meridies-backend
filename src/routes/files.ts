@@ -698,7 +698,8 @@ export default async function fileRoutes(app: FastifyInstance) {
       // the caller's own delete removed the row (RLS can refuse it silently,
       // and then the object must stay with the row that still points at it),
       // and only for a path of the shape the app writes (lib/documentClaim.ts).
-      if ((gone ?? []).length > 0) await removeDeletedDocumentObject(request, existing);
+      // A delete AxIS ran for a confirmed card keeps the file for its 30-day Restore; the trash's purge removes it after.
+      if ((gone ?? []).length > 0 && !request.axisActionId) await removeDeletedDocumentObject(request, existing);
       return { deleted: true };
     }
   );

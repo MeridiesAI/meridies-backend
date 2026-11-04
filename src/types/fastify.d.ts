@@ -22,5 +22,10 @@ declare module "fastify" {
      * answers, up to 300 KB): read that with `loadOwnProfileBlob` where needed.
      */
     profile: AuthProfile;
+    /**
+     * Set when the request is AxIS running a delete the counselor confirmed (a valid mark, lib/axis/ops/trash.ts):
+     * `db` then carries the header the database's trash reads.
+     */
+    axisActionId?: string;
   }
 }
