@@ -8,13 +8,21 @@
  *  - Dialogue state: the students and schools the conversation is about,
  *    newest first, so "what about her ED deadline?" in a roster chat resolves
  *    without a model (lib/axis/nlu.ts).
+ *
+ * Replayed messages are the counselor's text and AxIS's answers only (tool
+ * results are never stored). Once 20261108000004 is in, an answer that quoted
+ * 8+ words of free text carries those runs (`outside_quotes`, lib/axis/quotes.ts):
+ * while it is among the replayed messages the chat is flagged (`History.flagged`),
+ * and the fold replaces each run with "[quote from <source>]", so the summary
+ * never carries the words.
  */
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { wrapUntrusted } from "../context/pack.js";
 import { fromPostgrest } from "../errors.js";
-import { isSchemaMissing } from "./failsafe.js";
+import { flagsReady, isSchemaMissing } from "./failsafe.js";
+import { redactQuotes, validRuns } from "./quotes.js";
 import { stripCitations } from "./ledger.js";
 import { structured } from "./llm.js";
 import type { DialogueState } from "./nlu.js";
@@ -24,14 +32,22 @@ export const RECENT_MESSAGES = 12;
 /** Unsummarised messages that trigger a fold. Above RECENT_MESSAGES so a fold always has something to fold. */
 export const FOLD_AT = 20;
 
-type MsgRow = { role: string; content: string; created_at: string };
+type MsgRow = { role: string; content: string; created_at: string; outside_quotes?: unknown };
 
 export type History = {
   summary: string | null;
   /** Oldest first; starts with a user turn; alternates. */
   turns: Anthropic.Beta.BetaMessageParam[];
   state: DialogueState | null;
+  /** A replayed answer quoted free text: the chat stays flagged (changes wait for Confirm) while it is replayed. */
+  flagged: boolean;
+  /** Those quoted words, as free text this turn can see (re-quoting them keeps the flag). */
+  quoted: { source: string; text: string }[];
 };
+
+/** The columns history reads: the text, and its quote marks once 20261108000004 is in. */
+const messageColumns = (flags: boolean) => `role, content, created_at${flags ? ", outside_quotes" : ""}`;
+const flagsOn = (request: FastifyRequest) => flagsReady(request.db).catch(() => false);
 
 /** Alternating user/assistant turns from a user turn, with old citation markers removed. */
 export function toTurns(rows: MsgRow[]): Anthropic.Beta.BetaMessageParam[] {
@@ -66,9 +82,10 @@ export async function loadHistory(request: FastifyRequest, conversationId: strin
   if (error && !isSchemaMissing(error)) throw fromPostgrest(error);
   if (error) request.log.warn({ code: error.code }, "axis memory columns missing; recent turns only");
   const conv = error ? null : convRow;
+  const flags = await flagsOn(request);
   let query = request.db
     .from("ai_messages")
-    .select("role, content, created_at")
+    .select(messageColumns(flags))
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: false })
     .limit(RECENT_MESSAGES);
@@ -76,10 +93,16 @@ export async function loadHistory(request: FastifyRequest, conversationId: strin
   const { data, error: mErr } = await query;
   if (mErr) throw fromPostgrest(mErr);
   const parsedState = stateSchema.safeParse(conv?.state);
+  const rows = ((data ?? []) as unknown as MsgRow[]).slice().reverse();
+  const quoted = rows
+    .filter((r) => r.role === "assistant")
+    .flatMap((r) => validRuns(r.content, r.outside_quotes).map((q) => ({ source: q.source, text: r.content.slice(q.start, q.end) })));
   return {
     summary: (conv?.summary as string | null) ?? null,
-    turns: toTurns(((data ?? []) as MsgRow[]).slice().reverse()),
+    turns: toTurns(rows),
     state: parsedState.success ? parsedState.data : null,
+    flagged: quoted.length > 0,
+    quoted,
   };
 }
 
@@ -96,6 +119,16 @@ const SUMMARY_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** The fold's transcript: each answer's quoted runs replaced by "[quote from <source>]" before anything else. */
+export function foldTranscript(rows: MsgRow[]): string {
+  return rows
+    .map((r) => {
+      const text = r.role === "assistant" ? redactQuotes(r.content, r.outside_quotes) : r.content;
+      return `${r.role === "user" ? "Counselor" : "AxIS"}: ${stripCitations(text).slice(0, 2000)}`;
+    })
+    .join("\n\n");
+}
+
 /**
  * Folds everything but the most recent messages into the summary. Called
  * without awaiting after a turn; a failure keeps the old summary and the next
@@ -111,18 +144,18 @@ export async function foldIfLong(request: FastifyRequest, conversationId: string
   if (convErr || !conv) return;
   let query = request.db
     .from("ai_messages")
-    .select("role, content, created_at")
+    .select(messageColumns(await flagsOn(request)))
     .eq("conversation_id", conversationId)
     .order("created_at")
     .limit(200);
   if (conv?.summary_through) query = query.gt("created_at", conv.summary_through as string);
   const { data } = await query;
-  const rows = (data ?? []) as MsgRow[];
+  const rows = (data ?? []) as unknown as MsgRow[];
   if (rows.length < FOLD_AT) return;
 
   const older = rows.slice(0, rows.length - RECENT_MESSAGES);
   const through = older.at(-1)!.created_at;
-  const transcript = older.map((r) => `${r.role === "user" ? "Counselor" : "AxIS"}: ${stripCitations(r.content).slice(0, 2000)}`).join("\n\n");
+  const transcript = foldTranscript(older);
   const out = await structured({
     request,
     module: "axis-memory",
