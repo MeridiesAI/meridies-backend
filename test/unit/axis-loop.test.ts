@@ -181,9 +181,14 @@ test("the gate wraps every model call with that call's usage", async () => {
   await runLoop(options(api, { gate }));
   assert.equal(seen.before.length, 2, "reserved before each call");
   assert.equal(seen.before[0]!.max_tokens, MAX_TOKENS.low);
+  // What settle prices: one call's tokens (the usage also carries #85's cache split and long-prompt part).
+  const priced = (u: unknown) => {
+    const { input, output, cacheRead, cacheWrite, calls } = u as Record<string, number>;
+    return { input, output, cacheRead, cacheWrite, calls };
+  };
   assert.deepEqual(
-    seen.after.map((a) => [(a.hold as { id: number }).id, a.usage]),
-    [1, 2].map((id) => [id, { input: 100, output: 20, cacheRead: 80, cacheWrite: 0 }]),
+    seen.after.map((a) => [(a.hold as { id: number }).id, priced(a.usage)]),
+    [1, 2].map((id) => [id, { input: 100, output: 20, cacheRead: 80, cacheWrite: 0, calls: 1 }]),
     "each call settled with its own usage"
   );
 });

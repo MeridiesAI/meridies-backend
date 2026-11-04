@@ -20,7 +20,7 @@ import { HttpError } from "../errors.js";
 import { estimatePromptTokens, reserve, settle, usageAfterError, type BudgetSubject, type Hold } from "../aiBudget.js";
 import { assertAiAllowed } from "../practiceSettings.js";
 import { serviceClient } from "../supabase.js";
-import type { CallGate, MessagesApi, StreamLike, Usage } from "./loop.js";
+import { emptyUsage, usageFromApi, type CallGate, type MessagesApi, type StreamLike, type Usage } from "./loop.js";
 import { cutAt } from "./text.js";
 import { AXIS_MODEL, featureOn, MAX_TOKENS, PER_MESSAGE_EFFORT_BETA, PINNED_EFFORT, PROMPT_TOKEN_BUDGET, THINKING, type Effort } from "./models.js";
 
@@ -85,26 +85,50 @@ export async function closeRun(
 ): Promise<void> {
   const svc = serviceClient();
   if (!svc || !run.id) return;
+  const cols = usageColumns(usage);
   await svc
     .from("ai_runs")
     .update({
       status,
       latency_ms: Date.now() - run.startedAt,
       completed_at: new Date().toISOString(),
-      input_tokens: usage.input + usage.cacheRead + usage.cacheWrite,
-      output_tokens: usage.output,
-      output: { ...output, cacheReadTokens: usage.cacheRead, cacheWriteTokens: usage.cacheWrite },
+      input_tokens: cols.input_tokens,
+      output_tokens: cols.output_tokens,
+      output: { ...output, ...cols.output },
       ...(error ? { error: error.slice(0, 500) } : {}),
     })
     .eq("id", run.id);
 }
 
-const usageOf = (m: Anthropic.Message): Usage => ({
-  input: m.usage.input_tokens,
-  output: m.usage.output_tokens,
-  cacheRead: m.usage.cache_read_input_tokens ?? 0,
-  cacheWrite: m.usage.cache_creation_input_tokens ?? 0,
-});
+/**
+ * A run's usage as the ai_runs row keeps it: input_tokens counts cached tokens too, and the
+ * output names the cache split, the billed calls, and the same figures for the calls whose
+ * prompt passed Haiku 5.5's lower rate card (billed at 5x), so the cost report
+ * (scripts/axis/axis-cost-report.sql) can price each part.
+ */
+export function usageColumns(usage: Usage) {
+  const l = usage.longPrompt;
+  return {
+    input_tokens: usage.input + usage.cacheRead + usage.cacheWrite,
+    output_tokens: usage.output,
+    output: {
+      cacheReadTokens: usage.cacheRead,
+      cacheWriteTokens: usage.cacheWrite,
+      cacheWrite5mTokens: usage.cacheWrite5m,
+      cacheWrite1hTokens: usage.cacheWrite1h,
+      modelCalls: usage.calls,
+      longPrompt: {
+        calls: l.calls,
+        inputTokens: l.input + l.cacheRead + l.cacheWrite,
+        outputTokens: l.output,
+        cacheReadTokens: l.cacheRead,
+        cacheWriteTokens: l.cacheWrite,
+        cacheWrite5mTokens: l.cacheWrite5m,
+        cacheWrite1hTokens: l.cacheWrite1h,
+      },
+    },
+  };
+}
 
 /**
  * One structured answer from Haiku 5.5, or null when the model declined, ran
@@ -149,7 +173,7 @@ export async function structured<T>(o: {
       system: o.system,
       messages: [{ role: "user", content: o.prompt }],
     }, o.signal ? { signal: o.signal } : undefined);
-    const usage = usageOf(msg);
+    const usage = usageFromApi(msg.usage);
     used = usage;
     answered = true;
     if (msg.stop_reason === "refusal" || msg.stop_reason === "max_tokens") {
@@ -162,7 +186,7 @@ export async function structured<T>(o: {
     return parsed.success ? parsed.data : null;
   } catch (err) {
     if (!answered) used = failedUsage(err, o.signal);
-    await closeRun(run, "failed", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, {}, err instanceof Error ? err.message : "unknown error");
+    await closeRun(run, "failed", emptyUsage(), {}, err instanceof Error ? err.message : "unknown error");
     o.request.log.warn({ err: errInfo(err), module: o.module }, "axis structured call failed");
     return null;
   } finally {
@@ -211,7 +235,7 @@ export async function transcribe(o: {
   /** The Messages API; the live client unless a test hands in its own. */
   client?: Pick<Anthropic, "messages">;
 }): Promise<{ text: string; cut: boolean } | "retry" | null> {
-  const empty: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const empty: Usage = emptyUsage();
   let run: Run | null = null;
   let hold: Hold | null = null;
   let used: Usage | "unused" | null = null;
@@ -236,7 +260,7 @@ export async function transcribe(o: {
       },
       o.signal ? { signal: o.signal } : undefined
     );
-    const usage = usageOf(msg);
+    const usage = usageFromApi(msg.usage);
     used = usage;
     answered = true;
     const out = transcriptFromMessage(msg);
@@ -287,13 +311,13 @@ export async function prewarm(o: {
       tools: o.tools,
       messages,
     });
-    const usage = { input: msg.usage.input_tokens, output: 0, cacheRead: msg.usage.cache_read_input_tokens ?? 0, cacheWrite: msg.usage.cache_creation_input_tokens ?? 0 };
+    const usage = usageFromApi(msg.usage);
     used = usage;
     await closeRun(run, "succeeded", usage, {});
     return { cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead };
   } catch (err) {
     if (used === null) used = failedUsage(err);
-    await closeRun(run, "failed", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, {}, err instanceof Error ? err.message : "unknown error");
+    await closeRun(run, "failed", emptyUsage(), {}, err instanceof Error ? err.message : "unknown error");
     throw err;
   } finally {
     await settle(hold, used, o.request.log);

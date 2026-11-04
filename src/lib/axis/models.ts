@@ -35,6 +35,8 @@ export const MAX_TOKENS: Record<Effort, number> = { low: 8_000, medium: 16_000, 
  * the conservative estimate used for the budget.
  */
 export const PROMPT_TOKEN_BUDGET = 90_000;
+/** Where Haiku 5.5's lower rate card ends: a call whose prompt passes it is billed at the higher rate. */
+export const LOWER_RATE_PROMPT_TOKENS = 100_000;
 export const estimateTokens = (chars: number) => Math.ceil(chars / 3);
 
 export function stepEffort(e: Effort, by: number): Effort {
