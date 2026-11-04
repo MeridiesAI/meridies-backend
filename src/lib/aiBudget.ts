@@ -5,7 +5,7 @@
  *   const hold = await reserve(subject, estimate, log);   // throws 429 at a cap, 503 when it can't check
  *   try { call the model } finally { await settle(hold, usage, log); }
  *
- * A user reservation is five lines, taken all or none by `ai_budget_reserve` (20261104000002): 1 call (per UTC
+ * A user reservation is five lines, taken all or none by `ai_budget_reserve` (20261108000002): 1 call (per UTC
  * day), max output tokens and weighted input tokens (per calendar month), and the estimated spend on the user's
  * own daily line and on the company's daily ceiling. A system job reserves its monthly calls and the company line.
  * Settle swaps the reservation for what the call used; the call stays counted.
@@ -59,7 +59,7 @@ export type BudgetBackend = {
 
 export type CeilingAlert = { pct: 50 | 80 | 100; day: string; spendUsd: number; ceilingUsd: number };
 
-export const MIGRATION = "20261104000002_ai_budget";
+export const MIGRATION = "20261108000002_ai_budget";
 const CHECK_TIMEOUT_MS = 2_000;
 const MISSING_RECHECK_MS = 30_000;
 const PRICES_TTL_MS = 10 * 60_000;
@@ -97,6 +97,7 @@ function caps() {
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  if (ms <= 0) return Promise.reject(new Error("AI budget check ran out of time"));
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`AI budget check took over ${ms} ms`)), ms);
@@ -133,6 +134,9 @@ let missingUntil = 0;
 let prices: { table: PriceTable; at: number } | null = null;
 let lastFallbackWarn: number | null = null;
 const memory = new Map<string, number>();
+/** Ceiling alerts this process already claimed (day:pct), so a paused day doesn't cost a database call per refusal. */
+const alerted = new Set<string>();
+const unpriced = new Set<string>();
 
 /** Tests: a fake backend (null: the service client's). Resets everything the gate remembers. */
 export function setBudgetBackend(b: BudgetBackend | null): void {
@@ -142,6 +146,8 @@ export function setBudgetBackend(b: BudgetBackend | null): void {
   prices = null;
   lastFallbackWarn = null;
   memory.clear();
+  alerted.clear();
+  unpriced.clear();
 }
 /** Tests: capture ceiling alerts instead of emailing them (null: email). */
 export function setAlertSender(fn: ((a: CeilingAlert) => Promise<void>) | null): void {
@@ -155,11 +161,11 @@ const isProduction = () => productionOverride ?? env.NODE_ENV === "production";
 const backend = () => backendOverride ?? rpcBackend();
 
 /** "ready" is kept for the process; "missing" is checked again after 30 s; any other probe error throws. */
-async function readiness(b: BudgetBackend): Promise<"ready" | "missing"> {
+async function readiness(b: BudgetBackend, ms = CHECK_TIMEOUT_MS): Promise<"ready" | "missing"> {
   if (ready) return "ready";
   if (Date.now() < missingUntil) return "missing";
   try {
-    await withTimeout(b.probe(), CHECK_TIMEOUT_MS);
+    await withTimeout(b.probe(), ms);
     ready = true;
     return "ready";
   } catch (err) {
@@ -171,10 +177,10 @@ async function readiness(b: BudgetBackend): Promise<"ready" | "missing"> {
   }
 }
 
-async function priceTable(b: BudgetBackend, log: FastifyBaseLogger): Promise<PriceTable> {
+async function priceTable(b: BudgetBackend, log: FastifyBaseLogger, ms = CHECK_TIMEOUT_MS): Promise<PriceTable> {
   if (prices && Date.now() - prices.at < PRICES_TTL_MS) return prices.table;
   try {
-    const table = priceTableFrom(await withTimeout(b.prices(), CHECK_TIMEOUT_MS));
+    const table = priceTableFrom(await withTimeout(b.prices(), ms));
     if (table.size === 0) throw new Error("ai_prices is empty");
     prices = { table, at: Date.now() };
     return table;
@@ -216,13 +222,26 @@ function refusalFor(r: { subject: string; metric: string }, now: Date): HttpErro
   return new HttpError(429, MONTHLY);
 }
 
-/** Sends a ceiling alert once per UTC day per threshold, never in the caller's way. */
-function alertOnce(pct: CeilingAlert["pct"], day: string, spend: number, log: FastifyBaseLogger): void {
+/** Sends a ceiling alert once per UTC day per threshold (this process, then the database decides), never in the caller's way. */
+function alertOnce(pct: CeilingAlert["pct"], day: string, spend: number | (() => Promise<number>), log: FastifyBaseLogger): void {
+  const memo = `${day}:${pct}`;
+  if (alerted.has(memo)) return;
+  alerted.add(memo);
   const ceilingUsd = caps().ceiling;
   void (async () => {
     if (!(await consumeRateLimit(`ai-ceiling:${day}:${pct}`, 1, 172_800))) return;
-    await (alertOverride ?? sendCeilingEmail)({ pct, day, spendUsd: spend, ceilingUsd });
-  })().catch((err) => log.warn({ err: err instanceof Error ? err.message : String(err), pct }, "AI ceiling alert not sent"));
+    const spendUsd = typeof spend === "number" ? spend : await spend().catch(() => ceilingUsd);
+    const send = alertOverride ?? ((a: CeilingAlert) => sendCeilingEmail(a, log));
+    await send({ pct, day, spendUsd, ceilingUsd });
+  })().catch((err) => log.error({ err: err instanceof Error ? err.message : String(err), pct }, "AI ceiling email not sent"));
+}
+
+/** What a sound `ai_budget_reserve` answer looks like; anything else is a failed check. */
+function soundAnswer(r: unknown): r is ReserveResult {
+  if (!r || typeof r !== "object") return false;
+  const a = r as Record<string, unknown>;
+  if (a.ok === true) return a.totals === undefined || (typeof a.totals === "object" && a.totals !== null);
+  return a.ok === false && typeof a.subject === "string" && typeof a.metric === "string";
 }
 
 function memoryReserve(subject: BudgetSubject, est: CallEstimate, now: Date): Hold {
@@ -252,6 +271,8 @@ async function fallbackReserve(subject: BudgetSubject, est: CallEstimate, now: D
 /** Reserves one model call for `subject`, or throws: 429 at a cap (the cap's own words), 503 when it can't check. */
 export async function reserve(subject: BudgetSubject, est: CallEstimate, log: FastifyBaseLogger): Promise<Hold> {
   const now = new Date();
+  const deadline = Date.now() + CHECK_TIMEOUT_MS;
+  const left = () => deadline - Date.now();
   const b = backend();
   if (!b) {
     if (isProduction()) {
@@ -262,7 +283,7 @@ export async function reserve(subject: BudgetSubject, est: CallEstimate, log: Fa
   }
   let state: "ready" | "missing";
   try {
-    state = await readiness(b);
+    state = await readiness(b, left());
   } catch (err) {
     log.error({ err }, "AI budget check failed; refusing the call");
     throw unavailableError();
@@ -272,39 +293,52 @@ export async function reserve(subject: BudgetSubject, est: CallEstimate, log: Fa
   let lines: ReserveLine[];
   let result: ReserveResult;
   try {
-    lines = linesFor(subject, est, await priceTable(b, log), now);
-    result = await withTimeout(b.reserve(lines), CHECK_TIMEOUT_MS);
+    const table = await priceTable(b, log, left());
+    if (!table.has(est.model) && !unpriced.has(est.model)) {
+      unpriced.add(est.model);
+      log.warn({ model: est.model }, `AI prices: no row for ${est.model}; it is priced at the table's highest rates`);
+    }
+    lines = linesFor(subject, est, table, now);
+    const answer: unknown = await withTimeout(b.reserve(lines), left());
+    if (!soundAnswer(answer)) throw new Error(`ai_budget_reserve answered ${JSON.stringify(answer)?.slice(0, 200)}`);
+    result = answer;
   } catch (err) {
     log.error({ err }, "AI budget check failed; refusing the call");
     throw unavailableError();
   }
+  const day = dayOf(now);
   if (!result.ok) {
-    if (result.subject === "company") alertOnce(100, dayOf(now), caps().ceiling, log);
+    if (result.subject === "company") alertOnce(100, day, () => b.total("company", "spend_usd", "day", day), log);
     throw refusalFor(result, now);
   }
 
-  const company = result.totals["company|spend_usd|day"];
-  const added = lines.find((l) => l.subject === "company")?.amount ?? 0;
+  // Each threshold the company total has reached today, including one a settle passed between reservations.
+  const company = result.totals?.["company|spend_usd|day"];
   if (typeof company === "number") {
-    const before = company - added;
-    for (const pct of [50, 80] as const) {
-      const at = (caps().ceiling * pct) / 100;
-      if (before < at && company >= at) alertOnce(pct, dayOf(now), company, log);
-    }
+    for (const pct of [50, 80] as const) if (company >= (caps().ceiling * pct) / 100) alertOnce(pct, day, company, log);
   }
   return { subject, model: est.model, mode: "enforced", lines, settled: false };
 }
 
 // ---- Settle ----
 
-/** Swaps the reservation for what the call used (null: it used nothing; the call stays counted). Never throws. */
-export async function settle(hold: Hold, actual: CallUsage | null, log: FastifyBaseLogger): Promise<void> {
+/**
+ * Swaps the reservation for what the call used; the call stays counted. Never throws.
+ * - usage: what the API reported.
+ * - "unused": the call never reached the model (a connection error, a refusal before the stream): tokens and spend
+ *   are released.
+ * - null: not known (the stream was stopped or failed after it started, which Anthropic may still bill): the whole
+ *   reservation stays, over-counted rather than under.
+ */
+export async function settle(hold: Hold, actual: CallUsage | "unused" | null, log: FastifyBaseLogger): Promise<void> {
   if (hold.settled) return;
   hold.settled = true;
+  if (actual === null) return;
+  const usage = actual === "unused" ? null : actual;
   try {
     if (hold.mode === "fallback") {
-      if ("userId" in hold.subject && actual && actual.output > 0) {
-        await consumeQuota(hold.subject.userId, "ai_output_tokens", "month", caps().output, actual.output).catch(() => undefined);
+      if ("userId" in hold.subject && usage && usage.output > 0) {
+        await consumeQuota(hold.subject.userId, "ai_output_tokens", "month", caps().output, usage.output).catch(() => undefined);
       }
       return;
     }
@@ -312,15 +346,15 @@ export async function settle(hold: Hold, actual: CallUsage | null, log: FastifyB
       const line = hold.lines[0];
       if (!line) return;
       const key = `${line.subject}|output|${line.period_start}`;
-      memory.set(key, Math.max(0, (memory.get(key) ?? 0) - line.amount + (actual?.output ?? 0)));
+      memory.set(key, Math.max(0, (memory.get(key) ?? 0) - line.amount + (usage?.output ?? 0)));
       return;
     }
     const b = backend();
     const table = prices?.table;
     if (!b || !table) throw new Error("no backend or price table to settle against");
-    const used = actual ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const used = usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     const actualOf = (m: Metric): number | null =>
-      m === "output_tokens" ? used.output : m === "input_weighted" ? weightedInput(table, hold.model, used) : m === "spend_usd" ? (actual ? spendUsd(table, hold.model, used) : 0) : null;
+      m === "output_tokens" ? used.output : m === "input_weighted" ? weightedInput(table, hold.model, used) : m === "spend_usd" ? (usage ? spendUsd(table, hold.model, used) : 0) : null;
     const lines: SettleLine[] = [];
     for (const l of hold.lines) {
       const a = actualOf(l.metric);
@@ -383,7 +417,7 @@ export function estimatePromptTokens(p: { system?: unknown; tools?: unknown; mes
 
 // ---- The ceiling email ----
 
-async function sendCeilingEmail(a: CeilingAlert): Promise<void> {
+async function sendCeilingEmail(a: CeilingAlert, log: FastifyBaseLogger): Promise<void> {
   const svc = serviceClient();
   let top: { subject: string; amount: number; role: string }[] = [];
   let modules: [string, number][] = [];
@@ -394,7 +428,8 @@ async function sendCeilingEmail(a: CeilingAlert): Promise<void> {
     const { data: profiles } = ids.length ? await svc.from("profiles").select("id, role").in("id", ids) : { data: [] };
     const roleOf = new Map(((profiles ?? []) as { id: string; role: string | null }[]).map((p) => [p.id, p.role ?? "unknown"]));
     top = list.map((r) => ({ ...r, role: r.subject.startsWith("user:") ? roleOf.get(r.subject.slice(5)) ?? "unknown" : "system" }));
-    const { data: runs } = await svc.from("ai_runs").select("module").gte("created_at", `${a.day}T00:00:00Z`).limit(20_000);
+    // PostgREST answers at most 1,000 rows, so this counts today's latest 1,000 calls (and says so).
+    const { data: runs } = await svc.from("ai_runs").select("module").gte("created_at", `${a.day}T00:00:00Z`).order("created_at", { ascending: false }).limit(1_000);
     const counts = new Map<string, number>();
     for (const r of (runs ?? []) as { module: string }[]) counts.set(r.module, (counts.get(r.module) ?? 0) + 1);
     modules = [...counts.entries()].sort((x, y) => y[1] - x[1]).slice(0, 5);
@@ -410,15 +445,18 @@ async function sendCeilingEmail(a: CeilingAlert): Promise<void> {
     "Top subjects by estimated spend (profile ids, no names):",
     ...(top.length ? top.map((t) => `- ${t.subject} (${t.role}): $${t.amount.toFixed(2)}`) : ["- none recorded"]),
     "",
-    "Top modules by calls today:",
+    "Top modules among today's latest 1,000 calls:",
     ...(modules.length ? modules.map(([m, n]) => `- ${m}: ${n}`) : ["- none recorded"]),
   ];
-  await sendEmail({
+  const sent = await sendEmail({
     to: env.COMPANY_CONTACT_EMAIL,
+    recipient_kind: "counselor",
+    logger: log,
     subject: a.pct === 100 ? `AI paused: daily ceiling reached (${a.day})` : `AI spend at ${a.pct}% of the daily ceiling (${a.day})`,
     text: lines.join("\n"),
     html: lines.map((l) => (l ? `<p style="margin:0 0 6px;">${escapeHtml(l)}</p>` : "<br>")).join(""),
     template: `ai-ceiling-${a.pct}`,
     idempotencyKey: `ai-ceiling:${a.day}:${a.pct}`,
   });
+  if (!sent.sent) log.error({ pct: a.pct, err: sent.error }, "AI ceiling email not sent");
 }

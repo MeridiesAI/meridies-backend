@@ -1,4 +1,4 @@
-// The AI budget's counters and prices (20261104000002, AxIS security PR A2): reserve before a call, settle
+// The AI budget's counters and prices (20261108000002, AxIS security PR A2): reserve before a call, settle
 // after, refuse at a cap. Service role only. Runs against the database; the API isn't needed.
 import { randomUUID } from "node:crypto";
 import { check, rest, serviceRpc, sql, user } from "./harness.mjs";
@@ -105,6 +105,8 @@ const u = () => `user:${randomUUID()}`;
   const f = rows.find((p) => p.model === "claude-fable-5-1");
   check("Fable 5.1 is $10 / $50 with reads at 0.025 and no long tier", Number(f?.input_usd) === 10 && Number(f?.read_mult) === 0.025 && f?.long_above === null, JSON.stringify(f));
   check("the table is seeded with the plan's 14 models", rows.length === 14, String(rows.length));
+  const free = await sql(`insert into private.ai_prices (model, input_usd, output_usd, read_mult, write_5m_mult) values ('claude-test-free', 1, 1, 0.1, 0)`).then(() => "inserted", () => "refused");
+  check("a price row with a free cache write is refused", free === "refused", free);
 }
 
 // Forget removes only that user's rows; top lists today's biggest spenders, not the company.

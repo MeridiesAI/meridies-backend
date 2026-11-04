@@ -1,6 +1,6 @@
 /**
  * What a model call costs, as arithmetic only. The prices themselves live in one table,
- * `private.ai_prices` (20261104000002), which the code reads through `public.ai_budget_prices()`
+ * `private.ai_prices` (20261108000002), which the code reads through `public.ai_budget_prices()`
  * (lib/aiBudget.ts) and the SQL reports join. No price figure lives in this file: a price change
  * is a migration that updates rows.
  */
@@ -55,7 +55,9 @@ export function priceTableFrom(rows: unknown[]): PriceTable {
       longMult: num(r.long_mult, "long_mult", model),
       webSearchUsd: num(r.web_search_usd, "web_search_usd", model),
     };
-    if (price.inputUsd === 0 || price.outputUsd === 0 || price.longMult < 1) throw new Error(`ai_prices: bad rates for ${model}`);
+    if (price.inputUsd === 0 || price.outputUsd === 0 || price.readMult === 0 || price.write5mMult === 0 || price.write1hMult === 0 || price.longMult < 1) {
+      throw new Error(`ai_prices: bad rates for ${model}`);
+    }
     table.set(model, price);
   }
   return table;

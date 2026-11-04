@@ -141,7 +141,7 @@ const envSchema = z.object({
   // the colleges most listed across rosters it checks per run. Default 30.
   EVENTS_DISCOVERY_COLLEGES: blankIsUnset(z.coerce.number().int().min(1).max(100).optional()),
 
-  // The AI budget gate (lib/aiBudget.ts, 20261104000002): every model call reserves against these and settles
+  // The AI budget gate (lib/aiBudget.ts, 20261108000002): every model call reserves against these and settles
   // after. Per user: calls and estimated spend per UTC day, output and weighted input tokens per calendar month.
   // Company-wide: estimated spend per UTC day; at it, all AI pauses until midnight UTC.
   AI_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(300)),

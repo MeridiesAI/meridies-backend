@@ -37,15 +37,21 @@ class FakeBackend implements BudgetBackend {
   settleError: unknown = null;
   pricesError: unknown = null;
   hang = false;
+  answer: unknown = undefined;
+  probeDelay = 0;
+  pricesDelay = 0;
   priceReads = 0;
   key = (subject: string, metric: string, period: string, start: string) => `${subject}|${metric}|${period}|${start}`;
   set(subject: string, metric: string, period: string, start: string, amount: number) {
     this.rows.set(this.key(subject, metric, period, start), amount);
   }
+  wait = (ms: number) => (ms ? new Promise((r) => setTimeout(r, ms)) : Promise.resolve());
   async probe() {
+    await this.wait(this.probeDelay);
     if (this.probeError) throw this.probeError;
   }
   async prices() {
+    await this.wait(this.pricesDelay);
     this.priceReads++;
     if (this.pricesError) throw this.pricesError;
     return PRICES;
@@ -53,8 +59,11 @@ class FakeBackend implements BudgetBackend {
   async reserve(lines: ReserveLine[]): Promise<ReserveResult> {
     if (this.hang) return new Promise(() => undefined);
     if (this.reserveError) throw this.reserveError;
+    if (this.answer !== undefined) return this.answer as ReserveResult;
     this.reserves.push(lines);
-    for (const l of lines) {
+    // The SQL checks the lines in key order, so the company line comes first.
+    const sorted = [...lines].sort((a, b) => this.key(a.subject, a.metric, a.period, a.period_start).localeCompare(this.key(b.subject, b.metric, b.period, b.period_start)));
+    for (const l of sorted) {
       if ((this.rows.get(this.key(l.subject, l.metric, l.period, l.period_start)) ?? 0) + l.amount > l.limit) {
         return { ok: false, subject: l.subject, metric: l.metric, period: l.period };
       }
@@ -185,7 +194,7 @@ test("resetsIn gives the hours to midnight UTC", () => {
 
 test("over the company ceiling: 429 ai_paused and one paused email", async () => {
   const { b, log, alerts } = setup("2026-10-01T20:00:00Z");
-  b.set("company", "spend_usd", "day", "2026-10-01", 100);
+  b.set("company", "spend_usd", "day", "2026-10-01", 100.25);
   for (const userId of [U, V]) {
     const err = await refusal(reserve({ userId }, EST, log));
     assert.equal(err.statusCode, 429);
@@ -194,6 +203,51 @@ test("over the company ceiling: 429 ai_paused and one paused email", async () =>
   }
   await flush();
   assert.deepEqual(alerts.map((a) => a.pct), [100]);
+  assert.equal(alerts[0]!.spendUsd, 100.25, "the email shows the day's real spend, not the ceiling");
+});
+
+test("over a user cap and the company ceiling at once: the pause wins", async () => {
+  const { b, log } = setup("2026-10-02T20:00:00Z");
+  b.set("company", "spend_usd", "day", "2026-10-02", 100);
+  b.set(`user:${U}`, "calls", "day", "2026-10-02", 300);
+  assert.equal((await refusal(reserve({ userId: U }, EST, log))).code, "ai_paused");
+});
+
+test("a malformed answer from the budget check refuses with 503, never a 500", async () => {
+  for (const answer of [null, { ok: false }, { ok: "yes" }, "ok"]) {
+    const { b, log } = setup();
+    b.answer = answer;
+    const err = await refusal(reserve({ userId: U }, EST, log));
+    assert.equal(err.statusCode, 503, JSON.stringify(answer));
+    assert.equal(err.code, "ai_budget_unavailable");
+  }
+  const { b, log } = setup();
+  b.answer = { ok: true };
+  const hold = await reserve({ userId: U }, EST, log);
+  assert.equal(hold.mode, "enforced", "an ok answer without totals still counts; it just can't alert");
+});
+
+test("a check whose steps add up to over 2 s refuses", async () => {
+  const { b, log } = setup();
+  b.probeDelay = 1_500;
+  b.pricesDelay = 1_000;
+  const pending = refusal(reserve({ userId: U }, EST, log));
+  await flush();
+  mock.timers.tick(1_500);
+  await flush();
+  mock.timers.tick(500);
+  const err = await pending;
+  assert.equal(err.statusCode, 503);
+  assert.equal(b.reserves.length, 0);
+});
+
+test("a model with no price row is priced high and logged once", async () => {
+  const { b, log, warns } = setup();
+  await reserve({ userId: U }, { ...EST, model: "claude-new-9" }, log);
+  await reserve({ userId: U }, { ...EST, model: "claude-new-9" }, log);
+  assert.equal(warns.filter((w) => /claude-new-9/.test(w)).length, 1);
+  const spend = b.reserves[0]!.find((l) => l.metric === "spend_usd")!.amount;
+  assert.ok(spend > 0.006 * 10, `priced at the highest rates (${spend})`);
 });
 
 test("once the migration is in, a backend error refuses with 503 ai_budget_unavailable", async () => {
@@ -225,7 +279,7 @@ test("once the migration is in, a check slower than 2 s refuses", async () => {
 test("without the migration: counts as today and logs the fallback line once an hour", async () => {
   const { b, log, warns } = setup();
   b.probeError = { code: "PGRST202", message: "Could not find the function public.ai_budget_total" };
-  const line = "AI budget fallback active: migration 20261104000002_ai_budget not applied, caps not enforced";
+  const line = "AI budget fallback active: migration 20261108000002_ai_budget not applied, caps not enforced";
   const h1 = await reserve({ userId: U }, EST, log);
   await reserve({ userId: U }, EST, log);
   assert.equal(h1.mode, "fallback");
@@ -288,10 +342,21 @@ test("settle replaces the reservation with actual usage and keeps the call", asy
   assert.equal(b.settles.length, 1, "a hold settles once");
 });
 
-test("settle(null) releases tokens and spend and keeps the call", async () => {
+test("settle(null) keeps the whole reservation: a stopped call may still have been billed", async () => {
   const { b, log } = setup();
   const hold = await reserve({ userId: U }, EST, log);
   await settle(hold, null, log);
+  assert.equal(b.settles.length, 0, "nothing released");
+  close(b.rows.get("company|spend_usd|day|2026-11-02")!, 0.006);
+  assert.equal(b.rows.get(`user:${U}|output_tokens|month|2026-11-01`), 8_000);
+  await settle(hold, "unused", log);
+  assert.equal(b.settles.length, 0, "a hold settles once");
+});
+
+test("settle(\"unused\") releases tokens and spend and keeps the call", async () => {
+  const { b, log } = setup();
+  const hold = await reserve({ userId: U }, EST, log);
+  await settle(hold, "unused", log);
   const lines = b.settles[0]!;
   assert.deepEqual(lines.map((l) => l.metric).sort(), ["input_weighted", "output_tokens", "spend_usd", "spend_usd"]);
   assert.equal(lines.find((l) => l.metric === "output_tokens")!.delta, -8_000);
@@ -330,6 +395,23 @@ test("crossing 50% and 80% sends each email once that day", async () => {
   await reserve({ userId: U }, EST, log);
   await flush();
   assert.deepEqual(alerts.map((a) => a.pct), [50, 80]);
+});
+
+test("a threshold passed between reservations is caught by the next one", async () => {
+  const { b, log, alerts } = setup("2026-09-16T12:00:00Z");
+  b.set("company", "spend_usd", "day", "2026-09-16", 50.5); // a settle that came in over its estimate
+  await reserve({ userId: U }, EST, log);
+  await flush();
+  assert.deepEqual(alerts.map((a) => a.pct), [50]);
+});
+
+test("a ceiling email that can't be sent is logged as an error", async () => {
+  const { b, log, errors } = setup("2026-09-17T20:00:00Z");
+  setAlertSender(null); // the real email: no Resend key or mail catcher in unit tests, so it isn't sent
+  b.set("company", "spend_usd", "day", "2026-09-17", 100);
+  await refusal(reserve({ userId: U }, EST, log));
+  for (let i = 0; i < 5; i++) await flush();
+  assert.ok(errors.some((e) => /ceiling email not sent/.test(e)), errors.join(" | "));
 });
 
 test("spendToday reads the company line; budgetMode says enforced", async () => {

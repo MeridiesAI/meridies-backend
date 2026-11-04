@@ -54,4 +54,6 @@ test("priceTableFrom reads numeric strings and refuses a malformed row", () => {
   assert.throws(() => priceTableFrom([{ ...row, output_usd: -1 }]));
   assert.throws(() => priceTableFrom([{ ...row, model: "" }]));
   assert.throws(() => priceTableFrom([null]));
+  assert.throws(() => priceTableFrom([{ ...row, write_5m_mult: 0 }]), "a free cache write");
+  assert.throws(() => priceTableFrom([{ ...row, read_mult: 0 }]));
 });

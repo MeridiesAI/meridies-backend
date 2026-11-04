@@ -33,11 +33,11 @@ create table if not exists private.ai_prices (
   input_usd      numeric(10, 4) not null check (input_usd > 0),
   output_usd     numeric(10, 4) not null check (output_usd > 0),
   read_mult      numeric(6, 4) not null check (read_mult > 0 and read_mult <= 1),
-  write_5m_mult  numeric(6, 4) not null default 1.25,
-  write_1h_mult  numeric(6, 4) not null default 2,
+  write_5m_mult  numeric(6, 4) not null default 1.25 check (write_5m_mult > 0),
+  write_1h_mult  numeric(6, 4) not null default 2 check (write_1h_mult > 0),
   long_above     integer check (long_above > 0),
   long_mult      numeric(6, 2) not null default 1 check (long_mult >= 1),
-  web_search_usd numeric(10, 4) not null default 0.01,
+  web_search_usd numeric(10, 4) not null default 0.01 check (web_search_usd >= 0),
   updated_at     timestamptz not null default now()
 );
 alter table private.ai_prices enable row level security;

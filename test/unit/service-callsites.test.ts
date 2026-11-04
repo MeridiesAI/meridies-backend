@@ -17,7 +17,7 @@ const REVIEWED = [
   // passed, and stamps profile_lookup_at.
   // lib/axis/llm.ts: writes only the ai_runs audit rows for the caller's own AxIS turn, inside their request.
   // lib/aiBudget.ts: service-only budget counters, prices and the ceiling email (profile ids and roles, no names);
-  // no student data. Its RPCs are EXECUTE to service_role only (20261104000002).
+  // no student data. Its RPCs are EXECUTE to service_role only (20261108000002).
   // lib/axis/attachments.ts: after an approved counselor's own AxIS or /chat turn, writes a chat file's stored text
   // (columns clients can't write), only to rows the caller's own RLS read returned, keyed on id, owner_id = the
   // caller and the chat.
