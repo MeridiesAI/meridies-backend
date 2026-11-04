@@ -11,9 +11,17 @@ type Filter = (r: Row) => boolean;
 /** One query the fake ran: what it did and which columns it filtered on (an update's filters say which rows it may touch). */
 export type DbCall = { table: string; op: "select" | "update"; patch?: Row; filters: string[] };
 
+/**
+ * Columns the fake database doesn't have, as `{ table, column }` rows under "missing:columns". By default
+ * ai_messages.outside_quotes (20261108000004), so a suite runs today's rules unless it passes [] to turn the
+ * free-text rule on (lib/axis/failsafe.ts flagsReady).
+ */
+const DEFAULT_MISSING: Row[] = [{ table: "ai_messages", column: "outside_quotes" }];
+
 export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
   return {
     from(table: string) {
+      let selected = "";
       const filters: Filter[] = [];
       const cols: string[] = [];
       let patch: Row | null = null;
@@ -25,7 +33,8 @@ export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
       let single: "maybe" | "one" | null = null;
       const cmp = (a: unknown, b: unknown) => (typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
       const chain: Record<string, unknown> = {
-        select(_cols?: string, opts?: { count?: string; head?: boolean }) {
+        select(cols?: string, opts?: { count?: string; head?: boolean }) {
+          selected = cols ?? "";
           countMode = !!opts?.count;
           head = !!opts?.head;
           return chain;
@@ -61,6 +70,9 @@ export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
         maybeSingle: () => ((single = "maybe"), chain),
         single: () => ((single = "one"), chain),
         then(resolve: (r: unknown) => unknown, reject?: (e: unknown) => unknown) {
+          const asked = selected.split(",").map((c) => c.trim());
+          const gone = (tables["missing:columns"] ?? DEFAULT_MISSING).find((m) => m.table === table && asked.includes(String(m.column)));
+          if (gone) return Promise.resolve({ data: null, error: { code: "42703", message: `column ${table}.${String(gone.column)} does not exist` } }).then(resolve, reject);
           let rows = (tables[table] ?? []).filter((r) => filters.every((f) => f(r)));
           if (orderBy) {
             const { col, asc } = orderBy;

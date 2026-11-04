@@ -158,6 +158,9 @@ export default async function axisRoutes(app: FastifyInstance) {
               content: turn.text,
               citations: turn.citations,
               trace: turn.trace,
+              // The runs the answer quoted from free text (lib/axis/quotes.ts): non-empty only once
+              // 20261108000004 is in, so the column is never named before it exists.
+              ...(turn.quotes.length ? { outside_quotes: turn.quotes } : {}),
               sources: turn.sources,
               ai_run_id: turn.runId,
             })

@@ -1898,9 +1898,32 @@ anyone copying it.
   task). Earlier changes are recalled each turn (`recentActionsText`) by
   their summary only when it was filed in a clean turn and not labelled from
   a read of its target (`payload.outside === false`); otherwise by the
-  operation's catalog title. Known limits: a short run of plain words is a
-  valid name shape; earlier answers in the verbatim history and the memory
-  summary can quote text from more than one turn back. Switching parents or a guardian off (`set_alert_recipients` with
+  operation's catalog title. **Once `20261108000004` is in** (`flagsReady`,
+  `lib/axis/failsafe.ts`), a narrower rule replaces "outside content": only
+  **free text** flags a turn (`lib/context/freeText.ts`): documents, essay
+  bodies, chat files, email, connected files, web pages and any student-written
+  value over 80 characters (`SHORT_FIELD_MAX`). Short fields (names, titles,
+  dates, statuses, the college list, deadlines, scores, majors, the high
+  school) don't. Each untrusted block says which it is (a short one renders
+  `length="short"`). A question turn's record is built `shortOnly`: each
+  outside section keeps its short fields and names what it left out ("Left
+  out, read with get_student_record: 1 document: transcript.pdf"), and the
+  lookup that fetches it flags the turn. A lookup op declared outside flags
+  only when its reply holds a free block (`TurnBudget.freeRule`); the
+  planner's evidence and direct answers carry `freeText`. A turn is flagged
+  when it reads free text, the previous turn did (`state.outside`), the chat
+  has files, or a replayed answer quoted free text: an answer that repeats 8+
+  consecutive words of free text the turn saw (`lib/axis/quotes.ts`, case
+  and punctuation ignored) is stored with those runs
+  (`ai_messages.outside_quotes`), keeps the chat flagged while it is among
+  the 12 replayed messages, and reaches the memory fold as "[quote from
+  <source>]" (`foldTranscript`), so the summary never holds the words.
+  Before the migration the wider rule above applies unchanged. Known limits:
+  a short run of plain words is a valid name shape; before the migration,
+  earlier answers in the verbatim history and the memory summary can quote
+  text from more than one turn back; under the rule, a quote of fewer than 8
+  words, or a paraphrase, isn't caught, and a `/chat` (fallback) answer
+  records no runs. Switching parents or a guardian off (`set_alert_recipients` with
   either copy flag, `update_guardian` with `alerts_enabled` or
   `receives_reports`) asks first whichever way it goes. After five auto changes
   in one turn the rest wait for Confirm; twenty changes is the limit per turn.

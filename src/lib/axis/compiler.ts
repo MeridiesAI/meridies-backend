@@ -51,6 +51,8 @@ export type DirectAnswer = {
    * over 80 characters. A title, a school or a major of that length or less is a short field.
    */
   freeText: boolean;
+  /** Those values, for the quote check. */
+  freeBlocks?: { source: string; text: string }[];
 };
 
 export type CompileContext = {
@@ -165,6 +167,7 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
   const who = (it: UpcomingItem) => (id ? "" : `${plain(ctx.roster.get(it.studentId)?.name ?? "Student", 60)} · `);
   // What a line shows of an item someone else wrote: free text when over 80 characters (the title shows up to 100).
   const freeIn = (it: UpcomingItem) => it.outside && anyLong([plain(it.title, 100)]);
+  const freeOf = (list: UpcomingItem[]) => list.filter(freeIn).map((it) => ({ source: it.kind, text: plain(it.title, 100) }));
   const line = (it: UpcomingItem) =>
     `${shortDate(it.date, now)}${it.overdue ? " (overdue)" : ""} · ${who(it)}${plain(it.title, 100)}${it.detail ? `, ${plain(it.detail, 60)}` : ""}${it.kind === "task" && it.status ? ` · ${it.status.replace("-", " ")}` : it.kind === "meeting" ? " · meeting" : ""}`;
   const name = id ? firstName(ctx.roster.get(id)?.name ?? (await studentFacts(ctx.request, id))?.name ?? "") : "";
@@ -181,7 +184,7 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
   if (SINGULAR_NEXT.test(u.norm)) {
     const kind = /\bmeeting\b/.test(u.norm) ? "meeting" : /\btask\b/.test(u.norm) ? "task" : /\bdeadline\b/.test(u.norm) ? "deadline" : null;
     const next = items.find((i) => !i.overdue && (!kind || i.kind === kind));
-    if (next) return { frame: "upcoming", text: `Next${kind ? ` ${kind}` : ""}: ${line(next)}.`, trace: ["Checked deadlines, tasks and meetings"], sources: ["Calendar", "Tasks"], outside: next.outside, freeText: freeIn(next) };
+    if (next) return { frame: "upcoming", text: `Next${kind ? ` ${kind}` : ""}: ${line(next)}.`, trace: ["Checked deadlines, tasks and meetings"], sources: ["Calendar", "Tasks"], outside: next.outside, freeText: freeIn(next), freeBlocks: freeOf([next]) };
   }
   const shown = items.slice(0, 12);
   const more = items.length - shown.length;
@@ -196,6 +199,7 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
     sources: ["Calendar", "Tasks"],
     outside: shown.some((i) => i.outside),
     freeText: shown.some(freeIn),
+    freeBlocks: freeOf(shown),
   };
 }
 
@@ -209,10 +213,16 @@ async function studentFactsAnswer(ctx: CompileContext, studentId: string, viaCha
   // school, testing status and a class year that isn't four digits. Numbers aren't.
   let outside = false;
   let freeText = false;
+  const freeBlocks: { source: string; text: string }[] = [];
   // `parts`: the separate values a joined line shows (a list of majors), each judged on its own.
   const typed = <T>(v: T, parts?: string[]): T => {
     outside = true;
-    if (anyLong(parts ?? [v])) freeText = true;
+    for (const part of parts ?? [v]) {
+      if (typeof part === "string" && anyLong([part])) {
+        freeText = true;
+        freeBlocks.push({ source: "record", text: part });
+      }
+    }
     return v;
   };
   const satLine = () =>
@@ -240,7 +250,7 @@ async function studentFactsAnswer(ctx: CompileContext, studentId: string, viaCha
     else if (a === "school") lines.push(f.highSchool ? `${n} attends ${typed(plain(f.highSchool, 100))}.` : `${n} has no high school on file.`);
   }
   if (!lines.length) return null;
-  return { frame: "student-facts", text: [...new Set(lines)].join("\n"), trace: [`Read ${n}'s record`], sources: ["Student profile", "Grades and scores"], outside, freeText };
+  return { frame: "student-facts", text: [...new Set(lines)].join("\n"), trace: [`Read ${n}'s record`], sources: ["Student profile", "Grades and scores"], outside, freeText, freeBlocks };
 }
 
 async function collegeFigures(ctx: CompileContext, ids: string[], asks: Attribute[]): Promise<DirectAnswer | null> {
