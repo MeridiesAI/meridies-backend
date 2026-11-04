@@ -6414,7 +6414,7 @@ UI, following the demo's AxIS panel and its rules (no caption lines):
 3. Deploy the backend. `/chat` keeps working; nothing in the app changes yet.
 4. Switch `streamAxisMessage` to `/axis/...`, call `warmAxis`, and render the new events (section 11).
 5. When Elvin's and Brandon's modules land, register them (section 5). AxIS needs no change: document and email tools, the fused search and the specialists come on with them.
-6. Watch `ai_runs` rows with `module = 'axis'`: `output.cacheReadTokens` should be most of `input_tokens` from the second turn of a chat; `output.invalidCitations` and `output.unverified` should stay near zero; `output.calls` should mostly be 1. Direct answers write no `ai_runs` row; they are logged as `axis turn` with `path: "direct"` and their latency.
+6. Watch `ai_runs` rows with `module = 'axis'`: `output.cacheReadTokens` should be most of `input_tokens` from the second turn of a chat; `output.invalidCitations` and `output.unverified` should stay near zero; `output.modelCalls` (billed calls, specialists included; rows before it have only `output.calls`, the loop's budget counter) should mostly be 1. `scripts/axis/axis-cost-report.sql` prices these rows: cost per turn, cache hits, calls over Haiku 5.5's 100K line, and what the pre-warm costs. Direct answers write no `ai_runs` row; they are logged as `axis turn` with `path: "direct"` and their latency.
 
 ## 13. Known limits
 

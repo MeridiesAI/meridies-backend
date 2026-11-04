@@ -86,6 +86,8 @@ export type Turn = {
   fail?: unknown;
   /** Milliseconds between closing the tool blocks and finishing the message. */
   tailMs?: number;
+  /** Replaces fields of this message's usage (the default is 100 in, 20 out, 80 read from cache). */
+  usage?: Record<string, unknown>;
 };
 
 export type Recorded = { params: StreamParams; at: number };
@@ -123,7 +125,7 @@ export function scriptedApi(turns: Turn[]): { api: MessagesApi; calls: Recorded[
           content,
           stop_reason: turn.stop ?? (turn.tools?.length ? "tool_use" : "end_turn"),
           stop_details: turn.stop === "refusal" ? { type: "refusal", category: "general_harms", explanation: null } : null,
-          usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 80, cache_creation_input_tokens: 0 },
+          usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 80, cache_creation_input_tokens: 0, ...turn.usage },
         } as unknown as Anthropic.Beta.BetaMessage;
       })();
       const stream: StreamLike = {

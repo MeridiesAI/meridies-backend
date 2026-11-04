@@ -38,7 +38,7 @@ import { loadCollegeIndex, type CollegeIndex } from "./entities.js";
 import { EvidenceIndex, LiveGrounder, type SentenceCheck } from "./grounding.js";
 import { dropInvalidCitations, renderSource, resolveCitations, SourceLedger, type Citation } from "./ledger.js";
 import { chargeCall, chargeOutput, closeRun, messagesApi, openRun, structured, type Run } from "./llm.js";
-import { emptyUsage, runLoop, type LoopOptions, type MessagesApi, type Usage } from "./loop.js";
+import { addUsage, emptyUsage, runLoop, type LoopOptions, type MessagesApi, type Usage } from "./loop.js";
 import { loadHistory } from "./memory.js";
 import {
   AXIS_MODEL,
@@ -369,12 +369,7 @@ export async function runAxisTurn(opts: {
     isReadOnly(c.name) ? exec(c, sig) : Promise.resolve({ content: "Specialists only research. Leave changes to the final answer.", isError: true, fresh: false });
   const beforeCall = () => (takePrepaid() ? Promise.resolve() : chargeCall(request));
   const total: Usage = emptyUsage();
-  const add = (x: Usage) => {
-    total.input += x.input;
-    total.output += x.output;
-    total.cacheRead += x.cacheRead;
-    total.cacheWrite += x.cacheWrite;
-  };
+  const add = (x: Usage) => addUsage(total, x);
 
   // Which kinds of passage the planner already found: a part they cover needs no specialist.
   const kinds = new Set(ledger.all().map((p) => p.kind));
