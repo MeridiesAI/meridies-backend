@@ -31,6 +31,24 @@ const rowA = (manyRows.body ?? []).find((r) => r.email === `bulk-a-${tag}@test.l
 check("bulk row keeps grade, year and time zone", rowA?.grade_level === "11th" && rowA?.grad_year === 2028 && rowA?.timezone === "PT · Pacific", JSON.stringify(rowA));
 check("bulk row carries the shared requests", rowA?.intake_requests?.length === 2 && rowA?.source === "mass", JSON.stringify(rowA));
 check("bulk note lists what to send", String(rowA?.note ?? "").includes("transcript, resume"), JSON.stringify(rowA?.note));
+// New student asks for an email and nothing else: the student fills in their own
+// name, grade and time zone in onboarding. A client may still send blanks, and a
+// blank must read as "not given" rather than trip the invitation's CHECKs.
+const bareA = `bare-a-${tag}@test.local`;
+const bareB = `bare-b-${tag}@test.local`;
+const bareC = `bare-c-${tag}@test.local`;
+const bare = await call(c.token, "POST", "/invites/bulk", {
+  recipients: [
+    { email: bareA },
+    { email: bareB, name: "", gradeLevel: "", timezone: "" },
+    { email: bareC, name: "   " },
+  ],
+});
+check("email-only bulk rows all send", bare.status === 200 && bare.body.results?.length === 3 && bare.body.results.every((r) => r.status !== "failed"), `status ${bare.status} ${JSON.stringify(bare.body).slice(0, 240)}`);
+const bareRows = await rest(c.token, "GET", `/rest/v1/invitations?email=in.(${bareA},${bareB},${bareC})&select=email,full_name,grade_level,timezone`);
+check("blank name, grade and time zone are stored as nothing", (bareRows.body ?? []).length === 3 && (bareRows.body ?? []).every((r) => r.full_name === null && r.grade_level === null && r.timezone === null), JSON.stringify(bareRows.body));
+const blankSingle = await call(c.token, "POST", "/invites", { email: `bare-d-${tag}@test.local`, fullName: "", gradeLevel: "", timezone: "", source: "intake" });
+check("a blank name on a single invite is not given, not an error", blankSingle.status === 201 || blankSingle.status === 200, `status ${blankSingle.status} ${JSON.stringify(blankSingle.body).slice(0, 160)}`);
 // CSV import: the sheet's other columns ride on the invitation and show on the
 // Building profile card; a row without them is unchanged.
 const csvEmail = `csv-${tag}@test.local`;

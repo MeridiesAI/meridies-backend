@@ -459,7 +459,12 @@ const HANDLED = new Set([
 ]);
 // Deliberately stays with the counselor (spec §6.7): personal working notes and notices.
 // kpi_completions: Time saved credits the counselor who did the work, so a transfer never moves it.
-const STAYS = new Set(["ai_conversations.owner_id", "axis_actions.owner_id", "notifications.recipient_id", "kpi_completions.counselor_id"]);
+// messaging_routes: a reply address belongs to one (counselor, family member); the new counselor mints their own.
+// inbound_messages: what a family wrote to the old counselor stays in their record (the email copy already reached them).
+const STAYS = new Set([
+  "ai_conversations.owner_id", "axis_actions.owner_id", "notifications.recipient_id", "kpi_completions.counselor_id",
+  "messaging_routes.counselor_id", "inbound_messages.counselor_id",
+]);
 const fks = (await sql(`
   select c.conrelid::regclass::text || '.' || a.attname
     from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any(c.conkey)

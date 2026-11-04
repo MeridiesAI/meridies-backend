@@ -23,6 +23,7 @@ import { FAST_MODEL, runStructured } from "../lib/anthropic.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { assertCanViewStudent, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { proposalsFromDocument } from "../lib/profileUpdateDocument.js";
 import {
   currentGrade,
   fallbackQuestion,
@@ -31,6 +32,8 @@ import {
   mergeDraft,
   missingFields,
   modelTurn,
+  NOT_AN_ACHIEVEMENT_REPLY,
+  notAnAchievement,
   parseDraft,
   PROFILE_UPDATE_SCHEMA,
   PROFILE_UPDATE_SYSTEM,
@@ -194,13 +197,20 @@ export default async function profileUpdateRoutes(app: FastifyInstance) {
         validate: (v) => modelTurn.parse(v),
       });
 
-      // The server decides completeness, never the model.
+      // The server decides completeness, never the model. A full record is
+      // filed only once the model says the student confirmed the read-back,
+      // and never when it is luck or a purchase (checked in code too).
       const merged = mergeDraft(current, turn.draft);
       const missing = missingFields(merged);
+      const notListable = !turn.listable || notAnAchievement(merged);
 
       let filed: FiledUpdate | null = null;
       let reply: string;
-      if (missing.length === 0) {
+      if (notListable) {
+        reply = turn.question && !turn.listable ? turn.question : NOT_AN_ACHIEVEMENT_REPLY;
+      } else if (missing.length === 0 && !turn.readyToFile) {
+        reply = turn.question ?? `Here's what I have: "${summaryOf(merged)}". Shall I add it?`;
+      } else if (missing.length === 0) {
         filed = await fileDraft(request, studentId, threadId, merged);
         const where = merged.kind === "honor" ? "honors" : "activities";
         reply = `Thanks! I've added "${summaryOf(merged)}" to your ${where} for your counselor to see. Anything else you've been up to?`;
@@ -211,8 +221,9 @@ export default async function profileUpdateRoutes(app: FastifyInstance) {
       const { data: saved, error: saveError } = await request.db
         .from("profile_update_threads")
         .update({
-          kind: merged.kind,
-          draft: merged,
+          // Luck or a purchase isn't kept as the record being built.
+          kind: notListable ? null : merged.kind,
+          draft: notListable ? {} : merged,
           status: filed ? "filed" : "open",
           filed_update_id: filed ? filed.id : null,
         })
@@ -277,6 +288,54 @@ export default async function profileUpdateRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That conversation isn't on file");
       return toThread(data as Row, await loadMessages(request, id));
+    }
+  );
+
+  /**
+   * The student uploads a document of their activities or awards; AxIS
+   * proposes rows, nothing is stored. Each proposal the student confirms goes
+   * through POST /profile-updates/file.
+   */
+  app.post(
+    "/profile-updates/from-document",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRole("student"),
+        aiLimit,
+        limit("profile-updates:document", 10, 3600, "That's a lot of documents. Try again in an hour."),
+      ],
+    },
+    async (request) => {
+      const { documentId } = z.object({ documentId: z.string().uuid() }).strict().parse(request.body);
+      if (!hasAnthropic) throw unavailable("AI features aren't configured yet. Set ANTHROPIC_API_KEY.");
+      return { proposals: await proposalsFromDocument(request, documentId) };
+    }
+  );
+
+  /** File one entry the student confirmed (from a document's proposals), under the chat's own rules. */
+  app.post(
+    "/profile-updates/file",
+    { preHandler: [app.authenticate, requireRole("student"), limit("profile-updates:file", 60, 3600)] },
+    async (request, reply) => {
+      const b = z.object({ draft: z.record(z.unknown()) }).strict().parse(request.body);
+      const draft = parseDraft(b.draft);
+      const missing = missingFields(draft);
+      if (missing.length > 0) throw badRequest(`Fill in ${missing.join(", ")} first.`);
+      if (notAnAchievement(draft)) throw badRequest(NOT_AN_ACHIEVEMENT_REPLY);
+      const studentId = request.auth.userId;
+      const { data: thread, error } = await request.db
+        .from("profile_update_threads")
+        .insert({ student_id: studentId, status: "open", kind: draft.kind, draft })
+        .select("id")
+        .single();
+      if (error) throw fromPostgrest(error);
+      const filed = await fileDraft(request, studentId, String(thread.id), draft);
+      await request.db
+        .from("profile_update_threads")
+        .update({ status: "filed", filed_update_id: filed.id })
+        .eq("id", String(thread.id));
+      return reply.code(201).send({ filed });
     }
   );
 

@@ -51,6 +51,7 @@ import { STUDENT_STEPS, openSteps, setupFacts } from "../lib/studentSetup.js";
 import { acceptMyInvitation, listMyInvitations } from "../lib/myInvitations.js";
 import { toMeridiesUser } from "../lib/serialize.js";
 import { hydrate } from "./tasks.js";
+import { recheckAfterNameChange } from "../lib/submissionReview.js";
 
 const settingsPatch = z
   .object({
@@ -89,10 +90,11 @@ async function assertCounselorShowsPolygon(request: FastifyRequest): Promise<voi
 
 async function overview(request: FastifyRequest, info?: StudentInfo) {
   const me = request.auth.userId;
-  const [card, counselor, preferences] = await Promise.all([
+  const [card, counselor, preferences, hidden] = await Promise.all([
     info ? Promise.resolve(info) : loadStudentInfo(request.db, me, request.log),
     counselorOf(request),
     loadPreferences(request.db, me),
+    hiddenByCounselor(request.db, me),
   ]);
   if (!card) throw notFound("Your profile isn't set up yet");
   return {
@@ -105,7 +107,7 @@ async function overview(request: FastifyRequest, info?: StudentInfo) {
     preferences,
     // Whether the strength profile shows on the student's dashboard: their own
     // switch and their counselor's (20261028000005).
-    strengthProfile: visibilityOf(await hiddenByCounselor(request.db, me), preferences.showStrengthProfile),
+    strengthProfile: visibilityOf(hidden, preferences.showStrengthProfile),
   };
 }
 
@@ -164,6 +166,7 @@ export default async function meRoutes(app: FastifyInstance) {
       const me = request.auth.userId;
 
       let fullName = request.profile.full_name;
+      let recheckedFiles = 0;
       if (patch.fullName !== undefined) {
         const { data, error } = await request.db
           .from("profiles")
@@ -173,7 +176,10 @@ export default async function meRoutes(app: FastifyInstance) {
           .maybeSingle();
         if (error) throw fromPostgrest(error);
         if (!data) throw notFound("Profile not found");
+        const before = String(request.profile.full_name ?? "").trim();
         fullName = String(data.full_name);
+        // AxIS checked handed-in files against the old name: look again.
+        if (before !== fullName.trim()) recheckedFiles = await recheckAfterNameChange(request, me);
       }
 
       const preferences =
@@ -181,7 +187,7 @@ export default async function meRoutes(app: FastifyInstance) {
           ? await savePreferences(request.db, me, { theme: patch.theme })
           : await loadPreferences(request.db, me);
 
-      return { fullName, theme: preferences.theme };
+      return { fullName, theme: preferences.theme, recheckedFiles };
     }
   );
 

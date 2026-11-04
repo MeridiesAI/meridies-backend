@@ -63,10 +63,18 @@ export const PHOTO_KEYS = ["webinar", "webinar-desk", "conference", "college-fai
 export const CALENDAR_TARGETS = ["meridies", "google", "outlook", "apple"] as const;
 export const REMINDERS = ["none", "15m", "1h", "1d", "1w"] as const;
 
-export type CollegeRef = { id: string; slug: string; name: string; shortName: string; photo: CollegePhoto | null };
+export type CollegeRef = {
+  id: string;
+  slug: string;
+  name: string;
+  shortName: string;
+  photo: CollegePhoto | null;
+  /** The school's own icon, copied (lib/collegeLogos.ts), or null. */
+  logoUrl: string | null;
+};
 
 /** A college as an event card names it; `photos` from loadCollegePhotos, when the caller read them. */
-export const toCollegeRef = (r: Row, photos?: Map<string, CollegePhotoRow>): CollegeRef => {
+export const toCollegeRef = (r: Row, photos?: Map<string, CollegePhotoRow>, logos?: Map<string, string>): CollegeRef => {
   const aka = arr(r.aka);
   return {
     id: str(r.id),
@@ -74,6 +82,7 @@ export const toCollegeRef = (r: Row, photos?: Map<string, CollegePhotoRow>): Col
     name: str(r.name),
     shortName: aka[0] ?? str(r.name),
     photo: toCollegePhoto(photos?.get(str(r.id)), str(r.name)),
+    logoUrl: logos?.get(str(r.id)) ?? null,
   };
 };
 

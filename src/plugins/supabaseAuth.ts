@@ -9,7 +9,9 @@
  * After verification the request carries:
  *   request.auth    - { userId, email, token }
  *   request.db      - a Supabase client bound to THAT user's token (RLS applies)
- *   request.profile - the caller's profiles row, loaded once per request
+ *   request.profile - the caller's profiles row, loaded once per request,
+ *                     without the `profile` jsonb (up to 300 KB of onboarding
+ *                     answers): `loadProfileBlob` reads it where a route needs it
  *
  * A counselor whose account is not approved is refused here (403,
  * code "account_pending") unless the route sets config.allowPending.
@@ -21,7 +23,7 @@ import { env } from "../env.js";
 import { userClient } from "../lib/supabase.js";
 import { blockedAsPending } from "../lib/access.js";
 import { accountPending, unauthorized } from "../lib/errors.js";
-import type { Profile } from "../lib/serialize.js";
+import type { AuthProfile } from "../lib/serialize.js";
 
 const ISSUER = `${env.SUPABASE_URL}/auth/v1`;
 const JWKS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`));
@@ -69,7 +71,7 @@ export default fp(async (app) => {
       .select(
         "id, full_name, email, role, role_confirmed, onboarding_step, onboarding_complete, " +
           "counselor_id, firm_id, avatar_url, phone, timezone, title, headline, hometown, " +
-          "high_school, grad_year, profile, counselor_approved_at"
+          "high_school, grad_year, counselor_approved_at"
       )
       .eq("id", userId)
       .maybeSingle();
@@ -83,7 +85,7 @@ export default fp(async (app) => {
       throw unauthorized("Your account isn't set up yet. Sign in again.");
     }
 
-    request.profile = data as unknown as Profile;
+    request.profile = data as unknown as AuthProfile;
 
     // Approval comes from the row just read, never from the token, so a revoke
     // holds from the next request. A route opts in with config.allowPending.

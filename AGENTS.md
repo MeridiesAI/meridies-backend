@@ -84,6 +84,10 @@ src/
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
 │   ├── collegePhotos.ts   # a college's campus photo as every college surface serves it; null without the migration
+│   ├── collegeLookup.ts   # Look up info & photo, the picture half: Commons by name, then the site's share images (up to 3)
+│   ├── collegeSiteInfo.ts # Look up info & photo, the facts half: pages picked, one Haiku read, every fact kept only with a quote the pages contain
+│   ├── collegeLookupRun.ts # the lookup's order and rules: 30-day cache, refresh, facts + picture at once, 45 s deadline; no db, no model client
+│   ├── imageConvert.ts    # PNG/WebP/JPEG to a 1280 px and a 500 px JPEG with sharp 0.35.5 (loaded lazily; JPEG-only without it)
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
@@ -178,6 +182,12 @@ src/
   writes, outbound message delivery. **Never** hand it a client-supplied id
   without checking the relationship first.
 
+**`request.profile` has no `profile` jsonb.** `authenticate` loads the
+caller's row without the onboarding blob (up to 300 KB); a route that needs it
+reads it with `loadProfileBlob` (`lib/ownProfile.ts`). A cheap point write may
+start its limiter with `startLimit` (`lib/limits.ts`) so the limiter's round
+trip overlaps the first reads; it must be awaited before anything is written.
+
 Authorize in code *and* let RLS enforce it. A route that skips its check leaks
 the shape of the answer (404 vs 403 vs empty list) even when RLS blocks the row.
 
@@ -230,9 +240,10 @@ transfer, campus photos, the Scorecard columns, meeting invites, every
 applied:** Payment Tracker credits (`20261029000001`: without it an
 overpayment and Mark refunded answer 409 `payment_credits_unavailable` and
 invoices apply no credit, `paymentCreditsReady`), the GPA-within-scale check
-(`20261029000002`, NOT VALID: new writes only; list what breaks it with
-`scripts/migrations/gpa-scale-violations.sql`, fix those rows, then VALIDATE
-it in a later migration; the routes apply the same rule in code either way),
+on existing rows (`20261104000001` VALIDATEs the constraint `20261029000002`
+added NOT VALID; it fails if any row breaks the rule, so run
+`scripts/migrations/gpa-scale-violations.sql` first; the routes apply the same
+rule in code either way),
 CSV import extras on invitations (`20261029000003`) and card payments
 (`20261102000001`: without it `GET /pipeline/stripe` answers `configured:
 false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`).
@@ -750,7 +761,16 @@ the database (`20261010*`):
   (the description is capped at 150 characters) and files it as a row of
   `activities` or `awards` (`source = 'ai'`) plus a `profile_updates` log row
   the counselor reads at `GET /students/:id/profile-updates`. It never writes
-  essay prose.
+  essay prose. AxIS coaches the entry before it is filed (QA round 10): it asks
+  for scope, numbers, role and dates, may suggest how to frame it, and files
+  only when the record is complete in code *and* the model says the student
+  confirmed the read-back (`readyToFile`); luck or a purchase ("won the
+  lottery") is never filed (`listable: false`, and `notAnAchievement` in code).
+  `POST /profile-updates/from-document { documentId }` reads one of the
+  student's own files (PDF, image, .docx/.txt, .xlsx/.csv in the capped parse
+  process; the hand-in's document rules and byte cap) and returns proposed
+  rows, storing nothing; `POST /profile-updates/file { draft }` files one the
+  student confirmed, under the same checks.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
@@ -895,7 +915,7 @@ the database (`20261010*`):
   student is told what to upload instead. The counselor gets one
   notification and one email per hand-in; the student gets both when AxIS
   hands it back (profile email, like task assignments; each send is a
-  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (counselor).
+  `message_deliveries` row, templates `submission-review-*`). `POST /tasks/:id/review` re-runs it (the counselor; or the student on their own unfinished task, under the hand-in limits and with no notices). A student who changes their display name (`PATCH /me/settings`) gets the latest file on up to 5 tasks AxIS handed back re-checked quietly (`recheckAfterNameChange`), since AxIS compares a file to the name on file.
   Tracker verdicts are counselor and service-role writes only; a student
   could write one through PostgREST before this migration.
 - **A student can't archive or restore themselves.** Archiving takes a
@@ -909,6 +929,18 @@ the database (`20261010*`):
   counselor-written. The banner image lives in the private `student-banners`
   bucket under `<student id>/`, uploaded through a signed URL minted on the
   student's own token.
+- **The banner can be any colour** (`20261105400001`): `bannerColor` ("#rrggbb" or null) on
+  `PATCH /me/preferences`, stored in `student_preferences.banner_color` (CHECK on the hex shape); a colour
+  wins over the preset, a photo over both. Before the migration `bannerColor` reads null and saving one
+  answers 503 `banner_color_unavailable`; other preferences keep saving.
+- **A high school's published profile** (`POST /high-school-profile/find { studentId? }`,
+  `lib/highSchoolProfile.ts`, `20261105400002`): the student's own school, or a student a counselor can
+  view. The catalog's `school_profile_url` when on file; otherwise cited research
+  (`runWebResearch` on `DISCOVERY_MODEL`, module `college-research`, the school's name and town only, no
+  student) keeps a URL only when it was cited, seen in the run, reads as a profile, and `checkLink` says
+  ok. A catalog school stores it (an empty field only) and `profile_lookup_at`, so a school with no
+  profile isn't searched again for 30 days. 5 an hour per user plus the daily AI quota. A school not in
+  the catalog gets the link back, unstored. Before the migration nothing is remembered.
 - **Settings is the display name and the theme** (`PATCH /me/settings`). The
   theme defaults to `light` (`20261013000001`); "Device" (`system`) is a
   choice, never the default.
@@ -939,6 +971,25 @@ the database (`20261010*`):
   of the student's first name. `GET /me/messages` lists what was sent to the student; RLS
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
+
+### A student's own messages and calendar events (QA round 10, `20261105000017`)
+
+`routes/studentOwn.ts` (student only, under `/me`). **`POST /me/messages/counselor`** `{ body }` (4,000
+characters, 10 an hour and 30 a day) emails the student's own counselor (`profiles.counselor_id` from the
+row `authenticate` loaded, approved only, fail closed) at their sign-in email with Reply-To the student's
+sign-in email (`lib/studentToCounselor.ts`, template `student-to-counselor`), and keeps a copy as an
+`inbound_messages` row (channel email, party student, `provider_message_id` `app-student:<uuid>`) through the
+service role, so it lists on the counselor's `GET /communication/:id/replies`. `GET /me/messages/counselor`
+reads those rows back for the caller. Email-backed, not an inbox. Without `20261103000002` the email still goes
+and nothing is listed. **`POST/PATCH/DELETE /me/calendar/events`**: `student_calendar_events` (student writes
+their own; anyone who can view the student reads), shown in the calendar feed as kind `milestone`, type
+`personal`, `personal: true`, for the student and for a counselor scoped to that student; 503
+`student_events_unavailable` and no feed rows before the migration. **Deploy order:** either; not in
+`REQUIRED_SCHEMA`. The feed also carries each `student_colleges` deadline (`college:<id>`, kind `deadline`)
+while the school is not decided, skipping one the counselor entered by hand as a deadline with the same school
+and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) now searches the whole eligible,
+open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
+against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
 
 ### CSV import extras (`20261029000003`)
 
@@ -975,6 +1026,27 @@ read `importData: null`. Not in `REQUIRED_SCHEMA`. Test: `test/integration/overv
   bullet is dropped unless it is 8-160 characters, has no first-person word and states no figure the row did not.
   It drafts bullets only, no summary or story, so the essay rule holds; nothing is stored until the student saves.
   Without the migration the routes answer 503 `resume_unavailable`. Tests: `test/unit/resume-draft.test.ts`.
+- **Resume adjuster** (`POST /resume/adjust`, `lib/resumeAdjust.ts`, `lib/applicationText.ts`; the app replaced the
+  builder with it, `student_resumes` is untouched). Body `{ documentId, studentId? }` (strict): the student, or a
+  counselor who can edit them, names a resume file in the student's documents; it is read on the caller's client
+  (`readStoredText`: documents bucket and a safe path only; .txt/.md/.docx through `lib/documentText.ts`, a PDF in
+  the capped worker of `lib/pdfText.ts`, a scan is unreadable) under the task document rule
+  (`documentReadableForTask`). AxIS (`resume-adjust`, Haiku, 10 a minute, under the practice's document-reading
+  switch) gets the resume's lines and the student's Activities and Honors rows as untrusted data and returns line
+  edits; `cleanSuggestions` keeps only an edit whose original is one of the resume's lines (the resume's own text is
+  returned, not the model's copy), adds no number the resume or the rows don't hold, has no first person (unless the
+  line did), and is one per line, at most 15. Answers `{ lines, suggestions }`; nothing stored. Without
+  `ANTHROPIC_API_KEY`, 503 `resume_adjust_unavailable`. Tests: `test/unit/resume-adjust.test.ts`.
+- **Essay files are counted from the essay** (`POST /application/essays/from-document`). PDFs are read too (the capped
+  worker), and AxIS (`essay-body`, Haiku, the document-reading switch, only for a confirmed file the AI may read and
+  not for `essay_kind = 'other'` materials) quotes the first and last words of the essay among a title, the prompt
+  and notes; `locateEssay` finds the quotes in the text (whitespace-loose, never a model offset) and keeps that
+  verbatim slice only when it holds 30+ words and a quarter of the document, else the whole text. The body is that
+  slice, so the database's word count counts the essay; nothing is rewritten. `essayId` fills an existing row (a
+  prompt's row, an empty record) instead of adding one. The app no longer calls `POST /application/supplement-docs`
+  (the route stays). Migration `20261105000071` sets Stanford's eight prompts (unverified, so the app says to check
+  the school's page) and adds both `ai_runs` labels; either deploy order. Tests: `test/unit/application-text.test.ts`,
+  `test/unit/application-sheet-fields.test.ts` (every sheet cell's patch is accepted and reads back).
 - **Coherence's activity alignment** (`lib/activityAlignment.ts`). `GET /application/coherence` adds `alignment`:
   the Activities and Honors sheets sorted into Research, Service and Competitions (by category and by the row's own
   words; hours per year from hours per week x weeks per year), the declared majors, which entries connect to a major
@@ -1374,24 +1446,70 @@ there).
   or `/internal/status` reads the job overdue. `20261024000071` (the review
   queue and `ingest_runs.counts`) goes in after it, either order with the
   code; not in `REQUIRED_SCHEMA` either.
-- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookup.ts`, `20261031000002`, `…000003`): a
-  counselor's button on a College Search card. It reads the college's own site (`fetchPageMeta` in `lib/links.ts`:
-  title, description, og:image, through the same pinned opener) and, for a school with **no photo at all**, stores
-  one: first a Commons file found by the school's name (`titleNamesCollege`: every word of the name must be a **whole
-  word** of the file's title, bar *the/of/at/in/and/for* and *university/college/institute/school*; *State* and
-  *A&M* count as part of the name; the title may leave out "university"/"college" but may not name a different kind
-  (Boston College is not Boston University) or say *State* when the name doesn't (Ohio University is not Ohio
-  State); then `choosePhoto`'s rules; `source = 'commons-search'`), else the site's og:image from the college's own
-  host or a subdomain (JPEG, 3 MB, at least 800 px wide, landscape; `source = 'site'`, `license = 'University
-  website'`, credit = the school, `source_url` = the page, no Commons title; one copy serves both sizes since there
-  is no image library). It never replaces a photo and is not behind the 7-day review gate. The monthly loader
-  leaves these two sources alone when Wikidata has nothing **or its file is rejected** (`isLookupSource`) and
-  replaces them when Wikidata or a pick offers a usable photo; only a `none` pick removes one. `…000003` makes the
-  database enforce the title rule: a `site` row has no Commons title, every other source has a `File:` title. 30 an
-  hour per counselor; 400 with no website on file; 503 only without the service-role key or when the
-  `college_photos` table is missing (before `…000002` the refused insert is caught and the counselor reads "No usable
-  picture was found"). Tests: `test/unit/college-lookup.test.ts` (the lookalike table), `college-photos-run.test.ts`
-  (the loader keeps looked-up rows), `test/integration/college-photos.test.mjs` (the CHECK).
+- **Look up info & photo** (`POST /colleges/:id/lookup`, `lib/collegeLookupRun.ts`, `lib/collegeSiteInfo.ts`,
+  `lib/collegeLookup.ts`, `lib/imageConvert.ts`; `20261031000002`, `…000003`, `20261104000002`): a counselor's button on
+  a College Search card and on the college's page. Body `{ "refresh": true }` is optional; an empty body is a plain
+  lookup. Answers `{ collegeId, site, info, cached, photo, photoNote, infoNote }`. 30 an hour per counselor; 400 with
+  no website on file; 503 only without the service-role key or when `college_photos` is missing.
+  **The facts** (`info`, a `CollegeSiteInfo`; also `siteInfo` on `GET /colleges/:id/extras`): the home page is read once
+  (`fetchSitePage` in `lib/links.ts`: text, links and head from one pinned fetch), then up to three pages of the
+  college's own site are picked from its links (`pickSubpages`: an apply/deadlines page, an admissions page, an
+  academics page; same host or a subdomain, no files, no long query strings, no news/giving/visit pages), read in
+  parallel, and one `runStructured` call (module `link-digest`, Haiku; the practice's AI-summaries switch and the 300/day
+  quota apply) pulls out `about`, `deadlines` by plan (ED, ED2, EA, REA, RD, Rolling, Transfer, Other), `testPolicy`,
+  `essaysRecs` and `programs`. Page text is untrusted: angle brackets are defanged so a page can't close its `<page>`
+  block, and the prompt says so. **The model's word is never taken**: `groundFacts` keeps a fact only when its
+  `evidence` quote (12+ characters) is in the page text after folding case, quotes, dashes and white space, a deadline's
+  date is inside its own quote (and has a digit unless Rolling), and a program name is itself in the text; everything
+  else is dropped, not repaired. With no model (AI off, quota spent, an error) the school's own description is kept
+  and nothing else, and the row says so (`model` null; `infoNote` gives the reason). Saved in `college_site_info`
+  (scraped, apart from the curated `colleges.deadlines` / `college_policies`, which a lookup never touches): fresh for 30
+  days (a day for a no-model row), so a repeat lookup for a school with a photo costs nothing; a no-model result never
+  replaces a row a model read. The facts and the picture hunt run at the same time under one 45 s deadline; each step's
+  failure costs only itself. `lib/collegeLookupRun.ts` holds that order and is unit tested with stand-ins.
+  **The picture**, for a school with **no photo at all**: first a Commons file found by the school's name
+  (`titleNamesCollege`: every word of the name must be a **whole word** of the file's title, bar
+  *the/of/at/in/and/for* and *university/college/institute/school*; *State* and *A&M* count as part of the name; the
+  title may leave out "university"/"college" but may not name a different kind (Boston College is not Boston
+  University) or say *State* when the name doesn't (Ohio University is not Ohio State); then `choosePhoto`'s rules;
+  `source = 'commons-search'`), else the site's share images: every image the head declares (`og:image:secure_url`,
+  `og:image`, `og:image:url`, `twitter:image`, `<link rel="image_src">`), the first three on the college's own host or a
+  subdomain, as a JPEG, PNG or WebP of at most 3 MB (by Content-Type and by magic bytes; `fetchImageAny`), at least
+  800 px wide and landscape as shown (EXIF orientation applied). Each is converted with `sharp` to a real 1280 px and a
+  real 500 px JPEG (transparency flattened, never enlarged, 40 MP input limit, `failOn: "error"`); sharp is loaded
+  lazily and, if it can't load, a JPEG is stored as before (one copy under both names) and a PNG/WebP is refused, so a
+  bad native install can't take the lookup down. `source = 'site'`, `license = 'University website'`, credit = the
+  school, `source_url` = the page, no Commons title. File names stay `-1280.jpg` / `-500.jpg` and the bucket stays
+  JPEG-only, so there is no storage migration. It never replaces a photo and is not behind the 7-day review gate. The
+  monthly loader leaves these two sources alone when Wikidata has nothing **or its file is rejected** (`isLookupSource`)
+  and replaces them when Wikidata or a pick offers a usable photo; only a `none` pick removes one. `…000003` makes the
+  database enforce the title rule: a `site` row has no Commons title, every other source has a `File:` title.
+  **Deploy order:** `20261104000002` either order with the code (without it the lookup still reads the site and finds a
+  photo but saves nothing, and `siteInfo` reads null); not in `REQUIRED_SCHEMA`. Known limits: some university sites
+  block bots by User-Agent (the lookup reads `Meridies-LinkReader/1.0`, identifies itself, honours no robots.txt, and
+  fetches at most four pages a click); a scraped fact is only as right as the school's page, which is why the app says
+  "scraped, check the school's site". Tests: `test/unit/college-site-info.test.ts`, `college-lookup-run.test.ts`,
+  `image-convert.test.ts`, `college-lookup.test.ts` (the lookalike table, candidates, any-format fetch),
+  `college-photos-run.test.ts` (the loader keeps looked-up rows), `test/integration/college-lookup.test.mjs` (the table's
+  RLS and CHECKs, and the route's cache), `college-photos.test.mjs` (the CHECK).
+- **Logos, and lookups nobody has to click** (`lib/collegeLogos.ts`, `lib/collegeMediaLookup.ts`,
+  `20261105000001`). A school's logo is the icon its own site declares (`<link rel="apple-touch-icon" | "icon">`,
+  read by `parsePageMeta`), fetched through `fetchIconImage` (lib/links.ts: PNG/JPEG/WebP by magic bytes, 512 KB,
+  own host or subdomain, never SVG or ICO, at least 48 px), copied into the public `college-logos` bucket at
+  `<unitid>/logo-<sha1>.<ext>` and recorded in `college_logos` (a row with no path = looked, none found;
+  `checked_at` keeps the automatic lookup off for a week). Served as `logoUrl` on search cards, `/colleges/suggest`,
+  event college refs, and `collegeLogoUrl` on board rows and recommendations (which also carry `collegePhoto`
+  now). We copy rather than hotlink or use a favicon service so viewers' browsers never tell a third party which
+  schools they look at. `POST /:id/lookup` also stores the logo (`lookUpLogoOnly`) and answers `logoUrl`. `GET
+  /colleges/media?ids=` (any signed-in user, 30 a minute) answers each school's photo and logo and queues up to six
+  missing ones for a background lookup (`lookUpMediaSoon`: two at a time per instance, 100 waiting at most, no
+  model, so no AI budget), naming them in `lookingUp`. **Backfill:** `npx tsx --env-file=.env
+  scripts/ingest/college-media.ts [--dry-run] [--limit N] [--only ids] [--retry]` looks up every school missing
+  either, most-listed first, a second apart. **Deploy order:** either; a missing table reads as no logos (five
+  minutes), not in `REQUIRED_SCHEMA`. Tests: `test/unit/college-logos.test.ts`.
+- **`GET /colleges/suggest?q=`**: the "Add a school" typeahead. One `search_colleges` call (8 rows) and three
+  small reads (name/place/acceptance rate, Scorecard's admit rate, photo, logo), instead of the full search's
+  card extras.
 - **Tests**: `college-photos*.test.ts` (rules, client, run, serving, the
   review gate, the version check, text holds, pins, the store without the
   migration, and `csvCell`), `test/integration/college-photos.test.mjs`
@@ -1730,7 +1848,7 @@ private `axis-attachments` bucket, minted on the counselor's own token under
 `attachmentIds` when it sends the message (`/chat` or `/axis`), which ties
 them to that message. Only this chat's unclaimed files can be named.
 
-- **Read once, then sent as text** (`20261104000001`, AxIS security PR A1).
+- **Read once, then sent as text** (`20261108000001`, AxIS security PR A1).
   The turn a file arrives in, it goes to the model as a file: PDFs as
   `document` blocks, images as `image` blocks, text as a plain-text
   `document`, after a line saying they are the counselor's material and not
@@ -1782,7 +1900,7 @@ them to that message. Only this chat's unclaimed files can be named.
   is safe: before it, the upload route answers
   `503 { code: "attachments_unavailable" }` and messages are sent without
   files as before. Not in `REQUIRED_SCHEMA`, for the same reason as
-  `20261018000001`. `20261104000001_axis_file_text.sql` (the stored text,
+  `20261018000001`. `20261108000001_axis_file_text.sql` (the stored text,
   its grants, the `axis-attachment` label): either order too. Without it
   nothing is stored and every turn sends the files as files (a missing column
   reads as "not read yet"); the previous build writes only the columns it

@@ -853,7 +853,10 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         email,
         fullName: String(c.student_name ?? "").trim() || null,
         gradYear: (c.grad_year as number | null) ?? null,
-        timezone: request.profile.timezone,
+        // The student answers this themselves in onboarding. The counselor's own
+        // zone used to go here, and accepting the invitation copied it into the
+        // student's blank profile, so the Basics step arrived already answered.
+        timezone: null,
         source: "single",
       });
 

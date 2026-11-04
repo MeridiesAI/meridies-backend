@@ -85,7 +85,7 @@ export type AiModule =
   | "research-match"
   // AxIS on Claude Haiku 5.5 (lib/axis): the turn, the adjudicator, the memory fold, the cache pre-warm.
   | "axis" | "axis-verify" | "axis-memory" | "axis-warm"
-  // AxIS reading a chat file once: the transcription of an image or a scanned PDF (20261104000001).
+  // AxIS reading a chat file once: the transcription of an image or a scanned PDF (20261108000001).
   | "axis-attachment"
   // Events Hub: finding a college's upcoming events on its own site (lib/eventsDiscovery.ts).
   | "events-discovery"
@@ -94,7 +94,11 @@ export type AiModule =
   // Resume builder: bullets drafted from a student's own activity rows (lib/resume.ts).
   | "resume"
   // A counselor's pasted meeting notes drafted into a summary and action items (lib/meetingSummary.ts).
-  | "meeting-summary";
+  | "meeting-summary"
+  // Application page: where the essay sits in an uploaded file (lib/applicationText.ts), and the Resume adjuster (lib/resumeAdjust.ts).
+  | "essay-body" | "resume-adjust"
+  // AI help filling the questionnaire's tables from typed words or a photo (lib/intakeFill.ts).
+  | "intake-fill";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an

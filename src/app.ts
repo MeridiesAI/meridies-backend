@@ -85,6 +85,9 @@ import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
+import studentOwnRoutes from "./routes/studentOwn.js";
+import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
+import intakeFillRoutes from "./routes/intakeFill.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -136,7 +139,15 @@ export function buildApp() {
   });
 
   // Paged lists (GET /colleges/search) carry their total and next cursor in headers.
-  app.register(cors, { origin: corsOrigins, credentials: true, exposedHeaders: ["X-Total-Count", "X-Next-Cursor"] });
+  // maxAge: the browser keeps a preflight answer for 10 minutes, so the app's
+  // direct PATCH/DELETE calls don't pay an OPTIONS round trip each time
+  // (browsers otherwise keep it for about 5 seconds).
+  app.register(cors, {
+    origin: corsOrigins,
+    credentials: true,
+    exposedHeaders: ["X-Total-Count", "X-Next-Cursor"],
+    maxAge: 600,
+  });
   app.register(rateLimitPlugin);
   // Interactive API reference at /docs (spec at /docs/json). Registered before
   // the routes so every route lands in the spec. Most routes validate with zod
@@ -235,6 +246,12 @@ export function buildApp() {
   app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(stripeWebhookRoutes, { prefix: "/webhooks" });
   app.register(internalRoutes, { prefix: "/internal" });
+  // A student messaging their counselor, and their own calendar events (QA round 10).
+  app.register(studentOwnRoutes, { prefix: "/me" });
+  // QA round 10: a high school's published profile, found on request.
+  app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
+  // AI help for the questionnaire's tables (POST /me/intake/fill).
+  app.register(intakeFillRoutes);
   startSweepInterval(app);
   startExtractionRecovery(app);
 

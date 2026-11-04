@@ -47,7 +47,7 @@ import { documentReadableForTask, toAiDoc, unconfirmedAttachedNote } from "../li
 import { essayBodyReadable } from "../lib/context/sections.js";
 import { composeTrackerNote } from "../lib/trackerNote.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
-import { enforceRateLimit, limit } from "../lib/limits.js";
+import { enforceRateLimit, limit, startLimit } from "../lib/limits.js";
 import { checkLiveDocuments, holdsNoActivity, isGrantProblem, liveStatusOf, type LiveFileCheck } from "../lib/liveDocuments.js";
 import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
@@ -368,6 +368,12 @@ export default async function taskRoutes(app: FastifyInstance) {
           throw forbidden("Only your counselor can choose what you see");
         }
         const sb = studentTaskBody.parse(request.body);
+        // A new to-do can't be due in the past. The day before UTC's is allowed,
+        // so a student west of UTC can still pick their own today.
+        if (sb.dueDate) {
+          const earliest = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+          if (sb.dueDate < earliest) throw badRequest("Pick today or a later date");
+        }
         const studentId = request.auth.userId;
         const { data, error } = await request.db
           .from("deliverables")
@@ -537,8 +543,10 @@ export default async function taskRoutes(app: FastifyInstance) {
 
   app.patch(
     "/:id",
-    { preHandler: [app.authenticate, limit("tasks:update", 240, 60)] },
+    { preHandler: app.authenticate },
     async (request) => {
+      // The limiter's round trip runs alongside the reads; it answers before the update.
+      const withinLimit = startLimit(request, "tasks:update", 240, 60);
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const b = patchTaskBody.parse(request.body);
 
@@ -601,6 +609,8 @@ export default async function taskRoutes(app: FastifyInstance) {
         }
       }
 
+      await withinLimit();
+
       const update: Row = {};
       if (b.title !== undefined) update.title = b.title;
       if (b.instructions !== undefined) update.instructions = b.instructions;
@@ -621,16 +631,18 @@ export default async function taskRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
 
-      await request.db.from("progress_events").insert({
-        student_id: studentId,
-        deliverable_id: id,
-        entity_type: "deliverable",
-        entity_id: id,
-        event: b.status ? "status-changed" : "edited",
-        actor_id: request.auth.userId,
-      });
-
-      const [dto] = await hydrate(request, [data as Row]);
+      // The activity log and the answer's stages and files are independent reads and writes: side by side.
+      const [, [dto]] = await Promise.all([
+        request.db.from("progress_events").insert({
+          student_id: studentId,
+          deliverable_id: id,
+          entity_type: "deliverable",
+          entity_id: id,
+          event: b.status ? "status-changed" : "edited",
+          actor_id: request.auth.userId,
+        }),
+        hydrate(request, [data as Row]),
+      ]);
 
       // Sharing a hidden task is the moment it is assigned: do what creating
       // a visible one does (mirror its dated stages, tell the student).
@@ -916,20 +928,32 @@ export default async function taskRoutes(app: FastifyInstance) {
     }
   );
 
-  /** The counselor asks AxIS to check the latest handed-in file again. */
+  /**
+   * AxIS checks the latest handed-in file again: the counselor on any task,
+   * the student on their own task whose file was handed back (after fixing
+   * their name, say), under the same limits as a hand-in and with no notices.
+   */
   app.post(
     "/:id/review",
     {
       preHandler: [
         app.authenticate,
-        requireRole("counselor"),
         limit("ai:submission-review", 20, 60, "You're running checks very fast."),
       ],
     },
     async (request) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const b = z.object({ documentId: z.string().uuid().optional() }).strict().parse(request.body ?? {});
-      await loadTaskForSubmission(request, id);
+      const role = request.profile.role;
+      if (role !== "counselor" && role !== "student") throw forbidden("Only counselors and students can do that");
+      const task = await loadTaskForSubmission(request, id);
+      const quiet = role === "student";
+      if (quiet) {
+        if (String(task.student_id) !== request.auth.userId) throw forbidden("Only your own tasks");
+        if (task.status === "complete") throw conflict("This task is already done.");
+        await enforceRateLimit(`hand-in:task:${id}`, HAND_INS_PER_TASK_HOUR, 3600, "That's a lot of checks for one task. Try again in an hour.");
+        await enforceRateLimit(`hand-in:student:${request.auth.userId}`, HAND_INS_PER_STUDENT_DAY, 86_400, "That's a lot of checks for one day. Try again tomorrow.");
+      }
 
       let builder = request.db
         .from("deliverable_documents")
@@ -942,7 +966,7 @@ export default async function taskRoutes(app: FastifyInstance) {
       const latest = subs?.[0];
       if (!latest) throw badRequest("Nothing has been handed in on this task yet");
 
-      const review = await startSubmissionReview(request, { taskId: id, documentId: String(latest.document_id) });
+      const review = await startSubmissionReview(request, { taskId: id, documentId: String(latest.document_id) }, { quiet });
       return { task: await freshTask(request, id), review };
     }
   );

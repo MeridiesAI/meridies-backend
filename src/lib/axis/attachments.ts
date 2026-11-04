@@ -15,7 +15,7 @@
  *
  * Owner-only: rows and objects are read and written on the counselor's own
  * token, so RLS and the bucket's policies decide. The one exception is the
- * stored text, which clients can't write (20261104000001): the service client
+ * stored text, which clients can't write (20261108000001): the service client
  * writes it, only to rows the counselor's own read returned.
  */
 import { randomUUID } from "node:crypto";
@@ -243,7 +243,7 @@ export async function fileBlocks(request: FastifyRequest, conversationId: string
       .order("created_at", { ascending: false })
       .limit(MAX_FILES_IN_TURN);
   let res = await query(READ_COLUMNS);
-  // Before 20261104000001 nothing is stored: every file goes as a file, as it always did.
+  // Before 20261108000001 nothing is stored: every file goes as a file, as it always did.
   if (res.error && isSchemaMissing(res.error)) res = await query(COLUMNS);
   if (res.error) {
     if (!isSchemaMissing(res.error)) request.log.warn({ code: res.error.code }, "axis attachments not read");
@@ -379,7 +379,7 @@ export function withFiles(text: string, files: FileBlocks): string | Anthropic.M
   return [{ type: "text", text: filesPreamble(files.names) }, ...files.blocks, { type: "text", text }];
 }
 
-// ---- Reading a file once (20261104000001) ----
+// ---- Reading a file once (20261108000001) ----
 
 /** The most text stored for one file; past it the text is cut and marked so. */
 export const STORED_TEXT_MAX = 200_000;

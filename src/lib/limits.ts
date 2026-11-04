@@ -124,6 +124,32 @@ export async function enforceQuota(
 }
 
 /**
+ * The same per-user limit as `limit()`, started inside a handler so its
+ * database round trip runs alongside the handler's first reads instead of
+ * before them. Call the returned function before anything is written: it
+ * resolves when the request is within its limit and throws the same 429
+ * otherwise. Nothing is weaker: the count is the same key `limit()` uses, and
+ * no write happens until it has answered.
+ *
+ *   const withinLimit = startLimit(request, "activities:update", 240, 60);
+ *   const row = await readTheRow();       // runs while the limiter answers
+ *   await withinLimit();
+ *   await writeTheRow();
+ */
+export function startLimit(
+  request: { auth: { userId: string } },
+  name: string,
+  max: number,
+  windowSeconds: number,
+  message?: string
+): () => Promise<void> {
+  const pending = enforceRateLimit(`${name}:${request.auth.userId}`, max, windowSeconds, message);
+  // Handled when awaited; this keeps an early 429 from counting as unhandled meanwhile.
+  pending.catch(() => {});
+  return () => pending;
+}
+
+/**
  * Per-user, per-route limiter for use as a preHandler. The key is scoped to the
  * authenticated user, so one abusive account cannot exhaust everyone's budget.
  */

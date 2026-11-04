@@ -135,7 +135,7 @@ if (fixtureDir || dryRun) {
         return read(recheck && thumbCalls++ > 0 ? "commons-imageinfo-500-recheck.json" : "commons-imageinfo-500.json");
       },
       download: async (url) => {
-        if (!isAllowedDownloadUrl(url)) throw new Error("refused: not an upload.wikimedia.org URL");
+        if (!isAllowedDownloadUrl(url)) throw new Error("refused: not a Wikimedia upload or thumbnail URL");
         return tiny;
       },
       picks,

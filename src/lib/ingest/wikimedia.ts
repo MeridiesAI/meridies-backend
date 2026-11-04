@@ -13,6 +13,13 @@
 export const WDQS = "https://query.wikidata.org/sparql";
 export const COMMONS_API = "https://commons.wikimedia.org/w/api.php";
 export const UPLOAD_HOST = "upload.wikimedia.org";
+/**
+ * Commons' imageinfo answers a file's original from upload.wikimedia.org and its resized copies
+ * ("thumburl") from thumb.wikimedia.org. Both serve the JPEG directly; these two exact hosts are
+ * the only ones a photo is ever downloaded from.
+ */
+export const THUMB_HOST = "thumb.wikimedia.org";
+const DOWNLOAD_HOSTS: ReadonlySet<string> = new Set([UPLOAD_HOST, THUMB_HOST]);
 /** Wikimedia's User-Agent policy asks for a contact: the team inbox, never a person's. */
 export const USER_AGENT = "MeridiesCatalog/1.0 (https://meridiesai.com; team@meridiesai.com) college-photos";
 /** A stored copy is at most this big; the bucket refuses more as well. */
@@ -36,7 +43,7 @@ type Fetch = typeof fetch;
 type Sleep = (ms: number) => Promise<void>;
 const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Only https://upload.wikimedia.org/..., never a look-alike host, a port, or credentials. */
+/** Only https://upload.wikimedia.org/... or https://thumb.wikimedia.org/..., never a look-alike host, a port, or credentials. */
 export function isAllowedDownloadUrl(u: string): boolean {
   let url: URL;
   try {
@@ -44,7 +51,7 @@ export function isAllowedDownloadUrl(u: string): boolean {
   } catch {
     return false;
   }
-  return url.protocol === "https:" && url.hostname === UPLOAD_HOST && url.port === "" && !url.username && !url.password;
+  return url.protocol === "https:" && DOWNLOAD_HOSTS.has(url.hostname) && url.port === "" && !url.username && !url.password;
 }
 
 function assertApiUrl(u: URL): void {
@@ -176,7 +183,7 @@ export function wikimediaClient(opts: { fetch?: Fetch; sleep?: Sleep; minGapMs?:
     },
 
     async download(u) {
-      if (!isAllowedDownloadUrl(u)) throw new Error("refused: not an upload.wikimedia.org URL");
+      if (!isAllowedDownloadUrl(u)) throw new Error("refused: not a Wikimedia upload or thumbnail URL");
       for (let attempt = 0; ; attempt++) {
         const res = await doFetch(u, {
           redirect: "error",
@@ -190,7 +197,7 @@ export function wikimediaClient(opts: { fetch?: Fetch; sleep?: Sleep; minGapMs?:
           }
           throw new Error(`download returned ${res.status}`);
         }
-        if (res.url && !isAllowedDownloadUrl(res.url)) throw new Error("refused: download left upload.wikimedia.org");
+        if (res.url && !isAllowedDownloadUrl(res.url)) throw new Error("refused: download left Wikimedia's upload and thumbnail hosts");
         return readJpeg(res);
       }
     },

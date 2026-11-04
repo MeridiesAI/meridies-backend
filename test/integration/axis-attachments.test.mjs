@@ -77,7 +77,7 @@ check("no one else can open it", peek.status === 404, `status ${peek.status}`);
 const rows = await rest(other.token, "GET", `/rest/v1/ai_attachments?select=id&id=eq.${ticket.body.attachment.id}`);
 check("no one else can read its row", (rows.body ?? []).length === 0);
 
-// A file's stored text (20261104000001) is the server's to write: the counselor's own token can't plant
+// A file's stored text (20261108000001) is the server's to write: the counselor's own token can't plant
 // text the model would later read as the file.
 const fileId = ticket.body.attachment.id;
 const textOf = () => sql(`select coalesce(extracted_text, '<null>') || '|' || coalesce(extract_kind, '<null>') || '|' || extract_cut from public.ai_attachments where id = '${fileId}'`);

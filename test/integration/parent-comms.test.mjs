@@ -15,6 +15,8 @@ const tag = Date.now();
 const C = await user("pc-counselor");
 const X = await user("pc-outsider");
 const S = await studentOf(C, "pc-student");
+// No quiet hours, so the dispatch below runs whatever the time of day in CI (as composer-recipients does).
+await sql(`insert into public.accountability_settings (counselor_id, timezone, quiet_hours_start, quiet_hours_end) values ('${C.id}', 'UTC', null, null)`);
 const guardianId = await sql(
   `with g as (insert into public.guardians (student_id, full_name, email, phone) values ('${S.id}', 'Pat Parent', 'pat-${tag}@families.test', '(415) 555-0142') returning id) select id from g`
 );

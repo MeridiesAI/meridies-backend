@@ -12,7 +12,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z, type ZodTypeAny } from "zod";
 import { badRequest, fromPostgrest, notFound } from "./errors.js";
 import { resolveStudentId } from "./guards.js";
-import { limit } from "./limits.js";
+import { limit, startLimit } from "./limits.js";
 
 const idParam = z.object({ id: z.string().uuid() });
 const listQuery = z.object({ studentId: z.string().uuid().optional() });
@@ -184,8 +184,10 @@ export function registerCollection<T extends ZodTypeAny>(
 
   app.post(
     `/${path}`,
-    { preHandler: [app.authenticate, limit(`${path}:create`, 120, 60)] },
+    { preHandler: app.authenticate },
     async (request, reply) => {
+      // The limiter's round trip runs alongside the reads below; it answers before the insert.
+      const withinLimit = startLimit(request, `${path}:create`, 120, 60);
       const { studentId, rest } = splitStudentId(request.body);
       const parsed = (body as ZodTypeAny).parse(rest) as Record<string, unknown>;
       const student = await resolveStudentId(request, studentId, "edit");
@@ -201,6 +203,7 @@ export function registerCollection<T extends ZodTypeAny>(
       const withKey = keyed && !requestIdMissing(table);
 
       await opts.beforeWrite?.(request, student, parsed, "insert");
+      await withinLimit();
 
       const insert = (values: Record<string, unknown>) =>
         request.db.from(table).insert(values).select("*").single();
@@ -227,8 +230,9 @@ export function registerCollection<T extends ZodTypeAny>(
 
   app.patch(
     `/${path}/:id`,
-    { preHandler: [app.authenticate, limit(`${path}:update`, 240, 60)] },
+    { preHandler: app.authenticate },
     async (request) => {
+      const withinLimit = startLimit(request, `${path}:update`, 240, 60);
       const { id } = idParam.parse(request.params);
       const { studentId: expected } = listQuery.parse(request.query ?? {});
       const { rest } = splitStudentId(request.body);
@@ -248,6 +252,7 @@ export function registerCollection<T extends ZodTypeAny>(
 
       await resolveStudentId(request, existing.student_id as string, "edit");
       await opts.beforeWrite?.(request, existing.student_id as string, parsed, "update");
+      await withinLimit();
 
       const { data, error } = await request.db
         .from(table)
@@ -270,8 +275,9 @@ export function registerCollection<T extends ZodTypeAny>(
 
   app.delete(
     `/${path}/:id`,
-    { preHandler: [app.authenticate, limit(`${path}:delete`, 120, 60)] },
+    { preHandler: app.authenticate },
     async (request) => {
+      const withinLimit = startLimit(request, `${path}:delete`, 120, 60);
       const { id } = idParam.parse(request.params);
       const { studentId: expected } = listQuery.parse(request.query ?? {});
 
@@ -285,6 +291,7 @@ export function registerCollection<T extends ZodTypeAny>(
 
       await resolveStudentId(request, existing.student_id as string, "edit");
       await opts.beforeDelete?.(request, existing.student_id as string, id);
+      await withinLimit();
 
       const { data: removed, error } = await request.db.from(table).delete().eq("id", id).select("id");
       if (error) throw fromPostgrest(error);
