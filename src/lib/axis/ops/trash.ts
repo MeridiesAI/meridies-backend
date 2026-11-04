@@ -47,7 +47,6 @@ export const TRASH_COVERED: ReadonlySet<string> = new Set([
   "files.delete_link",
   "outcomes.delete",
   "referrals.delete",
-  "pipeline.delete_stage",
   "pipeline.delete_contact",
   "management.delete_task",
 ]);
@@ -136,3 +135,10 @@ export function restoreSentence(reason: string): string {
 /** How long a confirmed delete can be restored. */
 export const RESTORE_DAYS = 30;
 export const restoreUntil = (confirmedAt: Date): string => new Date(confirmedAt.getTime() + RESTORE_DAYS * 86_400_000).toISOString();
+
+/** Whether a confirmed delete's 30 days are up (its result's `restoreUntil` has passed). */
+export function restoreExpired(result: unknown, now = Date.now()): boolean {
+  const until = result && typeof result === "object" ? (result as Record<string, unknown>).restoreUntil : null;
+  const at = typeof until === "string" ? Date.parse(until) : Number.NaN;
+  return Number.isFinite(at) && at <= now;
+}

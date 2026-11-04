@@ -7,12 +7,17 @@
 --                             x-meridies-axis-action header (the API forwards it for a delete the counselor confirmed
 --                             on an AxIS card); without the header it does nothing
 --   public.axis_trash_restore(action)  the card's Restore: the counselor who confirmed the delete, within 30 days,
---                             all or nothing, same ids, parents before children
+--                             all or nothing, same ids, every access check before anything goes back, parents
+--                             before children (a row waits for its parent), never over a key set since
 --   public.axis_trash_purge(), public.axis_trash_forget(user)  service role: the hourly purge and account deletion
 --
 -- The header is a client-settable PostgREST header, so the database trusts nothing about it beyond "keep a copy":
 -- a forged mark keeps the forger's own deletes (deleted_by is auth.uid()), and only that account can restore them,
 -- under the access rules, while still an approved counselor.
+--
+-- Three rows come back changed, so a restore can't undo what happened since: an active sequence enrollment comes
+-- back paused, a school the student had enrolled in comes back accepted when they've enrolled elsewhere since, and a
+-- meeting comes back without its calendar pointer (meetings.delete removed the calendar event and told the families).
 --
 -- Restoring sends nothing and changes nothing on the way back in: the triggers listed at the end of this file skip
 -- while a restore runs (meridies.axis_restore = 'on'): the one that notifies (student_colleges_notify_counselor),
@@ -40,13 +45,18 @@ create table if not exists private.axis_trash (
 );
 create index if not exists axis_trash_action_idx on private.axis_trash (action_id, id);
 create index if not exists axis_trash_deleted_at_idx on private.axis_trash (deleted_at);
+create index if not exists axis_trash_deleted_by_idx on private.axis_trash (deleted_by);
+create index if not exists axis_trash_student_idx on private.axis_trash (student_id) where student_id is not null;
 alter table private.axis_trash enable row level security;
 revoke all on private.axis_trash from public, anon, authenticated;
 
+-- student_col: the column naming the student the row is about, whatever the rule. A restorer who can no longer
+-- edit that student gets nothing back; it also fills axis_trash.student_id (account deletion and export).
 create table if not exists private.axis_trash_rules (
-  table_name text primary key,
-  rule       text not null check (rule in ('student', 'practice', 'owner', 'contact')),
-  columns    text[] not null check (cardinality(columns) between 1 and 2)
+  table_name  text primary key,
+  rule        text not null check (rule in ('student', 'practice', 'owner', 'parent')),
+  columns     text[] not null check (cardinality(columns) between 1 and 2),
+  student_col text
 );
 alter table private.axis_trash_rules enable row level security;
 revoke all on private.axis_trash_rules from public, anon, authenticated;
@@ -57,12 +67,13 @@ create or replace function private.axis_trash_capture()
 returns trigger
 language plpgsql security definer set search_path = '' as $$
 declare
-  v_hdr    text;
-  v_uid    uuid;
-  v_old    jsonb := to_jsonb(old);
-  v_pk     jsonb;
-  v_nulled jsonb := '{}'::jsonb;
-  v_col    text;
+  v_hdr     text;
+  v_uid     uuid;
+  v_old     jsonb;
+  v_pk      jsonb;
+  v_nulled  jsonb := '{}'::jsonb;
+  v_col     text;
+  v_student uuid;
 begin
   begin
     v_hdr := nullif(current_setting('request.headers', true), '')::json ->> 'x-meridies-axis-action';
@@ -73,14 +84,16 @@ begin
   if v_hdr is null or v_uid is null or v_hdr !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
     return case when tg_op = 'DELETE' then old else new end;
   end if;
+  v_old := to_jsonb(old);
 
   select coalesce(jsonb_object_agg(a.attname, v_old -> a.attname::text), '{}'::jsonb) into v_pk
   from pg_index i join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey)
   where i.indrelid = tg_relid and i.indisprimary;
+  select nullif(v_old ->> r.student_col, '')::uuid into v_student from private.axis_trash_rules r where r.table_name = tg_table_name;
 
   if tg_op = 'DELETE' then
     insert into private.axis_trash (action_id, table_name, row_pk, row_data, kind, student_id, deleted_by)
-    values (v_hdr::uuid, tg_table_name, v_pk, v_old, 'delete', nullif(v_old ->> 'student_id', '')::uuid, v_uid);
+    values (v_hdr::uuid, tg_table_name, v_pk, v_old, 'delete', v_student, v_uid);
     return old;
   end if;
 
@@ -93,7 +106,7 @@ begin
   end loop;
   if v_nulled <> '{}'::jsonb then
     insert into private.axis_trash (action_id, table_name, row_pk, row_data, kind, student_id, deleted_by)
-    values (v_hdr::uuid, tg_table_name, v_pk, v_nulled, 'set-null', nullif(v_old ->> 'student_id', '')::uuid, v_uid);
+    values (v_hdr::uuid, tg_table_name, v_pk, v_nulled, 'set-null', v_student, v_uid);
   end if;
   return new;
 end;
@@ -129,70 +142,73 @@ revoke all on function private.attach_axis_trash(regclass, text[], boolean) from
 --   student  [student col, fallback owner col]: counselor_can_edit_student; with no student, the owner col is the caller
 --   practice [firm col, counselor col]:         crm_can_access
 --   owner    [col]:                              the col is the caller
---   contact  [contact col]:                      crm_can_access on the contact's workspace
+--   parent   [key cols]:                         every parent the row names (live, or in this action's trash) passes
+--                                                its own rule: for rows that go with their parent whoever owns them
+--                                                (a colleague's saved copy of a firm event, a card's packages)
+-- and its student column: a row about a student comes back only while the restorer can edit that student, whatever
+-- its rule. (pipeline_stages aren't covered: AxIS doesn't delete a stage, whose delete moves its cards.)
 
-insert into private.axis_trash_rules (table_name, rule, columns) values
-  ('activities', 'student', '{student_id}'),
-  ('admission_outcomes', 'student', '{student_id,counselor_id}'),
-  ('alumni_records', 'student', '{student_id}'),
-  ('award_appeals', 'student', '{student_id}'),
-  ('award_letter_items', 'student', '{student_id}'),
-  ('award_letters', 'student', '{student_id}'),
-  ('awards', 'student', '{student_id}'),
-  ('calendar_event_type_assignments', 'owner', '{owner_id}'),
-  ('calendar_event_types', 'owner', '{owner_id}'),
-  ('calendar_events', 'owner', '{owner_id}'),
-  ('college_webinar_tips', 'practice', '{firm_id,created_by}'),
-  ('consultant_tasks', 'practice', '{firm_id,assignee_id}'),
-  ('counselor_work_items', 'owner', '{counselor_id}'),
-  ('courses', 'student', '{student_id}'),
-  ('deadlines', 'student', '{student_id}'),
-  ('deliverable_documents', 'student', '{student_id}'),
-  ('deliverable_stages', 'student', '{student_id}'),
-  ('deliverable_tracker_checks', 'student', '{student_id}'),
-  ('deliverables', 'student', '{student_id}'),
-  ('document_links', 'student', '{student_id,owner_id}'),
-  ('documents', 'student', '{student_id,owner_id}'),
-  ('draft_quality_checks', 'student', '{student_id}'),
-  ('email_templates', 'owner', '{counselor_id}'),
-  ('essay_marks', 'student', '{student_id}'),
-  ('essay_versions', 'student', '{student_id}'),
-  ('essays', 'student', '{student_id}'),
-  ('family_reports', 'student', '{student_id}'),
-  ('folders', 'student', '{student_id,owner_id}'),
-  ('guardians', 'student', '{student_id}'),
-  ('hub_event_saves', 'owner', '{profile_id}'),
-  ('hub_events', 'practice', '{firm_id,created_by}'),
-  ('inbound_messages', 'practice', '{firm_id,counselor_id}'),
-  ('library_resource_pins', 'practice', '{firm_id,counselor_id}'),
-  ('library_resources', 'practice', '{firm_id,counselor_id}'),
-  ('meeting_attendees', 'student', '{student_id}'),
-  ('meeting_notes', 'student', '{student_id}'),
-  ('meetings', 'student', '{student_id,counselor_id}'),
-  ('messaging_routes', 'owner', '{counselor_id}'),
-  ('narrative_flags', 'student', '{student_id}'),
-  ('net_price_estimates', 'student', '{student_id}'),
-  ('opportunity_matches', 'student', '{student_id}'),
-  ('parent_alerts', 'student', '{student_id}'),
-  ('pipeline_activities', 'practice', '{firm_id,counselor_id}'),
-  ('pipeline_contacts', 'practice', '{firm_id,counselor_id}'),
-  ('pipeline_followups', 'practice', '{firm_id,counselor_id}'),
-  ('pipeline_packages', 'contact', '{contact_id}'),
-  ('pipeline_payments', 'contact', '{contact_id}'),
-  ('pipeline_sequence_enrollments', 'practice', '{firm_id,counselor_id}'),
-  ('pipeline_stages', 'practice', '{firm_id,counselor_id}'),
-  ('pipeline_unsubscribe_tokens', 'contact', '{contact_id}'),
-  ('progress_events', 'student', '{student_id}'),
-  ('red_flags', 'student', '{student_id}'),
-  ('referrals', 'owner', '{counselor_id}'),
-  ('scholarship_matches', 'student', '{student_id}'),
-  ('student_aid_checklist', 'student', '{student_id}'),
-  ('student_college_fit', 'student', '{student_id}'),
-  ('student_colleges', 'student', '{student_id}'),
-  ('student_status_overrides', 'student', '{student_id}'),
-  ('supplement_docs', 'student', '{student_id,owner_id}'),
-  ('test_scores', 'student', '{student_id}')
-on conflict (table_name) do update set rule = excluded.rule, columns = excluded.columns;
+insert into private.axis_trash_rules (table_name, rule, columns, student_col) values
+  ('activities', 'student', '{student_id}', 'student_id'),
+  ('admission_outcomes', 'student', '{student_id,counselor_id}', 'student_id'),
+  ('alumni_records', 'student', '{student_id}', 'student_id'),
+  ('award_appeals', 'student', '{student_id}', 'student_id'),
+  ('award_letter_items', 'student', '{student_id}', 'student_id'),
+  ('award_letters', 'student', '{student_id}', 'student_id'),
+  ('awards', 'student', '{student_id}', 'student_id'),
+  ('calendar_event_type_assignments', 'owner', '{owner_id}', null),
+  ('calendar_event_types', 'owner', '{owner_id}', null),
+  ('calendar_events', 'owner', '{owner_id}', 'student_id'),
+  ('college_webinar_tips', 'practice', '{firm_id,created_by}', null),
+  ('consultant_tasks', 'practice', '{firm_id,assignee_id}', 'student_id'),
+  ('counselor_work_items', 'owner', '{counselor_id}', 'student_id'),
+  ('courses', 'student', '{student_id}', 'student_id'),
+  ('deadlines', 'student', '{student_id}', 'student_id'),
+  ('deliverable_documents', 'student', '{student_id}', 'student_id'),
+  ('deliverable_stages', 'student', '{student_id}', 'student_id'),
+  ('deliverable_tracker_checks', 'student', '{student_id}', 'student_id'),
+  ('deliverables', 'student', '{student_id}', 'student_id'),
+  ('document_links', 'student', '{student_id,owner_id}', 'student_id'),
+  ('documents', 'student', '{student_id,owner_id}', 'student_id'),
+  ('draft_quality_checks', 'student', '{student_id}', 'student_id'),
+  ('email_templates', 'owner', '{counselor_id}', null),
+  ('essay_marks', 'student', '{student_id}', 'student_id'),
+  ('essay_versions', 'student', '{student_id}', 'student_id'),
+  ('essays', 'student', '{student_id}', 'student_id'),
+  ('family_reports', 'student', '{student_id}', 'student_id'),
+  ('folders', 'student', '{student_id,owner_id}', 'student_id'),
+  ('guardians', 'student', '{student_id}', 'student_id'),
+  ('hub_event_saves', 'parent', '{event_id}', null),
+  ('hub_events', 'practice', '{firm_id,created_by}', null),
+  ('inbound_messages', 'practice', '{firm_id,counselor_id}', 'student_id'),
+  ('library_resource_pins', 'practice', '{firm_id,counselor_id}', 'student_id'),
+  ('library_resources', 'practice', '{firm_id,counselor_id}', null),
+  ('meeting_attendees', 'student', '{student_id}', 'student_id'),
+  ('meeting_notes', 'student', '{student_id}', 'student_id'),
+  ('meetings', 'student', '{student_id,counselor_id}', 'student_id'),
+  ('messaging_routes', 'parent', '{contact_id,guardian_id}', 'student_id'),
+  ('narrative_flags', 'student', '{student_id}', 'student_id'),
+  ('net_price_estimates', 'student', '{student_id}', 'student_id'),
+  ('opportunity_matches', 'student', '{student_id}', 'student_id'),
+  ('parent_alerts', 'student', '{student_id}', 'student_id'),
+  ('pipeline_activities', 'practice', '{firm_id,counselor_id}', null),
+  ('pipeline_contacts', 'practice', '{firm_id,counselor_id}', 'student_id'),
+  ('pipeline_followups', 'practice', '{firm_id,counselor_id}', null),
+  ('pipeline_packages', 'parent', '{contact_id}', null),
+  ('pipeline_payments', 'parent', '{contact_id}', null),
+  ('pipeline_sequence_enrollments', 'practice', '{firm_id,counselor_id}', null),
+  ('pipeline_unsubscribe_tokens', 'parent', '{contact_id}', null),
+  ('progress_events', 'student', '{student_id}', 'student_id'),
+  ('red_flags', 'student', '{student_id}', 'student_id'),
+  ('referrals', 'owner', '{counselor_id}', 'from_student_id'),
+  ('scholarship_matches', 'student', '{student_id}', 'student_id'),
+  ('student_aid_checklist', 'student', '{student_id}', 'student_id'),
+  ('student_college_fit', 'student', '{student_id}', 'student_id'),
+  ('student_colleges', 'student', '{student_id}', 'student_id'),
+  ('student_status_overrides', 'student', '{student_id}', 'student_id'),
+  ('supplement_docs', 'student', '{student_id,owner_id}', 'student_id'),
+  ('test_scores', 'student', '{student_id}', 'student_id')
+on conflict (table_name) do update set rule = excluded.rule, columns = excluded.columns, student_col = excluded.student_col;
 
 -- Deleted (directly or by cascade), with the keys a delete elsewhere can set null on them.
 select private.attach_axis_trash('public.activities');
@@ -240,7 +256,6 @@ select private.attach_axis_trash('public.pipeline_followups');
 select private.attach_axis_trash('public.pipeline_packages');
 select private.attach_axis_trash('public.pipeline_payments');
 select private.attach_axis_trash('public.pipeline_sequence_enrollments');
-select private.attach_axis_trash('public.pipeline_stages');
 select private.attach_axis_trash('public.pipeline_unsubscribe_tokens');
 select private.attach_axis_trash('public.progress_events');
 select private.attach_axis_trash('public.referrals');
@@ -259,40 +274,79 @@ select private.attach_axis_trash('public.supplement_docs', '{student_college_id}
 
 -- ---- Restore ----
 
--- Whether the caller may have this row back, by its table's rule (deny by default).
-create or replace function private.axis_trash_allows(p_table text, p_row jsonb, p_uid uuid)
+-- A row by id: live, or else as this action's trash kept it (a parent the restore is about to put back).
+create or replace function private.axis_trash_find(p_table text, p_id text, p_action uuid)
+returns jsonb
+language plpgsql stable security definer set search_path = '' as $$
+declare
+  v_row jsonb;
+begin
+  if p_id is null then
+    return null;
+  end if;
+  execute format('select to_jsonb(x) from public.%I x where x.id::text = $1', p_table) into v_row using p_id;
+  if v_row is null then
+    select t.row_data into v_row from private.axis_trash t
+    where t.action_id = p_action and t.kind = 'delete' and t.table_name = p_table and t.row_pk ->> 'id' = p_id
+    limit 1;
+  end if;
+  return v_row;
+end;
+$$;
+revoke all on function private.axis_trash_find(text, text, uuid) from public, anon, authenticated;
+
+-- Whether the caller may have this row back (deny by default): the restorer can still edit the student the row is
+-- about, if any, and the row passes its table's rule.
+drop function if exists private.axis_trash_allows(text, jsonb, uuid);
+create or replace function private.axis_trash_allows(p_table text, p_row jsonb, p_uid uuid, p_action uuid)
 returns boolean
 language plpgsql stable security definer set search_path = '' as $$
 declare
-  r     private.axis_trash_rules;
-  v_one text;
-  v_two text;
+  r         private.axis_trash_rules;
+  v_one     text;
+  v_two     text;
+  v_student text;
+  v_col     text;
+  v_parent  text;
+  v_prow    jsonb;
+  v_any     boolean := false;
 begin
   select * into r from private.axis_trash_rules where table_name = p_table;
   if not found or p_row is null then
     return false;
   end if;
+  v_student := case when r.student_col is not null then p_row ->> r.student_col end;
+  if v_student is not null and not coalesce(private.counselor_can_edit_student(v_student::uuid, p_uid), false) then
+    return false;
+  end if;
   v_one := p_row ->> r.columns[1];
   v_two := case when cardinality(r.columns) >= 2 then p_row ->> r.columns[2] end;
   if r.rule = 'student' then
-    if v_one is not null then
-      return coalesce(private.counselor_can_edit_student(v_one::uuid, p_uid), false);
-    end if;
-    return v_two is not null and v_two::uuid = p_uid;
+    return v_one is not null or (v_two is not null and v_two::uuid = p_uid);
   elsif r.rule = 'practice' then
     return coalesce(private.crm_can_access(v_one::uuid, v_two::uuid, p_uid), false);
   elsif r.rule = 'owner' then
     return v_one is not null and v_one::uuid = p_uid;
-  elsif r.rule = 'contact' then
-    return exists (
-      select 1 from public.pipeline_contacts c
-      where c.id = v_one::uuid and coalesce(private.crm_can_access(c.firm_id, c.counselor_id, p_uid), false)
-    );
+  elsif r.rule = 'parent' then
+    foreach v_col in array r.columns loop
+      continue when p_row ->> v_col is null;
+      select cf.relname into v_parent
+      from pg_constraint k
+      join pg_attribute a on a.attrelid = k.conrelid and a.attnum = k.conkey[1]
+      join pg_class cf on cf.oid = k.confrelid
+      where k.conrelid = ('public.' || quote_ident(p_table))::regclass and k.contype = 'f' and cardinality(k.conkey) = 1 and a.attname = v_col;
+      v_prow := private.axis_trash_find(v_parent, p_row ->> v_col, p_action);
+      if v_parent is null or v_prow is null or not private.axis_trash_allows(v_parent, v_prow, p_uid, p_action) then
+        return false;
+      end if;
+      v_any := true;
+    end loop;
+    return v_any;
   end if;
   return false;
 end;
 $$;
-revoke all on function private.axis_trash_allows(text, jsonb, uuid) from public, anon, authenticated;
+revoke all on function private.axis_trash_allows(text, jsonb, uuid, uuid) from public, anon, authenticated;
 
 -- A table's columns that take a value on insert (generated columns are left to the database).
 create or replace function private.axis_trash_columns(p_table text)
@@ -325,6 +379,9 @@ declare
   v_row      jsonb;
   v_restored integer := 0;
   v_paused   text[] := '{}';
+  v_pending  bigint[];
+  v_waiting  bigint[];
+  v_id       bigint;
 begin
   if p_action is null then
     return jsonb_build_object('ok', false, 'reason', 'not-yours');
@@ -355,42 +412,62 @@ begin
   if exists (select 1 from private.axis_trash t where t.action_id = p_action and t.deleted_at < now() - interval '30 days') then
     return jsonb_build_object('ok', false, 'reason', 'expired');
   end if;
-  if exists (
-    select 1 from private.axis_trash t
-    where t.action_id = p_action and not exists (select 1 from private.axis_trash_rules x where x.table_name = t.table_name)
-  ) then
-    return jsonb_build_object('ok', false, 'reason', 'no-access');
-  end if;
-
-  begin
-    perform set_config('meridies.axis_restore', 'on', true);
-    -- Deleted rows, parents first (the order they were captured in), with their own ids.
-    for r in select * from private.axis_trash t where t.action_id = p_action and t.kind = 'delete' order by t.id loop
-      v_data := r.row_data;
-      if r.table_name = 'pipeline_sequence_enrollments' and v_data ->> 'status' = 'active' then
-        v_data := jsonb_set(v_data, '{status}', '"paused"');
-        if not 'pipeline_sequence_enrollments' = any (v_paused) then
-          v_paused := array_append(v_paused, 'pipeline_sequence_enrollments');
-        end if;
-      end if;
-      v_cols := private.axis_trash_columns(r.table_name);
-      execute format('insert into public.%I (%s) overriding system value select %s from jsonb_populate_record(null::public.%I, $1)',
-                     r.table_name, v_cols, v_cols, r.table_name)
-        using v_data;
-      if not private.axis_trash_allows(r.table_name, v_data, v_uid) then
-        raise exception 'axis-trash-no-access' using errcode = 'P0001';
-      end if;
-      v_restored := v_restored + 1;
-    end loop;
-    -- Keys set null, put back on rows that still exist.
-    for r in select * from private.axis_trash t where t.action_id = p_action and t.kind = 'set-null' order by t.id loop
+  -- Every access check before anything goes back, so a refusal says no-access and nothing else (not a conflict or
+  -- a missing parent that would hint at what the student has done since).
+  for r in select * from private.axis_trash t where t.action_id = p_action order by t.id loop
+    if r.kind = 'delete' then
+      v_row := r.row_data;
+    else
       execute format('select to_jsonb(x) from public.%I x where %s', r.table_name, private.axis_trash_pk_match(r.table_name, r.row_pk))
         into v_row using null::jsonb, r.row_pk;
       continue when v_row is null;
-      if not private.axis_trash_allows(r.table_name, v_row, v_uid) then
-        raise exception 'axis-trash-no-access' using errcode = 'P0001';
+    end if;
+    if not private.axis_trash_allows(r.table_name, v_row, v_uid, p_action) then
+      return jsonb_build_object('ok', false, 'reason', 'no-access');
+    end if;
+  end loop;
+
+  begin
+    perform set_config('meridies.axis_restore', 'on', true);
+    -- Deleted rows with their own ids. A row whose parent isn't back yet waits for the next pass; a pass that puts
+    -- nothing back means a parent is gone for good.
+    v_pending := array(select t.id from private.axis_trash t where t.action_id = p_action and t.kind = 'delete' order by t.id);
+    while cardinality(v_pending) > 0 loop
+      v_waiting := '{}';
+      foreach v_id in array v_pending loop
+        select * into r from private.axis_trash t where t.id = v_id;
+        v_data := r.row_data;
+        if r.table_name = 'pipeline_sequence_enrollments' and v_data ->> 'status' = 'active' then
+          v_data := jsonb_set(v_data, '{status}', '"paused"');
+          if not 'pipeline_sequence_enrollments' = any (v_paused) then
+            v_paused := array_append(v_paused, 'pipeline_sequence_enrollments');
+          end if;
+        elsif r.table_name = 'meetings' then
+          v_data := v_data || '{"calendar_provider": null, "calendar_event_id": null}'::jsonb;
+        elsif r.table_name = 'student_colleges' and v_data ->> 'status' = 'enrolled' and exists (
+          select 1 from public.student_colleges sc
+          where sc.student_id = (v_data ->> 'student_id')::uuid and sc.status = 'enrolled' and sc.id <> (v_data ->> 'id')::uuid
+        ) then
+          v_data := jsonb_set(v_data, '{status}', '"accepted"');
+        end if;
+        v_cols := private.axis_trash_columns(r.table_name);
+        begin
+          execute format('insert into public.%I (%s) overriding system value select %s from jsonb_populate_record(null::public.%I, $1)',
+                         r.table_name, v_cols, v_cols, r.table_name)
+            using v_data;
+          v_restored := v_restored + 1;
+        exception when foreign_key_violation then
+          v_waiting := array_append(v_waiting, v_id);
+        end;
+      end loop;
+      if cardinality(v_waiting) = cardinality(v_pending) then
+        raise exception 'axis-trash-parent-missing' using errcode = 'P0001';
       end if;
-      select string_agg(format('%I = (jsonb_populate_record(null::public.%I, $1)).%I', k, r.table_name, k), ', ')
+      v_pending := v_waiting;
+    end loop;
+    -- Keys set null, put back on rows that still exist, unless the key was set to something else since.
+    for r in select * from private.axis_trash t where t.action_id = p_action and t.kind = 'set-null' order by t.id loop
+      select string_agg(format('%I = coalesce(%I, (jsonb_populate_record(null::public.%I, $1)).%I)', k, k, r.table_name, k), ', ')
         into v_set from jsonb_object_keys(r.row_data) k;
       execute format('update public.%I set %s where %s', r.table_name, v_set, private.axis_trash_pk_match(r.table_name, r.row_pk))
         using r.row_data, r.row_pk;
@@ -403,20 +480,23 @@ begin
     when foreign_key_violation then
       return jsonb_build_object('ok', false, 'reason', 'parent-missing');
     when raise_exception then
-      if sqlerrm = 'axis-trash-no-access' then
-        return jsonb_build_object('ok', false, 'reason', 'no-access');
+      if sqlerrm = 'axis-trash-parent-missing' then
+        return jsonb_build_object('ok', false, 'reason', 'parent-missing');
       end if;
       raise;
   end;
   return jsonb_build_object('ok', true, 'restored', v_restored, 'paused', to_jsonb(v_paused));
 end;
 $$;
-revoke all on function public.axis_trash_restore(uuid) from public, anon;
-grant execute on function public.axis_trash_restore(uuid) to authenticated, service_role;
+-- Only the counselor's own client (and postgres by hand): the service role has no user, and would stand in as
+-- the deleter.
+revoke all on function public.axis_trash_restore(uuid) from public, anon, service_role;
+grant execute on function public.axis_trash_restore(uuid) to authenticated;
 
 -- ---- Purge and forget (service role) ----
 
--- Rows past 30 days go; the document objects they kept are returned when no live documents row points at them.
+-- Rows past 30 days go; the document objects they kept are returned when no live documents row, and no trash row
+-- that stays, points at them (a document deleted, restored and deleted again still needs its file).
 create or replace function public.axis_trash_purge(p_now timestamptz default now())
 returns table (bucket text, storage_path text)
 language sql security definer set search_path = '' as $$
@@ -429,6 +509,11 @@ language sql security definer set search_path = '' as $$
   where g.table_name = 'documents' and g.kind = 'delete' and g.row_data ->> 'storage_path' is not null
     and not exists (
       select 1 from public.documents d where d.bucket = g.row_data ->> 'bucket' and d.storage_path = g.row_data ->> 'storage_path'
+    )
+    and not exists (
+      select 1 from private.axis_trash k
+      where k.table_name = 'documents' and k.kind = 'delete' and k.deleted_at >= p_now - interval '30 days'
+        and k.row_data ->> 'bucket' = g.row_data ->> 'bucket' and k.row_data ->> 'storage_path' = g.row_data ->> 'storage_path'
     );
 $$;
 
@@ -445,6 +530,11 @@ language sql security definer set search_path = '' as $$
   where g.table_name = 'documents' and g.kind = 'delete' and g.row_data ->> 'storage_path' is not null
     and not exists (
       select 1 from public.documents d where d.bucket = g.row_data ->> 'bucket' and d.storage_path = g.row_data ->> 'storage_path'
+    )
+    and not exists (
+      select 1 from private.axis_trash k
+      where k.table_name = 'documents' and k.kind = 'delete' and k.deleted_by is distinct from p_user and k.student_id is distinct from p_user
+        and k.row_data ->> 'bucket' = g.row_data ->> 'bucket' and k.row_data ->> 'storage_path' = g.row_data ->> 'storage_path'
     );
 $$;
 revoke all on function public.axis_trash_purge(timestamptz) from public, anon, authenticated;
@@ -453,13 +543,14 @@ grant execute on function public.axis_trash_purge(timestamptz) to service_role;
 grant execute on function public.axis_trash_forget(uuid) to service_role;
 
 -- ---- Triggers that would send, duplicate or rewrite a restored row ----
--- A restore puts back rows exactly as they were. These triggers skip while it runs (meridies.axis_restore = 'on'):
+-- A restore puts back rows as they were. These 19 triggers skip while it runs (meridies.axis_restore = 'on'):
 -- each is re-created from its own definition with a WHEN condition added, so its events and columns stay as
 -- they are. The restore checks access itself (private.axis_trash_allows), so the guards' client rules aren't needed.
 do $$
 declare
-  t     record;
-  v_def text;
+  t       record;
+  v_def   text;
+  v_found integer := 0;
 begin
   for t in
     select tg.oid, tg.tgname, c.relname
@@ -485,8 +576,11 @@ begin
         ('pipeline_contacts', 'pipeline_contacts_status_guard'),
         ('pipeline_followups', 'pipeline_followups_guard'),
         ('pipeline_sequence_enrollments', 'pipeline_sequence_enrollments_guard'),
-        ('student_colleges', 'student_colleges_stamp_decision_date'))
+        ('student_colleges', 'student_colleges_stamp_decision_date'),
+        -- refuse a restorer who isn't the importer of a student's linked (Drive, OneDrive) file
+        ('documents', 'documents_external_pointer_guard'))
   loop
+    v_found := v_found + 1;
     v_def := pg_get_triggerdef(t.oid);
     continue when v_def ilike '%meridies.axis_restore%';
     if v_def ~* ' WHEN \(' then
@@ -496,5 +590,9 @@ begin
     execute format('drop trigger %I on public.%I', t.tgname, t.relname);
     execute v_def;
   end loop;
+  -- A listed trigger renamed or dropped since would leave the restore running it: stop rather than skip it.
+  if v_found <> 19 then
+    raise exception 'expected 19 triggers to skip during a restore, found %', v_found;
+  end if;
 end;
 $$;

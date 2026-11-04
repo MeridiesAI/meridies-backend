@@ -176,3 +176,125 @@ async function deadline(title = "UC application") {
   const denied = await rest(c.token, "POST", "/rest/v1/rpc/axis_trash_purge", {});
   check("a signed-in user can't purge", denied.status === 401 || denied.status === 403 || denied.status === 404, `status ${denied.status}`);
 }
+
+// ---- Checkpoint review fixes ----
+const studentMoved = async (tag) => {
+  const owner = await user(`${tag}-c`);
+  const st = await studentOf(owner, `${tag}-s`);
+  const next = await user(`${tag}-next`);
+  return { owner, st, move: () => sql(`update public.profiles set counselor_id = '${next.id}' where id = '${st.id}'`) };
+};
+
+// Every row about a student needs the restorer to still be able to edit that student, whatever its table's rule.
+for (const [label, insert, path] of [
+  ["a work item", (o, st) => `insert into public.counselor_work_items (counselor_id, student_id, title) values ('${o.id}', '${st.id}', 'Call home') returning id`, "counselor_work_items"],
+  ["a referral", (o, st) => `insert into public.referrals (from_student_id, counselor_id) values ('${st.id}', '${o.id}') returning id`, "referrals"],
+  ["a calendar event", (o, st) => `insert into public.calendar_events (owner_id, student_id, title, on_date) values ('${o.id}', '${st.id}', 'Visit', '2026-12-05') returning id`, "calendar_events"],
+]) {
+  const m = await studentMoved(`trash-gate-${path.slice(0, 6)}`);
+  const id = await sql(insert(m.owner, m.st)).then((o) => o.split("\n")[0]);
+  const action = randomUUID();
+  await del(m.owner.token, `${path}?id=eq.${id}`, action);
+  await m.move();
+  const refused = await restore(m.owner.token, action);
+  check(`${label} about a student moved to another counselor isn't restored`, refused.body?.ok === false && refused.body?.reason === "no-access" && !(await exists(path, id)), JSON.stringify(refused.body));
+}
+{
+  const kept = await sql(`select count(*) from private.axis_trash where table_name = 'referrals' and student_id is not null`);
+  check("a referral's trash row knows its student (for account deletion)", Number(kept) >= 1, kept);
+}
+
+// The purge keeps a file a later trash entry still needs.
+{
+  const path = `${s.id}/twice-${Date.now()}.pdf`;
+  const docId = await sql(`insert into public.documents (owner_id, student_id, filename, bucket, storage_path, mime_type, size_bytes, uploaded_by)
+                           values ('${c.id}', '${s.id}', 'Twice.pdf', 'student-documents', '${path}', 'application/pdf', 10, '${c.id}') returning id`).then((o) => o.split("\n")[0]);
+  const first = randomUUID();
+  await del(c.token, `documents?id=eq.${docId}`, first);
+  await restore(c.token, first);
+  const second = randomUUID();
+  await del(c.token, `documents?id=eq.${docId}`, second);
+  await sql(`update private.axis_trash set deleted_at = now() - interval '31 days' where action_id = '${first}'`);
+  const purged = await serviceRpc("axis_trash_purge", {});
+  const objects = Array.isArray(purged.body) ? purged.body : [];
+  check("the purge keeps a file a later trash entry still needs", !objects.some((o) => o.storage_path === path), JSON.stringify(objects).slice(0, 200));
+}
+
+// Parents come back first whatever order the rows were kept in.
+{
+  const t = await task("Order");
+  await sql(`insert into public.deliverable_stages (deliverable_id, student_id, name, sequence) values ('${t}', '${s.id}', 'Step', 0)`);
+  const first = randomUUID();
+  await del(c.token, `deliverables?id=eq.${t}`, first);
+  const reversed = randomUUID();
+  await sql(`insert into private.axis_trash (action_id, table_name, row_pk, row_data, kind, student_id, deleted_by)
+             select '${reversed}', table_name, row_pk, row_data, kind, student_id, deleted_by from private.axis_trash where action_id = '${first}' order by id desc`);
+  await sql(`delete from private.axis_trash where action_id = '${first}'`);
+  const back = await restore(c.token, reversed);
+  check("parents come back first whatever order they were kept in", back.body?.ok === true && (await exists("deliverables", t)), JSON.stringify(back.body));
+}
+
+// A key set null isn't put back over what the counselor set since.
+{
+  const f = await sql(`insert into public.folders (owner_id, student_id, name) values ('${c.id}', '${s.id}', 'Old folder ${Date.now()}') returning id`).then((o) => o.split("\n")[0]);
+  const g = await sql(`insert into public.folders (owner_id, student_id, name) values ('${c.id}', '${s.id}', 'New folder ${Date.now()}') returning id`).then((o) => o.split("\n")[0]);
+  const d = await sql(`insert into public.documents (owner_id, student_id, filename, bucket, storage_path, mime_type, size_bytes, uploaded_by, folder_id)
+                       values ('${c.id}', '${s.id}', 'Moved.pdf', 'student-documents', '${s.id}/moved-${Date.now()}.pdf', 'application/pdf', 10, '${c.id}', '${f}') returning id`).then((o) => o.split("\n")[0]);
+  const action = randomUUID();
+  await del(c.token, `folders?id=eq.${f}`, action);
+  await sql(`update public.documents set folder_id = '${g}' where id = '${d}'`);
+  const back = await restore(c.token, action);
+  const where = await sql(`select folder_id from public.documents where id = '${d}'`);
+  check("a key set null isn't put back over what was set since", back.body?.ok === true && where === g, `${JSON.stringify(back.body)} ${where}`);
+}
+
+// A student's linked (Drive) file comes back for the counselor who deleted it.
+{
+  const d = await sql(`insert into public.documents (owner_id, student_id, filename, bucket, storage_path, mime_type, size_bytes, uploaded_by, external_provider, external_file_id)
+                       values ('${s.id}', '${s.id}', 'Linked.pdf', 'student-documents', '${s.id}/linked-${Date.now()}.pdf', 'application/pdf', 10, '${s.id}', 'google', 'file-${Date.now()}') returning id`).then((o) => o.split("\n")[0]);
+  const action = randomUUID();
+  await del(c.token, `documents?id=eq.${d}`, action);
+  const back = await restore(c.token, action);
+  check("a student's linked file comes back for the counselor who deleted it", back.body?.ok === true && (await exists("documents", d)), JSON.stringify(back.body));
+}
+
+// A restored meeting doesn't point at the calendar event its delete removed.
+{
+  const m = await sql(`insert into public.meetings (student_id, counselor_id, title, starts_at, ends_at, calendar_provider, calendar_event_id)
+                       values ('${s.id}', '${c.id}', 'Synced', now() + interval '2 days', now() + interval '2 days 30 minutes', 'google', 'evt-${Date.now()}') returning id`).then((o) => o.split("\n")[0]);
+  const action = randomUUID();
+  await del(c.token, `meetings?id=eq.${m}`, action);
+  const back = await restore(c.token, action);
+  const pointer = await sql(`select coalesce(calendar_provider, 'null') || '|' || coalesce(calendar_event_id, 'null') from public.meetings where id = '${m}'`);
+  check("a restored meeting doesn't point at the calendar event its delete removed", back.body?.ok === true && pointer === "null|null", `${JSON.stringify(back.body)} ${pointer}`);
+}
+
+// Restoring a school the student had enrolled in doesn't change the one they chose since.
+{
+  const a = await sql(`insert into public.student_colleges (student_id, name, status) values ('${s.id}', 'First choice ${Date.now()}', 'enrolled') returning id`).then((o) => o.split("\n")[0]);
+  const action = randomUUID();
+  await del(c.token, `student_colleges?id=eq.${a}`, action);
+  const b = await sql(`insert into public.student_colleges (student_id, name, status) values ('${s.id}', 'Second choice ${Date.now()}', 'enrolled') returning id`).then((o) => o.split("\n")[0]);
+  const back = await restore(c.token, action);
+  const states = await sql(`select (select status from public.student_colleges where id = '${a}') || '|' || (select status from public.student_colleges where id = '${b}')`);
+  check("restoring an enrolled school keeps the one chosen since", back.body?.ok === true && states === "accepted|enrolled", `${JSON.stringify(back.body)} ${states}`);
+}
+
+// Every trigger that skips during a restore still does; the service role can't restore.
+{
+  const guarded = await sql(`select count(*) from pg_trigger where not tgisinternal and pg_get_triggerdef(oid) ilike '%meridies.axis_restore%'`);
+  check("every trigger that must skip during a restore does", Number(guarded) === 19, guarded);
+  const svcRestore = await serviceRpc("axis_trash_restore", { p_action: randomUUID() });
+  check("the service role can't restore", svcRestore.status === 401 || svcRestore.status === 403 || svcRestore.status === 404, `status ${svcRestore.status}`);
+}
+
+// A row that goes with its parent comes back with it, whoever owns it: a student's saved copy of the counselor's event.
+{
+  const ev = await sql(`insert into public.hub_events (name, kind, host, start_date, url, created_by) values ('Open house ${Date.now()}', 'webinar', 'Our practice', '2026-12-12', 'https://example.org/open', '${c.id}') returning id`).then((o) => o.split("\n")[0]);
+  await sql(`insert into public.hub_event_saves (event_id, profile_id, targets) values ('${ev}', '${s.id}', '{meridies}')`);
+  const action = randomUUID();
+  await del(c.token, `hub_events?id=eq.${ev}`, action);
+  const back = await restore(c.token, action);
+  const saves = await sql(`select count(*) from public.hub_event_saves where event_id = '${ev}' and profile_id = '${s.id}'`);
+  check("someone else's saved copy comes back with the event", back.body?.ok === true && saves === "1", `${JSON.stringify(back.body)} saves=${saves}`);
+}

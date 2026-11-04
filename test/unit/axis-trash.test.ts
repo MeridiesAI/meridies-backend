@@ -42,10 +42,11 @@ test("every DELETE op is covered by the trash or excluded with a reason", () => 
   assert.ok(TRASH_COVERED.size >= 30, String(TRASH_COVERED.size));
 });
 
-test("firm.remove_member and invites.delete_import are not in the catalog", () => {
+test("firm.remove_member, invites.delete_import and pipeline.delete_stage are not in the catalog", () => {
   const names = new Set(allOps().map((d) => d.name));
   assert.ok(!names.has("firm.remove_member"));
   assert.ok(!names.has("invites.delete_import"));
+  assert.ok(!names.has("pipeline.delete_stage"));
 });
 
 test("without the migration AxIS refuses a covered delete before anything runs", async () => {

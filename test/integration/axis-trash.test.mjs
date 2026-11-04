@@ -65,7 +65,6 @@ const cases = {
   "files.delete_link": async () => { const id = await one(`insert into public.document_links (owner_id, student_id, url, title) values ('${c.id}', '${s.id}', 'https://example.org/doc', 'A link') returning id`); return { input: { link_id: id }, table: "document_links", where: `id = '${id}'` }; },
   "outcomes.delete": async () => { const id = await one(`insert into public.admission_outcomes (counselor_id, student_id, high_school_name, cycle, college_name, result) values ('${c.id}', '${s.id}', 'Lincoln High', '2025-2026', 'Pomona College', 'admitted') returning id`); return { input: { outcome_id: id }, table: "admission_outcomes", where: `id = '${id}'` }; },
   "referrals.delete": async () => { const id = await one(`insert into public.referrals (from_student_id, counselor_id) values ('${s.id}', '${c.id}') returning id`); return { input: { referral_id: id }, table: "referrals", where: `id = '${id}'` }; },
-  "pipeline.delete_stage": async () => { const id = await one(`insert into public.pipeline_stages (counselor_id, name, position) values ('${c.id}', 'Waitlist ${randomUUID().slice(0, 4)}', 90) returning id`); return { input: { stage_id: id }, table: "pipeline_stages", where: `id = '${id}'` }; },
   "pipeline.delete_contact": async () => { const r = await call(c.token, "POST", "/pipeline/contacts", { stageId, studentName: "Ada Lovelace", parentEmail: `ada-${randomUUID().slice(0, 8)}@families.test` }); return { input: { contact_id: r.body.id }, table: "pipeline_contacts", where: `id = '${r.body.id}'` }; },
   "management.delete_task": async () => { const id = await one(`insert into public.consultant_tasks (assignee_id, assigned_by, title) values ('${c.id}', '${c.id}', 'Prep the fair') returning id`); return { input: { task_id: id }, table: "consultant_tasks", where: `id = '${id}'` }; },
 };
@@ -123,4 +122,42 @@ for (const [op, seed] of Object.entries(cases)) {
   check("restore sends nothing", before === after, `${before} -> ${after}`);
   const attendees = await count("meeting_attendees", `meeting_id = '${meeting.input.meeting_id}'`);
   check("a restored meeting has its attendee once", attendees === "1", attendees);
+}
+
+// A work item about a student moved to another counselor isn't restored through the card either.
+{
+  const s3 = await studentOf(c, "trash-api-moved-item");
+  const other = await user("trash-api-other-item");
+  const id = await one(`insert into public.counselor_work_items (counselor_id, student_id, title) values ('${c.id}', '${s3.id}', 'Call the family') returning id`);
+  const actionId = await propose("work_queue.delete", { item_id: id }, s3.id);
+  await call(c.token, "POST", `/axis/actions/${actionId}/confirm`);
+  await sql(`update public.profiles set counselor_id = '${other.id}' where id = '${s3.id}'`);
+  const refused = await call(c.token, "POST", `/axis/actions/${actionId}/undo`);
+  check("a work item about a moved student isn't restored", refused.status === 409 && (await count("counselor_work_items", `id = '${id}'`)) === "0", `${refused.status} ${JSON.stringify(refused.body)}`);
+}
+
+// After 30 days the card stops offering Restore, and a late click is refused without claiming the card.
+{
+  const id = await one(`insert into public.courses (student_id, name) values ('${s.id}', 'AP Latin') returning id`);
+  const actionId = await propose("courses.delete", { course_id: id, student_id: s.id });
+  await call(c.token, "POST", `/axis/actions/${actionId}/confirm`);
+  await sql(`update public.axis_actions set result = jsonb_set(result, '{restoreUntil}', to_jsonb((now() - interval '1 hour')::text)) where id = '${actionId}'`);
+  await sql(`update private.axis_trash set deleted_at = now() - interval '31 days' where action_id = '${actionId}'`);
+  const listed = (await call(c.token, "GET", `/axis/actions?conversationId=${conv.body.id}&status=all`)).body.find?.((a) => a.id === actionId);
+  check("an expired card doesn't offer Restore", listed?.payload?.undoable === false, JSON.stringify(listed?.payload ?? null).slice(0, 160));
+  const late = await call(c.token, "POST", `/axis/actions/${actionId}/undo`);
+  check("a late Restore says the 30 days are up", late.status === 409 && String(late.body?.error ?? late.body?.message).includes("the 30 days are up"), `${late.status} ${JSON.stringify(late.body)}`);
+  const status = await one(`select status from public.axis_actions where id = '${actionId}'`);
+  check("and the expired card keeps its state", status === "confirmed", status);
+}
+
+// A delete already restored another way leaves the card undone.
+{
+  const id = await one(`insert into public.courses (student_id, name) values ('${s.id}', 'AP Music Theory') returning id`);
+  const actionId = await propose("courses.delete", { course_id: id, student_id: s.id });
+  await call(c.token, "POST", `/axis/actions/${actionId}/confirm`);
+  await rest(c.token, "POST", "/rest/v1/rpc/axis_trash_restore", { p_action: actionId });
+  const again = await call(c.token, "POST", `/axis/actions/${actionId}/undo`);
+  const status = await one(`select status from public.axis_actions where id = '${actionId}'`);
+  check("a delete already restored leaves the card undone", again.status === 409 && String(again.body?.error ?? again.body?.message).includes("already restored") && status === "undone", `${again.status} ${JSON.stringify(again.body)} ${status}`);
 }

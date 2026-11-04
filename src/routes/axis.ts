@@ -43,7 +43,7 @@ import {
   type OperationPayload,
   type OperationStatus,
 } from "../lib/axis/ops/run.js";
-import { restoreSentence, TRASH_MISSING } from "../lib/axis/ops/trash.js";
+import { restoreExpired, restoreSentence, TRASH_MISSING } from "../lib/axis/ops/trash.js";
 import { hasAnthropic } from "../env.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -343,6 +343,7 @@ export default async function axisRoutes(app: FastifyInstance) {
     // without touching its status, so the claim can't race the Confirm that is about to write its outcome.
     const trash = isTrashResult(row.result);
     if (!trash && !undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
+    if (trash && restoreExpired(row.result)) throw conflict(restoreSentence("expired"));
     // Claim, so two clicks can't run the reversal twice.
     const { data: claimed, error: claimErr } = await request.db
       .from("axis_actions")
@@ -359,6 +360,8 @@ export default async function axisRoutes(app: FastifyInstance) {
       const { data: out, error: restoreErr } = await request.db.rpc("axis_trash_restore", { p_action: id });
       const answer = (out ?? {}) as { ok?: boolean; reason?: string; restored?: number; paused?: string[] };
       if (restoreErr || answer.ok !== true) {
+        // Already restored (by hand, or a click that won a race): the card is undone either way.
+        if (!restoreErr && answer.reason === "already") throw conflict(restoreSentence(answer.reason));
         await handBack();
         if (restoreErr) throw isSchemaMissing(restoreErr) ? unavailable(TRASH_MISSING) : fromPostgrest(restoreErr);
         if (answer.reason === "not-yours") throw notFound("That change isn't AxIS's to undo.");
@@ -400,7 +403,7 @@ function publicAction(r: Record<string, unknown>) {
     warning: typeof p.warning === "string" ? p.warning : null,
     reason: p.reason === "outside-content" || p.reason === "many-changes" ? p.reason : null,
     status,
-    undoable: (status === "executed" || status === "confirmed") && (!!undoStepOf(res) || isTrashResult(res)),
+    undoable: (status === "executed" || status === "confirmed") && (!!undoStepOf(res) || (isTrashResult(res) && !restoreExpired(res))),
     restoreUntil: isTrashResult(res) && typeof res.restoreUntil === "string" ? res.restoreUntil : null,
     message: typeof res.message === "string" ? res.message : null,
   };
