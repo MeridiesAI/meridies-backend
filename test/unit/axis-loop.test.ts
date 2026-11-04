@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Anthropic from "@anthropic-ai/sdk";
-import { degrade, runLoop, STALE_ROUNDS, type LoopOptions, type MessagesApi, type StreamLike } from "../../src/lib/axis/loop.js";
+import type { Hold } from "../../src/lib/aiBudget.js";
+import { degrade, runLoop, STALE_ROUNDS, type CallGate, type LoopOptions, type MessagesApi, type StreamLike } from "../../src/lib/axis/loop.js";
 import { effortMessage, featureOn, MAX_TOKENS, modeMessage, resetFeatures } from "../../src/lib/axis/models.js";
 import type { ToolOutput } from "../../src/lib/axis/tools.js";
 import { scriptedApi, type Turn } from "./axis-fakes.js";
@@ -163,9 +164,56 @@ test("degrade folds the mode into the user turn and drops effort-only messages",
   assert.deepEqual(m[0], { role: "user", content: [{ type: "text", text: "q" }, { type: "text", text: "(AxIS operator note: Mode: email.)" }] });
 });
 
-test("every call is charged against the quota before it is made", async () => {
-  let charged = 0;
+/** A gate that records what the loop asked of it; each hold is a plain marker object. */
+function recordingGate() {
+  const seen: { before: { max_tokens: number }[]; after: { hold: unknown; usage: unknown }[] } = { before: [], after: [] };
+  let n = 0;
+  const gate: CallGate = {
+    before: async (params) => (seen.before.push({ max_tokens: params.max_tokens }), { id: ++n } as unknown as Hold),
+    after: async (hold, usage) => void seen.after.push({ hold, usage }),
+  };
+  return { gate, seen };
+}
+
+test("the gate wraps every model call with that call's usage", async () => {
+  const { gate, seen } = recordingGate();
   const { api } = scriptedApi([{ tools: [{ id: "x", name: "list_upcoming", input: {} }] }, { text: "ok" }]);
-  await runLoop(options(api, { beforeCall: async () => void charged++ }));
-  assert.equal(charged, 2);
+  await runLoop(options(api, { gate }));
+  assert.equal(seen.before.length, 2, "reserved before each call");
+  assert.equal(seen.before[0]!.max_tokens, MAX_TOKENS.low);
+  assert.deepEqual(
+    seen.after.map((a) => [(a.hold as { id: number }).id, a.usage]),
+    [1, 2].map((id) => [id, { input: 100, output: 20, cacheRead: 80, cacheWrite: 0 }]),
+    "each call settled with its own usage"
+  );
+});
+
+test("an aborted stream settles with null and doesn't throw from the gate", async () => {
+  const { gate, seen } = recordingGate();
+  const ctl = new AbortController();
+  const abortErr = new Anthropic.APIUserAbortError();
+  const api: MessagesApi = {
+    stream() {
+      ctl.abort();
+      const s = { on: () => s, finalMessage: () => Promise.reject(abortErr) } as unknown as StreamLike;
+      return s;
+    },
+  };
+  await assert.rejects(runLoop(options(api, { gate, signal: ctl.signal })), (e) => e === abortErr);
+  assert.equal(seen.after.length, 1);
+  assert.equal(seen.after[0]!.usage, null, "kept whole: the call may have been billed");
+});
+
+test("a request the API refused before answering releases its reservation", async () => {
+  const { gate, seen } = recordingGate();
+  const bad = new Anthropic.BadRequestError(400, undefined, "bad", new Headers());
+  const api: MessagesApi = {
+    stream() {
+      const s = { on: () => s, finalMessage: () => Promise.reject(bad) } as unknown as StreamLike;
+      return s;
+    },
+  };
+  await assert.rejects(runLoop(options(api, { gate, messages: [{ role: "user", content: "q" }] })));
+  assert.ok(seen.after.length >= 1);
+  assert.ok(seen.after.every((a) => a.usage === "unused"), JSON.stringify(seen.after.map((a) => a.usage)));
 });
