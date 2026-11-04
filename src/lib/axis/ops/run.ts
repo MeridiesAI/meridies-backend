@@ -26,6 +26,7 @@ import { essayShaped, narrativeWords } from "../../proseGuard.js";
 import { assertAllowedCall, counselorMessage, dispatch, failureMessage, isTransient } from "./dispatch.js";
 import { getOp, headingOf, riskOf } from "./registry.js";
 import type { OpCall, OpDef, OpHelpers, UndoStep } from "./types.js";
+import { freeBlocks } from "../../context/freeText.js";
 
 export const MAX_WRITES_PER_TURN = 20;
 export const MAX_AUTO_WRITES_PER_TURN = 5;
@@ -40,15 +41,24 @@ export type TurnBudget = {
   autoWrites: number;
   /** Narrative (first-person, unaddressed) words in the free text this turn filed: the essay guardrail's turn count. */
   proseWords: number;
+  /**
+   * The free-text rule is on (20261108000004 is in, lib/axis/failsafe.ts flagsReady): a read flags the turn only
+   * when what it showed the model holds free text (lib/context/freeText.ts). Off, today's declarations decide.
+   */
+  freeRule: boolean;
 };
 
-/** `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history. */
-export const newTurnBudget = (outside = false, inherited = false): TurnBudget => ({
+/**
+ * `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history;
+ * `freeRule`: judge reads by the free-text rule.
+ */
+export const newTurnBudget = (outside = false, inherited = false, freeRule = false): TurnBudget => ({
   tainted: outside || inherited,
   sawOutside: outside,
   writes: 0,
   autoWrites: 0,
   proseWords: 0,
+  freeRule,
 });
 
 /** Narrative words one turn may file across all its changes and drafts (lib/proseGuard.ts). */
@@ -136,7 +146,8 @@ export type OpContext = {
   onOperation: (e: OperationEvent) => void;
 };
 
-export type OpOutput = { content: string; isError?: boolean; fresh: boolean };
+/** `freeBlocks`: the free text the answer showed the model (for the quote check), when it read outside content. */
+export type OpOutput = { content: string; isError?: boolean; fresh: boolean; freeBlocks?: { source: string; text: string }[] };
 
 /** The row as it is stored. `input` is only ever read back by Confirm, never sent to the app. */
 export type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> & {
@@ -309,8 +320,11 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
   const res = await dispatch(ctx.request, call);
   if (res.status >= 400) return { content: failureMessage(res), isError: true, fresh: false };
   const content = def.reply ? (safelySync(() => def.reply!(res.body, input)) ?? "That lookup's answer couldn't be read.") : "Done.";
-  if (readsOutside(def, res.body)) markOutside(ctx.turn);
-  return { content: content || "Nothing found.", fresh: !!content };
+  // Declared outside: under the free-text rule it flags only when the reply holds free text (a document, a
+  // value over 80 characters), judged on the blocks it actually shows the model.
+  const blocks = readsOutside(def, res.body) ? freeBlocks(content) : [];
+  if (readsOutside(def, res.body) && (!ctx.turn.freeRule || blocks.length > 0)) markOutside(ctx.turn);
+  return { content: content || "Nothing found.", fresh: !!content, freeBlocks: blocks };
 }
 
 /** `perform_action`: run it now, or file it for the counselor's Confirm. */

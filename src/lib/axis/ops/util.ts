@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { plainName } from "../../context/identity.js";
 import { wrapUntrusted } from "../../context/pack.js";
+import { isFree } from "../../context/freeText.js";
 
 export const uuid = z.string().uuid();
 export const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "YYYY-MM-DD");
@@ -30,7 +31,9 @@ export function untrusted(text: unknown, source = "record"): string {
   // model only in a name's shape (lib/context/identity.ts): it can't spell an operation or its input.
   const raw = typeof text === "string" ? text : text == null ? "" : String(text);
   const s = source === "roster" ? plainName(raw) : raw;
-  return wrapUntrusted(source, s.length > 300 ? `${s.slice(0, 297)}...` : s);
+  // A value of at most 80 characters is a short field (lib/context/freeText.ts): marked so, it doesn't flag a turn
+  // under the free-text rule. Judged on the whole value, not the 300-character cut.
+  return wrapUntrusted(source, s.length > 300 ? `${s.slice(0, 297)}...` : s, isFree(source, s));
 }
 
 /** The value as plain text for a card (never sent to the model). */
