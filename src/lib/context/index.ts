@@ -2,6 +2,7 @@ import type { FastifyRequest } from "fastify";
 import { forbidden, fromPostgrest, notFound } from "../errors.js";
 import { assertCanViewStudent } from "../guards.js";
 import { loadPracticeSettings } from "../practiceSettings.js";
+import { entryFree, leaveOutFree } from "./freeText.js";
 import { packSections, type Section } from "./pack.js";
 import { OUTSIDE_SECTIONS, PROFILES, type Feature, type SectionName } from "./profiles.js";
 import { LOADERS } from "./sections.js";
@@ -17,12 +18,14 @@ export function selectSections(sections: SectionName[], only?: SectionName[]): S
 /**
  * What one AI feature may read about one student, packed to that feature's budget.
  * `opts.only` narrows the feature's profile to those sections (never widens it).
+ * `opts.shortOnly` (an AxIS question turn) leaves each outside section's free text out, with a line saying what
+ * exists, so the turn reads only short fields unless a lookup fetches the rest.
  */
 export async function buildStudentContext(
   request: FastifyRequest,
   studentId: string,
   feature: Feature,
-  opts?: { only?: SectionName[]; trustedOnly?: boolean }
+  opts?: { only?: SectionName[]; trustedOnly?: boolean; shortOnly?: boolean }
 ): Promise<StudentContext> {
   // Counselors only (spec §4): a student's own session never builds a context, even for themselves.
   if (request.profile.role !== "counselor") throw forbidden("Only counselors can do that");
@@ -39,7 +42,11 @@ export async function buildStudentContext(
   const profileRow = results[profile.sections.indexOf("profile")];
   if (profile.sections.includes("profile") && !profileRow?.section) throw notFound("That student isn't on your roster");
 
-  const sections: Section[] = results.flatMap((r) => (r.section ? [r.section] : []));
+  // Which sections carry someone else's words (OUTSIDE_SECTIONS, or what the loader said for this read).
+  const outsideByName = new Map(profile.sections.map((name, i) => [name as string, results[i]?.outside ?? OUTSIDE_SECTIONS.has(name)]));
+  const isOutside = (name: string) => outsideByName.get(name) === true;
+  let sections: Section[] = results.flatMap((r) => (r.section ? [r.section] : []));
+  if (opts?.shortOnly) sections = leaveOutFree(sections, isOutside);
   const packed = packSections(sections, profile.budget);
   const facts: StudentContext["facts"] = Object.assign({
     intendedMajors: [], gradYear: null, state: null, gpa: { value: null, scale: null },
@@ -53,13 +60,15 @@ export async function buildStudentContext(
     facts.identity = { ...facts.identity, email: (who?.email as string | undefined) ?? null };
   }
 
-  // Which sections that made it into the text carry someone else's words.
-  const outsideByName = new Map(profile.sections.map((name, i) => [name as string, results[i]?.outside ?? OUTSIDE_SECTIONS.has(name)]));
-  const outside = packed.used.map((u) => u.section).filter((name) => outsideByName.get(name) === true);
+  // Of the sections that made it into the text: which carry someone else's words, and which of those free text.
+  const outside = packed.used.map((u) => u.section).filter(isOutside);
+  const byName = new Map(sections.map((s) => [s.name, s]));
+  const freeText = outside.filter((name) => (byName.get(name)?.untrusted ?? []).some(entryFree));
 
   return {
     text: packed.text,
     outside,
+    freeText,
     used: packed.used,
     omitted: [...results.flatMap((r) => r.omitted ?? []), ...packed.omitted],
     studentName: facts.identity.name,
