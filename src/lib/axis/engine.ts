@@ -37,7 +37,8 @@ import { cachedStudentContext, loadRoster, studentFacts } from "./data.js";
 import { loadCollegeIndex, type CollegeIndex } from "./entities.js";
 import { EvidenceIndex, LiveGrounder, type SentenceCheck } from "./grounding.js";
 import { dropInvalidCitations, renderSource, resolveCitations, SourceLedger, type Citation } from "./ledger.js";
-import { chargeCall, chargeOutput, closeRun, messagesApi, openRun, structured, type Run } from "./llm.js";
+import { settle, type Hold } from "../aiBudget.js";
+import { axisGate, closeRun, messagesApi, openRun, structured, type Run } from "./llm.js";
 import { emptyUsage, runLoop, type LoopOptions, type MessagesApi, type Usage } from "./loop.js";
 import { loadHistory } from "./memory.js";
 import {
@@ -191,11 +192,11 @@ async function essayAdvice(
   studentId: string | null,
   question: string,
   record: string | null,
-  o: { signal: AbortSignal; precharged: boolean }
+  o: { signal: AbortSignal; hold?: Hold }
 ): Promise<string> {
   const out = await structured({
     signal: o.signal,
-    precharged: o.precharged,
+    hold: o.hold,
     request,
     module: "essay-advice",
     studentId,
@@ -212,7 +213,16 @@ async function essayAdvice(
     : "- I don't write essay text. Tell me which part of the draft worries you and I'll point at what to change.";
 }
 
-export async function runAxisTurn(opts: {
+/** One AxIS turn. A reservation the route made that the turn never used is released at the end (the call stays counted). */
+export async function runAxisTurn(opts: Parameters<typeof axisTurn>[0]): Promise<TurnResult> {
+  try {
+    return await axisTurn(opts);
+  } finally {
+    if (opts.prepaid) await settle(opts.prepaid, "unused", opts.request.log);
+  }
+}
+
+async function axisTurn(opts: {
   request: FastifyRequest;
   conversationId: string;
   studentId: string | null;
@@ -221,19 +231,16 @@ export async function runAxisTurn(opts: {
   signal: AbortSignal;
   api?: MessagesApi;
   /**
-   * Model calls already charged against the daily quota. The route charges the
-   * first before the stream opens, so an exhausted quota is a plain 429 the app
-   * can show rather than an error mid-stream.
+   * The turn's first call, already reserved (lib/aiBudget.ts). The route reserves it before the stream opens, so a
+   * cap or a paused day is a plain 429 the app can show rather than an error mid-stream.
    */
-  prepaidCalls?: number;
+  prepaid?: Hold;
   /** This message brought files: it goes to the model, never to a direct answer from the record. */
   newFiles?: boolean;
   /** The counselor's message this turn answers: its files go as files, earlier files as their stored text. */
   messageId?: string;
 }): Promise<TurnResult> {
   const { request, studentId, content, emit, signal } = opts;
-  let prepaid = opts.prepaidCalls ?? 0;
-  const takePrepaid = () => (prepaid > 0 ? (prepaid--, true) : false);
   const startedAt = Date.now();
   emit("status", { phase: "thinking" });
 
@@ -308,7 +315,7 @@ export async function runAxisTurn(opts: {
   if (u.intent === "essay") {
     emit("route", { intent: "essay", path: "essay" });
     emit("status", { phase: "answering" });
-    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, precharged: takePrepaid() });
+    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, hold: opts.prepaid });
     emit("delta", { text });
     return {
       // The bullets were written over the student's record (their essays, activities): saved to the
@@ -373,7 +380,8 @@ export async function runAxisTurn(opts: {
   // Specialists research; a change is only ever made by the agent answering the counselor.
   const researchOnly: LoopOptions["exec"] = (c, sig) =>
     isReadOnly(c.name) ? exec(c, sig) : Promise.resolve({ content: "Specialists only research. Leave changes to the final answer.", isError: true, fresh: false });
-  const beforeCall = () => (takePrepaid() ? Promise.resolve() : chargeCall(request));
+  // Every model call through the budget gate; the first takes the route's reservation.
+  const budget = axisGate(request, opts.prepaid);
   const total: Usage = emptyUsage();
   const add = (x: Usage) => {
     total.input += x.input;
@@ -401,7 +409,7 @@ export async function runAxisTurn(opts: {
       emit("route", { intent: u.intent, path: "specialists", parts: tasks.map((t) => t.intent), effort });
       const before = ledger.size;
       const res = await runSpecialists({
-        tasks, question: content, api, base: requestBase(system, tools, "low"), evidence: evidence.text, effort: "low", signal, exec: researchOnly, readOnly: isReadOnly, beforeCall, onStep: step,
+        tasks, question: content, api, base: requestBase(system, tools, "low"), evidence: evidence.text, effort: "low", signal, exec: researchOnly, readOnly: isReadOnly, gate: budget, onStep: step,
       });
       add(res.usage);
       findings = renderFindings(res.findings);
@@ -448,7 +456,7 @@ export async function runAxisTurn(opts: {
     emit("status", { phase: "answering" });
     const res = await runLoop({
       api, base: requestBase(system, tools, turnEffort), messages, effort: turnEffort, maxCalls: turnProfile.maxCalls,
-      deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, beforeCall,
+      deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, gate: budget,
       onText: (d) => show(gate.push(d)),
       onToolStart: (c) => {
         const label = toolLabel(c.name, c.input);
@@ -475,7 +483,6 @@ export async function runAxisTurn(opts: {
       ms: Date.now() - startedAt, writes: toolCtx.turn.writes, autoWrites: toolCtx.turn.autoWrites, tainted: toolCtx.turn.tainted,
       essayGuard: gate.blocked,
     });
-    await chargeOutput(request, total.output);
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: { ...state, outside: toolCtx.turn.sawOutside },

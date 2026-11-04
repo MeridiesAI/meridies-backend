@@ -17,15 +17,12 @@ import type { z } from "zod";
 import { anthropicClient, type AiModule } from "../anthropic.js";
 import { UNTRUSTED_DATA_RULE } from "../context/pack.js";
 import { HttpError } from "../errors.js";
-import { enforceQuota } from "../limits.js";
+import { estimatePromptTokens, reserve, settle, usageAfterError, type BudgetSubject, type Hold } from "../aiBudget.js";
 import { assertAiAllowed } from "../practiceSettings.js";
 import { serviceClient } from "../supabase.js";
-import type { MessagesApi, StreamLike, Usage } from "./loop.js";
+import type { CallGate, MessagesApi, StreamLike, Usage } from "./loop.js";
 import { cutAt } from "./text.js";
-import { AXIS_MODEL, featureOn, MAX_TOKENS, PER_MESSAGE_EFFORT_BETA, PINNED_EFFORT, THINKING, type Effort } from "./models.js";
-
-const DAILY_AI_CALL_LIMIT = 300;
-const MONTHLY_OUTPUT_TOKENS = 5_000_000;
+import { AXIS_MODEL, featureOn, MAX_TOKENS, PER_MESSAGE_EFFORT_BETA, PINNED_EFFORT, PROMPT_TOKEN_BUDGET, THINKING, type Effort } from "./models.js";
 
 /** The live client behind the loop's MessagesApi seam. */
 export function messagesApi(): MessagesApi {
@@ -33,13 +30,33 @@ export function messagesApi(): MessagesApi {
   return { stream: (params, options) => client.beta.messages.stream(params, options) as unknown as StreamLike };
 }
 
-export async function chargeCall(request: FastifyRequest): Promise<void> {
-  await enforceQuota(request.auth.userId, "ai_calls", "day", DAILY_AI_CALL_LIMIT, "You've hit today's AI limit. It resets at midnight.");
+const subjectOf = (request: FastifyRequest): BudgetSubject => ({ userId: request.auth.userId });
+
+/** How a failed call settles (lib/aiBudget.ts): an HTTP error or a lost connection billed nothing; a stop mid-call may have. */
+const failedUsage = (err: unknown, signal?: AbortSignal): "unused" | null => usageAfterError(err, { signal });
+
+/**
+ * The AxIS loop's budget gate (lib/aiBudget.ts): every model call reserves and settles with its own usage. The
+ * turn's first call takes the reservation the route made before the stream opened, so a cap there is a plain 429.
+ */
+export function axisGate(request: FastifyRequest, prepaid?: Hold): CallGate {
+  let first = prepaid;
+  return {
+    before: async (params) => {
+      if (first) {
+        const h = first;
+        first = undefined;
+        return h;
+      }
+      return reserve(subjectOf(request), { model: AXIS_MODEL, maxOutputTokens: params.max_tokens, promptTokens: estimatePromptTokens(params), module: "axis" }, request.log);
+    },
+    after: (hold, usage) => settle(hold, usage, request.log),
+  };
 }
 
-export async function chargeOutput(request: FastifyRequest, outputTokens: number): Promise<void> {
-  if (outputTokens <= 0) return;
-  await enforceQuota(request.auth.userId, "ai_output_tokens", "month", MONTHLY_OUTPUT_TOKENS, "Monthly AI usage limit reached.", outputTokens).catch(() => undefined);
+/** The reservation the AxIS route makes before the stream opens: the largest first call a turn can make. */
+export function reserveTurn(request: FastifyRequest): Promise<Hold> {
+  return reserve(subjectOf(request), { model: AXIS_MODEL, maxOutputTokens: MAX_TOKENS.high, promptTokens: PROMPT_TOKEN_BUDGET, module: "axis" }, request.log);
 }
 
 export type Run = { id: string | null; startedAt: number };
@@ -107,24 +124,34 @@ export async function structured<T>(o: {
   maxTokens?: number;
   /** Aborts the call (the counselor left, or the turn ran out of time); an aborted call returns null. */
   signal?: AbortSignal;
-  /** The daily call was already charged for this one (the route charges a turn's first call before streaming). */
-  precharged?: boolean;
+  /** A reservation already made for this call (the AxIS route reserves a turn's first call before streaming). */
+  hold?: Hold;
 }): Promise<T | null> {
   await assertAiAllowed(o.request, o.module);
-  if (!o.precharged) await chargeCall(o.request);
   const effort = o.effort ?? "low";
+  const maxTokens = o.maxTokens ?? MAX_TOKENS[effort];
+  const hold =
+    o.hold ??
+    (await reserve(
+      subjectOf(o.request),
+      { model: AXIS_MODEL, maxOutputTokens: maxTokens, promptTokens: estimatePromptTokens({ system: o.system, messages: [{ role: "user", content: o.prompt }] }), module: o.module },
+      o.request.log
+    ));
+  let used: Usage | "unused" | null = null;
+  let answered = false;
   const run = await openRun(o.request, o.module, o.studentId ?? null, { promptChars: o.prompt.length, effort });
   try {
     const msg = await anthropicClient().messages.create({
       model: AXIS_MODEL,
-      max_tokens: o.maxTokens ?? MAX_TOKENS[effort],
+      max_tokens: maxTokens,
       thinking: { type: "adaptive" },
       output_config: { effort, format: { type: "json_schema", schema: o.schema } },
       system: o.system,
       messages: [{ role: "user", content: o.prompt }],
     }, o.signal ? { signal: o.signal } : undefined);
     const usage = usageOf(msg);
-    await chargeOutput(o.request, usage.output);
+    used = usage;
+    answered = true;
     if (msg.stop_reason === "refusal" || msg.stop_reason === "max_tokens") {
       await closeRun(run, msg.stop_reason === "refusal" ? "blocked" : "failed", usage, { stop: msg.stop_reason });
       return null;
@@ -134,9 +161,12 @@ export async function structured<T>(o: {
     await closeRun(run, parsed.success ? "succeeded" : "failed", usage, { valid: parsed.success });
     return parsed.success ? parsed.data : null;
   } catch (err) {
+    if (!answered) used = failedUsage(err, o.signal);
     await closeRun(run, "failed", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, {}, err instanceof Error ? err.message : "unknown error");
     o.request.log.warn({ err: errInfo(err), module: o.module }, "axis structured call failed");
     return null;
+  } finally {
+    await settle(hold, used, o.request.log);
   }
 }
 
@@ -160,7 +190,7 @@ export function transcriptFromMessage(msg: Pick<Anthropic.Message, "content" | "
 
 /** A failure that may not happen again: a rate limit or the counselor's daily quota, an overload, a lost connection. */
 function mayWorkLater(err: unknown): boolean {
-  if (err instanceof HttpError) return err.statusCode === 429;
+  if (err instanceof HttpError) return err.statusCode === 429 || err.statusCode === 503;
   if (err instanceof Anthropic.APIConnectionError || err instanceof Anthropic.APIUserAbortError) return true;
   if (err instanceof Anthropic.APIError) return err.status === 429 || (typeof err.status === "number" && err.status >= 500);
   return false;
@@ -183,9 +213,17 @@ export async function transcribe(o: {
 }): Promise<{ text: string; cut: boolean } | "retry" | null> {
   const empty: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let run: Run | null = null;
+  let hold: Hold | null = null;
+  let used: Usage | "unused" | null = null;
+  let answered = false;
+  const messages: Anthropic.Messages.MessageParam[] = [{ role: "user", content: [o.block, { type: "text", text: `Transcribe ${o.name}.` }] }];
   try {
     await assertAiAllowed(o.request, "axis-attachment");
-    await chargeCall(o.request);
+    hold = await reserve(
+      subjectOf(o.request),
+      { model: AXIS_MODEL, maxOutputTokens: TRANSCRIBE_MAX_TOKENS, promptTokens: estimatePromptTokens({ system: TRANSCRIBE_SYSTEM, messages }), module: "axis-attachment" },
+      o.request.log
+    );
     run = await openRun(o.request, "axis-attachment", null, { kind: o.block.type });
     const msg = await (o.client ?? anthropicClient()).messages.create(
       {
@@ -194,20 +232,24 @@ export async function transcribe(o: {
         thinking: { type: "disabled" },
         output_config: { effort: "low" },
         system: TRANSCRIBE_SYSTEM,
-        messages: [{ role: "user", content: [o.block, { type: "text", text: `Transcribe ${o.name}.` }] }],
+        messages,
       },
       o.signal ? { signal: o.signal } : undefined
     );
     const usage = usageOf(msg);
-    await chargeOutput(o.request, usage.output);
+    used = usage;
+    answered = true;
     const out = transcriptFromMessage(msg);
     await closeRun(run, msg.stop_reason === "refusal" ? "blocked" : out ? "succeeded" : "failed", usage, { stop: msg.stop_reason, chars: out?.text.length ?? 0, cut: out?.cut ?? false });
     return out;
   } catch (err) {
+    if (!answered) used = failedUsage(err, o.signal);
     if (run) await closeRun(run, "failed", empty, {}, err instanceof Error ? err.message : "unknown error");
     const retry = mayWorkLater(err);
     o.request.log.warn({ err: errInfo(err), module: "axis-attachment", retry }, "axis transcription failed");
     return retry ? "retry" : null;
+  } finally {
+    if (hold) await settle(hold, used, o.request.log);
   }
 }
 
@@ -224,8 +266,14 @@ export async function prewarm(o: {
   system: Anthropic.Beta.BetaTextBlockParam[];
   tools: Anthropic.Beta.BetaTool[];
 }): Promise<{ cacheWrite: number; cacheRead: number }> {
-  // The pre-warm is a billed call (it writes the cache), so it counts against the daily quota like any other.
-  await chargeCall(o.request);
+  // The pre-warm is a billed call (it writes the cache), so it goes through the budget like any other.
+  const messages: Anthropic.Beta.BetaMessageParam[] = [{ role: "user", content: "warmup" }];
+  const hold = await reserve(
+    subjectOf(o.request),
+    { model: AXIS_MODEL, maxOutputTokens: 0, promptTokens: estimatePromptTokens({ system: o.system, tools: o.tools, messages }), module: "axis-warm" },
+    o.request.log
+  );
+  let used: Usage | "unused" | null = null;
   const run = await openRun(o.request, "axis-warm", o.studentId, { tools: o.tools.length });
   try {
     const perMessage = featureOn("perMessageEffort");
@@ -237,13 +285,17 @@ export async function prewarm(o: {
       ...(perMessage ? { betas: [PER_MESSAGE_EFFORT_BETA] } : {}),
       system: o.system,
       tools: o.tools,
-      messages: [{ role: "user", content: "warmup" }],
+      messages,
     });
     const usage = { input: msg.usage.input_tokens, output: 0, cacheRead: msg.usage.cache_read_input_tokens ?? 0, cacheWrite: msg.usage.cache_creation_input_tokens ?? 0 };
+    used = usage;
     await closeRun(run, "succeeded", usage, {});
     return { cacheWrite: usage.cacheWrite, cacheRead: usage.cacheRead };
   } catch (err) {
+    if (used === null) used = failedUsage(err);
     await closeRun(run, "failed", { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, {}, err instanceof Error ? err.message : "unknown error");
     throw err;
+  } finally {
+    await settle(hold, used, o.request.log);
   }
 }

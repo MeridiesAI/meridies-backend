@@ -20,7 +20,8 @@ import { z } from "zod";
 import { claimAttachments, extractChatFiles, MAX_FILES_PER_MESSAGE } from "../lib/axis/attachments.js";
 import { TtlLru } from "../lib/axis/cache.js";
 import { runAxisTurn, warmInputs } from "../lib/axis/engine.js";
-import { chargeCall, prewarm } from "../lib/axis/llm.js";
+import { settle } from "../lib/aiBudget.js";
+import { prewarm, reserveTurn } from "../lib/axis/llm.js";
 import {
   axisReadiness,
   axisUnavailable,
@@ -98,21 +99,27 @@ export default async function axisRoutes(app: FastifyInstance) {
         request.log.warn({ reason: ready.reason }, "axis unavailable; client should fall back to /chat");
         return reply.code(503).send(unavailableBody());
       }
-      // The turn's first model call is charged here, so an exhausted daily quota is a plain 429.
-      await chargeCall(request);
-
-      const { data: userMsg, error: insErr } = await request.db
-        .from("ai_messages")
-        .insert({ conversation_id: id, owner_id: request.auth.userId, role: "user", content: body.content })
-        .select("id")
-        .single();
-      if (insErr) throw isSchemaMissing(insErr) ? axisUnavailable() : fromPostgrest(insErr);
-      const attached = body.attachmentIds?.length ? await claimAttachments(request, id, userMsg.id as string, body.attachmentIds) : [];
-      const { error: convErr } = await request.db
-        .from("ai_conversations")
-        .update({ student_id: studentId, module: "axis", ...(conv.title ? {} : { title: body.content.slice(0, 60) }) })
-        .eq("id", id);
-      if (convErr) request.log.warn({ code: convErr.code }, "axis conversation not updated");
+      // The turn's first model call is reserved here (lib/aiBudget.ts), so a cap or a paused day is a plain 429.
+      const prepaid = await reserveTurn(request);
+      // Anything that fails before the turn takes the reservation hands it back (the call stays counted).
+      const { userMsg, attached } = await (async () => {
+        const { data: userMsg, error: insErr } = await request.db
+          .from("ai_messages")
+          .insert({ conversation_id: id, owner_id: request.auth.userId, role: "user", content: body.content })
+          .select("id")
+          .single();
+        if (insErr) throw isSchemaMissing(insErr) ? axisUnavailable() : fromPostgrest(insErr);
+        const attached = body.attachmentIds?.length ? await claimAttachments(request, id, userMsg.id as string, body.attachmentIds) : [];
+        const { error: convErr } = await request.db
+          .from("ai_conversations")
+          .update({ student_id: studentId, module: "axis", ...(conv.title ? {} : { title: body.content.slice(0, 60) }) })
+          .eq("id", id);
+        if (convErr) request.log.warn({ code: convErr.code }, "axis conversation not updated");
+        return { userMsg, attached };
+      })().catch(async (err: unknown) => {
+        await settle(prepaid, "unused", request.log);
+        throw err;
+      });
 
       const sse = new PassThrough();
       reply.header("Content-Type", "text/event-stream");
@@ -137,7 +144,7 @@ export default async function axisRoutes(app: FastifyInstance) {
             .then(() => extractChatFiles(request, id)),
         work: async ({ signal, emit, markDone }) => {
           const turn = await runAxisTurn({
-            request, conversationId: id, studentId, content: body.content, emit, signal, prepaidCalls: 1, newFiles: attached.length > 0,
+            request, conversationId: id, studentId, content: body.content, emit, signal, prepaid, newFiles: attached.length > 0,
             messageId: userMsg.id as string,
           });
           const { data: saved, error: saveErr } = await request.db

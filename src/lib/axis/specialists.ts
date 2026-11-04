@@ -19,7 +19,7 @@
  * would each pay for the whole prefix.
  */
 import type Anthropic from "@anthropic-ai/sdk";
-import { runLoop, emptyUsage, type LoopOptions, type MessagesApi, type ToolCall, type Usage } from "./loop.js";
+import { runLoop, emptyUsage, type CallGate, type LoopOptions, type MessagesApi, type ToolCall, type Usage } from "./loop.js";
 import { effortMessage, featureOn, type Effort } from "./models.js";
 import type { Intent, Understanding } from "./nlu.js";
 import { modeLine } from "./profiles.js";
@@ -67,7 +67,7 @@ export async function runSpecialists(o: {
   signal: AbortSignal;
   exec: (call: ToolCall, signal: AbortSignal) => Promise<ToolOutput>;
   readOnly: (name: string) => boolean;
-  beforeCall: () => Promise<void>;
+  gate?: CallGate;
   onStep: (label: string) => void;
 }): Promise<{ findings: Finding[]; usage: Usage }> {
   const usage = emptyUsage();
@@ -99,7 +99,7 @@ export async function runSpecialists(o: {
       signal: o.signal,
       exec: o.exec,
       readOnly: o.readOnly,
-      beforeCall: o.beforeCall,
+      gate: o.gate,
       onFirstEvent: firstEvent,
       onToolStart: (c) => o.onStep(`${task.intent}: ${c.name.replace(/_/g, " ")}`),
     });

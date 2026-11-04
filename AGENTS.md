@@ -1109,7 +1109,8 @@ Without `SUPABASE_SERVICE_ROLE_KEY` the second layer degrades to an in-process
 map and logs a warning at boot. Set it before going live.
 
 New expensive route? Add a `limit(...)` preHandler. AI routes get 20/min per
-user plus a 300-call daily quota.
+user; every model call also passes the AI budget gate (see "The AI budget gate"
+below), which is the cap on AI spend.
 
 **Reads get the DB-backed limiter when they carry volume or fan out** — a list,
 a roster-wide query, a 2000-row scattergram or history series. Single-row point
@@ -1282,10 +1283,11 @@ sign-up links:
   loader's key (now also a unique index on Meridies-wide rows). Never
   overwrites a CSV or hand-entered row; deletes nothing.
 - **When:** weekly `POST /internal/events/discover` (CRON_SECRET, 202, lease
-  `events-discovery`, `ingest_runs` + `job_heartbeats`), capped by a system
-  budget (`consume_quota` on a fixed subject, 2,000 calls a month). A
+  `events-discovery`, `ingest_runs` + `job_heartbeats`), capped by the
+  `system:events-discovery` budget in the AI budget gate (2,000 research calls
+  a month, plus the company ceiling); a refusal from the gate stops the run. A
   counselor's **Refresh events** (`POST /events/discover { collegeId }`) runs
-  one college on their own AI quota. No student fact ever goes into a prompt.
+  one college on their own AI budget. No student fact ever goes into a prompt.
 - **Looked up when listed:** opening the student's Events tab (`/me/events`)
   or the Events Hub's college filter (`/events/colleges`) starts a
   background lookup (`lookUpSoon`, system budget, three at a time per
@@ -1699,8 +1701,58 @@ explicitly decides otherwise.
 - Every model must support image and file attachments
 - Never enable `thinking` / `effort` on models that don't support them
 
-`runStructured()` handles quota, the `ai_runs` audit row, token accounting and
+`runStructured()` handles the budget gate, the `ai_runs` audit row, token accounting and
 safe error messages. Use it rather than calling the SDK directly.
+
+### The AI budget gate (`lib/aiBudget.ts`, `20261108000002`)
+
+Only `lib/anthropic.ts` and `lib/axis/llm.ts` call the model (`ai-gate-callsites.test.ts`
+fails on any other file), and every call there reserves before it runs and settles after:
+`const hold = await reserve(subject, estimate, log)`, then `settle(hold, usage, log)` in a
+`finally`. Settle takes the API's usage, `"unused"` when the call never reached the model
+(an HTTP error, a lost connection, our own refusal before the call: tokens and spend are
+released, the call stays counted) or `null` when it isn't known (a stream stopped or
+failed after it started, which may still be billed: the whole reservation stays).
+
+- **The caps** (env vars, defaults): per user, `AI_DAILY_CALLS` 300 calls and
+  `AI_USER_DAILY_USD` $10 of estimated spend per UTC day, `AI_MONTHLY_OUTPUT_TOKENS`
+  5,000,000 and `AI_MONTHLY_INPUT_TOKENS` 100,000,000 weighted input tokens per calendar
+  month; company-wide `AI_DAILY_CEILING_USD` $100 per UTC day. Weighted input counts each
+  token at its price relative to the model's uncached input (cache reads at the model's
+  read ratio, writes at 2x until the 5m/1h split is recorded). A system job reserves its
+  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000) and the company
+  line; `budget-subjects.test.ts` fails on a budget charged to a made-up account.
+- **Refusals:** a user cap answers 429 "You've hit today's AI limit. It resets in 5
+  hours." (hours to 00:00 UTC, rounded up) or "Monthly AI usage limit reached."; the
+  company ceiling answers 429 `ai_paused` "AI features are paused for today. They come
+  back in N hours." for everyone. The AxIS route reserves a turn's first call before the
+  stream opens (`reserveTurn`), so either is a plain 429, never a fallback to `/chat`.
+- **Fail closed:** once the migration is in, a budget check that errors or takes over 2 s
+  (one deadline for the whole check) refuses the call: 503 `ai_budget_unavailable`, logged
+  at error level. Before the migration the gate counts as before (`consume_quota` calls per
+  day, output after the call) and logs "AI budget fallback active: migration
+  20261108000002_ai_budget not applied, caps not enforced" once an hour. In production
+  with no service role key every call is refused; in development the counts are in
+  process. `/internal/status` shows `aiBudget: { mode, spendTodayUsd, ceilingUsd }`
+  (`mode` is `enforced` or `fallback`; it never changes the status code).
+- **Ceiling emails:** at 50%, 80% and 100% of the ceiling an email to
+  `COMPANY_CONTACT_EMAIL`, once per UTC day per threshold: the day's estimated spend, the
+  top five subjects by spend (profile ids and roles, no names) and the top modules among
+  the day's latest 1,000 calls.
+- **Prices** live only in `private.ai_prices` (USD per million tokens per model; the long
+  tier, such as Haiku 5.5 at 5x above 100K prompt tokens; web search per use). The code
+  reads them through `ai_budget_prices()`, cached 10 minutes; `lib/aiPricing.ts` is the
+  arithmetic only. A model with no row is priced at the table's highest rates and logged,
+  and `ai-prices-seed.test.ts` fails when the code names a model the seed doesn't price.
+  **To change a price:** a new migration that updates the row (`update private.ai_prices
+  set input_usd = ..., updated_at = now() where model = '...'`); add a row for a new model
+  in the same PR that starts using it. Known exception: `lib/imports/spend.ts` keeps its
+  own two prices for the per-import 200-cent cap (they match the table today).
+- **Deploy order:** either. Without the migration the gate falls back as above; with it
+  and the previous build, nothing calls the new functions. Not in `REQUIRED_SCHEMA`. The
+  counters (`private.ai_budget`) and prices have no client grants; the functions are
+  EXECUTE to `service_role` only. Account deletion removes a user's counters
+  (`ai_budget_forget`).
 
 AxIS runs on Claude Haiku 5.5 for every call (`lib/axis/models.ts`), with effort set per turn; its side calls use structured outputs.
 
@@ -1729,9 +1781,10 @@ would hold every deploy until the migration is in.
   `/chat/conversations/:id/messages`. `/axis/actions*` answer the same 503 on a
   schema error; `/axis/warm` always answers 202 and says why it didn't warm.
 - **Limits.** 20 a minute per user on messages (`ai:axis`) and on warm; the
-  first model call of a turn is charged against the 300-call daily quota before
-  the stream opens, so a spent quota is a plain 429 (not a fallback), and each
-  further call is charged as it is made. The pre-warm is charged too.
+  first model call of a turn is reserved in the AI budget before the stream
+  opens (`reserveTurn`), so a cap or a paused day is a plain 429 (not a
+  fallback), and each further call reserves as it is made (`axisGate`). The
+  pre-warm reserves too.
 - **A turn always ends.** `runSseTurn` puts a 90 s hard timeout over the whole
   turn (the tool phase has its own 40 s budget), aborts the model stream, the
   planner and the tools when the counselor closes the panel (the response's

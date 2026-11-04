@@ -17,7 +17,8 @@ import { env, hasAnthropic } from "../env.js";
 import { createKeyCheck, withDeadline, type KeyCheckLog, type KeyStatus } from "./anthropicKeyCheck.js";
 import type { ContextUsage } from "./context/types.js";
 import { HttpError, unavailable } from "./errors.js";
-import { enforceQuota } from "./limits.js";
+import { estimatePromptTokens, reserve, settle, usageAfterError, usageOf, type BudgetSubject } from "./aiBudget.js";
+import type { CallUsage } from "./aiPricing.js";
 import { assertAiAllowed } from "./practiceSettings.js";
 import { serviceClient } from "./supabase.js";
 
@@ -26,7 +27,7 @@ export const DEEP_MODEL = "claude-sonnet-4-5";
 
 let client: Anthropic | null = null;
 
-/** The shared client, for callers that run their own loop (AxIS). They keep the audit and quota discipline themselves. */
+/** The shared client, for callers that run their own loop (AxIS). They keep the audit and the AI budget gate (lib/aiBudget.ts) themselves. */
 export const anthropicClient = (): Anthropic => anthropic();
 
 function anthropic(): Anthropic {
@@ -150,25 +151,25 @@ function userContent(prompt: string, attachments: AiAttachment[] | undefined): A
   return blocks;
 }
 
-/** Per-counselor daily ceiling. Generous for real use, fatal for a scraper. */
-const DAILY_AI_CALL_LIMIT = 300;
-
 export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
   const { request, module, studentId } = opts;
   const actorId = request.auth.userId;
 
-  // The practice's Data & privacy switches come before the quota is spent.
+  // The practice's Data & privacy switches come before the budget is spent.
   await assertAiAllowed(request, module);
 
-  await enforceQuota(
-    actorId,
-    "ai_calls",
-    "day",
-    DAILY_AI_CALL_LIMIT,
-    "You've hit today's AI limit. It resets at midnight."
-  );
-
   const model = opts.model ?? FAST_MODEL;
+  const maxTokens = opts.maxTokens ?? 2048;
+  const content = userContent(opts.prompt, opts.attachments);
+  const tools = [{ name: opts.toolName, description: "Return the result in this exact structure.", input_schema: opts.schema as never }];
+  // Every model call reserves against the budget first (lib/aiBudget.ts) and settles after, whatever happens.
+  const hold = await reserve(
+    { userId: actorId },
+    { model, maxOutputTokens: maxTokens, promptTokens: estimatePromptTokens({ system: opts.system, tools, messages: [{ role: "user", content }] }), module },
+    request.log
+  );
+  let used: CallUsage | "unused" | null = null;
+  let answered = false;
   const svc = serviceClient();
   const startedAt = Date.now();
 
@@ -209,18 +210,14 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
   try {
     const response = await anthropic().messages.create({
       model,
-      max_tokens: opts.maxTokens ?? 2048,
+      max_tokens: maxTokens,
       system: opts.system,
-      messages: [{ role: "user", content: userContent(opts.prompt, opts.attachments) }],
-      tools: [
-        {
-          name: opts.toolName,
-          description: "Return the result in this exact structure.",
-          input_schema: opts.schema as never,
-        },
-      ],
+      messages: [{ role: "user", content }],
+      tools,
       tool_choice: { type: "tool", name: opts.toolName },
     });
+    used = usageOf(response);
+    answered = true;
 
     if (opts.onUsage) {
       try {
@@ -242,19 +239,18 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
     });
-    await enforceQuota(
-      actorId, "ai_output_tokens", "month", 5_000_000,
-      "Monthly AI usage limit reached.", response.usage.output_tokens
-    ).catch(() => undefined);
 
     return value;
   } catch (err) {
+    if (!answered) used = usageAfterError(err);
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });
     // Log server-side; hand the client something safe with no key hints.
     request.log.error({ module, err }, "AI call failed");
     if (err && typeof err === "object" && "statusCode" in err) throw err;
     throw unavailable("The AI service is unavailable right now. Try again shortly.");
+  } finally {
+    await settle(hold, used, request.log);
   }
 }
 
@@ -266,9 +262,9 @@ const turnChars = (c: ChatTurn["content"]) =>
 
 /**
  * Streaming chat completion. Unlike runStructured this is multi-turn, free-form
- * text, and streams token deltas via `onDelta` — but it keeps the same audit +
- * quota discipline: a daily-call gate, an `ai_runs` row, and output-token
- * accounting on completion. Callers are responsible for transport (SSE).
+ * text, and streams token deltas via `onDelta` — but it keeps the same audit
+ * and budget discipline: the AI budget gate (reserve, then settle with the final
+ * usage), and an `ai_runs` row. Callers are responsible for transport (SSE).
  */
 export async function streamChat(opts: {
   request: FastifyRequest;
@@ -284,15 +280,16 @@ export async function streamChat(opts: {
   const { request, studentId } = opts;
   const actorId = request.auth.userId;
 
-  await enforceQuota(
-    actorId,
-    "ai_calls",
-    "day",
-    DAILY_AI_CALL_LIMIT,
-    "You've hit today's AI limit. It resets at midnight."
-  );
-
   const model = opts.model ?? FAST_MODEL;
+  const maxTokens = opts.maxTokens ?? 1200;
+  const messages = opts.messages.map((m) => ({ role: m.role, content: m.content }));
+  const hold = await reserve(
+    { userId: actorId },
+    { model, maxOutputTokens: maxTokens, promptTokens: estimatePromptTokens({ system: opts.system, messages }), module: "chat" },
+    request.log
+  );
+  let used: CallUsage | "unused" | null = null;
+  let started = false;
   const svc = serviceClient();
   const startedAt = Date.now();
 
@@ -334,9 +331,12 @@ export async function streamChat(opts: {
     let text = "";
     const stream = anthropic().messages.stream({
       model,
-      max_tokens: opts.maxTokens ?? 1200,
+      max_tokens: maxTokens,
       system: opts.system,
-      messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages,
+    });
+    stream.on("streamEvent", () => {
+      started = true;
     });
     stream.on("text", (delta: string) => {
       text += delta;
@@ -344,26 +344,22 @@ export async function streamChat(opts: {
     });
 
     const final = await stream.finalMessage();
+    used = usageOf(final);
     await finish("succeeded", {
       input_tokens: final.usage.input_tokens,
       output_tokens: final.usage.output_tokens,
     });
-    await enforceQuota(
-      actorId,
-      "ai_output_tokens",
-      "month",
-      5_000_000,
-      "Monthly AI usage limit reached.",
-      final.usage.output_tokens
-    ).catch(() => undefined);
 
     return { text, runId };
   } catch (err) {
+    if (used === null) used = usageAfterError(err, { started });
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });
     request.log.error({ module: "chat", err }, "AI chat stream failed");
     if (err instanceof HttpError) throw err;
     throw unavailable("AxIS is unavailable right now. Try again in a few minutes.");
+  } finally {
+    await settle(hold, used, request.log);
   }
 }
 
@@ -557,8 +553,8 @@ const RESEARCH_SYSTEM = [
 ].join("\n");
 
 /**
- * One cited research answer. Same audit and quota discipline as runStructured:
- * a daily-call gate, an ai_runs row, output-token accounting. A refusal or a
+ * One cited research answer. Same audit and budget discipline as runStructured:
+ * the AI budget gate on every API call, an ai_runs row. A refusal or a
  * pause is handled here; the caller gets parts with their citations.
  */
 type ResearchOptions = {
@@ -578,11 +574,16 @@ type ResearchOptions = {
   model?: string;
 };
 
-type ResearchLog = { error: (o: object, m?: string) => void };
+type ResearchLog = { warn(o: unknown, m?: string): void; error(o: unknown, m?: string): void };
+
+/** Whose budget a research call spends: the signed-in user's, or the events-discovery system budget for a job. */
+export function researchSubject(actorId: string | null): BudgetSubject {
+  return actorId ? { userId: actorId } : { system: "events-discovery" };
+}
 
 /**
- * Cited research for a signed-in user: their AI switch and daily quota first,
- * then the call, audited under their name.
+ * Cited research for a signed-in user: their AI switch first, then each API
+ * call through the AI budget gate on their budget, audited under their name.
  */
 export async function runWebResearch(opts: ResearchOptions & { request: FastifyRequest }): Promise<ResearchResult> {
   // A programming mistake, not a user error: refuse before anything is audited or sent.
@@ -591,14 +592,13 @@ export async function runWebResearch(opts: ResearchOptions & { request: FastifyR
   }
   const { request, module } = opts;
   await assertAiAllowed(request, module);
-  await enforceQuota(request.auth.userId, "ai_calls", "day", DAILY_AI_CALL_LIMIT, "You've hit today's AI limit. It resets at midnight.");
   return research(opts, request.auth.userId, request.log);
 }
 
 /**
  * Cited research a scheduled job runs, with nobody signed in: the ai_runs row
- * has no actor. The caller owns the budget (a system quota) and must pass only
- * public facts, never a student's.
+ * has no actor, and it spends the events-discovery system budget (lib/aiBudget.ts).
+ * The caller must pass only public facts, never a student's.
  */
 export async function runSystemResearch(opts: ResearchOptions, log: ResearchLog): Promise<ResearchResult> {
   if (opts.domains !== undefined && opts.blockedDomains !== undefined) {
@@ -657,28 +657,44 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
     let response: Anthropic.Beta.BetaMessage | null = null;
     const queries = new Set<string>();
     const seenUrls = new Set<string>();
-    // Server tools can pause a long turn; resume it a few times at most.
+    // Server tools can pause a long turn; resume it a few times at most. Each API call reserves on its own.
+    const subject = researchSubject(actorId);
+    const model = opts.model ?? RESEARCH_MODEL;
     for (let turn = 0; turn < 4; turn++) {
-      response = await anthropic().beta.messages.create(
-        {
-          model: opts.model ?? RESEARCH_MODEL,
-          max_tokens: 16000,
-          betas: ["server-side-fallback-2026-07-01"],
-          fallbacks: "default",
-          output_config: { effort: "medium" },
-          system: opts.system ?? RESEARCH_SYSTEM,
-          // The basic tool versions on purpose: the _20260209 ones filter results
-          // through code execution, and the answer then comes back with empty
-          // citation lists (checked 10/7). "A link for every claim" needs the
-          // per-sentence web_search_result_location citations these give.
-          tools: [
-            { type: "web_search_20250305", name: "web_search", ...domainScope, max_uses: opts.maxSearches ?? 5 },
-            { type: "web_fetch_20250910", name: "web_fetch", ...domainScope, max_uses: 3, citations: { enabled: true }, max_content_tokens: 20000 },
-          ],
-          messages,
-        },
-        { timeout: 180_000 }
+      const hold = await reserve(
+        subject,
+        { model, maxOutputTokens: 16000, webSearches: opts.maxSearches ?? 5, promptTokens: estimatePromptTokens({ system: opts.system ?? RESEARCH_SYSTEM, messages }), module },
+        log
       );
+      let used: CallUsage | "unused" | null = null;
+      try {
+        response = await anthropic().beta.messages.create(
+          {
+            model: opts.model ?? RESEARCH_MODEL,
+            max_tokens: 16000,
+            betas: ["server-side-fallback-2026-07-01"],
+            fallbacks: "default",
+            output_config: { effort: "medium" },
+            system: opts.system ?? RESEARCH_SYSTEM,
+            // The basic tool versions on purpose: the _20260209 ones filter results
+            // through code execution, and the answer then comes back with empty
+            // citation lists (checked 10/7). "A link for every claim" needs the
+            // per-sentence web_search_result_location citations these give.
+            tools: [
+              { type: "web_search_20250305", name: "web_search", ...domainScope, max_uses: opts.maxSearches ?? 5 },
+              { type: "web_fetch_20250910", name: "web_fetch", ...domainScope, max_uses: 3, citations: { enabled: true }, max_content_tokens: 20000 },
+            ],
+            messages,
+          },
+          { timeout: 180_000 }
+        );
+        used = usageOf(response);
+      } catch (err) {
+        used = usageAfterError(err);
+        throw err;
+      } finally {
+        await settle(hold, used, log);
+      }
       inputTokens += response.usage.input_tokens;
       outputTokens += response.usage.output_tokens;
       const activity = extractResearchActivity(response.content);
@@ -713,9 +729,6 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
     for (const p of parts) for (const c of p.citations) if (!seen.has(c.url)) seen.set(c.url, c.title);
 
     await finish("succeeded", { input_tokens: inputTokens, output_tokens: outputTokens });
-    if (actorId) {
-      await enforceQuota(actorId, "ai_output_tokens", "month", 5_000_000, "Monthly AI usage limit reached.", outputTokens).catch(() => undefined);
-    }
     return { parts, sources: [...seen].map(([url, title]) => ({ url, title })), runId, refused: false, queries: [...queries], seenUrls: [...seenUrls] };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";

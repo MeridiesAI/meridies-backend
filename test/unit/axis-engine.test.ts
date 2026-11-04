@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { setBudgetBackend, type BudgetBackend, type ReserveLine, type SettleLine } from "../../src/lib/aiBudget.js";
 import { runAxisTurn, type Emit } from "../../src/lib/axis/engine.js";
+import { reserveTurn } from "../../src/lib/axis/llm.js";
 import { AXIS_MODEL, PER_MESSAGE_EFFORT_BETA, resetFeatures } from "../../src/lib/axis/models.js";
 import { fakeRequest, scriptedApi } from "./axis-fakes.js";
 
@@ -127,6 +129,68 @@ test("a judgement about her GPA is not a lookup", async () => {
   const scripted = scriptedApi([{ text: "Her 3.912 is strong for Cornell." }]);
   const { res } = await turn("Is Ethan's GPA good enough for Cornell?", null, scripted.api);
   assert.equal(res.path, "agent");
+});
+
+/** A budget backend that lets everything through and records what was reserved and settled. */
+function countingBackend() {
+  const reserves: ReserveLine[][] = [];
+  const settles: SettleLine[][] = [];
+  const backend: BudgetBackend = {
+    probe: async () => undefined,
+    prices: async () => [{ model: AXIS_MODEL, input_usd: 0.1, output_usd: 0.5, read_mult: 0.1, write_5m_mult: 1.25, write_1h_mult: 2, long_above: 100000, long_mult: 5, web_search_usd: 0.01 }],
+    reserve: async (lines) => (reserves.push(lines), { ok: true, totals: {} }),
+    settle: async (lines) => void settles.push(lines),
+    total: async () => 0,
+  };
+  return { backend, reserves, settles };
+}
+
+test("the turn's first call uses the route's reservation", async () => {
+  const b = countingBackend();
+  setBudgetBackend(b.backend);
+  try {
+    const request = fakeRequest(TABLES, "11111111-1111-4111-8111-111111111111");
+    const prepaid = await reserveTurn(request);
+    assert.equal(b.reserves.length, 1);
+    const scripted = scriptedApi([{ thinkingOnly: true }, { text: "Her 3.912 is strong for Cornell." }]);
+    const res = await runAxisTurn({
+      request, conversationId: "conv-1", studentId: null, content: "Is Ethan's GPA good enough for Cornell?", emit: collect().emit,
+      signal: new AbortController().signal, api: scripted.api, prepaid,
+    });
+    assert.equal(res.path, "agent");
+    assert.equal(scripted.calls.length, 2);
+    assert.equal(b.reserves.length, 1 + (scripted.calls.length - 1), "one new reservation per call after the first");
+    assert.equal(b.settles.length, 2, "each call settled with its usage");
+  } finally {
+    setBudgetBackend(null);
+  }
+});
+
+test("a direct answer settles the unused reservation", async () => {
+  const b = countingBackend();
+  setBudgetBackend(b.backend);
+  try {
+    const request = fakeRequest(TABLES, "11111111-1111-4111-8111-111111111111");
+    const prepaid = await reserveTurn(request);
+    const scripted = scriptedApi([{ text: "should not be called" }]);
+    const res = await runAxisTurn({
+      request, conversationId: "conv-1", studentId: null, content: "Who is behind this week?", emit: collect().emit,
+      signal: new AbortController().signal, api: scripted.api, prepaid,
+    });
+    assert.equal(res.path, "direct");
+    assert.equal(scripted.calls.length, 0);
+    assert.equal(b.settles.length, 1, "released once");
+    const released = b.settles[0]!;
+    const reserved = b.reserves[0]!;
+    for (const l of released) {
+      const r = reserved.find((x) => x.subject === l.subject && x.metric === l.metric)!;
+      assert.ok(Math.abs(l.delta + r.amount) < 1e-9, `${l.metric} released in full`);
+    }
+    assert.ok(!released.some((l) => l.metric === "calls"), "the call stays counted, as the route's charge always did");
+    assert.equal(prepaid.settled, true);
+  } finally {
+    setBudgetBackend(null);
+  }
 });
 
 // Last in the file: it registers ports, which are process-wide.
