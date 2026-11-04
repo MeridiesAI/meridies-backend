@@ -162,8 +162,8 @@ async function deadline(title = "UC application") {
   await del(c.token, `documents?id=eq.${doc}`, action);
   await sql(`update private.axis_trash set deleted_at = now() - interval '31 days' where action_id = '${action}'`);
   const purged = await serviceRpc("axis_trash_purge", {});
-  const objects = Array.isArray(purged.body) ? purged.body : [];
-  check("purge removes rows past 30 days", (await sql(`select count(*) from private.axis_trash where action_id = '${action}'`)) === "0", `status ${purged.status}`);
+  const objects = Array.isArray(purged.body?.objects) ? purged.body.objects : [];
+  check("purge removes rows past 30 days and counts them", (await sql(`select count(*) from private.axis_trash where action_id = '${action}'`)) === "0" && Number(purged.body?.rows) >= 1, `status ${purged.status} ${JSON.stringify(purged.body).slice(0, 120)}`);
   check("and returns the kept document objects", objects.some((o) => o.bucket === "student-documents" && o.storage_path === path), JSON.stringify(objects).slice(0, 200));
 
   const gone = await user("trash-gone");
@@ -216,8 +216,8 @@ for (const [label, insert, path] of [
   await del(c.token, `documents?id=eq.${docId}`, second);
   await sql(`update private.axis_trash set deleted_at = now() - interval '31 days' where action_id = '${first}'`);
   const purged = await serviceRpc("axis_trash_purge", {});
-  const objects = Array.isArray(purged.body) ? purged.body : [];
-  check("the purge keeps a file a later trash entry still needs", !objects.some((o) => o.storage_path === path), JSON.stringify(objects).slice(0, 200));
+  const objects = Array.isArray(purged.body?.objects) ? purged.body.objects : null;
+  check("the purge keeps a file a later trash entry still needs", objects !== null && !objects.some((o) => o.storage_path === path), JSON.stringify(purged.body).slice(0, 200));
 }
 
 // Parents come back first whatever order the rows were kept in.

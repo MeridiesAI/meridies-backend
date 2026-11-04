@@ -495,48 +495,63 @@ grant execute on function public.axis_trash_restore(uuid) to authenticated;
 
 -- ---- Purge and forget (service role) ----
 
--- Rows past 30 days go; the document objects they kept are returned when no live documents row, and no trash row
--- that stays, points at them (a document deleted, restored and deleted again still needs its file).
+-- Both return { rows, objects: [{ bucket, storage_path }] }: how many trash rows went, and the document files they
+-- kept that nothing needs now (no live documents row, and no trash row that stays, points at them: a document
+-- deleted, restored and deleted again still needs its file). The API removes those objects from Storage.
+drop function if exists public.axis_trash_purge(timestamptz);
+drop function if exists public.axis_trash_forget(uuid);
+
+-- What a purge or forget hands back, given the rows it deleted (which it excludes itself: they may still be visible
+-- to the statement that deleted them).
+create or replace function private.axis_trash_freed(p_gone jsonb)
+returns jsonb
+language sql stable security definer set search_path = '' as $$
+  select jsonb_build_object(
+    'rows', jsonb_array_length(p_gone),
+    'objects', coalesce((
+      select jsonb_agg(distinct jsonb_build_object('bucket', f.bucket, 'storage_path', f.storage_path))
+      from (
+        select g -> 'row_data' ->> 'bucket' as bucket, g -> 'row_data' ->> 'storage_path' as storage_path
+        from jsonb_array_elements(p_gone) g
+        where g ->> 'table_name' = 'documents' and g ->> 'kind' = 'delete' and g -> 'row_data' ->> 'storage_path' is not null
+      ) f
+      where not exists (select 1 from public.documents d where d.bucket = f.bucket and d.storage_path = f.storage_path)
+        and not exists (
+          select 1 from private.axis_trash k
+          where k.table_name = 'documents' and k.kind = 'delete'
+            and k.row_data ->> 'bucket' = f.bucket and k.row_data ->> 'storage_path' = f.storage_path
+            and not exists (select 1 from jsonb_array_elements(p_gone) x where (x ->> 'id')::bigint = k.id)
+        )
+    ), '[]'::jsonb)
+  );
+$$;
+revoke all on function private.axis_trash_freed(jsonb) from public, anon, authenticated;
+
+-- Rows past 30 days go.
 create or replace function public.axis_trash_purge(p_now timestamptz default now())
-returns table (bucket text, storage_path text)
+returns jsonb
 language sql security definer set search_path = '' as $$
   with gone as (
     delete from private.axis_trash t where t.deleted_at < p_now - interval '30 days'
-    returning t.table_name, t.kind, t.row_data
+    returning t.id, t.table_name, t.kind, t.row_data
   )
-  select distinct g.row_data ->> 'bucket', g.row_data ->> 'storage_path'
-  from gone g
-  where g.table_name = 'documents' and g.kind = 'delete' and g.row_data ->> 'storage_path' is not null
-    and not exists (
-      select 1 from public.documents d where d.bucket = g.row_data ->> 'bucket' and d.storage_path = g.row_data ->> 'storage_path'
-    )
-    and not exists (
-      select 1 from private.axis_trash k
-      where k.table_name = 'documents' and k.kind = 'delete' and k.deleted_at >= p_now - interval '30 days'
-        and k.row_data ->> 'bucket' = g.row_data ->> 'bucket' and k.row_data ->> 'storage_path' = g.row_data ->> 'storage_path'
-    );
+  select private.axis_trash_freed((select coalesce(jsonb_agg(jsonb_build_object('id', g.id, 'table_name', g.table_name, 'kind', g.kind, 'row_data', g.row_data)), '[]'::jsonb) from gone g));
 $$;
 
--- An account's deletion: the trash it made and the trash about it.
+-- An account's deletion: the trash it made and the trash about it (a row naming the account in any column, such as
+-- a student's saved copy of an event, not only the rows filed under it as the student).
 create or replace function public.axis_trash_forget(p_user uuid)
-returns table (bucket text, storage_path text)
+returns jsonb
 language sql security definer set search_path = '' as $$
   with gone as (
-    delete from private.axis_trash t where t.deleted_by = p_user or t.student_id = p_user
-    returning t.table_name, t.kind, t.row_data
+    delete from private.axis_trash t
+    where t.deleted_by = p_user or t.student_id = p_user
+       or exists (select 1 from jsonb_each_text(t.row_data) e where e.value = p_user::text)
+    returning t.id, t.table_name, t.kind, t.row_data
   )
-  select distinct g.row_data ->> 'bucket', g.row_data ->> 'storage_path'
-  from gone g
-  where g.table_name = 'documents' and g.kind = 'delete' and g.row_data ->> 'storage_path' is not null
-    and not exists (
-      select 1 from public.documents d where d.bucket = g.row_data ->> 'bucket' and d.storage_path = g.row_data ->> 'storage_path'
-    )
-    and not exists (
-      select 1 from private.axis_trash k
-      where k.table_name = 'documents' and k.kind = 'delete' and k.deleted_by is distinct from p_user and k.student_id is distinct from p_user
-        and k.row_data ->> 'bucket' = g.row_data ->> 'bucket' and k.row_data ->> 'storage_path' = g.row_data ->> 'storage_path'
-    );
+  select private.axis_trash_freed((select coalesce(jsonb_agg(jsonb_build_object('id', g.id, 'table_name', g.table_name, 'kind', g.kind, 'row_data', g.row_data)), '[]'::jsonb) from gone g));
 $$;
+
 revoke all on function public.axis_trash_purge(timestamptz) from public, anon, authenticated;
 revoke all on function public.axis_trash_forget(uuid) from public, anon, authenticated;
 grant execute on function public.axis_trash_purge(timestamptz) to service_role;

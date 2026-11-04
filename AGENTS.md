@@ -1622,6 +1622,17 @@ error is held, not sent. Every run writes one `audit_log` row
 (`accountability.sweep.{manual,cron,interval}`). Without
 `SUPABASE_SERVICE_ROLE_KEY` a scheduled run logs and skips.
 
+**The AxIS trash purge rides on the sweep.** After a scheduled run (cron or
+interval, not the dashboard button) `purgeAxisTrash` (`lib/axisTrash.ts`)
+deletes AxIS trash past 30 days (`axis_trash_purge`, `20261108000003`) and
+removes the `student-documents` objects those rows kept that nothing needs any
+more. It takes the `axis-trash-purge` lease for an hour and keeps it, so it
+runs at most once an hour across every replica (a failed purge releases it,
+so the next sweep tries again); it never fails the sweep. With no sweep
+scheduled the trash isn't purged. `DELETE /account` runs `forgetAxisTrash`
+first (the trash the account made and every trash row naming it, with their
+files), and refuses the deletion with a 503 if that fails.
+
 **The second cron: scheduled messages.** "Schedule send" in the
 Communication composer, and any composer message held for quiet hours, is a
 `student_messages` row in `scheduled` until

@@ -85,6 +85,10 @@ const REVIEWED = [
   // address of the caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request
   // value) after asking isCounselorApproved, and writes or reads only inbound_messages rows keyed by the caller's id.
   "lib/studentToCounselor.ts",
+  // lib/axisTrash.ts: acts for no counselor. The hourly purge (from the scheduled sweep) deletes trash rows past
+  // 30 days; account deletion (DELETE /account, the caller's own id) deletes the trash it made and about it. Both
+  // remove only the student-documents objects the database hands back as needed by nothing.
+  "lib/axisTrash.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
