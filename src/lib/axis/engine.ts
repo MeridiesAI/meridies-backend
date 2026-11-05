@@ -99,6 +99,8 @@ export type TurnResult = {
    * route to store with it (ai_messages.outside_quotes). Always empty before 20261108000004.
    */
   quotes: QuoteRun[];
+  /** The answer was checked for quotes (the rule is on): the route stores its runs, [] when clean. */
+  quotesChecked: boolean;
 };
 
 type Free = { source: string; text: string }[];
@@ -333,6 +335,7 @@ async function axisTurn(opts: {
         state: (flags ? direct.freeText : direct.outside) ? { ...state, outside: true } : state,
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
         quotes: flags ? quotedRuns(direct.text, [...(direct.freeBlocks ?? []), ...history.quoted]) : [],
+        quotesChecked: flags,
       };
     }
   }
@@ -341,15 +344,19 @@ async function axisTurn(opts: {
   if (u.intent === "essay") {
     emit("route", { intent: "essay", path: "essay" });
     emit("status", { phase: "answering" });
-    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, hold: opts.prepaid });
+    // Advice needs the whole record (an uploaded draft, the activity descriptions) and runs no tools to fetch what
+    // a short-only record leaves out: under the rule it reads the full record and the turn is judged by it.
+    const essayCtx = flags && !forChange && studentId ? await loadContext(request, studentId, false, false) : ctx;
+    const text = await essayAdvice(request, studentId, content, essayCtx.record, { signal, hold: opts.prepaid });
     emit("delta", { text });
     return {
       // The bullets were written over the student's record (their essays, activities): saved to the
       // chat, they are outside content for the next turn.
       path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u,
-      state: (flags ? ctx.freeText : ctx.outside) ? { ...state, outside: true } : state,
+      state: (flags ? essayCtx.freeText : ctx.outside) ? { ...state, outside: true } : state,
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
-      quotes: flags ? quotedRuns(text, [...ctx.free, ...history.quoted]) : [],
+      quotes: flags ? quotedRuns(text, [...essayCtx.free, ...history.quoted]) : [],
+      quotesChecked: flags,
     };
   }
 
@@ -360,6 +367,7 @@ async function axisTurn(opts: {
   if (sources.size) emit("sources", { sources: [...sources] });
   const evidence = await gatherEvidence({
     request, u, chatStudentId: studentId, roster, ledger, connected, retrievalReady: retrievalOn, speculative, signal, onStep: step,
+    freeRule: flags,
   });
   for (const s of evidence.sources) sources.add(s);
 
@@ -521,6 +529,7 @@ async function axisTurn(opts: {
       verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
       quotes,
+      quotesChecked: flags,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";

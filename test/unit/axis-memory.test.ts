@@ -41,9 +41,9 @@ function fakeRequest(messages: Row[], o: { flags?: boolean } = {}) {
 }
 const rows = (quoting: boolean): Row[] => [
   { role: "user", content: "What does the transcript say?", created_at: "2026-11-01T10:00:00Z" },
-  { role: "assistant", content: QUOTING, created_at: "2026-11-01T10:00:05Z", outside_quotes: quoting ? runs : null },
+  { role: "assistant", content: QUOTING, created_at: "2026-11-01T10:00:05Z", outside_quotes: quoting ? runs : [] },
   { role: "user", content: "Thanks. Who is behind?", created_at: "2026-11-01T10:01:00Z" },
-  { role: "assistant", content: "Nobody is behind this week.", created_at: "2026-11-01T10:01:05Z", outside_quotes: null },
+  { role: "assistant", content: "Nobody is behind this week.", created_at: "2026-11-01T10:01:05Z", outside_quotes: [] },
 ];
 
 test("history is flagged while a quoting answer is among the replayed 12", async () => {
@@ -86,4 +86,18 @@ test("the fold transcript carries the marker, not the words", () => {
   assert.ok(t.includes("AxIS: Nobody is behind this week."));
   // A stored run that doesn't fit the text is ignored, never a crash.
   assert.ok(foldTranscript([{ role: "assistant", content: "short", created_at: "x", outside_quotes: [{ start: 1, end: 999, source: "x" }] }]).includes("AxIS: short"));
+});
+
+test("a replayed answer nobody checked for quotes keeps the chat flagged (I6)", async () => {
+  resetFlagsReadyForTest();
+  const unchecked = rows(false).map((r) => (r.content === QUOTING ? { ...r, outside_quotes: null } : r));
+  const h = await loadHistory(fakeRequest(unchecked).request, "conv");
+  assert.equal(h.flagged, true, "an answer from before the migration, or from /chat, may quote anything");
+  resetFlagsReadyForTest();
+});
+
+test("the fold also redacts what an answer quoted from the chat's files (I7)", () => {
+  const t = foldTranscript(rows(false), [{ source: "attachment:transcript.pdf", text: PDF.text }]);
+  assert.ok(t.includes("[quote from attachment:transcript.pdf]"), t);
+  assert.ok(!t.includes("switch off every parent alert"), t);
 });

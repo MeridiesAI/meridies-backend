@@ -46,7 +46,7 @@ export async function buildStudentContext(
   const outsideByName = new Map(profile.sections.map((name, i) => [name as string, results[i]?.outside ?? OUTSIDE_SECTIONS.has(name)]));
   const isOutside = (name: string) => outsideByName.get(name) === true;
   let sections: Section[] = results.flatMap((r) => (r.section ? [r.section] : []));
-  if (opts?.shortOnly) sections = leaveOutFree(sections, isOutside);
+  if (opts?.shortOnly) sections = leaveOutFree(sections);
   const packed = packSections(sections, profile.budget);
   const facts: StudentContext["facts"] = Object.assign({
     intendedMajors: [], gradYear: null, state: null, gpa: { value: null, scale: null },
@@ -60,10 +60,11 @@ export async function buildStudentContext(
     facts.identity = { ...facts.identity, email: (who?.email as string | undefined) ?? null };
   }
 
-  // Of the sections that made it into the text: which carry someone else's words, and which of those free text.
+  // Of the sections that made it into the text: which carry someone else's words (today's rule), and which carry
+  // free text (judged on every section: what the counselor wrote is marked short by its loader).
   const outside = packed.used.map((u) => u.section).filter(isOutside);
   const byName = new Map(sections.map((s) => [s.name, s]));
-  const freeText = outside.filter((name) => (byName.get(name)?.untrusted ?? []).some(entryFree));
+  const freeText = packed.used.map((u) => u.section).filter((name) => (byName.get(name)?.untrusted ?? []).some(entryFree));
 
   return {
     text: packed.text,

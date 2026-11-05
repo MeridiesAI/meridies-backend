@@ -124,6 +124,9 @@ function planContext(request: FastifyRequest): PlanContext {
 test("planner evidence with only short fields doesn't flag", async () => {
   const short = await gatherEvidence(planContext(fakeRequest({ deadlines: [deadline("UC application")] })));
   assert.ok(short.text.includes("UC application"), short.text);
+  // A short title is still the student's words: it reaches the model inside a data block (I8).
+  const bare = short.text.replace(/<data source="[^"]*" kind="untrusted"(?: length="short")?>[\s\S]*?<\/data>/g, "");
+  assert.ok(!bare.includes("UC application"), bare);
   assert.equal(short.outside, true, "today's wider rule still says outside");
   assert.equal(short.freeText, false);
   assert.deepEqual(short.freeBlocks, []);

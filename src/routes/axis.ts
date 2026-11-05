@@ -48,6 +48,7 @@ import { hasAnthropic } from "../env.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { storableRuns } from "../lib/axis/quotes.js";
 
 const messageSchema = z
   .object({
@@ -158,9 +159,9 @@ export default async function axisRoutes(app: FastifyInstance) {
               content: turn.text,
               citations: turn.citations,
               trace: turn.trace,
-              // The runs the answer quoted from free text (lib/axis/quotes.ts): non-empty only once
-              // 20261108000004 is in, so the column is never named before it exists.
-              ...(turn.quotes.length ? { outside_quotes: turn.quotes } : {}),
+              // The runs the answer quoted from free text (lib/axis/quotes.ts), [] when clean. Only once
+              // 20261108000004 is in (quotesChecked), so the column is never named before it exists; capped to fit it.
+              ...(turn.quotesChecked ? { outside_quotes: storableRuns(turn.quotes) } : {}),
               sources: turn.sources,
               ai_run_id: turn.runId,
             })

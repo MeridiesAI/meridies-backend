@@ -25,8 +25,9 @@ import type { Intent, Understanding } from "./nlu.js";
 import { getConnectors, type ConnectedProvider, type RetrievedChunk } from "./ports.js";
 import { fusedSearch, retrievalQueries } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
-import { readsDocuments, readsOutside } from "./tools.js";
+import { readsOutside } from "./tools.js";
 import { anyLong, freeBlocks } from "../context/freeText.js";
+import { wrapUntrusted } from "../context/pack.js";
 import { TRUSTED_SECTIONS } from "../context/profiles.js";
 
 export type PlanContext = {
@@ -37,6 +38,8 @@ export type PlanContext = {
   ledger: SourceLedger;
   connected: ConnectedProvider[];
   retrievalReady: boolean;
+  /** The free-text rule is on (20261108000004): a question's record of another student is built short-only. */
+  freeRule?: boolean;
   /** The raw-question search started at the top of the turn. */
   speculative: Promise<RetrievedChunk[]>;
   signal: AbortSignal;
@@ -129,9 +132,9 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
         // student's own words don't turn the change into a card (as for the chat's own student).
         const c = change
           ? await cachedStudentContext(request, id, TRUSTED_SECTIONS.slice(), true)
-          : await cachedStudentContext(request, id, ["profile", "academics", "personal", "testScores", "colleges", "activities", "awards", "tasks", "deadlines", "meetingNotes"]);
+          : await cachedStudentContext(request, id, ["profile", "academics", "personal", "testScores", "colleges", "activities", "awards", "tasks", "deadlines", "meetingNotes"], false, ctx.freeRule === true);
         outside.set(readsOutside(c));
-        if ((c.freeText?.length ?? 0) > 0 || readsDocuments(c)) free.set(freeBlocks(c.text));
+        if ((c.freeText?.length ?? 0) > 0) free.set(freeBlocks(c.text));
         return c.text ? `## Record of another student: ${plain(s.name, 60)}\n${c.text}` : null;
       },
     });
@@ -160,7 +163,8 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
           `## Due ${window.label} (today is ${isoDay()})`,
           ...items.map(
             (i) =>
-              `${i.date}${i.overdue ? " OVERDUE" : ""} ${i.kind}${i.status ? ` [${i.status}]` : ""}${id ? "" : ` · ${plain(ctx.roster.get(i.studentId)?.name ?? "Student", 60)}`} · ${plain(i.title, 120)}${i.detail ? `, ${plain(i.detail, 60)}` : ""}`
+              // Titles and details are the student's words (a deadline, a task they added): in a data block, short or free.
+              `${i.date}${i.overdue ? " OVERDUE" : ""} ${i.kind}${i.status ? ` [${i.status}]` : ""}${id ? "" : ` · ${wrapUntrusted("student", plain(ctx.roster.get(i.studentId)?.name ?? "Student", 60), false)}`} · ${wrapUntrusted(i.kind, `${plain(i.title, 120)}${i.detail ? `, ${plain(i.detail, 60)}` : ""}`, i.outside && anyLong([i.title, i.detail]))}`
           ),
         ].join("\n");
       },
@@ -178,7 +182,8 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
         const ranked = (await loadRosterRisk(request, 14)).slice(0, 8);
         outside.set(ranked.some((r) => r.outside));
         if (!ranked.length) return "## Caseload ranking\nNobody has overdue work, a red flag or a deadline at risk in the next 14 days.";
-        return ["## Caseload ranking (computed: overdue work, deadlines in 14 days, days without activity, red flags)", ...ranked.map((r, i) => `${i + 1}. ${plain(r.name, 60)} (score ${r.score}): ${r.reasons.join("; ")}`)].join("\n");
+        // A reason quotes a title cut to 80 characters (lib/axis/risk.ts): a short field, inside a data block.
+        return ["## Caseload ranking (computed: overdue work, deadlines in 14 days, days without activity, red flags)", ...ranked.map((r, i) => `${i + 1}. ${wrapUntrusted("student", plain(r.name, 60), false)} (score ${r.score}): ${wrapUntrusted("reasons", r.reasons.join("; "), false)}`)].join("\n");
       },
     });
   }

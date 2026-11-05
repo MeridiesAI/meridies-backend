@@ -22,7 +22,7 @@ import { z } from "zod";
 import { wrapUntrusted } from "../context/pack.js";
 import { fromPostgrest } from "../errors.js";
 import { flagsReady, isSchemaMissing } from "./failsafe.js";
-import { redactQuotes, validRuns } from "./quotes.js";
+import { mergeRuns, quotedRuns, redactQuotes, validRuns } from "./quotes.js";
 import { stripCitations } from "./ledger.js";
 import { structured } from "./llm.js";
 import type { DialogueState } from "./nlu.js";
@@ -39,7 +39,10 @@ export type History = {
   /** Oldest first; starts with a user turn; alternates. */
   turns: Anthropic.Beta.BetaMessageParam[];
   state: DialogueState | null;
-  /** A replayed answer quoted free text: the chat stays flagged (changes wait for Confirm) while it is replayed. */
+  /**
+   * A replayed answer quoted free text, or was never checked for quotes (saved before 20261108000004, or by /chat):
+   * the chat stays flagged (changes wait for Confirm) while it is replayed.
+   */
   flagged: boolean;
   /** Those quoted words, as free text this turn can see (re-quoting them keeps the flag). */
   quoted: { source: string; text: string }[];
@@ -97,13 +100,24 @@ export async function loadHistory(request: FastifyRequest, conversationId: strin
   const quoted = rows
     .filter((r) => r.role === "assistant")
     .flatMap((r) => validRuns(r.content, r.outside_quotes).map((q) => ({ source: q.source, text: r.content.slice(q.start, q.end) })));
+  // Under the rule every AxIS answer is stored with its runs ([] when clean); one without (null) wasn't checked.
+  const unchecked = flags && rows.some((r) => r.role === "assistant" && !Array.isArray(r.outside_quotes));
   return {
     summary: (conv?.summary as string | null) ?? null,
     turns: toTurns(rows),
     state: parsedState.success ? parsedState.data : null,
-    flagged: quoted.length > 0,
+    flagged: quoted.length > 0 || unchecked,
     quoted,
   };
+}
+
+/** The chat's files' stored text (20261108000001), for the fold's quote check. Best effort: none on any error. */
+async function chatFileTexts(request: FastifyRequest, conversationId: string): Promise<{ source: string; text: string }[]> {
+  const { data, error } = await request.db.from("ai_attachments").select("file_name, extracted_text").eq("conversation_id", conversationId);
+  if (error) return [];
+  return ((data ?? []) as { file_name?: unknown; extracted_text?: unknown }[])
+    .filter((f) => typeof f.extracted_text === "string" && f.extracted_text.trim() !== "")
+    .map((f) => ({ source: `attachment:${String(f.file_name ?? "file")}`, text: f.extracted_text as string }));
 }
 
 /** Never throws: a turn whose state can't be saved has still been answered. */
@@ -119,11 +133,16 @@ const SUMMARY_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** The fold's transcript: each answer's quoted runs replaced by "[quote from <source>]" before anything else. */
-export function foldTranscript(rows: MsgRow[]): string {
+/**
+ * The fold's transcript: each answer's quoted runs replaced by "[quote from <source>]" before anything else, the
+ * stored runs and any run from the chat's files (`fileTexts`: a file attached in a turn is read after its answer,
+ * so the stored runs can't include it).
+ */
+export function foldTranscript(rows: MsgRow[], fileTexts: { source: string; text: string }[] = []): string {
   return rows
     .map((r) => {
-      const text = r.role === "assistant" ? redactQuotes(r.content, r.outside_quotes) : r.content;
+      const runs = r.role === "assistant" ? mergeRuns([...validRuns(r.content, r.outside_quotes), ...quotedRuns(r.content, fileTexts)]) : [];
+      const text = r.role === "assistant" ? redactQuotes(r.content, runs) : r.content;
       return `${r.role === "user" ? "Counselor" : "AxIS"}: ${stripCitations(text).slice(0, 2000)}`;
     })
     .join("\n\n");
@@ -142,9 +161,10 @@ export async function foldIfLong(request: FastifyRequest, conversationId: string
     .maybeSingle();
   // No memory columns (migration not applied) or no row: nothing to fold into.
   if (convErr || !conv) return;
+  const flags = await flagsOn(request);
   let query = request.db
     .from("ai_messages")
-    .select(messageColumns(await flagsOn(request)))
+    .select(messageColumns(flags))
     .eq("conversation_id", conversationId)
     .order("created_at")
     .limit(200);
@@ -155,7 +175,7 @@ export async function foldIfLong(request: FastifyRequest, conversationId: string
 
   const older = rows.slice(0, rows.length - RECENT_MESSAGES);
   const through = older.at(-1)!.created_at;
-  const transcript = foldTranscript(older);
+  const transcript = foldTranscript(older, flags ? await chatFileTexts(request, conversationId) : []);
   const out = await structured({
     request,
     module: "axis-memory",

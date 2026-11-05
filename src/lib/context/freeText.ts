@@ -37,12 +37,17 @@ export function isFree(source: string, text: string): boolean {
   return FREE_SOURCES.has(prefixOf(source)) || text.trim().length > SHORT_FIELD_MAX;
 }
 
-/** Whether any of the values a loader joined is longer than a short field (arrays and objects searched). */
+/**
+ * Whether any of the values a loader joined is longer than a short field. Arrays and objects are searched, their
+ * keys too (a key is printed like a value); anything nested deeper than the search goes counts as long.
+ */
 export function anyLong(values: unknown[]): boolean {
   const long = (v: unknown, depth: number): boolean => {
     if (typeof v === "string") return v.trim().length > SHORT_FIELD_MAX;
-    if (depth > 4 || v === null || typeof v !== "object") return false;
-    return (Array.isArray(v) ? v : Object.values(v)).some((x) => long(x, depth + 1));
+    if (v === null || typeof v !== "object") return false;
+    if (depth > 8) return true;
+    if (Array.isArray(v)) return v.some((x) => long(x, depth + 1));
+    return Object.entries(v).some(([k, x]) => k.trim().length > SHORT_FIELD_MAX || long(x, depth + 1));
   };
   return values.some((v) => long(v, 0));
 }
@@ -79,38 +84,48 @@ const NOUNS: Record<string, [string, string]> = {
   document: ["document", "documents"],
 };
 
-/** "6 activity descriptions, 1 document: transcript.pdf" for what was left out of one section. */
-function leftOutLine(section: Section, dropped: { source: string }[]): string {
-  const groups = new Map<string, { nouns: [string, string]; n: number; names: string[] }>();
+/**
+ * "6 activity descriptions, 1 document (named below)" for what was left out of one section: counts only, because
+ * the body is server text. A left-out document's name was written by a student, an import or Drive, so the
+ * names go in a short data block of their own.
+ */
+function leftOutLine(section: Section, dropped: { source: string }[]): { line: string; names: string[] } {
+  const groups = new Map<string, { nouns: [string, string]; n: number }>();
+  const names: string[] = [];
   for (const d of dropped) {
     const prefix = prefixOf(d.source);
     const nouns = NOUNS[prefix] ?? ([`${section.label.toLowerCase()} entry`, `${section.label.toLowerCase()} entries`] as [string, string]);
-    const g = groups.get(prefix) ?? { nouns, n: 0, names: [] };
+    const g = groups.get(prefix) ?? { nouns, n: 0 };
     g.n += 1;
-    if (prefix === "document") g.names.push(d.source.slice(d.source.indexOf(":") + 1));
+    if (prefix === "document") names.push(d.source.slice(d.source.indexOf(":") + 1));
     groups.set(prefix, g);
   }
-  const parts = [...groups.values()].map((g) => `${g.n} ${g.n === 1 ? g.nouns[0] : g.nouns[1]}${g.names.length ? `: ${g.names.join(", ")}` : ""}`);
-  return `Left out, read with get_student_record: ${parts.join(", ")}`;
+  const parts = [...groups.entries()].map(([prefix, g]) => `${g.n} ${g.n === 1 ? g.nouns[0] : g.nouns[1]}${prefix === "document" ? " (named below)" : ""}`);
+  return { line: `Left out, read with get_student_record: ${parts.join(", ")}`, names };
 }
 
+/** A document name as its entry's source label carries it (lib/context/sections.ts tag): one line, at most 80. */
+const asTagged = (name: string) => name.replace(/\s+/g, " ").trim().slice(0, 80);
+
 /**
- * A question turn's record (spec §3.2): each outside section keeps its short fields inline and leaves out its
- * free entries, with a line in its body naming what exists so AxIS can fetch it with a lookup (which flags the
- * turn). Sections the counselor wrote are unchanged.
+ * A question turn's record (spec §3.2): each section keeps its short fields inline and leaves out its free
+ * entries, with a line in its body saying what exists so AxIS can fetch it with a lookup (which flags the turn).
+ * Judged on every section, whatever its outside mark (a Research task's title is the counselor's section but a
+ * web page's words); what the counselor wrote is never free (the loaders mark it short), so it stays.
  */
-export function leaveOutFree(sections: Section[], outside: (name: string) => boolean): Section[] {
+export function leaveOutFree(sections: Section[]): Section[] {
   return sections.map((s) => {
-    if (!outside(s.name) || !s.untrusted?.length) return s;
+    if (!s.untrusted?.length) return s;
     const kept = s.untrusted.filter((u) => !entryFree(u));
     const dropped = s.untrusted.filter((u) => entryFree(u));
     if (dropped.length === 0) return s;
-    const droppedDocs = new Set(dropped.filter((d) => prefixOf(d.source) === "document").map((d) => d.source.slice(d.source.indexOf(":") + 1)));
+    const { line, names } = leftOutLine(s, dropped);
+    const droppedDocs = new Set(names);
     return {
       ...s,
-      body: [s.body, leftOutLine(s, dropped)].filter(Boolean).join("\n"),
-      untrusted: kept,
-      ...(s.items ? { items: s.items.filter((i) => !droppedDocs.has(i)) } : {}),
+      body: [s.body, line].filter(Boolean).join("\n"),
+      untrusted: [...kept, ...(names.length ? [{ source: "left-out", text: names.join("\n"), free: false }] : [])],
+      ...(s.items ? { items: s.items.filter((i) => !droppedDocs.has(asTagged(i))) } : {}),
     };
   });
 }

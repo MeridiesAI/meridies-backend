@@ -237,7 +237,7 @@ const intake: Loader = async (db, studentId) => {
       untrusted: entries.map(([key, value]) => ({
         source: tag("intake", key),
         text: `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
-        free: anyLong([value]),
+        free: anyLong([key, value]),
       })),
     },
   };

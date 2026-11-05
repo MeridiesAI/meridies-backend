@@ -274,13 +274,14 @@ const DEFS: ToolDef[] = [
       // The student's own words or a file's text: from here on a change waits for a click. Under the free-text
       // rule only free text does (a document, a value over 80 characters); short fields don't.
       const outside = readsOutside(built);
-      const free = outside && ((built.freeText?.length ?? 0) > 0 || readsDocuments(built));
+      // Free text in any section read, whatever its outside mark (a Research task's long title is the counselor's section).
+      const free = (built.freeText?.length ?? 0) > 0;
       if (ctx.turn.freeRule ? free : outside) markOutside(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return {
         content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`,
         fresh: !!built.text,
-        freeBlocks: outside ? freeBlocks(built.text) : [],
+        freeBlocks: free || outside ? freeBlocks(built.text) : [],
       };
     },
   },
