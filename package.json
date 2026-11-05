@@ -14,6 +14,7 @@
     "lint": "tsc --noEmit",
     "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
     "test:integration": "node --import tsx --test test/integration/*.test.mjs",
+    "eval:axis": "node --import tsx evals/axis/run.mjs",
     "test:imports-load": "node test/integration/imports-load.mjs",
     "test:caseload-load": "node test/integration/caseload-transfer-load.mjs",
     "test:perf": "node test/integration/perf-roster.mjs",
