@@ -47,10 +47,11 @@ async function deadline(title = "UC application") {
 }
 
 {
+  // Counted by this row's id: other suites keep trash at the same time, so a table-wide count races them.
   const t = await task("Unmarked");
-  const before = await sql("select count(*) from private.axis_trash");
   await del(c.token, `deliverables?id=eq.${t}`);
-  check("an unmarked delete keeps nothing", (await sql("select count(*) from private.axis_trash")) === before);
+  const kept = await sql(`select count(*) from private.axis_trash where row_data->>'id' = '${t}' or row_data->>'deliverable_id' = '${t}'`);
+  check("an unmarked delete keeps nothing", !(await exists("deliverables", t)) && kept === "0", `still there: ${await exists("deliverables", t)}, kept ${kept}`);
 }
 
 // A cascade that sets a child's key to null (Review Focus 1): restore puts the old key back.
