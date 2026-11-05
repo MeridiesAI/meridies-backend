@@ -27,6 +27,17 @@ const session = (type, subject, secs) =>
   check("credited to the caller in their month", (await field("month::text", id)) === (await MONTH()));
 }
 
+// ---- A saved minutes-with-Meridies figure is never used (Meridies' default is) -----
+{
+  await sql(`insert into public.kpi_baselines (counselor_id, meridies, meridies_edited) values ('${c.id}', '{"family_report": 1}', '{"family_report": true}')
+             on conflict (counselor_id) do update set meridies = excluded.meridies, meridies_edited = excluded.meridies_edited`);
+  const id = await report();
+  await sent(id);
+  check("a saved figure of 1 min is ignored: the default 10 is used", (await field("measure_method", id)) === "signup" && Number(await field("meridies_minutes", id)) === 10 && Number(await field("saved_minutes", id)) === 50);
+  await sql(`update public.kpi_baselines set meridies = '{}', meridies_edited = '{}' where counselor_id = '${c.id}'`);
+  await unsend(id);
+}
+
 // ---- A month crossing a settings change keeps each row's own snapshot -------------
 {
   await sql(`insert into public.kpi_baselines (counselor_id, manual, manual_edited) values ('${c.id}', '{"family_report": 60}', '{"family_report": true}')

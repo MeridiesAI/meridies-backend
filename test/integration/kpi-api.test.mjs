@@ -7,12 +7,25 @@ const g0 = await call(c.token, "GET", "/kpi/baselines");
 check("GET baselines with no row: defaults and the prompt", g0.status === 200 && g0.body.needsPrompt === true && g0.body.tasks.college_list.manual === 240, JSON.stringify(g0.body));
 
 const put = await call(c.token, "PUT", "/kpi/baselines", {
-  tasks: { college_list: { manual: 300, manualEdited: true }, meeting: { meridies: 5, meridiesEdited: true } },
+  tasks: { college_list: { manual: 300, manualEdited: true } },
   hourlyRate: 220, rateEdited: true,
 });
 check("PUT baselines saves", put.status === 200, JSON.stringify(put.body));
 const g1 = await call(c.token, "GET", "/kpi/baselines");
-check("edited figures round-trip", g1.body.tasks.college_list.manual === 300 && g1.body.tasks.college_list.manualEdited === true && g1.body.tasks.meeting.meridies === 5 && g1.body.tasks.meeting.meridiesEdited === true, JSON.stringify(g1.body.tasks));
+check("edited figures round-trip", g1.body.tasks.college_list.manual === 300 && g1.body.tasks.college_list.manualEdited === true, JSON.stringify(g1.body.tasks));
+
+// ---- Minutes with Meridies are Meridies' own figure, never the counselor's ----------
+for (const patch of [{ meridies: 1 }, { meridies: 1, meridiesEdited: true }, { meridiesEdited: true }, { manual: 50, meridies: 1 }]) {
+  const r = await call(c.token, "PUT", "/kpi/baselines", { tasks: { family_report: patch } });
+  check(`a counselor can't set minutes with Meridies (${JSON.stringify(patch)})`, r.status === 400 && /set by Meridies/i.test(r.body?.error ?? r.body?.message ?? ""), JSON.stringify(r.body));
+}
+const g2 = await call(c.token, "GET", "/kpi/baselines");
+check("...and nothing in a refused save is kept", g2.body.tasks.family_report.manual === 60 && g2.body.tasks.family_report.meridies === 10 && g2.body.tasks.family_report.meridiesEdited === false, JSON.stringify(g2.body.tasks.family_report));
+// A figure saved before the change (written straight to the table) is never read back.
+await sql(`update public.kpi_baselines set meridies = '{"meeting": 1}', meridies_edited = '{"meeting": true}' where counselor_id = '${c.id}'`);
+const g3 = await call(c.token, "GET", "/kpi/baselines");
+check("an old saved figure reads as the Meridies default", g3.body.tasks.meeting.meridies === 15 && g3.body.tasks.meeting.meridiesEdited === false, JSON.stringify(g3.body.tasks.meeting));
+await sql(`update public.kpi_baselines set meridies = '{}', meridies_edited = '{}' where counselor_id = '${c.id}'`);
 check("untouched figures stay defaults, unedited", g1.body.tasks.family_report.manual === 60 && g1.body.tasks.family_report.manualEdited === false);
 check("rate saved and edited", g1.body.hourlyRate === 220 && g1.body.rateEdited === true && g1.body.needsPrompt === false);
 const bad = await call(c.token, "PUT", "/kpi/baselines", { tasks: { college_list: { manual: 5000 } } });
@@ -38,8 +51,8 @@ check("dismissing the prompt hides it and keeps defaults unedited", gd.body.need
   await seed(4, 90, "capped");
   const five = await call(h.token, "GET", "/kpi/baselines");
   check("measured usual: the median once there are 5", JSON.stringify(five.body.measured?.college_list) === JSON.stringify({ minutes: 14, count: 5 }), JSON.stringify(five.body.measured));
-  const put = await call(h.token, "PUT", "/kpi/baselines", { tasks: { college_list: { meridies: 14, meridiesEdited: true } } });
-  check("measured usual: PUT returns it too, and the saved figure is separate", put.body.measured?.college_list?.minutes === 14 && put.body.tasks.college_list.meridies === 14, JSON.stringify(put.body));
+  const put = await call(h.token, "PUT", "/kpi/baselines", { tasks: { college_list: { manual: 200, manualEdited: true } } });
+  check("measured usual: PUT returns it too, and the Meridies figure stays the default", put.body.measured?.college_list?.minutes === 14 && put.body.tasks.college_list.meridies === 30, JSON.stringify(put.body));
   const other = await call(c.token, "GET", "/kpi/baselines");
   check("measured usual: another consultant never sees it", other.body.measured?.college_list === null, JSON.stringify(other.body.measured));
 }
@@ -88,11 +101,11 @@ check("...but nothing else in Time saved", ph.status === 403, `status ${ph.statu
   await Promise.all(
     tasks.flatMap((t, i) => [
       call(z.token, "PUT", "/kpi/baselines", { tasks: { [t]: { manual: 100 + i, manualEdited: true } } }),
-      call(z.token, "PUT", "/kpi/baselines", { tasks: { [t]: { meridies: 10 + i, meridiesEdited: true } } }),
+      call(z.token, "PUT", "/kpi/baselines", { hourlyRate: 100 + i, rateEdited: true }),
     ])
   );
   const g = await call(z.token, "GET", "/kpi/baselines");
-  const ok = tasks.every((t, i) => g.body.tasks[t].manual === 100 + i && g.body.tasks[t].meridies === 10 + i && g.body.tasks[t].manualEdited && g.body.tasks[t].meridiesEdited);
+  const ok = tasks.every((t, i) => g.body.tasks[t].manual === 100 + i && g.body.tasks[t].manualEdited) && g.body.rateEdited === true;
   check("ten overlapping saves keep every figure and flag", ok, JSON.stringify(g.body.tasks));
 }
 

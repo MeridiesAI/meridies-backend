@@ -24,9 +24,15 @@ const heartbeatBody = z
 
 const MINUTES_RULE = "Enter a whole number of minutes from 1 to 1440";
 const minutes = z.number({ invalid_type_error: MINUTES_RULE }).int(MINUTES_RULE).min(1, MINUTES_RULE).max(1440, MINUTES_RULE);
-const taskPatch = z
-  .object({ manual: minutes.optional(), meridies: minutes.optional(), manualEdited: z.boolean().optional(), meridiesEdited: z.boolean().optional() })
-  .strict();
+// Only the by-hand figure is the counselor's. Minutes with Meridies are Meridies'
+// own defaults (measured time replaces them), so a typed figure can't inflate savings.
+const taskPatch = z.object({ manual: minutes.optional(), manualEdited: z.boolean().optional() }).strict();
+const MERIDIES_FIXED = "Minutes with Meridies are set by Meridies and can't be changed";
+const triesMeridies = (body: unknown): boolean => {
+  const tasks = (body as { tasks?: unknown } | null)?.tasks;
+  if (!tasks || typeof tasks !== "object") return false;
+  return Object.values(tasks).some((t) => !!t && typeof t === "object" && ("meridies" in t || "meridiesEdited" in t));
+};
 const baselinesBody = z
   .object({
     tasks: z.object(Object.fromEntries(TASK_TYPES.map((t) => [t, taskPatch.optional()])) as Record<TaskType, z.ZodOptional<typeof taskPatch>>).strict().optional(),
@@ -88,22 +94,21 @@ export default async function kpiRoutes(app: FastifyInstance) {
    */
   app.put("/baselines", { preHandler: [...counselor, limit("kpi:baselines:write", 30, 60)], config: { allowPending: true } }, async (request) => {
     // A refusal says what's wrong in words (e.g. whole minutes only), not a schema dump.
+    if (triesMeridies(request.body)) throw badRequest(MERIDIES_FIXED);
     const parsed = baselinesBody.safeParse(request.body);
     if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "Invalid request");
     const body = parsed.data;
     const svc = serviceClient();
     if (!svc) throw unavailable("Saving needs the service role key");
-    const pick = (field: "manual" | "meridies") =>
-      Object.fromEntries(TASK_TYPES.flatMap((t) => (body.tasks?.[t]?.[field] !== undefined ? [[t, body.tasks[t]![field]]] : [])));
-    const flags = (field: "manualEdited" | "meridiesEdited") =>
-      Object.fromEntries(TASK_TYPES.flatMap((t) => (body.tasks?.[t]?.[field] ? [[t, true]] : [])));
+    const manual = Object.fromEntries(TASK_TYPES.flatMap((t) => (body.tasks?.[t]?.manual !== undefined ? [[t, body.tasks[t]!.manual]] : [])));
+    const manualEdited = Object.fromEntries(TASK_TYPES.flatMap((t) => (body.tasks?.[t]?.manualEdited ? [[t, true]] : [])));
     // One atomic merge in the database: overlapping saves from separate fields keep every figure.
     const { error: saveError } = await svc.rpc("kpi_save_baselines", {
       p_counselor: request.auth.userId,
-      p_manual: pick("manual"),
-      p_meridies: pick("meridies"),
-      p_manual_edited: flags("manualEdited"),
-      p_meridies_edited: flags("meridiesEdited"),
+      p_manual: manual,
+      p_meridies: {}, // never written (kpi_save_baselines ignores it too)
+      p_manual_edited: manualEdited,
+      p_meridies_edited: {},
       p_rate: body.hourlyRate ?? null,
       p_rate_edited: body.rateEdited === true,
       p_hours: body.hoursPerStudentYear ?? null,

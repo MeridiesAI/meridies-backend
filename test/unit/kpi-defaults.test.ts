@@ -35,6 +35,16 @@ test("a saved row overrides only what it holds", () => {
   assert.equal(dto.monthlyEmail, false);
 });
 
+test("a saved minutes-with-Meridies figure is never read back: always Meridies' default", () => {
+  const dto = toBaselinesDto({
+    manual: {}, meridies: { family_report: 1 }, manual_edited: {}, meridies_edited: { family_report: true },
+    hourly_rate: null, rate_edited: false, hours_per_student_year: null, hours_edited: false,
+    monthly_email: true, prompt_dismissed_at: null,
+  });
+  assert.deepEqual(dto.tasks.family_report, { manual: 60, meridies: 10, manualEdited: false, meridiesEdited: false });
+  assert.equal(dto.needsPrompt, true); // an old Meridies-minutes edit no longer counts as answering
+});
+
 test("a row nobody answered (e.g. made for an unsubscribe token) still asks", () => {
   const blank = {
     manual: {}, meridies: {}, manual_edited: {}, meridies_edited: {}, hourly_rate: null, rate_edited: false,
