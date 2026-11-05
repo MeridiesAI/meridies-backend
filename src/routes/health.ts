@@ -58,17 +58,27 @@ async function databaseReachable(log: FastifyInstance["log"]): Promise<boolean> 
  */
 let schemaOk = false;
 let schemaCheckedAt = 0;
+let schemaInFlight: Promise<boolean> | null = null;
 
 async function schemaPresent(log: FastifyInstance["log"]): Promise<boolean> {
   if (schemaOk) return true;
+  if (schemaInFlight) return schemaInFlight;
   if (Date.now() - schemaCheckedAt < PROBE_CACHE_MS) return false;
-  schemaCheckedAt = Date.now();
-  const missing = await missingSchema(serviceClient() ?? anonClient());
-  schemaOk = missing.length === 0;
-  if (!schemaOk) {
-    log.error({ missing }, "health: the database is missing what this build needs. Apply the migration; this deployment must not serve traffic.");
-  }
-  return schemaOk;
+  schemaInFlight = missingSchema(serviceClient() ?? anonClient())
+    .then((missing) => {
+      schemaOk = missing !== null && missing.length === 0;
+      schemaCheckedAt = Date.now();
+      if (missing === null) {
+        log.warn("health: schema probe inconclusive; retrying before this deployment serves traffic.");
+      } else if (!schemaOk) {
+        log.error({ missing }, "health: the database is missing what this build needs. Apply the migration; this deployment must not serve traffic.");
+      }
+      return schemaOk;
+    })
+    .finally(() => {
+      schemaInFlight = null;
+    });
+  return schemaInFlight;
 }
 
 export default async function healthRoutes(app: FastifyInstance) {

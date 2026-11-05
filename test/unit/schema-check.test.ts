@@ -47,9 +47,15 @@ test("permission denied means the table is there", async () => {
   assert.deepEqual(await missingSchema(fakeDb({ counselor_access_requests: { code: "42501" } }).db, need), []);
 });
 
-test("a timeout or an unknown error is not called a missing schema", async () => {
-  assert.deepEqual(await missingSchema(fakeDb({ profiles: "throw" }).db, need), []);
-  assert.deepEqual(await missingSchema(fakeDb({ profiles: { code: "57014" } }).db, need), []);
+test("a timeout or an unknown error leaves the schema unverified, not present", async () => {
+  assert.equal(await missingSchema(fakeDb({ profiles: "throw" }).db, need), null);
+  assert.equal(await missingSchema(fakeDb({ profiles: { code: "57014" } }).db, need), null);
+  assert.equal(await missingSchema(fakeDb({ profiles: {} }).db, need), null);
+});
+
+test("a definite missing column is still reported when another probe times out", async () => {
+  const { db } = fakeDb({ profiles: { code: "42703" }, counselor_access_requests: "throw" });
+  assert.deepEqual(await missingSchema(db, need), ["profiles(counselor_approved_at, role)"]);
 });
 
 test("the list names the column every signed-in request reads", () => {

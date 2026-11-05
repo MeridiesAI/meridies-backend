@@ -3343,7 +3343,10 @@ check and otherwise answers from the cache while it finishes. Like
 
 `schema` is whether the tables and columns this build cannot run without
 exist (`REQUIRED_SCHEMA` in `lib/schemaCheck.ts`); when one is missing the route
-returns **503** too. `railway.json` points Railway's healthcheck at `/health`,
+returns **503** too. An inconclusive schema probe (timeout or unknown error)
+also returns 503 and is retried after five seconds, never cached as proof of a
+present schema. Concurrent health requests share the in-flight schema probe.
+`railway.json` points Railway's healthcheck at `/health`,
 so a build that is merged before its migration is applied never goes live: the
 previous deployment keeps serving until the migration is in. **A migration that
 adds something every request needs gets a line in `REQUIRED_SCHEMA` in the same
