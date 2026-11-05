@@ -39,7 +39,7 @@ export type BaselinesDto = {
 
 export type MeasuredUsual = Record<TaskType, { minutes: number; count: number } | null>;
 
-/** The report switches from the signup figure to the measured median at this many tasks. */
+/** The report switches from Meridies' default figure to the measured median at this many tasks. */
 export const MEASURED_MIN_COUNT = 5;
 
 /**
@@ -70,9 +70,10 @@ export function toBaselinesDto(row: BaselinesRow | null, measured: MeasuredUsual
       t,
       {
         manual: num(row?.manual?.[t], DEFAULT_BASELINES[t].manual),
-        meridies: num(row?.meridies?.[t], DEFAULT_BASELINES[t].meridies),
+        // Always Meridies' own figure: counselors can't set it (see 20261109000001).
+        meridies: DEFAULT_BASELINES[t].meridies,
         manualEdited: row?.manual_edited?.[t] === true,
-        meridiesEdited: row?.meridies_edited?.[t] === true,
+        meridiesEdited: false,
       },
     ])
   ) as Record<TaskType, TaskBaseline>;
@@ -90,8 +91,7 @@ export function toBaselinesDto(row: BaselinesRow | null, measured: MeasuredUsual
       (!row.prompt_dismissed_at &&
         !row.rate_edited &&
         !row.hours_edited &&
-        !Object.values(row.manual_edited ?? {}).some((v) => v === true) &&
-        !Object.values(row.meridies_edited ?? {}).some((v) => v === true)),
+        !Object.values(row.manual_edited ?? {}).some((v) => v === true)),
     measured,
   };
 }
