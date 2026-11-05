@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cleanReview } from "../../src/lib/submissionReview.js";
-import { columnFor, fallbackFindings, findingsWithValues, infoPatchFrom, valuesFrom, withCurrent, type HandInValue } from "../../src/lib/handInValues.js";
+import { columnFor, fallbackFindings, infoPatchFrom, valuesFrom, withCurrent, type HandInValue } from "../../src/lib/handInValues.js";
 
 const review = (over: Record<string, unknown> = {}) =>
   cleanReview({
@@ -28,14 +28,9 @@ test("values come out as a list, unverified", () => {
   assert.deepEqual(valuesFrom(review({ weightedGpa: null, unweightedGpa: null, classRank: null, testScores: [] })), []);
 });
 
-test("the test score kept as a value is one the profile can take; the rest stay labelled in the findings", () => {
+test("the test score kept as a value is one the profile can take", () => {
   const r = review({ testScores: ["SAT Math 720", "ACT 33"] });
   assert.equal(valuesFrom(r).find((v) => v.key === "testScore")?.printed, "ACT 33");
-  assert.deepEqual(findingsWithValues(r), ["Test score (unverified, from the student's file): SAT Math 720", "All pages present"]);
-});
-
-test("with the column, findings keep only AxIS's observations", () => {
-  assert.deepEqual(findingsWithValues(review({ testScores: ["SAT 1450"] })), ["All pages present"]);
 });
 
 test("without the column, findings carry the labelled lines", () => {
@@ -81,4 +76,24 @@ test("each value carries the profile's value now for its column", () => {
   });
   assert.deepEqual(values.map((v) => v.current), [3.9, 31, null]);
   assert.deepEqual(withCurrent([value("classRank", "2 of 90")], null).map((v) => v.current), [null]);
+});
+
+test("the check's findings keep every value labelled unverified, with the column too: today's app reads them there", async () => {
+  const { recordReview } = await import("../../src/lib/submissionReview.js");
+  const inserted: Record<string, unknown>[] = [];
+  const chain = (table: string): Record<string, unknown> => {
+    const c: Record<string, unknown> = {
+      select: () => c,
+      eq: () => c,
+      maybeSingle: async () => ({ data: table === "deliverables" ? { status: "review" } : null, error: null }),
+      update: () => ({ eq: async () => ({ error: null }) }),
+      insert: async (row: Record<string, unknown>) => (inserted.push(row), { error: null }),
+    };
+    return c;
+  };
+  const svc = { from: chain } as unknown as Parameters<typeof recordReview>[0];
+  await recordReview(svc, { id: "t1", student_id: "s1", status: "review" }, "d1", review());
+  const row = inserted[0]!;
+  assert.ok(Array.isArray(row.extracted_values) && (row.extracted_values as unknown[]).length === 4, "the list is stored");
+  assert.deepEqual(row.findings, fallbackFindings(review()), "and the findings still name each value, labelled");
 });

@@ -38,6 +38,8 @@ export type DialogueState = {
   at: string;
   /** The last turn read outside content: its answer is in the next turn's history, so that turn's changes wait for a click too. */
   outside?: boolean;
+  /** Under the free-text rule: the last turn read a student's short fields, so changes a student or family sees wait too. */
+  short?: boolean;
 };
 
 export type Clause = { text: string; intent: Intent; score: number };

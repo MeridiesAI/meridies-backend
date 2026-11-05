@@ -46,20 +46,59 @@ export type TurnBudget = {
    * when what it showed the model holds free text (lib/context/freeText.ts). Off, today's declarations decide.
    */
   freeRule: boolean;
+  /**
+   * Under the rule: this turn read student-written short fields (sawShort), or it or the previous turn did
+   * (shortTainted). A short field can still carry a short instruction, so an instant change a student or family
+   * could see waits for a click (spec Known limits); a counselor-only one (COUNSELOR_ONLY) still runs.
+   */
+  sawShort: boolean;
+  shortTainted: boolean;
 };
 
 /**
  * `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history;
- * `freeRule`: judge reads by the free-text rule.
+ * `freeRule`: judge reads by the free-text rule; `shortRead` / `shortInherited`: student-written short fields read
+ * this turn / the previous turn (the rule only).
  */
-export const newTurnBudget = (outside = false, inherited = false, freeRule = false): TurnBudget => ({
+export const newTurnBudget = (outside = false, inherited = false, freeRule = false, shortRead = false, shortInherited = false): TurnBudget => ({
   tainted: outside || inherited,
   sawOutside: outside,
   writes: 0,
   autoWrites: 0,
   proseWords: 0,
   freeRule,
+  sawShort: shortRead,
+  shortTainted: shortRead || shortInherited,
 });
+
+/**
+ * Instant changes no student or family ever sees, and that can't lead to a send: these still run at once after a
+ * turn read a student's short fields. Anything else (a deadline, a task, the college list, a guardian, a pipeline
+ * contact's address, an invitation, a red flag) waits for the counselor's click then. `axis-ops.test.ts` checks
+ * each is a real instant write op.
+ */
+export const COUNSELOR_ONLY: ReadonlySet<string> = new Set([
+  "pins.pin",
+  "pins.unpin",
+  "work_queue.add",
+  "work_queue.update",
+  "calendar.create_event_type",
+  "calendar.update_event_type",
+  "calendar.set_event_type",
+  "templates.create",
+  "templates.update",
+  "colleges.add_webinar_tip",
+  "colleges.update_webinar_tip",
+  "colleges.research_folder",
+  "pipeline.create_stage",
+  "pipeline.update_stage",
+  "pipeline.reorder_stages",
+  "pipeline.move_contact",
+  "pipeline.order_contacts",
+  "events.save",
+  "events.unsave",
+  "meetings.mark_notes_sent",
+]);
 
 /** Narrative words one turn may file across all its changes and drafts (lib/proseGuard.ts). */
 export const TURN_NARRATIVE_CAP = 400;
@@ -101,6 +140,12 @@ export function proseRefusal(turn: TurnBudget, input: unknown): string | null {
 export function markOutside(turn: TurnBudget): void {
   turn.tainted = true;
   turn.sawOutside = true;
+}
+
+/** Marks the turn as having read a student's short fields (under the rule; see TurnBudget.sawShort). */
+export function markShort(turn: TurnBudget): void {
+  turn.sawShort = true;
+  turn.shortTainted = true;
 }
 
 /** Whether a read's answer brings outside text into the turn. Undeclared, or a check that throws: yes. */
@@ -324,6 +369,7 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
   // value over 80 characters), judged on the blocks it actually shows the model.
   const blocks = readsOutside(def, res.body) ? freeBlocks(content) : [];
   if (readsOutside(def, res.body) && (!ctx.turn.freeRule || blocks.length > 0)) markOutside(ctx.turn);
+  else if (readsOutside(def, res.body)) markShort(ctx.turn);
   return { content: content || "Nothing found.", fresh: !!content, freeBlocks: blocks };
 }
 
@@ -362,7 +408,8 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
   let risk = riskOf(def, input);
   let reason: OperationPayload["reason"] = null;
-  if (risk === "auto" && ctx.turn.tainted) {
+  const shortStop = ctx.turn.freeRule && ctx.turn.shortTainted && !COUNSELOR_ONLY.has(def.name);
+  if (risk === "auto" && (ctx.turn.tainted || shortStop)) {
     risk = "confirm";
     reason = "outside-content";
   } else if (risk === "auto" && ctx.turn.autoWrites >= MAX_AUTO_WRITES_PER_TURN) {

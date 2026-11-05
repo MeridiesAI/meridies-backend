@@ -24,8 +24,7 @@ import {
   undoOperation,
   undoStepOf,
   type OperationEvent,
-  type OpContext,
-} from "../../src/lib/axis/ops/run.js";
+  type OpContext, COUNSELOR_ONLY } from "../../src/lib/axis/ops/run.js";
 import { AXIS_SYSTEM } from "../../src/lib/axis/profiles.js";
 import { understand } from "../../src/lib/axis/nlu.js";
 import { SAMPLE_UUID, sampleInput, topShape } from "./axis-op-samples.js";
@@ -714,4 +713,43 @@ test("switching off who hears about a student always asks first", () => {
   assert.equal(riskOf(guardian, { student_id: SAMPLE_UUID, guardian_id: SAMPLE_UUID, alerts_enabled: false }), "confirm");
   assert.equal(riskOf(guardian, { student_id: SAMPLE_UUID, guardian_id: SAMPLE_UUID, receives_reports: false }), "confirm");
   assert.equal(riskOf(guardian, { student_id: SAMPLE_UUID, guardian_id: SAMPLE_UUID, relationship: "Aunt" }), "auto");
+});
+
+// ---- Whole-branch review: short fields never make an instant change a student or family sees ----
+
+test("after a read of a student's short fields, an instant change a student could see waits; a counselor-only one runs", async () => {
+  const run = async (name: string, input: Record<string, unknown>) => {
+    const { request, inserted } = fakeRequest();
+    const { ctx, events } = opCtx(onRoster(request));
+    ctx.turn = newTurnBudget(false, false, true, true);
+    await runWrite(ctx, name, input);
+    return { status: inserted[0]?.status, reason: events[0]?.payload.reason ?? null };
+  };
+  assert.deepEqual(await run("deadlines.create", { student_id: SAMPLE_UUID, title: "UC application", type: "application", due_date: "2026-12-01" }), { status: "pending", reason: "outside-content" });
+  assert.deepEqual(await run("work_queue.add", { title: "Call the Chens" }), { status: "executed", reason: null });
+  // Before the migration (no free-text rule) a short read never reaches this path: the turn is tainted instead.
+  const { request, inserted } = fakeRequest();
+  const { ctx } = opCtx(onRoster(request));
+  ctx.turn = newTurnBudget(false, false, false, true);
+  await runWrite(ctx, "deadlines.create", { student_id: SAMPLE_UUID, title: "UC application", type: "application", due_date: "2026-12-01" });
+  assert.equal(inserted[0]!.status, "executed", "the short-field rule applies only with the free-text rule");
+});
+
+test("every counselor-only op is a real instant write op", () => {
+  for (const name of COUNSELOR_ONLY) {
+    const def = getOp(name);
+    assert.ok(def && def.kind === "write", name);
+    assert.equal(riskOf(def, sampleInput(name)), "auto", name);
+  }
+});
+
+test("a lookup of short student fields marks the turn, under the rule", async () => {
+  const { request } = fakeRequest({
+    answer: (call) => (call.method === "GET" && call.url.startsWith("/tasks") ? { status: 200, body: [{ id: SAMPLE_UUID, title: "Ask Ms. Rivera for a letter", status: "not-started", source: "student", stages: [] }] } : { status: 201, body: {} }),
+  });
+  const { ctx } = opCtx(onRoster(request));
+  ctx.turn.freeRule = true;
+  await runRead(ctx, "tasks.list", { student_id: SAMPLE_UUID });
+  assert.equal(ctx.turn.tainted, false);
+  assert.equal(ctx.turn.shortTainted, true);
 });

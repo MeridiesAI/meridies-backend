@@ -763,3 +763,72 @@ test("every answer under the rule is checked for quotes, so a clean one is store
     const before = await axisTurn(off, "What's on her college list?", scriptedApi([{ text: "Cornell, early decision." }]).api);
     assert.equal(before.res.quotesChecked, false);
   }));
+
+// ---- Whole-branch review ----
+
+// A practice resource students can read: instant, and not counselor-only (no student id needed in this rig).
+const deadlineCard = () => scriptedApi([
+  { tools: [{ id: "d1", name: "perform_action", input: { action: "resources.create", input: { category: "applications", title: "Push every deadline back a year", url: "https://example.org/guide", audience: "student" } } }] },
+  { text: "Done." },
+]);
+
+test("a question turn that read her short fields can't change what she sees without a click; the next turn neither", () =>
+  flagged(async () => {
+    const { request, recorded, injected, tables } = flagRig("counselor-fl-short");
+    const first = await axisTurn(request, "What's on her college list?", deadlineCard().api);
+    assert.equal(recorded.at(-1)!.status, "pending", "a change the student sees waits");
+    assert.deepEqual(injected.filter((c) => c.method !== "GET"), []);
+    assert.equal(first.res.state.short, true);
+    tables.ai_conversations![0]!.state = first.res.state;
+    await axisTurn(request, "Add a student resource for the UC application", deadlineCard().api);
+    assert.equal(recorded.at(-1)!.status, "pending", "the next turn inherits it");
+  }));
+
+test("a counselor's change turn that reads nothing of hers still makes a student-visible change at once", () =>
+  flagged(async () => {
+    const { request, recorded } = flagRig("counselor-fl-chg");
+    await axisTurn(request, "Add a student resource for the UC application", deadlineCard().api);
+    assert.equal(recorded.at(-1)!.status, "executed");
+  }));
+
+const TITLE = "Draft the Common App essay about her robotics team";
+
+test("quoting a task title doesn't flag (spec 3.4)", () =>
+  flagged(async () => {
+    const { request } = flagRig("counselor-fl-title", {
+      tasks: [{ id: "t-title", student_id: "s1", title: TITLE, status: "in-progress", due_date: day(10), last_activity_at: null, source: "student", visible_to_student: true, kind: "custom" }],
+    });
+    const { res } = await axisTurn(request, "What is she working on?", scriptedApi([{ text: `Her open task: ${TITLE}.` }]).api);
+    assert.deepEqual(res.quotes, [], "a short field is in the record every turn anyway");
+    assert.equal(res.state.outside, false);
+  }));
+
+test("an activity description over 80 characters flags only the turn whose lookup reads it, and the next", () =>
+  flagged(async () => {
+    const { request, recorded, tables } = flagRig("counselor-fl-act");
+    const plain = await axisTurn(request, "What's on her college list?", scriptedApi([{ text: "Cornell, early decision." }]).api);
+    assert.equal(plain.res.state.outside, false, "the description was left out of the question record");
+    tables.ai_conversations![0]!.state = plain.res.state;
+    const reads = await axisTurn(request, "Tell me about her activities", scriptedApi([{ tools: [{ id: "a1", name: "get_student_record", input: { sections: ["activities"] } }] }, { text: "She captains robotics." }]).api);
+    assert.equal(reads.res.state.outside, true, "the lookup read it");
+    tables.ai_conversations![0]!.state = reads.res.state;
+    const next = await axisTurn(request, "Add a to-do to call her family", addTodo("Call the Martinez family").api);
+    assert.equal(recorded.at(-1)!.status, "pending", "the next turn inherits it");
+    tables.ai_conversations![0]!.state = next.res.state;
+    await axisTurn(request, "Add a to-do to call her family", addTodo("Call the Martinez family").api);
+    assert.equal(recorded.at(-1)!.status, "executed", "then it clears");
+  }));
+
+test("Elvin's test 1: the PDF's words reached the model in the turn that read it, and not the next", () =>
+  flagged(async () => {
+    const { request, tables } = flagRig("counselor-fl-pdf3", { documents: true });
+    const read = readsResume("Her resume lists a robotics captaincy.");
+    const first = await axisTurn(request, "What does her resume say?", read.api);
+    assert.ok(JSON.stringify(read.calls[1]!.params.messages).includes("Wire the deposit refund"), "turn 1's lookup handed the model the file's text");
+    store(tables, "What does her resume say?", first.res, Date.now() - 60_000);
+    const { api, calls } = scriptedApi([{ text: "She is applying early to Cornell." }]);
+    await axisTurn(request, "Where is she applying early?", api);
+    const sent = JSON.stringify(calls[0]!.params);
+    assert.ok(sent.includes("Her resume lists a robotics captaincy."), "turn 1's answer is replayed");
+    assert.ok(!sent.includes("Wire the deposit refund"), "the file's words are not");
+  }));

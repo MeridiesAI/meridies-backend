@@ -73,6 +73,7 @@ const stateSchema = z.object({
   colleges: z.array(z.object({ id: z.string(), name: z.string() })).max(10),
   at: z.string(),
   outside: z.boolean().optional(),
+  short: z.boolean().optional(),
 });
 
 export async function loadHistory(request: FastifyRequest, conversationId: string): Promise<History> {

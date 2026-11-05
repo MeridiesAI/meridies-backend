@@ -110,7 +110,8 @@ for (const [op, seed] of Object.entries(cases)) {
 
 // Restoring sends nothing: no notification, no delivery, no invite.
 {
-  const before = await one(`select (select count(*) from public.notifications) + (select count(*) from public.message_deliveries)`);
+  // Counted for this test's student and counselor only: other suites send at the same time.
+  const before = await one(`select (select count(*) from public.notifications where student_id = '${s.id}' or recipient_id in ('${c.id}', '${s.id}')) + (select count(*) from public.message_deliveries where student_id = '${s.id}' or recipient_id = '${c.id}')`);
   const sc = await cases["college_list.remove"]();
   const meeting = await cases["meetings.delete"]();
   for (const [op, t] of [["college_list.remove", sc], ["meetings.delete", meeting]]) {
@@ -118,7 +119,7 @@ for (const [op, seed] of Object.entries(cases)) {
     await call(c.token, "POST", `/axis/actions/${actionId}/confirm`);
     await call(c.token, "POST", `/axis/actions/${actionId}/undo`);
   }
-  const after = await one(`select (select count(*) from public.notifications) + (select count(*) from public.message_deliveries)`);
+  const after = await one(`select (select count(*) from public.notifications where student_id = '${s.id}' or recipient_id in ('${c.id}', '${s.id}')) + (select count(*) from public.message_deliveries where student_id = '${s.id}' or recipient_id = '${c.id}')`);
   check("restore sends nothing", before === after, `${before} -> ${after}`);
   const attendees = await count("meeting_attendees", `meeting_id = '${meeting.input.meeting_id}'`);
   check("a restored meeting has its attendee once", attendees === "1", attendees);

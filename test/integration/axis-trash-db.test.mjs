@@ -298,3 +298,40 @@ for (const [label, insert, path] of [
   const saves = await sql(`select count(*) from public.hub_event_saves where event_id = '${ev}' and profile_id = '${s.id}'`);
   check("someone else's saved copy comes back with the event", back.body?.ok === true && saves === "1", `${JSON.stringify(back.body)} saves=${saves}`);
 }
+
+// ---- Whole-branch review ----
+
+// Every row a covered delete reaches is kept: no table that cascades from, or is set null by, a captured table is
+// missing its capture trigger (a later migration adding one would otherwise lose rows for good on a restore).
+{
+  const missed = await sql(`
+    with captured as (
+      select distinct c.oid from pg_trigger t join pg_class c on c.oid = t.tgrelid
+      where t.tgname = 'zz_axis_trash_delete' and c.relnamespace = 'public'::regnamespace
+    ),
+    fks as (
+      select ch.relname::text as child, k.conrelid, k.confdeltype::text as action,
+             (select string_agg(a.attname, ',' order by a.attnum) from pg_attribute a
+              where a.attrelid = k.conrelid and a.attnum = any(coalesce(k.confdelsetcols, k.conkey))) as cols
+      from pg_constraint k join captured p on p.oid = k.confrelid join pg_class ch on ch.oid = k.conrelid
+      where k.contype = 'f' and k.confdeltype in ('c', 'n') and ch.relnamespace = 'public'::regnamespace
+    )
+    select coalesce(string_agg(child || ':' || action || ':' || cols, ', '), '') from fks f
+    where (action = 'c' and not exists (select 1 from pg_trigger t where t.tgrelid = f.conrelid and t.tgname = 'zz_axis_trash_delete'))
+       or (action = 'n' and not exists (
+             select 1 from pg_trigger t where t.tgrelid = f.conrelid and t.tgname = 'zz_axis_trash_set_null'
+               and pg_get_triggerdef(t.oid) ~ ('UPDATE OF [^O]*\\m' || f.cols || '\\M')))`);
+  check("every child row a covered delete reaches is kept", missed === "", missed);
+}
+
+// A restored task gets its delivery records back, so a due-tomorrow reminder already sent isn't sent again.
+{
+  const t = await task("Reminded");
+  const delivery = await sql(`insert into public.message_deliveries (student_id, recipient_kind, recipient_id, channel, provider, status, template, deliverable_id, to_email)
+                              values ('${s.id}', 'student', '${s.id}', 'email', 'resend', 'sent', 'task-due-reminder:2026-12-01', '${t}', 's@example.com') returning id`).then((o) => o.split("\n")[0]);
+  const action = randomUUID();
+  await del(c.token, `deliverables?id=eq.${t}`, action);
+  const back = await restore(c.token, action);
+  const linked = await sql(`select coalesce(deliverable_id::text, 'null') from public.message_deliveries where id = '${delivery}'`);
+  check("a restored task gets its delivery records back", back.body?.ok === true && linked === t, `${JSON.stringify(back.body)} ${linked}`);
+}

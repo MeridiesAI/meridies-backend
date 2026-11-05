@@ -33,7 +33,7 @@ import { getConnectors, getRetrieval, type ConnectedProvider, type RetrievedChun
 import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
-import { markOutside, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { markOutside, markShort, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
 import { anyLong, freeBlocks } from "../context/freeText.js";
 
 export type ProposedAction = {
@@ -277,6 +277,7 @@ const DEFS: ToolDef[] = [
       // Free text in any section read, whatever its outside mark (a Research task's long title is the counselor's section).
       const free = (built.freeText?.length ?? 0) > 0;
       if (ctx.turn.freeRule ? free : outside) markOutside(ctx.turn);
+      else if (outside) markShort(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
       return {
         content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`,
@@ -309,6 +310,7 @@ const DEFS: ToolDef[] = [
       // title or detail over 80 characters flags the turn.
       const long = (it: UpcomingItem) => it.outside && anyLong([it.title, it.detail]);
       if (ctx.turn.freeRule ? items.some(long) : items.some((it) => it.outside)) markOutside(ctx.turn);
+      else if (items.some((it) => it.outside)) markShort(ctx.turn);
       const name = (id: string) => ctx.roster.get(id)?.name ?? "";
       const lines = items.map(
         (it) =>
@@ -338,6 +340,7 @@ const DEFS: ToolDef[] = [
       if (!ranked.length) return { content: "Nobody has overdue work, a red flag or a deadline at risk in the next 14 days.", fresh: true };
       // A reason quotes a title cut to 80 characters (lib/axis/risk.ts): a short field, never free text.
       if (!ctx.turn.freeRule && ranked.some((r) => r.outside)) markOutside(ctx.turn);
+      else if (ranked.some((r) => r.outside)) markShort(ctx.turn);
       return {
         content: ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name, anyLong([r.name]))} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "), false)}`).join("\n"),
         fresh: true,

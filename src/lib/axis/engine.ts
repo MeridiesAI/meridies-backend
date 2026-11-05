@@ -305,7 +305,11 @@ async function axisTurn(opts: {
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
   // A direct or essay answer runs no tools: whatever the last turn read stays in force, and an answer that
   // quotes text someone else wrote (below) taints the next turn the way reading it would have.
-  const state = { ...nextState(u, history.state, chatStudent), ...(history.state?.outside ? { outside: true } : {}) };
+  const state = {
+    ...nextState(u, history.state, chatStudent),
+    ...(history.state?.outside ? { outside: true } : {}),
+    ...(flags && history.state?.short ? { short: true } : {}),
+  };
   const ledger = new SourceLedger();
   const trace: { label: string }[] = [];
   const sources = new Set<string>(ctx.labels);
@@ -332,7 +336,11 @@ async function axisTurn(opts: {
       request.log.info({ axis: { path: "direct", frame: direct.frame, ms: Date.now() - startedAt } }, "axis turn");
       return {
         path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u,
-        state: (flags ? direct.freeText : direct.outside) ? { ...state, outside: true } : state,
+        state: {
+          ...((flags ? direct.freeText : direct.outside) ? { ...state, outside: true } : state),
+          // A direct answer that shows her short fields: the next turn's student-visible changes wait.
+          ...(flags && direct.outside ? { short: true } : {}),
+        },
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
         quotes: flags ? quotedRuns(direct.text, [...(direct.freeBlocks ?? []), ...history.quoted]) : [],
         quotesChecked: flags,
@@ -353,7 +361,10 @@ async function axisTurn(opts: {
       // The bullets were written over the student's record (their essays, activities): saved to the
       // chat, they are outside content for the next turn.
       path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u,
-      state: (flags ? essayCtx.freeText : ctx.outside) ? { ...state, outside: true } : state,
+      state: {
+        ...((flags ? essayCtx.freeText : ctx.outside) ? { ...state, outside: true } : state),
+        ...(flags && essayCtx.outside ? { short: true } : {}),
+      },
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
       quotes: flags ? quotedRuns(text, [...essayCtx.free, ...history.quoted]) : [],
       quotesChecked: flags,
@@ -406,7 +417,9 @@ async function axisTurn(opts: {
       actions.push(a);
       emit("action", a);
     },
-    turn: newTurnBudget(outside, inherited, flags),
+    // Under the rule, short student-written fields read this turn (the record, the evidence) or the turn before
+    // still make an instant change a student or family sees wait (ops/run.ts COUNSELOR_ONLY).
+    turn: newTurnBudget(outside, inherited, flags, flags && (ctx.outside || evidence.outside), flags && history.state?.short === true),
     onOperation: (e) => {
       actions.push(e);
       emit("action", e);
@@ -525,7 +538,7 @@ async function axisTurn(opts: {
     });
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
-      state: { ...state, outside: toolCtx.turn.sawOutside },
+      state: { ...state, outside: toolCtx.turn.sawOutside, ...(flags ? { short: toolCtx.turn.sawShort } : {}) },
       verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
       quotes,

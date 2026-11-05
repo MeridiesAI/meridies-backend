@@ -26,7 +26,8 @@
 -- step 1, the restorer stamped as author, a digest reset). Other triggers (validators, KPI completions) run as usual.
 --
 -- Not covered: roster imports (the import pipeline owns those tables and their retention; AxIS no longer deletes
--- imports) and message_deliveries' keys (a delivery record isn't relinked to a restored meeting or task).
+-- imports). A delivery record's keys to a task, meeting or report are kept and put back, so a reminder already
+-- sent for a restored task isn't sent again.
 --
 -- Deploy order: either. Before it, the API refuses AxIS deletes with a message naming this file. Not in
 -- REQUIRED_SCHEMA. Private tables: no client grants; the approval gate isn't needed (no public table is created).
@@ -186,6 +187,7 @@ insert into private.axis_trash_rules (table_name, rule, columns, student_col) va
   ('meeting_attendees', 'student', '{student_id}', 'student_id'),
   ('meeting_notes', 'student', '{student_id}', 'student_id'),
   ('meetings', 'student', '{student_id,counselor_id}', 'student_id'),
+  ('message_deliveries', 'student', '{student_id,recipient_id}', 'student_id'),
   ('messaging_routes', 'parent', '{contact_id,guardian_id}', 'student_id'),
   ('narrative_flags', 'student', '{student_id}', 'student_id'),
   ('net_price_estimates', 'student', '{student_id}', 'student_id'),
@@ -266,6 +268,7 @@ select private.attach_axis_trash('public.student_status_overrides');
 select private.attach_axis_trash('public.test_scores');
 -- Only ever set null by a covered delete: their keys, not the rows.
 select private.attach_axis_trash('public.alumni_records', '{outcome_id}', false);
+select private.attach_axis_trash('public.message_deliveries', '{deliverable_id,family_report_id,meeting_id}', false);
 select private.attach_axis_trash('public.opportunity_matches', '{deadline_id,assigned_task_id}', false);
 select private.attach_axis_trash('public.parent_alerts', '{guardian_id}', false);
 select private.attach_axis_trash('public.red_flags', '{deadline_id,deliverable_id}', false);

@@ -147,3 +147,17 @@ test("a direct answer is free text only when a value it shows is over 80 charact
   const long = await compileDirect(dueQuestion, ctx([deadline(`UC application ${"x".repeat(90)}`)]));
   assert.equal(long?.freeText, true);
 });
+
+test("the 80/81 boundary holds in lookups and in quotes", async () => {
+  const { untrusted } = await import("../../src/lib/axis/ops/util.js");
+  const { quotedRuns } = await import("../../src/lib/axis/quotes.js");
+  const { freeBlocks } = await import("../../src/lib/context/freeText.js");
+  const eighty = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen";
+  const eightyOne = `${eighty}s`;
+  assert.equal(eighty.length, 80);
+  assert.match(untrusted(eighty, "record"), /length="short"/, "80 characters: a short field");
+  assert.doesNotMatch(untrusted(eightyOne, "record"), /length="short"/, "81: free text");
+  const quoting = `She wrote: ${eighty}.`;
+  assert.deepEqual(quotedRuns(quoting, freeBlocks(untrusted(eighty, "record"))), [], "a short field is never a quote source");
+  assert.equal(quotedRuns(quoting, freeBlocks(untrusted(eightyOne, "record"))).length, 1, "free text is");
+});

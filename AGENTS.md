@@ -926,9 +926,10 @@ the database (`20261010*`):
   edit is kept and reported in `kept`); a value the profile can't take is
   confirmed without being saved. Reads (`GET /tasks`, `/tasks/:id/tracker`, the
   New student card) carry each value with the profile's value now
-  (`current`). Before the migration the values stay in the findings, each
-  "Weighted GPA (unverified, from the student's file): 4.3", and Confirm is a
-  503; the counselor's email always labels them that way. Accepted only
+  (`current`). The findings always name each value too, "Weighted GPA
+  (unverified, from the student's file): 4.3" (the app before PR C reads them
+  there; Confirm hides the lines its list repeats). Before the migration there
+  is no list and Confirm is a 503. Accepted only
   completes the task: an `on-track` check and the task complete, nothing
   written to the record.
   Needs a fix: `below-the-brief`, the task back to `in-progress`, and the
@@ -1923,7 +1924,12 @@ anyone copying it.
   answer without them (saved before the migration, or by `/chat`) keeps the
   chat flagged, so an existing chat asks first for about six turns after the
   migration. Planner evidence and left-out file names reach the model inside
-  data blocks. Before the migration the wider rule above applies unchanged. Known limits:
+  data blocks. A short field can still carry a short instruction, so after a
+  turn read a student's short fields (or the turn before did), an instant
+  change a student or family could see waits for a click too; only the
+  counselor-only ops in `COUNSELOR_ONLY` (`ops/run.ts`: the work queue, pins,
+  templates, calendar types, pipeline layout...) still run at once. Before
+  the migration the wider rule above applies unchanged. Known limits:
   a short run of plain words is a valid name shape; before the migration,
   earlier answers in the verbatim history and the memory summary can quote
   text from more than one turn back; under the rule, a quote of fewer than 8
@@ -1970,8 +1976,8 @@ still needs. A client can set the database header itself (straight to PostgREST)
 own deletes, which only it can restore. Run a restore by hand as `postgres`: `select
 public.axis_trash_restore('<action id>');` (the caller is taken to be the deleter; every other check applies).
 Not covered: roster imports, removing a firm member and deleting a pipeline stage (all left the catalog: AxIS can't
-make them restorable; a stage's delete moves its cards, so adding a stage has no Undo), and a delivery record's link
-to a restored meeting or task. Before the migration a covered delete is refused with "AxIS can't delete things until
+make them restorable; a stage's delete moves its cards, so adding a stage has no Undo). A delivery record's link to
+a deleted task, meeting or report is kept and put back, so a reminder already sent isn't sent again. Before the migration a covered delete is refused with "AxIS can't delete things until
 the database update 20261108000003_axis_trash is applied." **Deploy order:** either; not in `REQUIRED_SCHEMA`.
 Tests: `test/unit/axis-trash.test.ts`, `test/integration/axis-trash-db.test.mjs`, `test/integration/axis-trash.test.mjs`
 (every covered op through the API, a caseload move, an expired card, nothing sent).

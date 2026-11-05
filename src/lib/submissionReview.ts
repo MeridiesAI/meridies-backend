@@ -53,7 +53,7 @@ import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePathShape } from "./s
 import { consumeRateLimit } from "./limits.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "./context/pack.js";
 import { isSchemaMissing } from "./axis/failsafe.js";
-import { fallbackFindings, findingsWithValues, valuesFrom } from "./handInValues.js";
+import { fallbackFindings, valuesFrom } from "./handInValues.js";
 
 type Row = Record<string, unknown>;
 type Svc = NonNullable<ReturnType<typeof serviceClient>>;
@@ -447,7 +447,9 @@ export async function recordReview(svc: Svc, task: Row, documentId: string | nul
     source: "ai",
     checked_by: null,
   };
-  let { error } = await svc.from("deliverable_tracker_checks").insert({ ...row, findings: findingsWithValues(result), extracted_values: valuesFrom(result) });
+  // The findings always name each value, labelled unverified: the app before PR C reads them there. With the
+  // column the values are also a list of their own, which the app's Confirm reads (and hides those lines).
+  let { error } = await svc.from("deliverable_tracker_checks").insert({ ...row, findings: fallbackFindings(result), extracted_values: valuesFrom(result) });
   if (error && isSchemaMissing(error)) {
     ({ error } = await svc.from("deliverable_tracker_checks").insert({ ...row, findings: fallbackFindings(result) }));
   }

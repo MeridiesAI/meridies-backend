@@ -133,22 +133,7 @@ export function valuesFrom(result: ReviewResult): HandInValue[] {
   return out;
 }
 
-/** The findings beside the values: other test scores, labelled unverified, then what AxIS noticed. */
-export function findingsWithValues(result: ReviewResult): string[] {
-  const test = chosenTestScore(result);
-  let skipped = false;
-  const leftover = result.facts.filter((f) => {
-    if (f.label !== LABELS.testScore) return false;
-    if (!skipped && f.value === test) {
-      skipped = true;
-      return false;
-    }
-    return true;
-  });
-  return [...leftover.map((f) => unverifiedLine(f.label, f.value)), ...result.findings].slice(0, 14);
-}
-
-/** Before the migration (and in the counselor's notice): every value as a labelled line, then what AxIS noticed. */
+/** The check's findings and the counselor's notice: every value as a labelled line, then what AxIS noticed. */
 export function fallbackFindings(result: ReviewResult): string[] {
   return [...result.facts.map((f) => unverifiedLine(f.label, f.value)), ...result.findings].slice(0, 14);
 }
