@@ -32,14 +32,14 @@ const PROBE_TIMEOUT_MS = 2000;
  * The required tables whose columns are not all there, as "table(col, col)".
  * One GET with limit 0 per table: no rows cross the wire. (Not a HEAD: a HEAD
  * error carries no body, so there would be no code to read.) Only a definite
- * "missing" answer counts. Permission denied means the table exists, and a
- * timeout or any other error is the database probe's business, not a reason
- * to call the schema wrong.
+ * "missing" answer names a table. Permission denied means the table exists.
+ * Null means an inconclusive probe: it must be retried, never cached as proof
+ * that every required column exists.
  */
 export async function missingSchema(
   db: SupabaseClient,
   required: Record<string, string[]> = REQUIRED_SCHEMA
-): Promise<string[]> {
+): Promise<string[] | null> {
   const results = await Promise.all(
     Object.entries(required).map(async ([table, columns]) => {
       try {
@@ -48,11 +48,16 @@ export async function missingSchema(
           .select(columns.join(","))
           .limit(0)
           .abortSignal(AbortSignal.timeout(PROBE_TIMEOUT_MS));
-        return error?.code && MISSING.has(error.code) ? `${table}(${columns.join(", ")})` : null;
+        if (!error || error.code === "42501") return { verified: true, missing: null };
+        if (error.code && MISSING.has(error.code)) {
+          return { verified: true, missing: `${table}(${columns.join(", ")})` };
+        }
+        return { verified: false, missing: null };
       } catch {
-        return null;
+        return { verified: false, missing: null };
       }
     })
   );
-  return results.filter((r): r is string => r !== null);
+  const missing = results.flatMap((r) => r.missing ? [r.missing] : []);
+  return missing.length || results.every((r) => r.verified) ? missing : null;
 }
