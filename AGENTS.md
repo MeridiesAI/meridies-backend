@@ -1917,13 +1917,18 @@ anyone copying it.
   and punctuation ignored) is stored with those runs
   (`ai_messages.outside_quotes`), keeps the chat flagged while it is among
   the 12 replayed messages, and reaches the memory fold as "[quote from
-  <source>]" (`foldTranscript`), so the summary never holds the words.
-  Before the migration the wider rule above applies unchanged. Known limits:
+  <source>]" (`foldTranscript`, which also checks each answer against the
+  chat's stored file texts), so the summary never holds the words. Every
+  answer under the rule is stored with its runs (`[]` when clean); a replayed
+  answer without them (saved before the migration, or by `/chat`) keeps the
+  chat flagged, so an existing chat asks first for about six turns after the
+  migration. Planner evidence and left-out file names reach the model inside
+  data blocks. Before the migration the wider rule above applies unchanged. Known limits:
   a short run of plain words is a valid name shape; before the migration,
   earlier answers in the verbatim history and the memory summary can quote
   text from more than one turn back; under the rule, a quote of fewer than 8
-  words, or a paraphrase, isn't caught, and a `/chat` (fallback) answer
-  records no runs. Switching parents or a guardian off (`set_alert_recipients` with
+  words, or a paraphrase, isn't caught; a summary folded before the
+  migration can't be repaired. Switching parents or a guardian off (`set_alert_recipients` with
   either copy flag, `update_guardian` with `alerts_enabled` or
   `receives_reports`) asks first whichever way it goes. After five auto changes
   in one turn the rest wait for Confirm; twenty changes is the limit per turn.
