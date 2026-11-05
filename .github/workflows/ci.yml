@@ -152,6 +152,16 @@ jobs:
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
         run: npm run test:integration
 
+      # The AI budget suite pauses AI for the whole database for a moment (the company ceiling) and revokes one
+      # budget function, so it runs here, after the parallel suites, against the same API (its ceiling emails go
+      # once a day per API process, and none was sent before this step).
+      - name: AI budget suite
+        env:
+          AI_BUDGET_SUITE: "1"
+          API_URL: http://127.0.0.1:4100
+          CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
+        run: node --import tsx --test test/integration/ai-budget-api.test.mjs
+
       # Two-way messaging needs an API configured for it: reply routing on, and the
       # providers pointed at stand-ins the two suites serve themselves (Resend on
       # :4199, Twilio on :4198). A second API on :4101 shares the database; the

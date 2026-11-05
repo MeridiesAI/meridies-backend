@@ -21,7 +21,7 @@
  * The route then saves the answer, sends `done`, and runs the adjudicator
  * and the memory fold after the counselor can already type again.
  */
-import { fileBlocks, withFiles, type FileBlocks } from "./attachments.js";
+import { earlierFilesMessage, fileBlocks, fileTokens, noFiles, withFiles, type FileBlocks } from "./attachments.js";
 import { errInfo } from "./failsafe.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
@@ -37,7 +37,8 @@ import { cachedStudentContext, loadRoster, studentFacts } from "./data.js";
 import { loadCollegeIndex, type CollegeIndex } from "./entities.js";
 import { EvidenceIndex, LiveGrounder, type SentenceCheck } from "./grounding.js";
 import { dropInvalidCitations, renderSource, resolveCitations, SourceLedger, type Citation } from "./ledger.js";
-import { chargeCall, chargeOutput, closeRun, messagesApi, openRun, structured, type Run } from "./llm.js";
+import { settle, type Hold } from "../aiBudget.js";
+import { axisGate, closeRun, messagesApi, openRun, structured, type Run } from "./llm.js";
 import { addUsage, emptyUsage, runLoop, type LoopOptions, type MessagesApi, type Usage } from "./loop.js";
 import { loadHistory } from "./memory.js";
 import {
@@ -164,12 +165,15 @@ async function loadContext(request: FastifyRequest, studentId: string | null, fo
   return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [], outside: r?.outside === true };
 }
 
-/** Drops the oldest turns until the prompt fits Haiku 5.5's lower rate card. */
-function fitHistory(turns: Anthropic.Beta.BetaMessageParam[], fixedChars: number): Anthropic.Beta.BetaMessageParam[] {
+/**
+ * Drops the oldest turns until the prompt fits Haiku 5.5's lower rate card. `fixedChars` is everything that always
+ * goes (the system prompt, the newest message, the files message); `fileTokens` the files still sent as files.
+ */
+function fitHistory(turns: Anthropic.Beta.BetaMessageParam[], fixedChars: number, filesTokens = 0): Anthropic.Beta.BetaMessageParam[] {
   const size = (m: Anthropic.Beta.BetaMessageParam) => (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length);
   let total = fixedChars + turns.reduce((n, m) => n + size(m), 0);
   const out = turns.slice();
-  while (out.length && estimateTokens(total) > PROMPT_TOKEN_BUDGET) {
+  while (out.length && estimateTokens(total) + filesTokens > PROMPT_TOKEN_BUDGET) {
     total -= size(out.shift()!);
     while (out[0]?.role === "assistant") total -= size(out.shift()!);
   }
@@ -188,11 +192,11 @@ async function essayAdvice(
   studentId: string | null,
   question: string,
   record: string | null,
-  o: { signal: AbortSignal; precharged: boolean }
+  o: { signal: AbortSignal; hold?: Hold }
 ): Promise<string> {
   const out = await structured({
     signal: o.signal,
-    precharged: o.precharged,
+    hold: o.hold,
     request,
     module: "essay-advice",
     studentId,
@@ -209,7 +213,16 @@ async function essayAdvice(
     : "- I don't write essay text. Tell me which part of the draft worries you and I'll point at what to change.";
 }
 
-export async function runAxisTurn(opts: {
+/** One AxIS turn. A reservation the route made that the turn never used is released at the end (the call stays counted). */
+export async function runAxisTurn(opts: Parameters<typeof axisTurn>[0]): Promise<TurnResult> {
+  try {
+    return await axisTurn(opts);
+  } finally {
+    if (opts.prepaid) await settle(opts.prepaid, "unused", opts.request.log);
+  }
+}
+
+async function axisTurn(opts: {
   request: FastifyRequest;
   conversationId: string;
   studentId: string | null;
@@ -218,17 +231,16 @@ export async function runAxisTurn(opts: {
   signal: AbortSignal;
   api?: MessagesApi;
   /**
-   * Model calls already charged against the daily quota. The route charges the
-   * first before the stream opens, so an exhausted quota is a plain 429 the app
-   * can show rather than an error mid-stream.
+   * The turn's first call, already reserved (lib/aiBudget.ts). The route reserves it before the stream opens, so a
+   * cap or a paused day is a plain 429 the app can show rather than an error mid-stream.
    */
-  prepaidCalls?: number;
+  prepaid?: Hold;
   /** This message brought files: it goes to the model, never to a direct answer from the record. */
   newFiles?: boolean;
+  /** The counselor's message this turn answers: its files go as files, earlier files as their stored text. */
+  messageId?: string;
 }): Promise<TurnResult> {
   const { request, studentId, content, emit, signal } = opts;
-  let prepaid = opts.prepaidCalls ?? 0;
-  const takePrepaid = () => (prepaid > 0 ? (prepaid--, true) : false);
   const startedAt = Date.now();
   emit("status", { phase: "thinking" });
 
@@ -248,15 +260,16 @@ export async function runAxisTurn(opts: {
     loadContext(request, studentId, looksLikeChange(content)),
     loadHistory(request, opts.conversationId),
     getConnectors().connected(request).catch(() => []),
-    // The chat's files, every turn: a reopened chat still knows what was in them.
-    fileBlocks(request, opts.conversationId).catch((err): FileBlocks => {
+    // The chat's files, every turn: a reopened chat still knows what was in them. Earlier files come as their stored text.
+    fileBlocks(request, opts.conversationId, { currentMessageId: opts.messageId }).catch((err): FileBlocks => {
       request.log.warn({ err: errInfo(err) }, "axis attachments skipped");
-      return { blocks: [], names: [], texts: [] };
+      return noFiles();
     }),
   ]);
-  const hasFiles = files.blocks.length > 0;
+  const fileNames = [...files.earlierNames, ...files.names];
+  const hasFiles = fileNames.length > 0;
   // A PDF or an image can't be read back by the live grounding, so its figures aren't checked against it.
-  const opaqueFiles = files.blocks.some((b) => b.type !== "text" && !(b.type === "document" && b.source.type === "text"));
+  const opaqueFiles = files.opaque;
   // What the counselor confirmed, dismissed or undid since the last answer. Best effort.
   const recentActions = recentActionsText(request, opts.conversationId).catch(() => "");
 
@@ -302,7 +315,7 @@ export async function runAxisTurn(opts: {
   if (u.intent === "essay") {
     emit("route", { intent: "essay", path: "essay" });
     emit("status", { phase: "answering" });
-    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, precharged: takePrepaid() });
+    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, hold: opts.prepaid });
     emit("delta", { text });
     return {
       // The bullets were written over the student's record (their essays, activities): saved to the
@@ -367,7 +380,8 @@ export async function runAxisTurn(opts: {
   // Specialists research; a change is only ever made by the agent answering the counselor.
   const researchOnly: LoopOptions["exec"] = (c, sig) =>
     isReadOnly(c.name) ? exec(c, sig) : Promise.resolve({ content: "Specialists only research. Leave changes to the final answer.", isError: true, fresh: false });
-  const beforeCall = () => (takePrepaid() ? Promise.resolve() : chargeCall(request));
+  // Every model call through the budget gate; the first takes the route's reservation.
+  const budget = axisGate(request, opts.prepaid);
   const total: Usage = emptyUsage();
   const add = (x: Usage) => addUsage(total, x);
 
@@ -375,9 +389,9 @@ export async function runAxisTurn(opts: {
   const kinds = new Set(ledger.all().map((p) => p.kind));
   const covered = (i: string) => (i === "documents" ? kinds.has("upload") || kinds.has("drive") || kinds.has("onedrive") : i === "email" ? kinds.has("outlook") || kinds.has("gmail") : true);
   const tasks = specialistTasks(u, covered);
-  if (hasFiles) step(`Reading ${files.names.length === 1 ? files.names[0] : `${files.names.length} attached files`}`);
+  if (hasFiles) step(`Reading ${fileNames.length === 1 ? fileNames[0] : `${fileNames.length} attached files`}`);
   const run: Run = await openRun(request, "axis", studentId, {
-    files: files.names.length,
+    files: fileNames.length,
     intent: u.intent, confidence: Math.round(u.confidence * 100) / 100, path: tasks ? "specialists" : "agent", effort,
     evidenceSteps: evidence.trace.length, skipped: evidence.skipped.length,
   });
@@ -390,7 +404,7 @@ export async function runAxisTurn(opts: {
       emit("route", { intent: u.intent, path: "specialists", parts: tasks.map((t) => t.intent), effort });
       const before = ledger.size;
       const res = await runSpecialists({
-        tasks, question: content, api, base: requestBase(system, tools, "low"), evidence: evidence.text, effort: "low", signal, exec: researchOnly, readOnly: isReadOnly, beforeCall, onStep: step,
+        tasks, question: content, api, base: requestBase(system, tools, "low"), evidence: evidence.text, effort: "low", signal, exec: researchOnly, readOnly: isReadOnly, gate: budget, onStep: step,
       });
       add(res.usage);
       findings = renderFindings(res.findings);
@@ -413,9 +427,13 @@ export async function runAxisTurn(opts: {
       featureOn("systemMessages") ? "" : `(${modeLine(turnMode)})`,
       content,
     ].filter(Boolean);
-    const fixedChars = system.reduce((n, b) => n + b.text.length, 0) + userParts.join("\n\n").length;
+    // Earlier files' text: one message ahead of the history, the same every turn so the prompt cache keeps it.
+    const filesMessage = earlierFilesMessage(files) as Anthropic.Beta.BetaMessageParam | null;
+    const fixedChars =
+      system.reduce((n, b) => n + b.text.length, 0) + userParts.join("\n\n").length + (filesMessage ? JSON.stringify(filesMessage.content).length : 0);
     const messages: Anthropic.Beta.BetaMessageParam[] = [
-      ...fitHistory(history.turns.slice(0, history.turns.at(-1)?.role === "user" ? -1 : undefined), fixedChars),
+      ...(filesMessage ? [filesMessage] : []),
+      ...fitHistory(history.turns.slice(0, history.turns.at(-1)?.role === "user" ? -1 : undefined), fixedChars, fileTokens(files.blocks)),
       ...(featureOn("perMessageEffort") ? [effortMessage(turnEffort)] : []),
       { role: "user", content: withFiles(userParts.join("\n\n"), files) as Anthropic.Beta.BetaMessageParam["content"] },
       ...(featureOn("systemMessages") ? [modeMessage(modeLine(turnMode))] : []),
@@ -433,7 +451,7 @@ export async function runAxisTurn(opts: {
     emit("status", { phase: "answering" });
     const res = await runLoop({
       api, base: requestBase(system, tools, turnEffort), messages, effort: turnEffort, maxCalls: turnProfile.maxCalls,
-      deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, beforeCall,
+      deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, gate: budget,
       onText: (d) => show(gate.push(d)),
       onToolStart: (c) => {
         const label = toolLabel(c.name, c.input);
@@ -460,7 +478,6 @@ export async function runAxisTurn(opts: {
       ms: Date.now() - startedAt, writes: toolCtx.turn.writes, autoWrites: toolCtx.turn.autoWrites, tainted: toolCtx.turn.tainted,
       essayGuard: gate.blocked,
     });
-    await chargeOutput(request, total.output);
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: { ...state, outside: toolCtx.turn.sawOutside },

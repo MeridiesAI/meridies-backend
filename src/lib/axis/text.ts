@@ -233,3 +233,10 @@ export class SentenceStream {
     return -1;
   }
 }
+
+/** The first `n` UTF-16 units of `s`, one fewer when the cut would split a surrogate pair (an emoji, say). */
+export function cutAt(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const last = s.charCodeAt(n - 1);
+  return s.slice(0, last >= 0xd800 && last <= 0xdbff ? n - 1 : n);
+}

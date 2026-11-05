@@ -22,8 +22,9 @@
 --     counter (it misses specialist calls), and which of their calls passed 100K is estimated
 --     (below). The old_logging_pct column says how much of a result rests on older rows.
 --
--- Prices: Anthropic's price list (platform.claude.com/docs/en/about-claude/pricing), checked
--- 2026-10-30, per million tokens. Cache reads are 0.1x input, 0.05x on Opus 5.5 and Sonnet 5.5,
+-- Prices: private.ai_prices (migration 20261108000002), the table the AI budget gate reads, so
+-- the report and the caps price a call the same way. Seeded from Anthropic's price list
+-- (platform.claude.com/docs/en/about-claude/pricing), checked 2026-10-30, per million tokens. Cache reads are 0.1x input, 0.05x on Opus 5.5 and Sonnet 5.5,
 -- 0.025x on Fable 5.1 and Mythos 5.1. Cache writes are 1.25x input for 5 minutes, 2x for 1 hour.
 -- Haiku 5.5 bills a call whose prompt (cached tokens included) passes 100K tokens at 5x on every
 -- token, output too (long_above / long_mult). Newer rows say exactly which tokens those were.
@@ -39,15 +40,8 @@
 --    its fact checks. long_prompt_* are the share of calls and of spend from calls over 100K;
 --    files_spend_pct is the share of spend from turns that carried attached files.
 begin read only;
-with prices (model, input_usd, output_usd, read_mult, long_above, long_mult) as (
-  values
-    ('claude-haiku-5-5', 0.10, 0.50, 0.10, 100000, 5), ('claude-haiku-4-5', 1.00, 5.00, 0.10, null, 1),
-    ('claude-sonnet-5-5', 2.00, 10.00, 0.05, null, 1), ('claude-sonnet-5', 2.00, 10.00, 0.10, null, 1),
-    ('claude-sonnet-4-6', 3.00, 15.00, 0.10, null, 1), ('claude-sonnet-4-5', 3.00, 15.00, 0.10, null, 1),
-    ('claude-opus-5-5', 4.00, 20.00, 0.05, null, 1), ('claude-opus-5', 5.00, 25.00, 0.10, null, 1),
-    ('claude-opus-4-8', 5.00, 25.00, 0.10, null, 1), ('claude-opus-4-7', 5.00, 25.00, 0.10, null, 1),
-    ('claude-opus-4-6', 5.00, 25.00, 0.10, null, 1), ('claude-fable-5', 10.00, 50.00, 0.10, null, 1),
-    ('claude-fable-5-1', 10.00, 50.00, 0.025, null, 1), ('claude-mythos-5-1', 10.00, 50.00, 0.025, null, 1)
+with prices as (
+  select model, input_usd, output_usd, read_mult, long_above, long_mult from private.ai_prices
 ),
 runs as (
   select
@@ -169,15 +163,8 @@ rollback;
 -- 2. The whole AxIS bill by week and kind of call, including the pre-warm and memory calls
 --    that don't belong to one turn.
 begin read only;
-with prices (model, input_usd, output_usd, read_mult, long_above, long_mult) as (
-  values
-    ('claude-haiku-5-5', 0.10, 0.50, 0.10, 100000, 5), ('claude-haiku-4-5', 1.00, 5.00, 0.10, null, 1),
-    ('claude-sonnet-5-5', 2.00, 10.00, 0.05, null, 1), ('claude-sonnet-5', 2.00, 10.00, 0.10, null, 1),
-    ('claude-sonnet-4-6', 3.00, 15.00, 0.10, null, 1), ('claude-sonnet-4-5', 3.00, 15.00, 0.10, null, 1),
-    ('claude-opus-5-5', 4.00, 20.00, 0.05, null, 1), ('claude-opus-5', 5.00, 25.00, 0.10, null, 1),
-    ('claude-opus-4-8', 5.00, 25.00, 0.10, null, 1), ('claude-opus-4-7', 5.00, 25.00, 0.10, null, 1),
-    ('claude-opus-4-6', 5.00, 25.00, 0.10, null, 1), ('claude-fable-5', 10.00, 50.00, 0.10, null, 1),
-    ('claude-fable-5-1', 10.00, 50.00, 0.025, null, 1), ('claude-mythos-5-1', 10.00, 50.00, 0.025, null, 1)
+with prices as (
+  select model, input_usd, output_usd, read_mult, long_above, long_mult from private.ai_prices
 ),
 runs as (
   select
@@ -281,15 +268,8 @@ rollback;
 --    pre-warms. Rows 4 and 5 are turns with no pre-warm in the hour before them: if those are
 --    rarely cold, the cache stays warm without the pre-warm.
 begin read only;
-with prices (model, input_usd, output_usd, read_mult, long_above, long_mult) as (
-  values
-    ('claude-haiku-5-5', 0.10, 0.50, 0.10, 100000, 5), ('claude-haiku-4-5', 1.00, 5.00, 0.10, null, 1),
-    ('claude-sonnet-5-5', 2.00, 10.00, 0.05, null, 1), ('claude-sonnet-5', 2.00, 10.00, 0.10, null, 1),
-    ('claude-sonnet-4-6', 3.00, 15.00, 0.10, null, 1), ('claude-sonnet-4-5', 3.00, 15.00, 0.10, null, 1),
-    ('claude-opus-5-5', 4.00, 20.00, 0.05, null, 1), ('claude-opus-5', 5.00, 25.00, 0.10, null, 1),
-    ('claude-opus-4-8', 5.00, 25.00, 0.10, null, 1), ('claude-opus-4-7', 5.00, 25.00, 0.10, null, 1),
-    ('claude-opus-4-6', 5.00, 25.00, 0.10, null, 1), ('claude-fable-5', 10.00, 50.00, 0.10, null, 1),
-    ('claude-fable-5-1', 10.00, 50.00, 0.025, null, 1), ('claude-mythos-5-1', 10.00, 50.00, 0.025, null, 1)
+with prices as (
+  select model, input_usd, output_usd, read_mult, long_above, long_mult from private.ai_prices
 ),
 runs as (
   select

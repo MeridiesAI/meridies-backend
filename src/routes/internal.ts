@@ -21,6 +21,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
+import { budgetMode, spendToday } from "../lib/aiBudget.js";
 import { unauthorized, unavailable } from "../lib/errors.js";
 import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { dispatchDueBlasts } from "../lib/blasts.js";
@@ -290,12 +291,14 @@ export default async function internalRoutes(app: FastifyInstance) {
     }
   );
 
-  app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (_request, reply) => {
+  app.get("/status", { preHandler: [requireCronSecret], config: { rateLimit: { max: 30, timeWindow: "1 minute" } } }, async (request, reply) => {
     const svc = serviceClient();
     if (!svc) return reply.code(503).send({ status: "degraded", reason: "no service role key" });
     const { data, error } = await svc.from("job_heartbeats").select("job, last_ok_at, last_error_at, expected_every");
     if (error) return reply.code(503).send({ status: "degraded", reason: "heartbeats unreadable" });
     const summary = summarizeHeartbeats((data ?? []) as HeartbeatRow[]);
-    return reply.code(summary.status === "all-ok" ? 200 : 503).send(summary);
+    // The AI budget's mode and today's spend (lib/aiBudget.ts): shown, never part of the status code.
+    const aiBudget = { mode: await budgetMode(request.log), spendTodayUsd: await spendToday(), ceilingUsd: env.AI_DAILY_CEILING_USD };
+    return reply.code(summary.status === "all-ok" ? 200 : 503).send({ ...summary, aiBudget });
   });
 }

@@ -27,6 +27,7 @@
  *
  * The client is injected, so the loop is tested with a scripted fake.
  */
+import type { Hold } from "../aiBudget.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { disableFeature, featureOn, LOWER_RATE_PROMPT_TOKENS, MAX_TOKENS, type Effort } from "./models.js";
 import type { ToolOutput } from "./tools.js";
@@ -104,7 +105,17 @@ export function addUsage(into: Usage, x: Usage): void {
   addTokens(into.longPrompt, x.longPrompt);
 }
 
+/** One call's usage as the API reported it (what the gate settles with). */
+const callUsage = (m: BetaMessage): Usage => usageFromApi(m.usage);
+
 export type ToolCall = { id: string; name: string; input: unknown };
+
+/**
+ * Wraps every model call (lib/aiBudget.ts): `before` reserves, `after` settles with that call's usage, "unused" when
+ * the API refused the request before answering (nothing billed), or null when it isn't known (a stream stopped or
+ * failed after it started, which may still be billed: the reservation stays).
+ */
+export type CallGate = { before(params: StreamParams): Promise<Hold>; after(hold: Hold, usage: Usage | "unused" | null): Promise<void> };
 
 export type LoopOptions = {
   api: MessagesApi;
@@ -118,8 +129,8 @@ export type LoopOptions = {
   deadline: number;
   signal: AbortSignal;
   exec: (call: ToolCall, signal: AbortSignal) => Promise<ToolOutput>;
-  /** Runs before every model call: the daily quota is charged per call, not per turn. */
-  beforeCall?: () => Promise<void>;
+  /** The budget gate around every model call: reserved per call, not per turn. */
+  gate?: CallGate;
   readOnly: (name: string) => boolean;
   onText?: (delta: string) => void;
   onFirstEvent?: () => void;
@@ -179,7 +190,6 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
 
   for (;;) {
     calls++;
-    await o.beforeCall?.();
     const mustAnswer = calls >= o.maxCalls || Date.now() > o.deadline || stale >= STALE_ROUNDS;
     const round = new AbortController();
     const relay = () => round.abort();
@@ -193,11 +203,15 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
       messages: o.messages,
     };
 
+    const hold = o.gate ? await o.gate.before(params) : null;
+    let used: Usage | "unused" | null = null;
+    let roundStarted = false;
     let msg: BetaMessage;
     let roundText = "";
     try {
       const stream = o.api.stream(params, { signal: o.signal });
       stream.on("streamEvent", () => {
+        roundStarted = true;
         if (!firstEventSeen) {
           firstEventSeen = true;
           o.onFirstEvent?.();
@@ -218,8 +232,11 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
         early.set(block.id, o.exec({ id: block.id, name: block.name, input: block.input }, round.signal));
       });
       msg = await stream.finalMessage();
+      used = callUsage(msg);
       jsonRetries = 0;
     } catch (err) {
+      // An HTTP error or a lost connection before any event: the API answered nothing and bills nothing.
+      if (!o.signal.aborted && !roundStarted && err instanceof Anthropic.APIError && !(err instanceof Anthropic.APIUserAbortError)) used = "unused";
       round.abort();
       o.signal.removeEventListener("abort", relay);
       if (o.signal.aborted) throw err;
@@ -243,6 +260,8 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
         continue;
       }
       throw err;
+    } finally {
+      if (hold) await o.gate!.after(hold, used);
     }
     o.signal.removeEventListener("abort", relay);
     addUsage(usage, usageFromApi(msg.usage));
