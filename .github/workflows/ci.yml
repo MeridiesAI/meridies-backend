@@ -134,6 +134,8 @@ jobs:
           TWILIO_AUTH_TOKEN: local-twilio-test-token-123
           # Research test double (no model or web calls); refuses to boot in production.
           RESEARCH_FAKE: fixture
+          # Translation test double (no model call): "[es] text" out, "[xx] text" read as language xx in; refuses to boot in production.
+          TRANSLATE_FAKE: fixture
           # The Import page for every test counselor, with presets only (no model calls).
           IMPORTS_ROLLOUT: all
           IMPORTS_AI: "off"
@@ -173,6 +175,8 @@ jobs:
           API_URL: http://127.0.0.1:4101
           PORT: "4101"
           NODE_ENV: development
+          # Translation double: the API and the two suites (which check a family's reply in English) both read it.
+          TRANSLATE_FAKE: fixture
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
           RESEND_WEBHOOK_SECRET: whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==
           PUBLIC_API_URL: http://127.0.0.1:4101

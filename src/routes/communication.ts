@@ -5,9 +5,12 @@
  *                                student's contact, AxIS suggestions, quiet hours
  *   PUT  /:id/prefs              "Parent | <student>" and "Email | Text", per student
  *   POST /:id/draft              AxIS drafts subject and body from the student's data
+ *   POST /:id/translate          the draft in the family's language (nothing stored); the composer
+ *                                puts the English underneath and the counselor reads it over
  *   POST /:id/messages           send now, or schedule (quiet hours hold it)
  *   GET  /:id/messages           what the composer sent or scheduled
- *   GET  /:id/replies            what the family answered (email replies), newest first
+ *   GET  /:id/replies            what the family answered (email and text), newest first, each with
+ *                                its English when it was written in another language
  *   POST /:id/replies/read       mark those read
  *   POST /messages/:messageId/cancel   cancel a scheduled message
  *   POST /:id/file-as-report     file the draft as a family report to approve
@@ -23,8 +26,13 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { inQuietHours, loadSettings, nextSendWindow } from "../lib/accountability.js";
 import { runStructured } from "../lib/anthropic.js";
-import { badRequest, fromPostgrest, notFound, tooManyRequests, unavailable } from "../lib/errors.js";
+import { hasAnthropic } from "../env.js";
+import { badRequest, fromPostgrest, HttpError, notFound, tooManyRequests, unavailable } from "../lib/errors.js";
 import { beat } from "../lib/heartbeat.js";
+import { retryFailedTranslations } from "../lib/inboundTranslate.js";
+import { isLanguageChoice, isLanguageCode, languageByCode } from "../lib/languages.js";
+import { MAX_TRANSLATED_SEGMENTS, smsOverLimit } from "../lib/smsSegments.js";
+import { translateFakeOn, translateMessage, TRANSLATE_BODY_MAX, TRANSLATE_SUBJECT_MAX } from "../lib/translate.js";
 import { toInviteDelivery, type InviteDelivery } from "../lib/inviteDelivery.js";
 import { plainName } from "../lib/context/identity.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -41,6 +49,8 @@ import {
   loadComposerFacts,
   loadComposerPref,
   loadFamily,
+  loadFamilyLanguage,
+  loadLanguageSuggestion,
   loadStudentContact,
   planSend,
   recordOutcome,
@@ -58,6 +68,12 @@ type Row = Record<string, unknown>;
 const idParam = z.object({ id: z.string().uuid("Not a valid student id") });
 const audienceEnum = z.enum(["parent", "student"]);
 const channelEnum = z.enum(["email", "sms"]);
+/** A language the family can be written to: a code from lib/languages.ts, never free text. */
+const languageCode = z.string().refine(isLanguageCode, "That isn't a language we translate into");
+const languageChoice = z.string().refine(isLanguageChoice, "That isn't a language we translate into");
+
+/** Translation needs a model (or the test double); without one the composer hides Translate. */
+const translateAvailable = (): boolean => hasAnthropic || translateFakeOn();
 
 /** Text messages are kept to two segments; the composer's meter says so. */
 export const TEXT_LIMIT = 320;
@@ -133,18 +149,25 @@ export default async function communicationRoutes(app: FastifyInstance) {
       const student = await resolveStudentId(request, id, "view");
       const db = request.db;
 
-      const [pref, family, contact, facts, settings] = await Promise.all([
+      const [pref, family, contact, facts, settings, familyLanguage] = await Promise.all([
         loadComposerPref(db, student),
         loadFamily(db, student),
         loadStudentContact(db, student),
         loadComposerFacts(db, student),
         loadSettings(request, request.auth.userId, student),
+        loadFamilyLanguage(db, student),
       ]);
       if (!contact) throw notFound("That student isn't on your roster");
+      // Financial aid already knows what some families speak: offered, never copied silently.
+      const languageSuggestion = familyLanguage === null ? await loadLanguageSuggestion(db, student) : null;
 
       const quiet = inQuietHours(settings);
       return {
-        prefs: pref,
+        // familyLanguage: a code, "en" (English only), or null (nobody has said).
+        prefs: { ...pref, familyLanguage },
+        languageSuggestion,
+        translateAvailable: translateAvailable(),
+        translatedSmsMaxSegments: MAX_TRANSLATED_SEGMENTS,
         family,
         student: contact,
         counselor: { name: request.profile.full_name ?? null, email: request.profile.email ?? null },
@@ -165,7 +188,12 @@ export default async function communicationRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = z
-        .object({ audience: audienceEnum.optional(), channel: channelEnum.optional() })
+        .object({
+          audience: audienceEnum.optional(),
+          channel: channelEnum.optional(),
+          // A code, "en" for English only, or null to say nobody knows.
+          familyLanguage: languageChoice.nullable().optional(),
+        })
         .strict()
         .parse(request.body);
       const student = await resolveStudentId(request, id, "edit");
@@ -173,9 +201,16 @@ export default async function communicationRoutes(app: FastifyInstance) {
       const row: Row = { student_id: student, updated_by: request.auth.userId };
       if (b.audience) row.composer_audience = b.audience;
       if (b.channel) row.composer_channel = b.channel;
+      if (b.familyLanguage !== undefined) row.family_language = b.familyLanguage;
       const { error } = await request.db.from("student_alert_prefs").upsert(row, { onConflict: "student_id" });
-      if (error) throw fromPostgrest(error);
-      return loadComposerPref(request.db, student);
+      if (error) {
+        // Only a write that names the new column fails without its migration; the others keep working.
+        if (b.familyLanguage !== undefined && isResultsNotApplied(error)) {
+          throw new HttpError(503, "Saving a family's language isn't switched on yet", "family_language_unavailable");
+        }
+        throw fromPostgrest(error);
+      }
+      return { ...(await loadComposerPref(request.db, student)), familyLanguage: await loadFamilyLanguage(request.db, student) };
     }
   );
 
@@ -304,6 +339,59 @@ export default async function communicationRoutes(app: FastifyInstance) {
     }
   );
 
+  /**
+   * The counselor's English, in the family's language. Persists nothing and sends
+   * nothing: the composer puts the translation in the box with the English under
+   * it, and the counselor reads it over before pressing Send. Under the practice's
+   * "AI summaries" switch (a family's words and names go to the model), the AI
+   * budget gate and its own limit.
+   */
+  app.post(
+    "/:id/translate",
+    { preHandler: [...counselorOnly, limit("communication:translate", 30, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const b = z
+        .object({
+          // Omitted: the student's saved family language.
+          to: languageCode.optional(),
+          channel: channelEnum,
+          subject: z.string().trim().max(TRANSLATE_SUBJECT_MAX).optional(),
+          body: z.string().trim().min(1).max(TRANSLATE_BODY_MAX),
+        })
+        .strict()
+        .parse(request.body);
+      const student = await resolveStudentId(request, id, "edit");
+
+      const saved = b.to ?? (await loadFamilyLanguage(request.db, student));
+      if (!saved || saved === "en") throw badRequest("Pick the language the family speaks first");
+      if (!isLanguageCode(saved)) throw badRequest("That isn't a language we translate into");
+      if (!translateAvailable()) {
+        throw new HttpError(503, "Translation isn't switched on yet", "translation_unavailable");
+      }
+
+      const contact = await loadStudentContact(request.db, student);
+      if (!contact) throw notFound("That student isn't on your roster");
+      const result = await translateMessage(request, student, {
+        to: saved,
+        channel: b.channel,
+        subject: b.channel === "email" ? b.subject : undefined,
+        body: b.body,
+        counselorName: request.profile.full_name ?? null,
+        studentFirst: firstName(contact.name),
+      });
+
+      const lang = languageByCode(saved);
+      return {
+        language: lang.code,
+        languageName: lang.name,
+        rtl: lang.rtl,
+        subject: result.subject,
+        body: result.body,
+      };
+    }
+  );
+
   app.post(
     "/:id/messages",
     {
@@ -322,6 +410,8 @@ export default async function communicationRoutes(app: FastifyInstance) {
           scheduleFor: z.string().datetime({ offset: true }).nullable().optional(),
           overrideQuietHours: z.boolean().optional(),
           aiDrafted: z.boolean().optional(),
+          /** The body is a translation into this language, then the English (the composer's Translate). */
+          translatedTo: languageCode.optional(),
         })
         .strict()
         .parse(request.body);
@@ -330,8 +420,16 @@ export default async function communicationRoutes(app: FastifyInstance) {
 
       const kind = b.kind ?? "message";
       if (b.channel === "email" && !b.subject) throw badRequest("Add a subject first");
-      if (b.channel === "sms" && b.body.length > TEXT_LIMIT) {
-        throw badRequest(`Texts are kept under ${TEXT_LIMIT} characters`);
+      if (b.translatedTo && b.audience !== "parent") throw badRequest("Only a message to the parents is translated");
+      if (b.channel === "sms") {
+        // A translated text is counted in segments: accented and non-Latin letters cost more (lib/smsSegments.ts).
+        if (b.translatedTo ? smsOverLimit(b.body, true) : b.body.length > TEXT_LIMIT) {
+          throw badRequest(
+            b.translatedTo
+              ? `A translated text is kept to ${MAX_TRANSLATED_SEGMENTS} message segments. Shorten it, or send it as an email.`
+              : `Texts are kept under ${TEXT_LIMIT} characters`
+          );
+        }
       }
       if (kind !== "message" && b.audience !== "parent") throw badRequest("That kind of message goes to the parents");
 
@@ -366,12 +464,17 @@ export default async function communicationRoutes(app: FastifyInstance) {
           scheduled_for: plan.scheduledFor,
           hold_reason: plan.holdReason,
           ai_drafted: b.aiDrafted === true,
+          // Named only when set, so a message that isn't translated still sends before 20261110000001 is applied.
+          ...(b.translatedTo ? { translated_to: b.translatedTo } : {}),
         })
         .select("*")
         .single();
       // 54000: the database's own daily cap on a counselor's message rows
       // (20261024000024), which sits above the route's limits.
       if (error?.code === "54000") throw tooManyRequests("You've sent a lot of family messages today.");
+      if (error && b.translatedTo && isResultsNotApplied(error)) {
+        throw new HttpError(503, "Sending a translated message isn't switched on yet", "translation_unavailable");
+      }
       if (error) throw fromPostgrest(error);
       const row = data as Row;
 
@@ -449,7 +552,9 @@ export default async function communicationRoutes(app: FastifyInstance) {
       const student = await resolveStudentId(request, id, "view");
       const { data, error } = await request.db
         .from("inbound_messages")
-        .select("id, channel, party, from_addr, subject, body, sender_known, authenticated, received_at, read_at, guardian:guardians(full_name)")
+        // `*`, not a column list: the English and the language came with 20261110000001, and a named column that
+        // isn't there yet would hide every reply (the not-applied branch below).
+        .select("*, guardian:guardians(full_name)")
         .eq("student_id", student)
         .order("received_at", { ascending: false })
         .limit(100);
@@ -470,8 +575,14 @@ export default async function communicationRoutes(app: FastifyInstance) {
         senderKnown: r.sender_known === true,
         receivedAt: String(r.received_at),
         read: r.read_at != null,
+        // The English of a reply written in another language, and the language it was detected as (null before the migration).
+        bodyEn: typeof r.body_en === "string" ? r.body_en : null,
+        detectedLanguage: typeof r.detected_language === "string" ? r.detected_language : null,
       }));
-      return { available: true, unread: replies.filter((x) => !x.read).length, replies };
+      // What the parents' replies look like, when the family's language isn't set: one click to set it.
+      const looksLike = replies.find((x) => x.party === "parent" && x.detectedLanguage && x.detectedLanguage !== "en")?.detectedLanguage ?? null;
+      const suggestedFamilyLanguage = looksLike && isLanguageCode(looksLike) ? looksLike : null;
+      return { available: true, unread: replies.filter((x) => !x.read).length, suggestedFamilyLanguage, replies };
     }
   );
 
@@ -613,7 +724,12 @@ export default async function communicationRoutes(app: FastifyInstance) {
           request.log.error({ err }, "student reminders failed");
           return { ran: false, sent: 0, skipped: 0, reason: "error" };
         });
-        return { ran: true, ...tally, reminders };
+        // A family's reply whose translation failed is tried again here (at most 3 times); never fails the dispatch.
+        const translations = await retryFailedTranslations(svc, request.log).catch((err: unknown) => {
+          request.log.error({ err }, "reply translation retry failed");
+          return { tried: 0, done: 0 };
+        });
+        return { ran: true, ...tally, reminders, translations };
       } catch (err) {
         await beat("message-dispatch", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;

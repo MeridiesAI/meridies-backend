@@ -33,6 +33,11 @@ export type CopyContext = {
   counselorName: string | null;
   /** The student the message is about. */
   studentName: string;
+  /**
+   * The body was translated into the family's language (it holds the translation, then the English).
+   * It already greets them, in their language, so no English greeting or opener is put above it.
+   */
+  translated?: boolean;
 };
 
 /** The footer on anything a parent receives from their child's counselor. */
@@ -67,7 +72,7 @@ export function composerEmailTemplate(
   if (to.kind === "guardian") {
     const studentFirst = firstWord(ctx.studentName);
     const parentFirst = firstWord(to.name);
-    const greeted = paragraphs[0] ? GREETING.test(paragraphs[0]) : false;
+    const greeted = ctx.translated === true || (paragraphs[0] ? GREETING.test(paragraphs[0]) : false);
     return {
       heading: msg.subject?.trim() || (studentFirst ? `A note about ${studentFirst}` : "A note from your child's counselor"),
       paragraphs: greeted || !parentFirst ? paragraphs : [`Dear ${parentFirst},`, ...paragraphs],
@@ -91,7 +96,7 @@ export function composerEmailTemplate(
  */
 export function parentTextBody(body: string, to: Pick<Recipient, "name">, ctx: CopyContext): string {
   const text = body.trim();
-  if (GREETING.test(text)) return text.slice(0, SMS_MAX_CHARS);
+  if (ctx.translated === true || GREETING.test(text)) return text.slice(0, SMS_MAX_CHARS);
   const parentFirst = firstWord(to.name);
   const studentFirst = firstWord(ctx.studentName);
   const sender = ctx.counselorName ?? "your child's counselor";

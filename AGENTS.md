@@ -79,6 +79,10 @@ src/
 │   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
 │   ├── inboundEmail.ts    # a family's emailed reply: decode, strip the quote, place it, copy the counselor
 │   ├── inboundSms.ts      # a family's text reply: keywords (STOP/START), whose number, place it
+│   ├── languages.ts       # the closed list of 16 languages a family can be written to; the demo's and the app's file, copied
+│   ├── smsSegments.ts    # a text's cost in segments (GSM-7 160/153, UCS-2 70/67) and the translated-text cap; the same file in the demo and app
+│   ├── translate.ts       # Translate: the prompts, the checks on the model's answer (links and addresses kept exactly), looksEnglish, TRANSLATE_FAKE
+│   ├── inboundTranslate.ts # a family's reply in English, written on its row by the webhooks; the retry sweep on the dispatch cron
 │   ├── twilioNumbers.ts   # search/buy/release a consultant's own Twilio number
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
@@ -674,6 +678,46 @@ forget it.
   and `inbound-email.test.mjs` / `texting.test.mjs` which run only with `MESSAGING_SUITE=1` against an API started with the
   routing env and stand-in providers (`RESEND_API_BASE`, `TWILIO_API_BASE`, honoured outside production only; CI has a
   second API for them).
+- **Writing to a family in their language** (`20261110000001`, `20261110000002`; `lib/translate.ts`, `lib/inboundTranslate.ts`,
+  `lib/languages.ts`, `lib/smsSegments.ts`, `routes/communication.ts`). **Language** is per student, on `student_alert_prefs.family_language`
+  (counselor-written like the rest of that table): a code from `lib/languages.ts`, `en` for English only, null for nobody has said.
+  It is a closed list, never free text (`home_language` on Financial aid is student-writable and could carry an injection); the
+  composer offers Financial aid's as a one-click `languageSuggestion`, never copies it. `PUT /communication/:id/prefs` takes
+  `familyLanguage`; `GET /:id/composer` returns it with `translateAvailable` and `translatedSmsMaxSegments`. **Outbound:**
+  `POST /communication/:id/translate` `{ to?, channel, subject?, body }` (counselor, edit access, 30 a minute, the AI budget gate, and
+  the practice's "AI summaries" switch, so `message-translate` is in `SUMMARY_MODULES`) returns the translation and stores nothing. The
+  composer puts it in the box with a "— English —" divider and the English under it, so what the counselor reads is what is sent
+  (the app composes it, `lib/bilingual.ts`); `POST /:id/messages` takes `translatedTo`, stored on `student_messages.translated_to`, which
+  tells delivery (`CopyContext.translated`) not to put an English "Dear X," or "Hi X, it's Y about Z:" above a body that already
+  greets the family, scheduled sends included. A translated text is capped in **segments** (6, `smsOverLimit`), not characters: an accent
+  beyond é/ù/ì/ò/è/à or any non-Latin letter makes a text UCS-2 at 70 characters a segment. The first text to a number still carries
+  the English "Reply STOP to opt out." line, which can take a full six-segment text one over. The email HTML gives every paragraph
+  `dir="auto"` (Arabic, Urdu and Persian read right to left above their English) and `white-space:pre-line`. **The model** is
+  `TRANSLATE_MODEL` (default `DEEP_MODEL`: Haiku is too risky for Vietnamese, Hindi and Arabic; check `claude-sonnet-5-5` takes a
+  forced `tool_choice` before changing it, and add its `private.ai_prices` row first). The prompt keeps names, dates, numbers, links and
+  paragraph breaks, keeps the English term in brackets the first time an admissions word appears, and wraps the message as data
+  (`<` swapped for a look-alike so it can't close its block). **The answer is checked in code** (`cleanTranslation`): non-empty, a sane
+  length for its source, an echoed English divider dropped, and every link and email address the source had present **exactly**
+  (whole tokens, ASCII-only URLs so Chinese up against a link is not "changed"); anything else is a 503 in words and the counselor
+  presses Translate again. **Inbound:** the Resend and Twilio webhooks store the reply, then `translateStoredReply` writes `body_en`,
+  `detected_language` and `translation_state` on its row (insert first, so a retried webhook never pays for a second model call).
+  It asks only for a reply tied to a student, when the practice's AI switch is on (`studentPracticeSettings`, failing closed, and
+  nothing for an unapproved counselor), and unless the text is plainly English from a family whose language is English or unset
+  (`looksEnglish`); a keyword (STOP, START, HELP) is never translated, and one text on file for several places is translated once.
+  It never throws and waits at most 5 s (`TRANSLATE_DEADLINE_MS`); a reply that couldn't be translated is `failed` and
+  `POST /communication/internal/dispatch` tries it again (10 a run, 3 attempts, oldest first; the answer's `translations`). It runs
+  as the counselor (`runStructuredUnattended`: the same AI budget and `ai_runs` row as `runStructured`, but no request, so the caller
+  checks the practice switch first). The counselor's emailed copy and `GET /communication/:id/replies` (`bodyEn`, `detectedLanguage`,
+  `suggestedFamilyLanguage`) show the English under the original. The CRM contact timeline is untouched: a contact has no language.
+  **Deploy order:** either; not in `REQUIRED_SCHEMA`. Without `20261110000001`: saving a language answers 503
+  `family_language_unavailable`, sending a translated message 503 `translation_unavailable`, the replies list reads `select *` and shows no
+  English, and inbound translation asks nothing (`translationReady`). Without `…0002` only the audit row is skipped. **Tests:**
+  `TRANSLATE_FAKE=fixture` (refused outside `NODE_ENV` development and test, like `RESEARCH_FAKE`) returns `[es] <text>` for an outbound
+  message and reads an inbound `[xx] <text>` as language xx with the rest as its English, so no model is called; CI sets it on both
+  APIs. `test/unit/translate.test.ts`, `inbound-translate.test.ts`; `test/integration/translate.test.mjs`, and sections of
+  `inbound-email.test.mjs` and `texting.test.mjs` (a Spanish reply, an English one, STOP, AI summaries off). Known limits: the model's
+  Vietnamese, Hindi and Arabic have not been read by a speaker (the composer says "Translated by AI. Read it over before sending.");
+  a reply whose webhook crashes between the insert and the update is never retried; numbers aren't checked, only links and addresses.
 - **`consultant_tasks` (Management) are visible to the assignee, the assigner
   and the firm's owners/admins, and nobody else.** Anyone may assign
   themselves a task; only an owner or admin assigns to another firm member,
@@ -723,7 +767,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the

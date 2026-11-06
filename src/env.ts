@@ -50,6 +50,13 @@ const envSchema = z.object({
   // development or test; the server refuses to start otherwise, and warns
   // whenever it is on (lib/research/bootGuard.ts).
   RESEARCH_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for message translation (no model): an outbound message comes back as "[es] <text>", and an
+  // inbound one starting "[xx] " is read as language xx with the rest as its English. Same rules as RESEARCH_FAKE:
+  // only with NODE_ENV development or test, the server refuses to start otherwise (lib/translate.ts).
+  TRANSLATE_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // The model that translates a family's messages; defaults to DEEP_MODEL (lib/translate.ts). A model the
+  // private.ai_prices table doesn't price is charged at the table's highest rates, so add its row first.
+  TRANSLATE_MODEL: blankIsUnset(z.string().min(5).max(80).optional()),
 
   // Outbound email (student invitations). Optional: without the key, invite
   // creation still works but the email is skipped and logged, rather than

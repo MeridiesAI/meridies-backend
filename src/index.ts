@@ -2,6 +2,7 @@ import { buildApp } from "./app.js";
 import { env } from "./env.js";
 import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
 import { researchFakeRefusal } from "./lib/research/bootGuard.js";
+import { translateFakeRefusal } from "./lib/translate.js";
 
 const app = buildApp();
 
@@ -13,6 +14,14 @@ if (refusal) {
   process.exit(1);
 }
 if (env.RESEARCH_FAKE) app.log.warn("RESEARCH_FAKE is on: research returns canned fixtures, not real results");
+
+// Same rule for the translation double: it would send families text no model translated.
+const translateRefusal = translateFakeRefusal({ TRANSLATE_FAKE: env.TRANSLATE_FAKE, NODE_ENV: process.env.NODE_ENV });
+if (translateRefusal) {
+  app.log.error(translateRefusal);
+  process.exit(1);
+}
+if (env.TRANSLATE_FAKE) app.log.warn("TRANSLATE_FAKE is on: translations are canned, not a model's");
 
 await verifyImportWorkerAtBoot(app.log);
 
