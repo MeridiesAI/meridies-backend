@@ -471,6 +471,12 @@ export const toBlast = (r: Row) => ({
   audienceLabel: nstr(r.audience_label),
   // Absent until 20261030000001: a blast then is the students it reached, sent once.
   recipientType: (r.recipient_type === "parents" ? "parents" : "students") as "students" | "parents",
+  // The classes the filters name ("2027"), so a queued seasonal blast can say who it is for.
+  classYears: Array.isArray((r.filters as { classYears?: unknown } | null)?.classYears)
+    ? ((r.filters as { classYears: unknown[] }).classYears.map((y) => String(y)))
+    : ([] as string[]),
+  // The seasonal draft it was queued from; absent until 20261110000003.
+  templateId: nstr(r.source_template_id),
   scheduledFor: nstr(r.scheduled_for),
   repeatYearly: r.repeat_yearly === true,
   channel: str(r.channel) as "email" | "sms" | "both",

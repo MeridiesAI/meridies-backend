@@ -102,6 +102,7 @@ src/
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
+│   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
@@ -533,10 +534,17 @@ forget it.
   combine (class year, a college on the students' lists, an application status; a college and a status are read
   from the same list row), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
   `students` (their sign-in email) or `parents` (guardians with an address and alerts on, one email per address,
-  a student nobody can reach kept as a skipped row). `{first}` and `{me}` are filled per recipient (the guardian's
-  first name for a parent); a body that doesn't already greet gets "Hi <first>,". `POST /blasts` sends now, or
+  a student nobody can reach kept as a skipped row). `{first}`, `{student}` and `{me}` are filled per recipient (the
+  guardian's first name for a parent; the student's first name, "Ana and Luis" when siblings share one parent address
+  and so one email; "your student" from a sender that has none, so braces never reach a family); a body that doesn't
+  already greet gets "Hi <first>,". `POST /blasts` sends now, or
   with `scheduledFor` (an instant, 1 minute to 5 years ahead) and optionally `repeatYearly` queues a `scheduled`
-  row; `GET /blasts?status=scheduled` is the Queued list and `POST /blasts/:id/cancel` takes one out. **The cron**
+  row; `GET /blasts?status=scheduled` is the Queued list and `POST /blasts/:id/cancel` takes one out. Sending now is
+  10 an hour and queueing 30 an hour (a season is nine in a row), under a coarse 60 an hour on every create.
+  `PATCH /blasts/:id` `{ subject?, body?, scheduledFor? }` changes a queued blast until its cron claims it (the
+  update is conditional on `scheduled` and an unset `claimed_at`, so a blast picked up a moment ago answers 409, never
+  changed under the run): a queued blast holds a frozen copy of its text, so editing a template later changes nothing
+  already queued, and this does; who it goes to can't change (cancel and requeue). **The cron**
   is `POST /internal/blasts/dispatch` (`CRON_SECRET`, every 10-15 minutes; heartbeat `email-blasts`): it claims a
   due row (`claimed_at`, reclaimed after 10 minutes), re-resolves recipients from the counselor's live roster at
   send time (the row stores filters and ticked ids, never who the people are), gives Resend a stable
@@ -550,6 +558,35 @@ forget it.
   (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/internal/blasts/dispatch"`, every 10-15
   minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. Tests:
   `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`.
+- **Seasonal stage emails** (`20261110000003`; `lib/stageTemplates.ts`, `routes/emailTemplates.ts`, `routes/blasts.ts`).
+  Nine rough drafts of the mass emails a practice sends through the year (starting the college search, essay ideas,
+  a summer plan, essay planning, first drafts, revisions, regular deadlines, wrap-up and financial aid, decisions),
+  written for families new to the process. **A stage is not a per-student field**: a draft is an `email_templates`
+  row in the `families` set (edited, renamed and saved like any template) that also carries `stage`, a suggested
+  `send_month` and `send_day` (a month and day that exist, Feb 29 allowed, checked by the table) and `class_offset`
+  (0 seniors, 1 juniors, 2 sophomores, 3 freshmen: relative, so one draft means the right graduating class every year),
+  plus `audience` (`parents` or `students`, which a blast of it defaults to). The five are written together or not at
+  all, families set only (`email_templates_stage_complete`), by the counselor (the column grant). The API stores
+  month, day and offset and nothing else: the app turns them into a date and a class year for the Class filter
+  (`lib/stageSchedule.ts`, the demo's and the app's file: the cycle starts August 1 in the counselor's zone). **Seeding
+  reaches existing accounts**: `ensure_email_templates` seeds only a counselor with no templates in a set, so the
+  migration also backfills the drafts once for every counselor who already has family templates, and
+  `POST /email-templates/stages/restore` (`restore_stage_templates()`) puts back whichever are missing by slug and
+  never touches one that is there, edited or not; a draft the counselor deletes stays deleted until they ask. The copy
+  is `private.stage_template_defaults()`, **generated** from meridies-demo's `lib/stageSeeds.ts` by `node
+  --no-warnings scripts/stage-seeds-sql.mjs` (`check:stage` there holds every draft to this table's limits): change it
+  there, regenerate, and ship new text in a later migration (this one never rewrites an edited draft).
+  `PATCH /email-templates/:id` takes `sendMonth`, `sendDay`, `classOffset` and `audience` for a seasonal draft only; a
+  month or day alone is checked against the other half already on the row (Jan 31 then April is refused). **Queueing**:
+  `POST /blasts` takes `templateId` (the caller's own template, else 400), stored as
+  `email_blasts.source_template_id`, and refuses the same draft for the same classes while one is queued (409
+  `already_queued`; class years compared as a set, a cancelled or sent blast frees it; a blast sent now doesn't count).
+  The blast DTO carries `templateId` and `classYears` (from its filters). Stage blasts are one-off: a yearly repeat
+  would keep the same class year after that class had graduated. **Deploy order:** either; not in `REQUIRED_SCHEMA`.
+  `stageColumnsReady` and `blastSourceReady` (zero-row probes, kept when present, 30 s when missing, any other error a
+  real fault) mean that without the file the template list reads the older columns and every picker works, the stage
+  routes answer 503 `stage_templates_unavailable`, a `templateId` is accepted and not remembered, and the DTO's new
+  fields read null. Tests: `test/unit/stage-templates.test.ts`, `test/integration/stage-templates.test.mjs`.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
