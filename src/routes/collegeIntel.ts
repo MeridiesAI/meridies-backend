@@ -47,6 +47,7 @@ export default async function collegeIntelRoutes(app: FastifyInstance) {
       .object({ text: z.string().trim().min(3).max(500), studentId: uuid.optional(), limit: z.number().int().min(1).max(100).optional() })
       .strict()
       .parse(request.body);
+    if (b.studentId) await resolveStudentId(request, b.studentId, "view");
     const parsed = await runStructured<Record<string, unknown>>({
       request,
       module: "college-search",
