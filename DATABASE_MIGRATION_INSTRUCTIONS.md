@@ -399,6 +399,7 @@ KPI / Time saved files (`20261027000001`-`06`) and the 10/28 files (`20261028000
 | `20261029000002_gpa_within_scale.sql` | The database's GPA-within-scale check (NOT VALID; the routes apply the same rule in code). Before validating it, list rows with `scripts/migrations/gpa-scale-violations.sql` |
 | `20261029000003_invitation_import_data.sql` | A CSV import's extra columns are dropped from the invitation; cards read `importData: null` |
 | `20261102000001_stripe_connect.sql` | Card payments: `GET /pipeline/stripe` reads `configured: false`, the other Stripe routes 503 `stripe_unavailable` (section below) |
+| `20261110000001_audit_guards.sql` | Security audit 2026-11-05 guards, each already enforced by the API: the documents bucket and `documents` rows refuse SVG/HTML by stored type or name; a pipeline contact's `owner_id` changes only by its owner, the solo counselor or a firm admin; the client INSERT grant on `profiles` is revoked; `pipeline_sequences` inserts name the caller's own workspace. Without it only the API-side checks hold |
 
 Apply them through the Apply migrations workflow (manual mode: apply on, confirm the newest version the plan lists) after a backup.
 
