@@ -2035,8 +2035,12 @@ A Confirm-tier delete on `TRASH_COVERED` (31 ops; `axis-trash.test.ts` fails on 
 `TRASH_COVERED` nor `TRASH_EXCLUDED`, which gives each exclusion its reason) runs with a mark: `dispatch` sends
 `x-meridies-axis-mark` (an HMAC of the action id under a key made fresh in each process), and `supabaseAuth` turns a
 valid one into `request.axisActionId` and the `x-meridies-axis-action` header on `request.db`. In the database a
-`zz_axis_trash_*` trigger on every covered table (59, each with a row in `private.axis_trash_rules`) keeps the
-deleted row, every row it cascades to and every key it sets null in `private.axis_trash` (no client grants).
+`zz_axis_trash_*` trigger on every covered table (60, each with a row in `private.axis_trash_rules`; the 60th,
+`email_blasts.source_template_id`, is `20261110000007`, added when the Seasonal-emails column made a template's delete
+null a blast's key) keeps the deleted row, every row it cascades to and every key it sets null in
+`private.axis_trash` (no client grants). A migration that adds a foreign key to a covered table with `on delete
+cascade` or `set null` has to attach the trash to the child too; the "every child row a covered delete reaches is
+kept" check in `axis-trash-db.test.mjs` fails otherwise.
 Confirm's result is `{ trash: true, restoreUntil }` and the card's Undo runs `axis_trash_restore` on the counselor's
 own client (not the service role, which has no user): only the counselor who confirmed the delete, still an approved
 counselor, within 30 days (the card stops offering Restore after `restoreUntil`), all or nothing, the same ids.
