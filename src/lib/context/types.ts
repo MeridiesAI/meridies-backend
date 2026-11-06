@@ -16,7 +16,7 @@ export type StudentContext = ContextUsage & {
   outside: string[];
   /**
    * The used sections that carry free text (lib/context/freeText.ts): the narrower rule a turn is flagged by once
-   * 20261110000005 is in. Empty for a shortOnly or trustedOnly build.
+   * 20261108000004 is in. Empty for a shortOnly or trustedOnly build.
    */
   freeText: string[];
   studentName: string | null;

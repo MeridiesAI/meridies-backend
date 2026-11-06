@@ -47,7 +47,7 @@ export type DirectAnswer = {
    */
   outside: boolean;
   /**
-   * The narrower rule (lib/context/freeText.ts), used once 20261110000005 is in: a value the answer shows is
+   * The narrower rule (lib/context/freeText.ts), used once 20261108000004 is in: a value the answer shows is
    * over 80 characters. A title, a school or a major of that length or less is a short field.
    */
   freeText: boolean;

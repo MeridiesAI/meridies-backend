@@ -13,7 +13,7 @@ export type DbCall = { table: string; op: "select" | "update"; patch?: Row; filt
 
 /**
  * Columns the fake database doesn't have, as `{ table, column }` rows under "missing:columns". By default
- * ai_messages.outside_quotes (20261110000005), so a suite runs today's rules unless it passes [] to turn the
+ * ai_messages.outside_quotes (20261108000004), so a suite runs today's rules unless it passes [] to turn the
  * free-text rule on (lib/axis/failsafe.ts flagsReady).
  */
 const DEFAULT_MISSING: Row[] = [{ table: "ai_messages", column: "outside_quotes" }];

@@ -1,4 +1,4 @@
-// AxIS deletes are kept 30 days and restorable by the counselor who confirmed them (20261110000004, AxIS security
+// AxIS deletes are kept 30 days and restorable by the counselor who confirmed them (20261108000003, AxIS security
 // PR B). The database side: a delete PostgREST runs with the x-meridies-axis-action header keeps its rows (and
 // what cascades or is set null) in private.axis_trash; axis_trash_restore puts them back, deny by default.
 import { randomUUID } from "node:crypto";

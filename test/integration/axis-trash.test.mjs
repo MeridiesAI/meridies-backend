@@ -1,4 +1,4 @@
-// AxIS deletes through the API (20261110000004, AxIS security PR B): every covered op a counselor confirms on a card
+// AxIS deletes through the API (20261108000003, AxIS security PR B): every covered op a counselor confirms on a card
 // keeps its rows in the trash, and the card's Undo (Restore) brings them back with the same ids. Proposals are written
 // the way perform_action writes them (as in axis-operations.test.mjs); no model is called.
 import { randomUUID } from "node:crypto";

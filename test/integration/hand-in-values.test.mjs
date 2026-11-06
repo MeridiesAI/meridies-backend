@@ -1,4 +1,4 @@
-// Hand-in values (20261110000006, AxIS security PR B; spec section 4): the values AxIS copies off a handed-in file
+// Hand-in values (20261108000005, AxIS security PR B; spec section 4): the values AxIS copies off a handed-in file
 // are a list on the check, unverified until a counselor who can edit the student confirms them. Confirm writes each
 // one to the profile only where the profile still holds what the card showed, under the info card's rules.
 // Checks are seeded the way the review records them; no model is called.
