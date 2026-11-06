@@ -12,6 +12,7 @@ import { z } from "zod";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { serviceClient } from "../lib/supabase.js";
 import { summarisePreferences, type DeckCard, type Rating } from "../lib/preferences.js";
 import { toCardRating, toPreferenceCard } from "../lib/serialize.js";
 
@@ -118,16 +119,30 @@ export default async function preferenceRoutes(app: FastifyInstance) {
   );
 }
 
+/**
+ * The deck without `counselor_note`, which coaches the answer and must never
+ * reach a student: a follow-up migration takes the column out of the client
+ * SELECT grant, so the read names its columns. A counselor's notes come from
+ * the service client (catalog rows, no caller id involved).
+ */
 async function loadDeck(request: FastifyRequest): Promise<DeckCard[]> {
   const { data, error } = await request.db
     .from("preference_cards")
-    .select("*")
+    .select("id, card_key, category, category_label, prompt, example, sort_order")
     .eq("is_active", true)
     .order("category")
     .order("sort_order")
     .limit(200);
   if (error) throw fromPostgrest(error);
-  return (data ?? []).map((r) => toPreferenceCard(r as Row));
+  const rows = (data ?? []) as Row[];
+  const svc = request.profile.role === "counselor" ? serviceClient() : null;
+  if (svc && rows.length) {
+    const notes = await svc.from("preference_cards").select("id, counselor_note").in("id", rows.map((r) => String(r.id)));
+    if (notes.error) throw fromPostgrest(notes.error);
+    const byId = new Map((notes.data ?? []).map((n) => [String(n.id), n.counselor_note as string | null]));
+    for (const r of rows) r.counselor_note = byId.get(String(r.id)) ?? null;
+  }
+  return rows.map((r) => toPreferenceCard(r));
 }
 
 async function loadRatings(request: FastifyRequest, student: string) {
