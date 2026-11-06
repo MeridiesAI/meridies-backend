@@ -22,7 +22,7 @@ import { collegeLogoUrls } from "../lib/collegeLogos.js";
 import { loadCollegePhotos, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { limit } from "../lib/limits.js";
+import { consumeRateLimit, limit } from "../lib/limits.js";
 import {
   CALENDAR_TARGETS,
   EVENT_KIND_LABEL,
@@ -39,7 +39,7 @@ import {
   type SavedState,
 } from "../lib/eventsHub.js";
 import { collegesOnLists, listRowsFor } from "../lib/rosterColleges.js";
-import { cleanSchedule, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
+import { LOOKUPS_PER_USER_PER_DAY, cleanSchedule, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
 import { similarColleges } from "../lib/similarColleges.js";
 
 type Row = Record<string, unknown>;
@@ -199,7 +199,12 @@ export default async function myEventRoutes(app: FastifyInstance) {
           .filter((r): r is Row => Boolean(r) && needsLookup(r!.visit_url_checked_at as string | null))
           .slice(0, n)
           .map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null }));
-      const started = lookUpSoon([...stale([...mine], 4), ...stale(similarIds.map((x) => x.id), 2)], request.log);
+      const wanted = [...stale([...mine], 4), ...stale(similarIds.map((x) => x.id), 2)];
+      // Each lookup is a Sonnet research run on the shared events-discovery budget, so
+      // one account's page loads queue at most a few a day (lib/eventsDiscovery.ts).
+      const started = wanted.length && (await consumeRateLimit(`events:lookup:${request.auth.userId}`, LOOKUPS_PER_USER_PER_DAY, 86_400))
+        ? lookUpSoon(wanted, request.log)
+        : [];
       lookingUp = started.map((c) => refOf(c.id)).filter((x): x is CollegeRef => x !== null);
     }
 
