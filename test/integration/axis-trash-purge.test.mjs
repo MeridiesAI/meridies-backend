@@ -1,4 +1,4 @@
-// The AxIS trash's upkeep (20261110000004, AxIS security PR B): the scheduled sweep purges what's past 30 days with
+// The AxIS trash's upkeep (20261108000003, AxIS security PR B): the scheduled sweep purges what's past 30 days with
 // the files it kept, at most once an hour (the axis-trash-purge lease); deleting an account removes the trash it
 // made and the trash about it; the data export carries no trash.
 import { randomUUID } from "node:crypto";

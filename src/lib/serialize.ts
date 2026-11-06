@@ -344,7 +344,7 @@ export const toTask = (
 
 /**
  * `values`: what AxIS copied off a handed-in file, each unverified until a counselor confirms it, with the
- * profile's value now (`academics`, the student's student_academics row). Null before 20261110000006.
+ * profile's value now (`academics`, the student's student_academics row). Null before 20261108000005.
  */
 export const toTrackerCheck = (r: Row, academics?: Row | null) => ({
   id: str(r.id ?? r.check_id),

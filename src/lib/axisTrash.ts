@@ -1,5 +1,5 @@
 /**
- * The AxIS trash's upkeep (20261110000004, AxIS security PR B; lib/axis/ops/trash.ts has the delete and restore).
+ * The AxIS trash's upkeep (20261108000003, AxIS security PR B; lib/axis/ops/trash.ts has the delete and restore).
  *
  *  - `purgeAxisTrash`: what's past 30 days goes, with the document files the trash kept. The scheduled sweep calls
  *    it (lib/sweepSchedule.ts); it runs at most once an hour across every replica, because it keeps the

@@ -1,5 +1,5 @@
 // Lookups, evidence and direct answers judged by the free-text rule (AxIS security PR B, spec §3.2): a read of
-// short fields doesn't flag a turn once 20261110000005 is in; free text does, and every student string a read
+// short fields doesn't flag a turn once 20261108000004 is in; free text does, and every student string a read
 // shows the model sits in a data block, so the rule can see it.
 import assert from "node:assert/strict";
 import { test } from "node:test";

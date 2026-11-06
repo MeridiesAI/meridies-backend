@@ -1,7 +1,7 @@
 /**
  * Quoted runs (AxIS security PR B, spec §3.3). An AxIS answer that repeats 8 or more consecutive words of free
  * text the turn could see (a document, a long student-written value: lib/context/freeText.ts) is flagged: the
- * runs are stored with the answer (`ai_messages.outside_quotes`, 20261110000005), the chat stays flagged while
+ * runs are stored with the answer (`ai_messages.outside_quotes`, 20261108000004), the chat stays flagged while
  * that answer is among the replayed messages, and the memory fold replaces each run with
  * "[quote from <source>]" so the summary never carries the words.
  *

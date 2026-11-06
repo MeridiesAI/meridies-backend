@@ -58,7 +58,7 @@ test("history is flagged while a quoting answer is among the replayed 12", async
   assert.deepEqual(cleared.quoted, []);
 });
 
-test("before 20261110000005 the history reads no quotes and isn't flagged by them", async () => {
+test("before 20261108000004 the history reads no quotes and isn't flagged by them", async () => {
   resetFlagsReadyForTest();
   const { request, selects } = fakeRequest(rows(true), { flags: false });
   const h = await loadHistory(request, "conv");

@@ -96,7 +96,7 @@ export type TurnResult = {
   runId: string | null;
   /**
    * The runs of 8+ words the answer repeated from free text the turn could see (lib/axis/quotes.ts), for the
-   * route to store with it (ai_messages.outside_quotes). Always empty before 20261110000005.
+   * route to store with it (ai_messages.outside_quotes). Always empty before 20261108000004.
    */
   quotes: QuoteRun[];
   /** The answer was checked for quotes (the rule is on): the route stores its runs, [] when clean. */
@@ -165,7 +165,7 @@ export function looksLikeChange(content: string): boolean {
 
 /**
  * The student's record or the roster view, with what it's built from and whether it carries someone else's words
- * (`outside`, today's rule) or free text (`freeText`, the rule once 20261110000005 is in). `shortOnly`: a
+ * (`outside`, today's rule) or free text (`freeText`, the rule once 20261108000004 is in). `shortOnly`: a
  * question turn's record leaves free text out with a line saying what exists (lib/context/freeText.ts).
  */
 async function loadContext(request: FastifyRequest, studentId: string | null, forChange = false, shortOnly = false) {
@@ -275,7 +275,7 @@ async function axisTurn(opts: {
       : Promise.resolve<RetrievedChunk[]>([]);
   const chatFacts = studentId ? studentFacts(request, studentId).catch(() => null) : undefined;
   // The free-text rule, the question turn's short record and the quote flag turn on together with
-  // 20261110000005 (spec §3.3). Without it, today's wider rule decides everything below.
+  // 20261108000004 (spec §3.3). Without it, today's wider rule decides everything below.
   const flags = await flagsReady(request.db).catch(() => false);
   const forChange = looksLikeChange(content);
   const [roster, colleges, ctx, history, connected, files] = await Promise.all([

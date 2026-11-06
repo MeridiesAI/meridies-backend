@@ -1,5 +1,5 @@
 /**
- * AxIS deletes are kept 30 days and restorable (20261110000004, AxIS security PR B; spec section 2).
+ * AxIS deletes are kept 30 days and restorable (20261108000003, AxIS security PR B; spec section 2).
  *
  * A covered delete (a Confirm-tier DELETE op below) runs with a mark: `dispatch` sends `x-meridies-axis-mark`, an
  * HMAC of the action id under a key made fresh in this process, and `supabaseAuth` turns a valid mark into the
@@ -13,7 +13,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isSchemaMissing } from "../failsafe.js";
 
-export const TRASH_MIGRATION = "20261110000004_axis_trash";
+export const TRASH_MIGRATION = "20261108000003_axis_trash";
 export const TRASH_MISSING = `AxIS can't delete things until the database update ${TRASH_MIGRATION} is applied.`;
 
 /** Every Confirm-tier DELETE op whose rows the trash keeps. `axis-trash.test.ts` fails on a DELETE op in neither list. */

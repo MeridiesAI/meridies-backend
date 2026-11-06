@@ -1,5 +1,5 @@
 /**
- * The values AxIS copies off a handed-in file (20261110000006, AxIS security PR B; spec section 4): a weighted and
+ * The values AxIS copies off a handed-in file (20261108000005, AxIS security PR B; spec section 4): a weighted and
  * an unweighted GPA, a class rank and a test score, as printed. They are a list on the check
  * (`deliverable_tracker_checks.extracted_values`), unverified until a counselor who can edit the student confirms
  * them. Confirm (`POST /tasks/:id/checks/:checkId/values/confirm`) also adds them to the profile, under the info
@@ -30,7 +30,7 @@ export type HandInValueRead = HandInValue & { current: string | number | null };
 export type HandInPatch = { gpaWeighted?: number; gpaUnweighted?: number; classRank?: string; sat?: number; act?: number };
 export type AcademicsColumn = "gpa_weighted" | "gpa_unweighted" | "class_rank" | "sat_superscore" | "act_composite";
 
-export const HAND_IN_VALUES_MIGRATION = "20261110000006_hand_in_values";
+export const HAND_IN_VALUES_MIGRATION = "20261108000005_hand_in_values";
 export const HAND_IN_VALUES_MISSING = `Confirming hand-in values needs the database update ${HAND_IN_VALUES_MIGRATION}.`;
 export const HAND_IN_CHANGED = "This hand-in changed. Reload to see it.";
 

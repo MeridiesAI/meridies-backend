@@ -992,7 +992,7 @@ the database (`20261010*`):
   only whether this is what was asked for and usable, never grades or
   rewrites it. The task title and instructions, the student's name, the file
   name and the file's text each reach it in an untrusted-data block
-  (`reviewPrompt`). **Hand-in values** (`20261110000006`, `lib/handInValues.ts`):
+  (`reviewPrompt`). **Hand-in values** (`20261108000005`, `lib/handInValues.ts`):
   the GPAs, class rank and a test score it copies off the file, as printed,
   are a list on the check (`extracted_values`, no client grant: the table's
   insert/update grants are per column, so a new column needs its own grant),
@@ -1726,7 +1726,7 @@ error is held, not sent. Every run writes one `audit_log` row
 
 **The AxIS trash purge rides on the sweep.** After a scheduled run (cron or
 interval, not the dashboard button) `purgeAxisTrash` (`lib/axisTrash.ts`)
-deletes AxIS trash past 30 days (`axis_trash_purge`, `20261110000004`) and
+deletes AxIS trash past 30 days (`axis_trash_purge`, `20261108000003`) and
 removes the `student-documents` objects those rows kept that nothing needs any
 more. It takes the `axis-trash-purge` lease for an hour and keeps it, so it
 runs at most once an hour across every replica (a failed purge releases it,
@@ -1980,7 +1980,7 @@ anyone copying it.
   task). Earlier changes are recalled each turn (`recentActionsText`) by
   their summary only when it was filed in a clean turn and not labelled from
   a read of its target (`payload.outside === false`); otherwise by the
-  operation's catalog title. **Once `20261110000005` is in** (`flagsReady`,
+  operation's catalog title. **Once `20261108000004` is in** (`flagsReady`,
   `lib/axis/failsafe.ts`), a narrower rule replaces "outside content": only
   **free text** flags a turn (`lib/context/freeText.ts`): documents, essay
   bodies, chat files, email, connected files, web pages and any student-written
@@ -2030,7 +2030,7 @@ anyone copying it.
   binary uploads, OAuth, imports, account export/deletion, catalog-editor
   routes, and essay prose.
 
-**Deletes are kept 30 days and restorable** (`20261110000004`, `lib/axis/ops/trash.ts`, AxIS security PR B).
+**Deletes are kept 30 days and restorable** (`20261108000003`, `lib/axis/ops/trash.ts`, AxIS security PR B).
 A Confirm-tier delete on `TRASH_COVERED` (31 ops; `axis-trash.test.ts` fails on a DELETE op that is in neither
 `TRASH_COVERED` nor `TRASH_EXCLUDED`, which gives each exclusion its reason) runs with a mark: `dispatch` sends
 `x-meridies-axis-mark` (an HMAC of the action id under a key made fresh in each process), and `supabaseAuth` turns a
@@ -2063,7 +2063,7 @@ public.axis_trash_restore('<action id>');` (the caller is taken to be the delete
 Not covered: roster imports, removing a firm member and deleting a pipeline stage (all left the catalog: AxIS can't
 make them restorable; a stage's delete moves its cards, so adding a stage has no Undo). A delivery record's link to
 a deleted task, meeting or report is kept and put back, so a reminder already sent isn't sent again. Before the migration a covered delete is refused with "AxIS can't delete things until
-the database update 20261110000004_axis_trash is applied." **Deploy order:** either; not in `REQUIRED_SCHEMA`.
+the database update 20261108000003_axis_trash is applied." **Deploy order:** either; not in `REQUIRED_SCHEMA`.
 Tests: `test/unit/axis-trash.test.ts`, `test/integration/axis-trash-db.test.mjs`, `test/integration/axis-trash.test.mjs`
 (every covered op through the API, a caseload move, an expired card, nothing sent).
 

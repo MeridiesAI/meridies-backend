@@ -38,7 +38,7 @@ export type PlanContext = {
   ledger: SourceLedger;
   connected: ConnectedProvider[];
   retrievalReady: boolean;
-  /** The free-text rule is on (20261110000005): a question's record of another student is built short-only. */
+  /** The free-text rule is on (20261108000004): a question's record of another student is built short-only. */
   freeRule?: boolean;
   /** The raw-question search started at the top of the turn. */
   speculative: Promise<RetrievedChunk[]>;
@@ -55,7 +55,7 @@ export type Evidence = {
    */
   outside: boolean;
   /**
-   * The narrower rule (lib/context/freeText.ts), used once 20261110000005 is in: a shown block holds free text
+   * The narrower rule (lib/context/freeText.ts), used once 20261108000004 is in: a shown block holds free text
    * (another student's document or long student-written value, a deadline or student task title over 80).
    */
   freeText: boolean;

@@ -42,7 +42,7 @@ export type TurnBudget = {
   /** Narrative (first-person, unaddressed) words in the free text this turn filed: the essay guardrail's turn count. */
   proseWords: number;
   /**
-   * The free-text rule is on (20261110000005 is in, lib/axis/failsafe.ts flagsReady): a read flags the turn only
+   * The free-text rule is on (20261108000004 is in, lib/axis/failsafe.ts flagsReady): a read flags the turn only
    * when what it showed the model holds free text (lib/context/freeText.ts). Off, today's declarations decide.
    */
   freeRule: boolean;
