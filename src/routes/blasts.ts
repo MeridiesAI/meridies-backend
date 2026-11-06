@@ -13,6 +13,9 @@
  *
  * A blast goes now, or is scheduled for a time (optionally every year): a
  * scheduled one is a `scheduled` row the `email-blasts` cron sends (lib/blasts.ts).
+ * Until its cron claims it, a queued blast's subject, text and time can be changed
+ * (`PATCH /blasts/:id`). One queued from a seasonal draft remembers it (`templateId`),
+ * and the same draft for the same classes can't be queued twice (409 `already_queued`).
  *
  * Sending reuses lib/email.ts and therefore `message_deliveries`; the blast
  * tables record the rule that was used and who it actually reached.
@@ -29,10 +32,11 @@ import {
   scheduleUnavailable,
   validScheduleTime,
 } from "../lib/blasts.js";
-import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
+import { HttpError, badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { limit } from "../lib/limits.js";
+import { enforceRateLimit, limit } from "../lib/limits.js";
 import { toBlast, toBlastRecipient } from "../lib/serialize.js";
+import { blastSourceReady, classYearsOf, sameClasses } from "../lib/stageTemplates.js";
 
 type Row = Record<string, unknown>;
 
@@ -168,11 +172,8 @@ export default async function blastRoutes(app: FastifyInstance) {
   app.post(
     "/",
     {
-      preHandler: [
-        app.authenticate,
-        requireRole("counselor"),
-        limit("blasts:send", 10, 3600, "You've sent several blasts this hour. Give it a moment."),
-      ],
+      // A coarse cap on every create; sending now and queueing for later have their own below.
+      preHandler: [app.authenticate, requireRole("counselor"), limit("blasts:create", 60, 3600)],
     },
     async (request, reply) => {
       const b = audienceInput
@@ -181,6 +182,8 @@ export default async function blastRoutes(app: FastifyInstance) {
           body: z.string().trim().min(1).max(20_000),
           scheduledFor: z.string().datetime({ offset: true }).optional(),
           repeatYearly: z.boolean().optional(),
+          /** The seasonal draft this was queued from (Email Blast's Season view). */
+          templateId: z.string().uuid().optional(),
         })
         .strict()
         .parse(request.body);
@@ -188,6 +191,14 @@ export default async function blastRoutes(app: FastifyInstance) {
       if (b.repeatYearly && !b.scheduledFor) throw badRequest("Pick a date to repeat from");
       if (b.scheduledFor && !validScheduleTime(b.scheduledFor)) {
         throw badRequest("Pick a time in the future, within the next five years");
+      }
+
+      // Sending now goes out to people at once, so it is the tight one; queueing a season is nine of these in a row.
+      const userId = request.auth.userId;
+      if (b.scheduledFor) {
+        await enforceRateLimit(`blasts:schedule:${userId}`, 30, 3600, "You've queued a lot of blasts this hour. Give it a moment.");
+      } else {
+        await enforceRateLimit(`blasts:send:${userId}`, 10, 3600, "You've sent several blasts this hour. Give it a moment.");
       }
 
       const { label, selected, recipients } = await resolveAudience(request.db, request.auth.userId, b);
@@ -199,6 +210,34 @@ export default async function blastRoutes(app: FastifyInstance) {
       // Without the migration a blast sent now is stored as the people it reached, as before.
       const ready = await scheduleReady(request.db);
       if (b.scheduledFor && !ready) throw scheduleUnavailable();
+
+      // The seasonal draft it came from: the caller's own, and not already queued for these classes.
+      // On a database without the column the id is simply not remembered.
+      let sourceTemplateId: string | null = null;
+      if (b.templateId && (await blastSourceReady(request.db))) {
+        const { data: tpl, error: tplError } = await request.db
+          .from("email_templates")
+          .select("id")
+          .eq("id", b.templateId)
+          .eq("counselor_id", userId)
+          .maybeSingle();
+        if (tplError) throw fromPostgrest(tplError);
+        if (!tpl) throw badRequest("That template isn't yours");
+        sourceTemplateId = b.templateId;
+        if (b.scheduledFor) {
+          const { data: queued, error: queuedError } = await request.db
+            .from("email_blasts")
+            .select("filters")
+            .eq("counselor_id", userId)
+            .eq("status", "scheduled")
+            .eq("source_template_id", b.templateId)
+            .limit(50);
+          if (queuedError) throw fromPostgrest(queuedError);
+          if ((queued ?? []).some((q) => sameClasses(classYearsOf((q as Row).filters), b.classYears))) {
+            throw new HttpError(409, "That draft is already queued for those classes", "already_queued");
+          }
+        }
+      }
 
       const { data: blast, error } = await request.db
         .from("email_blasts")
@@ -221,6 +260,7 @@ export default async function blastRoutes(app: FastifyInstance) {
                 repeat_yearly: b.repeatYearly === true,
               }
             : {}),
+          ...(sourceTemplateId ? { source_template_id: sourceTemplateId } : {}),
         })
         .select("*")
         .single();
@@ -257,6 +297,59 @@ export default async function blastRoutes(app: FastifyInstance) {
         ...toBlast((finished ?? blast) as Row),
         skipped: result.skipped,
       });
+    }
+  );
+
+  /**
+   * Change a queued blast's subject, text or time before it goes. A queued blast holds a frozen copy
+   * of its text, so editing a template later never changes it; this does. Only while it is still
+   * `scheduled` and no run has claimed it: the update is conditional, so a blast the cron picked up a
+   * moment ago answers 409 rather than being changed under it.
+   */
+  app.patch(
+    "/:id",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("blasts:edit", 120, 3600)] },
+    async (request) => {
+      const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+      const b = z
+        .object({
+          subject: z.string().trim().min(1).max(300).optional(),
+          body: z.string().trim().min(1).max(20_000).optional(),
+          scheduledFor: z.string().datetime({ offset: true }).optional(),
+        })
+        .strict()
+        .parse(request.body);
+      if (Object.keys(b).length === 0) throw badRequest("Nothing to change");
+      if (b.scheduledFor && !validScheduleTime(b.scheduledFor)) {
+        throw badRequest("Pick a time in the future, within the next five years");
+      }
+
+      const { data: blast, error } = await request.db
+        .from("email_blasts")
+        .select("id, status")
+        .eq("id", id)
+        .eq("counselor_id", request.auth.userId)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!blast) throw notFound("That blast isn't on file");
+      if (blast.status !== "scheduled") throw conflict("Only a queued blast can be changed");
+
+      const { data: changed, error: updateError } = await request.db
+        .from("email_blasts")
+        .update({
+          ...(b.subject !== undefined ? { subject: b.subject } : {}),
+          ...(b.body !== undefined ? { body: b.body } : {}),
+          ...(b.scheduledFor !== undefined ? { scheduled_for: b.scheduledFor } : {}),
+        })
+        .eq("id", id)
+        .eq("counselor_id", request.auth.userId)
+        .eq("status", "scheduled")
+        .is("claimed_at", null)
+        .select("*")
+        .maybeSingle();
+      if (updateError) throw fromPostgrest(updateError);
+      if (!changed) throw conflict("That blast is being sent right now");
+      return toBlast(changed as Row);
     }
   );
 

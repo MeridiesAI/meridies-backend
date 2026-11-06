@@ -55,9 +55,19 @@ export function crmError(error: { code?: string; message?: string } | null): Htt
   }
 }
 
-/** "Hi {first}," / "{me}" slots a template carries (demo lib/emailTemplates.ts). */
-export function fillTemplate(text: string, vars: { first?: string | null; me?: string | null }): string {
-  return text.replace(/\{first\}/g, vars.first?.trim() || "there").replace(/\{me\}/g, vars.me?.trim() ?? "");
+/**
+ * The "Hi {first}," / "{student}" / "{me}" slots a template carries (demo lib/emailTemplates.ts).
+ * `{student}` is the student the email is about; a sender that has none (a staff blast, a sequence)
+ * reads "your student" rather than leaving the braces in front of a family.
+ */
+export function fillTemplate(
+  text: string,
+  vars: { first?: string | null; student?: string | null; me?: string | null }
+): string {
+  return text
+    .replace(/\{first\}/g, vars.first?.trim() || "there")
+    .replace(/\{student\}/g, vars.student?.trim() || "your student")
+    .replace(/\{me\}/g, vars.me?.trim() ?? "");
 }
 
 /** Today's date (YYYY-MM-DD) where the counselor is, for due and overdue. */

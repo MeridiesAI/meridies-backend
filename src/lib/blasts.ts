@@ -63,6 +63,11 @@ export type Recipient = {
   studentId: string;
   /** Who the email is addressed to (the guardian's name for a parent). */
   fullName: string;
+  /**
+   * The student's first name, for `{student}`: "Ana", or "Ana and Luis" when siblings share
+   * one parent address (a parent gets one email, not one per child).
+   */
+  studentFirstName: string;
   email: string | null;
   skipReason: string | null;
   kind: "student" | "guardian";
@@ -192,15 +197,17 @@ export async function resolveAudience(
   }));
 
   const recipients: Recipient[] = [];
-  const seen = new Set<string>();
+  const byAddress = new Map<string, { recipient: Recipient; names: string[] }>();
   for (const r of selected) {
     const id = String(r.id);
     const name = String(r.full_name ?? "");
+    const studentFirst = firstName(name);
     if (!parents) {
       const email = String(r.email ?? "").trim() || null;
       recipients.push({
         studentId: id,
         fullName: name,
+        studentFirstName: studentFirst,
         email,
         skipReason: email ? null : "No email address on file",
         kind: "student",
@@ -209,27 +216,55 @@ export async function resolveAudience(
     }
     const mine = guardians.get(id) ?? [];
     if (mine.length === 0) {
-      recipients.push({ studentId: id, fullName: name, email: null, skipReason: "No parent email on file (or alerts are off)", kind: "student" });
+      recipients.push({
+        studentId: id,
+        fullName: name,
+        studentFirstName: studentFirst,
+        email: null,
+        skipReason: "No parent email on file (or alerts are off)",
+        kind: "student",
+      });
       continue;
     }
     for (const g of mine) {
       const email = String(g.email).trim();
-      if (seen.has(email.toLowerCase())) continue;
-      seen.add(email.toLowerCase());
-      recipients.push({ studentId: id, fullName: String(g.full_name ?? ""), email, skipReason: null, kind: "guardian" });
+      const key = email.toLowerCase();
+      const seen = byAddress.get(key);
+      if (seen) {
+        // A parent of two students on the blast gets one email that names both.
+        if (studentFirst && !seen.names.includes(studentFirst)) seen.names.push(studentFirst);
+        continue;
+      }
+      const recipient: Recipient = {
+        studentId: id,
+        fullName: String(g.full_name ?? ""),
+        studentFirstName: studentFirst,
+        email,
+        skipReason: null,
+        kind: "guardian",
+      };
+      byAddress.set(key, { recipient, names: studentFirst ? [studentFirst] : [] });
+      recipients.push(recipient);
     }
   }
+  for (const { recipient, names } of byAddress.values()) recipient.studentFirstName = joinNames(names);
 
   return { label: labelFor(audience, selected.length), students, selected: selected.length, recipients };
 }
 
 // ---- Writing the email ---------------------------------------------------------------
 
-/** One recipient's copy: {first} and {me} filled in, greeted by name unless the body already greets. */
-function blastTemplate(input: { subject: string; body: string; counselorName: string | null; first: string }) {
+/** "Ana", "Ana and Luis", "Ana, Luis and Maya". */
+export function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/** One recipient's copy: {first}, {student} and {me} filled in, greeted by name unless the body already greets. */
+export function blastTemplate(input: { subject: string; body: string; counselorName: string | null; first: string; student?: string }) {
   const me = input.counselorName ?? "";
-  const subject = fillTemplate(input.subject, { first: input.first, me });
-  const body = fillTemplate(input.body, { first: input.first, me });
+  const subject = fillTemplate(input.subject, { first: input.first, student: input.student, me });
+  const body = fillTemplate(input.body, { first: input.first, student: input.student, me });
   const greets = /\{first\}/.test(input.body) || /^\s*(hi|hello|hey|dear|good (morning|afternoon|evening))\b/i.test(input.body);
   return {
     subject,
@@ -282,6 +317,7 @@ export async function deliverBlast(a: DeliverArgs) {
   let delivered = 0;
   let failed = 0;
   const kinds = new Map(a.recipients.map((r) => [`${r.studentId}:${r.email ?? ""}`, r.kind]));
+  const students = new Map(a.recipients.map((r) => [`${r.studentId}:${r.email ?? ""}`, r.studentFirstName]));
 
   for (const row of rows ?? []) {
     if (row.status === "skipped" || !row.to_email) continue;
@@ -291,6 +327,7 @@ export async function deliverBlast(a: DeliverArgs) {
       body: a.body,
       counselorName: a.counselorName,
       first: firstName(String(row.full_name ?? "")),
+      student: students.get(`${row.student_id}:${row.to_email}`) ?? "",
     });
 
     const result = await sendEmail({
