@@ -2516,7 +2516,9 @@ model). A OneDrive import that names no kind arrives the same way (the shared `i
 /files/documents/confirm-types` confirms a list at once (1-50 items, per-item results, deduped by id with the last
 one winning) and queues text extraction for files the AI may read. `PATCH /files/documents/:id` with a `kind`
 confirms and queues only when a counselor sends it; a student's edit changes `kind` only (unchanged behavior).
-Extraction is `lib/documentExtraction.ts`: the stored copy, two at a time, a durable `extraction_requested_at`, a
+A counselor's own upload (`POST /files/documents`) is a confirmed type and is queued at once unless it is kept out
+of AI; a student's upload is not (the database keeps the queue columns on the counselor's side), so their
+counselor confirming its type queues it. Extraction is `lib/documentExtraction.ts`: the stored copy, two at a time, a durable `extraction_requested_at`, a
 2-minute lease per claim with a compare-and-set attempts count, recovery on boot, every minute and at
 `POST /internal/documents/extraction-recover`, and a file `failed` (`parse_error = 'gave-up'`) after 3 attempts;
 `POST /files/documents/extraction-retry` re-queues a failed file. Approval for the work is checked against the
@@ -2541,7 +2543,9 @@ files are unconfirmed (`unconfirmedAttachedNote`, `lib/trackerNote.ts`).
 Do not set `NODE_OPTIONS=--max-old-space-size` on Railway: a process-wide heap flag can override the PDF worker's
 `resourceLimits`.
 
-**Later, not built: text backfill.** Existing documents are never extracted. If wanted, write
+**Backfill.** `20261110000008` queued, once, the counselor uploads the upload route had left at `pending`
+with no request (before it queued them itself). **Later, not built: a wider text backfill.** Other existing
+documents (a student's own uploads, anything else never requested) are never extracted. If wanted, write
 `scripts/backfill-document-text.ts`: dry run by default (counts), `--apply` to run, scoped by `--practice` or
 `--student`, only confirmed, AI-allowed documents without `parsed_data`, by setting `extraction_requested_at` a
 few at a time so the same queue and limits do the work; log counts only.
