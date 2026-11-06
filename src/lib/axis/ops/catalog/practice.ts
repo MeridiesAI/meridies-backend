@@ -445,23 +445,8 @@ export const firm: OpGroup = {
           : null;
       },
     }),
-    // Caseload transfer (Management) is deliberately not an op, and this one
-    // never sends releaseStudents: AxIS can't move or release a caseload.
-    op({
-      name: "firm.remove_member",
-      kind: "write",
-      risk: "confirm",
-      title: "Remove someone from the firm (owner/admin), or leave it yourself with your own id.",
-      doc: "{ profile_id (firm.members) }",
-      input: z.object({ profile_id: uuid }).strict(),
-      request: (i) => ({ method: "DELETE", url: `/firms/mine/members/${seg(i.profile_id)}` }),
-      describe: async (i, h) => {
-        const [m, people, name] = await Promise.all([findMember(h, i.profile_id), loadConsultants(h), firmName(h)]);
-        if (people.find((c) => c.id === i.profile_id)?.isYou === true) return `Leave ${name}`;
-        return `Remove ${m?.fullName ? plainText(m.fullName, 60) : "a member"} from ${name}`;
-      },
-      warning: "They (or you, when leaving) lose the firm's shared pipeline, payments and Management; coming back takes a new invitation.",
-    }),
+    // Caseload transfer (Management) is deliberately not an op, and nor is removing a member: AxIS can't move or
+    // release a caseload, or take someone out of a firm (that can't be restored from the trash).
   ],
 };
 

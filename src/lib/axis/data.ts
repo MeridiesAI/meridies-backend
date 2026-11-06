@@ -60,9 +60,12 @@ const contextCache = new TtlLru<Promise<StudentContext>>(500, 60_000);
  * this is reached, so a revoked student never comes back from here.
  */
 /** `trustedOnly`: only what the counselor wrote (lib/context/profiles.ts TRUSTED_SECTIONS), for change turns. */
-export function cachedStudentContext(request: FastifyRequest, studentId: string, only?: SectionName[], trustedOnly = false): Promise<StudentContext> {
-  const key = `${request.auth.userId}:${studentId}:${only ? only.join(",") : "*"}:${trustedOnly ? "trusted" : "all"}`;
-  return sharedLoad(contextCache, key, () => buildStudentContext(request, studentId, "chat", { ...(only ? { only } : {}), ...(trustedOnly ? { trustedOnly } : {}) }));
+/** `shortOnly`: a question turn's record under the free-text rule (lib/context/freeText.ts leaveOutFree). */
+export function cachedStudentContext(request: FastifyRequest, studentId: string, only?: SectionName[], trustedOnly = false, shortOnly = false): Promise<StudentContext> {
+  const key = `${request.auth.userId}:${studentId}:${only ? only.join(",") : "*"}:${trustedOnly ? "trusted" : "all"}${shortOnly ? ":short" : ""}`;
+  return sharedLoad(contextCache, key, () =>
+    buildStudentContext(request, studentId, "chat", { ...(only ? { only } : {}), ...(trustedOnly ? { trustedOnly } : {}), ...(shortOnly ? { shortOnly } : {}) })
+  );
 }
 
 // ---- One student's facts ------------------------------------------------------------------

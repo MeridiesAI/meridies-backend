@@ -468,19 +468,7 @@ export const rosterImports: OpGroup = {
       },
       warning: "Every waiting row gets an invitation email now.",
     }),
-    op({
-      name: "invites.delete_import",
-      kind: "write",
-      risk: "confirm",
-      title: "Delete a roster import and its staged rows.",
-      doc: "{ import_id }",
-      input: z.object({ import_id: uuid }).strict(),
-      request: (i) => ({ method: "DELETE", url: `/roster/imports/${seg(i.import_id)}` }),
-      describe: async (i, h) => {
-        const imp = await findImport(h, i.import_id);
-        return `Delete the roster import ${imp?.filename ? `"${plainText(imp.filename, 80)}"` : ""}`.trim();
-      },
-      warning: "The import and its rows are deleted; invitations it already sent keep working.",
-    }),
+    // Deleting a roster import is not an op: the import pipeline owns those tables and their retention, so AxIS
+    // can't keep the delete restorable (lib/axis/ops/trash.ts). The counselor deletes an import on the Import page.
   ],
 };

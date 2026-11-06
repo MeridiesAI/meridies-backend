@@ -990,8 +990,29 @@ the database (`20261010*`):
   counselor's email subject carries the student's name, not the task title;
   the client polls `GET /tasks/:id`. AxIS (`submission-review`, Haiku) decides
   only whether this is what was asked for and usable, never grades or
-  rewrites it, and copies printed facts (a GPA) into the findings without
-  writing them anywhere. Accepted: an `on-track` check and the task complete.
+  rewrites it. The task title and instructions, the student's name, the file
+  name and the file's text each reach it in an untrusted-data block
+  (`reviewPrompt`). **Hand-in values** (`20261108000005`, `lib/handInValues.ts`):
+  the GPAs, class rank and a test score it copies off the file, as printed,
+  are a list on the check (`extracted_values`, no client grant: the table's
+  insert/update grants are per column, so a new column needs its own grant),
+  unverified until a counselor who can edit the student confirms them with
+  `POST /tasks/:id/checks/:checkId/values/confirm` (`{ values: [{ key,
+  printed, profileWas }] }`, 1-4 keys; 409 "This hand-in changed. Reload to see
+  it." when a printed value isn't the stored one). Confirm also writes each to
+  the profile under the info card's rules (`infoPatchFrom`: a GPA 0-6, "N of M",
+  an SAT total 400-1600 by 10, an ACT composite 1-36, never a section score;
+  then `assertGpaFitsScale`, 400) through `apply_hand_in_values` on the
+  counselor's client, only where the profile still holds `profileWas` (a newer
+  edit is kept and reported in `kept`); a value the profile can't take is
+  confirmed without being saved. Reads (`GET /tasks`, `/tasks/:id/tracker`, the
+  New student card) carry each value with the profile's value now
+  (`current`). The findings always name each value too, "Weighted GPA
+  (unverified, from the student's file): 4.3" (the app before PR C reads them
+  there; Confirm hides the lines its list repeats). Before the migration there
+  is no list and Confirm is a 503. Accepted only
+  completes the task: an `on-track` check and the task complete, nothing
+  written to the record.
   Needs a fix: `below-the-brief`, the task back to `in-progress`, and the
   student is told what to upload instead. The counselor gets one
   notification and one email per hand-in; the student gets both when AxIS
@@ -1703,6 +1724,17 @@ error is held, not sent. Every run writes one `audit_log` row
 (`accountability.sweep.{manual,cron,interval}`). Without
 `SUPABASE_SERVICE_ROLE_KEY` a scheduled run logs and skips.
 
+**The AxIS trash purge rides on the sweep.** After a scheduled run (cron or
+interval, not the dashboard button) `purgeAxisTrash` (`lib/axisTrash.ts`)
+deletes AxIS trash past 30 days (`axis_trash_purge`, `20261108000003`) and
+removes the `student-documents` objects those rows kept that nothing needs any
+more. It takes the `axis-trash-purge` lease for an hour and keeps it, so it
+runs at most once an hour across every replica (a failed purge releases it,
+so the next sweep tries again); it never fails the sweep. With no sweep
+scheduled the trash isn't purged. `DELETE /account` runs `forgetAxisTrash`
+first (the trash the account made and every trash row naming it, with their
+files), and refuses the deletion with a 503 if that fails.
+
 **The second cron: scheduled messages.** "Schedule send" in the
 Communication composer, and any composer message held for quiet hours, is a
 `student_messages` row in `scheduled` until
@@ -1948,9 +1980,42 @@ anyone copying it.
   task). Earlier changes are recalled each turn (`recentActionsText`) by
   their summary only when it was filed in a clean turn and not labelled from
   a read of its target (`payload.outside === false`); otherwise by the
-  operation's catalog title. Known limits: a short run of plain words is a
-  valid name shape; earlier answers in the verbatim history and the memory
-  summary can quote text from more than one turn back. Switching parents or a guardian off (`set_alert_recipients` with
+  operation's catalog title. **Once `20261108000004` is in** (`flagsReady`,
+  `lib/axis/failsafe.ts`), a narrower rule replaces "outside content": only
+  **free text** flags a turn (`lib/context/freeText.ts`): documents, essay
+  bodies, chat files, email, connected files, web pages and any student-written
+  value over 80 characters (`SHORT_FIELD_MAX`). Short fields (names, titles,
+  dates, statuses, the college list, deadlines, scores, majors, the high
+  school) don't. Each untrusted block says which it is (a short one renders
+  `length="short"`). A question turn's record is built `shortOnly`: each
+  outside section keeps its short fields and names what it left out ("Left
+  out, read with get_student_record: 1 document: transcript.pdf"), and the
+  lookup that fetches it flags the turn. A lookup op declared outside flags
+  only when its reply holds a free block (`TurnBudget.freeRule`); the
+  planner's evidence and direct answers carry `freeText`. A turn is flagged
+  when it reads free text, the previous turn did (`state.outside`), the chat
+  has files, or a replayed answer quoted free text: an answer that repeats 8+
+  consecutive words of free text the turn saw (`lib/axis/quotes.ts`, case
+  and punctuation ignored) is stored with those runs
+  (`ai_messages.outside_quotes`), keeps the chat flagged while it is among
+  the 12 replayed messages, and reaches the memory fold as "[quote from
+  <source>]" (`foldTranscript`, which also checks each answer against the
+  chat's stored file texts), so the summary never holds the words. Every
+  answer under the rule is stored with its runs (`[]` when clean); a replayed
+  answer without them (saved before the migration, or by `/chat`) keeps the
+  chat flagged, so an existing chat asks first for about six turns after the
+  migration. Planner evidence and left-out file names reach the model inside
+  data blocks. A short field can still carry a short instruction, so after a
+  turn read a student's short fields (or the turn before did), an instant
+  change a student or family could see waits for a click too; only the
+  counselor-only ops in `COUNSELOR_ONLY` (`ops/run.ts`: the work queue, pins,
+  templates, calendar types, pipeline layout...) still run at once. Before
+  the migration the wider rule above applies unchanged. Known limits:
+  a short run of plain words is a valid name shape; before the migration,
+  earlier answers in the verbatim history and the memory summary can quote
+  text from more than one turn back; under the rule, a quote of fewer than 8
+  words, or a paraphrase, isn't caught; a summary folded before the
+  migration can't be repaired. Switching parents or a guardian off (`set_alert_recipients` with
   either copy flag, `update_guardian` with `alerts_enabled` or
   `receives_reports`) asks first whichever way it goes. After five auto changes
   in one turn the rest wait for Confirm; twenty changes is the limit per turn.
@@ -1964,6 +2029,39 @@ anyone copying it.
 - **Never in the catalog:** student-only routes, anything that runs a model,
   binary uploads, OAuth, imports, account export/deletion, catalog-editor
   routes, and essay prose.
+
+**Deletes are kept 30 days and restorable** (`20261108000003`, `lib/axis/ops/trash.ts`, AxIS security PR B).
+A Confirm-tier delete on `TRASH_COVERED` (31 ops; `axis-trash.test.ts` fails on a DELETE op that is in neither
+`TRASH_COVERED` nor `TRASH_EXCLUDED`, which gives each exclusion its reason) runs with a mark: `dispatch` sends
+`x-meridies-axis-mark` (an HMAC of the action id under a key made fresh in each process), and `supabaseAuth` turns a
+valid one into `request.axisActionId` and the `x-meridies-axis-action` header on `request.db`. In the database a
+`zz_axis_trash_*` trigger on every covered table (59, each with a row in `private.axis_trash_rules`) keeps the
+deleted row, every row it cascades to and every key it sets null in `private.axis_trash` (no client grants).
+Confirm's result is `{ trash: true, restoreUntil }` and the card's Undo runs `axis_trash_restore` on the counselor's
+own client (not the service role, which has no user): only the counselor who confirmed the delete, still an approved
+counselor, within 30 days (the card stops offering Restore after `restoreUntil`), all or nothing, the same ids.
+Every row is checked before anything goes back (deny by default: a table with no rule restores nothing): a row about
+a student (its rule's `student_col`, e.g. `referrals.from_student_id`) needs the restorer to still be able to edit
+that student, whatever its table's rule, and then passes its rule (`student`, `practice`, `owner`, or `parent`: rows
+that go with their parent whoever owns them, such as a student's saved copy of the counselor's event, pass when their
+parent does). Rows go back parents first (a row waits for its parent; a pass that puts nothing back is
+`parent-missing`), and a key set null goes back only where nothing was set since. Refusals are 409 with the card's
+sentence (`restoreSentence`), 403 when the caller's access isn't active and 404 when the action isn't theirs; an
+action already restored leaves the card undone. A restore sends nothing and rewrites nothing: 19 triggers on covered
+tables skip while it runs (`meridies.axis_restore = 'on'`, listed in the migration, which stops if one is missing).
+Three rows come back changed so a restore can't undo what happened since: a sequence enrollment comes back `paused`
+at its own step, a school the student enrolled in comes back `accepted` when they've enrolled elsewhere since, and a
+meeting comes back without its calendar pointer (the delete removed the calendar event; invites aren't re-sent).
+A document AxIS deletes keeps its Storage object until the trash's purge, which keeps a file any remaining trash row
+still needs. A client can set the database header itself (straight to PostgREST), but that only keeps a copy of its
+own deletes, which only it can restore. Run a restore by hand as `postgres`: `select
+public.axis_trash_restore('<action id>');` (the caller is taken to be the deleter; every other check applies).
+Not covered: roster imports, removing a firm member and deleting a pipeline stage (all left the catalog: AxIS can't
+make them restorable; a stage's delete moves its cards, so adding a stage has no Undo). A delivery record's link to
+a deleted task, meeting or report is kept and put back, so a reminder already sent isn't sent again. Before the migration a covered delete is refused with "AxIS can't delete things until
+the database update 20261108000003_axis_trash is applied." **Deploy order:** either; not in `REQUIRED_SCHEMA`.
+Tests: `test/unit/axis-trash.test.ts`, `test/integration/axis-trash-db.test.mjs`, `test/integration/axis-trash.test.mjs`
+(every covered op through the API, a caseload move, an expired card, nothing sent).
 
 **Deploy order.** Apply `20261019000001_axis_operations.sql` (widens the
 `axis_actions` type and status checks, payload cap 32 KB). Either order is

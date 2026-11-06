@@ -17,6 +17,7 @@
 import type { FastifyRequest } from "fastify";
 import { DEEP_MODEL, FAST_MODEL } from "./anthropic.js";
 import { plainGradYear, plainName } from "./context/identity.js";
+import { anyLong } from "./context/freeText.js";
 import { researchTaskIds } from "./research/origin.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "./context/pack.js";
 
@@ -173,10 +174,12 @@ export function chatToolCatalog() {
 export async function buildRosterContext(
   request: FastifyRequest,
   opts: { trustedOnly?: boolean } = {}
-): Promise<{ text: string; sources: string[]; outside: boolean } | null> {
+): Promise<{ text: string; sources: string[]; outside: boolean; freeText: boolean } | null> {
   // trustedOnly (AxIS change turns): names and class years, booked meetings and the counselor's
   // own tasks; no high school, no deadlines and no student-added task, whose words are the
-  // student's. `outside` says whether what was read carries such words (lib/axis/ops/run.ts).
+  // student's. `outside` says whether what was read carries such words (lib/axis/ops/run.ts);
+  // `freeText` whether any of them is free text (a value over 80 characters, lib/context/freeText.ts): high
+  // schools, deadlines and student-added task titles are short fields.
   const trusted = opts.trustedOnly === true;
   if (request.profile.role !== "counselor") return null;
   const db = request.db;
@@ -271,7 +274,14 @@ export async function buildRosterContext(
     null,
     1
   ).slice(0, 60_000);
-  return { text, sources, outside };
+  const freeText =
+    !trusted &&
+    anyLong([
+      ...students.flatMap((st) => Object.values(st)),
+      ...deadlineRows.flatMap((d) => [d.student, (d as Record<string, unknown>).title, (d as Record<string, unknown>).school, (d as Record<string, unknown>).type, (d as Record<string, unknown>).level]),
+      ...taskRows.map((t) => (t as Record<string, unknown>).title),
+    ]);
+  return { text, sources, outside, freeText };
 }
 
 /**

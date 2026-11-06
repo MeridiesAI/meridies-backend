@@ -19,6 +19,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { forgetAxisTrash } from "../lib/axisTrash.js";
 import { limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
 
@@ -150,6 +151,14 @@ export default async function accountRoutes(app: FastifyInstance) {
       if (firm) throw conflict("You own a firm. Hand ownership to someone else before deleting your account.");
     }
 
+    // The AxIS trash it made and the trash about it, with the files it kept (the cascade can't reach a row that
+    // only names the account, or remove a Storage object). Refused rather than leave them behind.
+    try {
+      await forgetAxisTrash(me, request.log);
+    } catch (err) {
+      request.log.error({ err }, "account delete: axis trash cleanup failed");
+      throw unavailable("Couldn't delete the account right now. Try again shortly.");
+    }
     await svc.from("audit_log").insert({ actor_id: null, action: "account.deleted", entity_type: "profile", entity_id: me, metadata: { role: request.profile.role } });
     // The account's AI budget counters (numbers keyed by its id) go too. Best effort: never what stops a deletion.
     await forgetUser(me).catch((err) => request.log.warn({ err: err instanceof Error ? err.message : String(err) }, "AI budget rows not removed"));

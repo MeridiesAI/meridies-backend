@@ -22,7 +22,9 @@
  * and the memory fold after the counselor can already type again.
  */
 import { earlierFilesMessage, fileBlocks, fileTokens, noFiles, withFiles, type FileBlocks } from "./attachments.js";
-import { errInfo } from "./failsafe.js";
+import { errInfo, flagsReady } from "./failsafe.js";
+import { quotedRuns, type QuoteRun } from "./quotes.js";
+import { freeBlocks } from "../context/freeText.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { enforceNoProse, NO_PROSE_SYSTEM } from "../anthropic.js";
@@ -92,7 +94,18 @@ export type TurnResult = {
   /** For the adjudicator, after `done`. */
   verify: { wanted: boolean; checks: SentenceCheck[]; material: string[]; ledger: SourceLedger };
   runId: string | null;
+  /**
+   * The runs of 8+ words the answer repeated from free text the turn could see (lib/axis/quotes.ts), for the
+   * route to store with it (ai_messages.outside_quotes). Always empty before 20261108000004.
+   */
+  quotes: QuoteRun[];
+  /** The answer was checked for quotes (the rule is on): the route stores its runs, [] when clean. */
+  quotesChecked: boolean;
 };
+
+type Free = { source: string; text: string }[];
+/** Passages from outside Meridies' own records: free text whatever their length. */
+const OUTSIDE_PASSAGES = new Set(["upload", "drive", "onedrive", "outlook", "gmail"]);
 
 /** The cached system prompt: the stable rules (shared by every counselor), then today and this student or roster. */
 export function systemBlocks(
@@ -150,19 +163,29 @@ export function looksLikeChange(content: string): boolean {
   return scores.action >= 5 && scores.essay < 6;
 }
 
-/** The student's record or the roster view, with what it's built from and whether it carries someone else's words. */
-async function loadContext(request: FastifyRequest, studentId: string | null, forChange = false) {
+/**
+ * The student's record or the roster view, with what it's built from and whether it carries someone else's words
+ * (`outside`, today's rule) or free text (`freeText`, the rule once 20261108000004 is in). `shortOnly`: a
+ * question turn's record leaves free text out with a line saying what exists (lib/context/freeText.ts).
+ */
+async function loadContext(request: FastifyRequest, studentId: string | null, forChange = false, shortOnly = false) {
   if (studentId) {
     const c = forChange
       ? await cachedStudentContext(request, studentId, RECORD_FOR_CHANGES, true)
-      : await cachedStudentContext(request, studentId);
+      : await cachedStudentContext(request, studentId, undefined, false, shortOnly);
+    const freeText = (c.freeText?.length ?? 0) > 0;
     return {
       record: c.text, roster: null, name: c.studentName, usage: { used: c.used, omitted: c.omitted } as ContextUsage,
       labels: c.used.map((u) => SECTION_LABELS[u.section] ?? u.section), outside: readsOutside(c),
+      freeText, free: (freeText ? freeBlocks(c.text) : []) as Free,
     };
   }
   const r = await buildRosterContext(request, { trustedOnly: forChange });
-  return { record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [], outside: r?.outside === true };
+  const freeText = r?.freeText === true;
+  return {
+    record: null, roster: r?.text ?? null, name: null, usage: null, labels: r?.sources ?? [], outside: r?.outside === true,
+    freeText, free: (freeText && r ? [{ source: "roster", text: r.text }] : []) as Free,
+  };
 }
 
 /**
@@ -251,13 +274,17 @@ async function axisTurn(opts: {
       ? getRetrieval().search(request, { query: content, studentId, k: 8, signal }).catch((): RetrievedChunk[] => [])
       : Promise.resolve<RetrievedChunk[]>([]);
   const chatFacts = studentId ? studentFacts(request, studentId).catch(() => null) : undefined;
+  // The free-text rule, the question turn's short record and the quote flag turn on together with
+  // 20261108000004 (spec §3.3). Without it, today's wider rule decides everything below.
+  const flags = await flagsReady(request.db).catch(() => false);
+  const forChange = looksLikeChange(content);
   const [roster, colleges, ctx, history, connected, files] = await Promise.all([
     loadRoster(request),
     loadCollegeIndex(request).catch((err): CollegeIndex | null => {
       request.log.warn({ err: errInfo(err) }, "axis college index unavailable");
       return null;
     }),
-    loadContext(request, studentId, looksLikeChange(content)),
+    loadContext(request, studentId, forChange, flags && !forChange),
     loadHistory(request, opts.conversationId),
     getConnectors().connected(request).catch(() => []),
     // The chat's files, every turn: a reopened chat still knows what was in them. Earlier files come as their stored text.
@@ -278,7 +305,11 @@ async function axisTurn(opts: {
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
   // A direct or essay answer runs no tools: whatever the last turn read stays in force, and an answer that
   // quotes text someone else wrote (below) taints the next turn the way reading it would have.
-  const state = { ...nextState(u, history.state, chatStudent), ...(history.state?.outside ? { outside: true } : {}) };
+  const state = {
+    ...nextState(u, history.state, chatStudent),
+    ...(history.state?.outside ? { outside: true } : {}),
+    ...(flags && history.state?.short ? { short: true } : {}),
+  };
   const ledger = new SourceLedger();
   const trace: { label: string }[] = [];
   const sources = new Set<string>(ctx.labels);
@@ -305,8 +336,14 @@ async function axisTurn(opts: {
       request.log.info({ axis: { path: "direct", frame: direct.frame, ms: Date.now() - startedAt } }, "axis turn");
       return {
         path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u,
-        state: direct.outside ? { ...state, outside: true } : state,
+        state: {
+          ...((flags ? direct.freeText : direct.outside) ? { ...state, outside: true } : state),
+          // A direct answer that shows her short fields: the next turn's student-visible changes wait.
+          ...(flags && direct.outside ? { short: true } : {}),
+        },
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
+        quotes: flags ? quotedRuns(direct.text, [...(direct.freeBlocks ?? []), ...history.quoted]) : [],
+        quotesChecked: flags,
       };
     }
   }
@@ -315,14 +352,22 @@ async function axisTurn(opts: {
   if (u.intent === "essay") {
     emit("route", { intent: "essay", path: "essay" });
     emit("status", { phase: "answering" });
-    const text = await essayAdvice(request, studentId, content, ctx.record, { signal, hold: opts.prepaid });
+    // Advice needs the whole record (an uploaded draft, the activity descriptions) and runs no tools to fetch what
+    // a short-only record leaves out: under the rule it reads the full record and the turn is judged by it.
+    const essayCtx = flags && !forChange && studentId ? await loadContext(request, studentId, false, false) : ctx;
+    const text = await essayAdvice(request, studentId, content, essayCtx.record, { signal, hold: opts.prepaid });
     emit("delta", { text });
     return {
       // The bullets were written over the student's record (their essays, activities): saved to the
       // chat, they are outside content for the next turn.
       path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u,
-      state: ctx.outside ? { ...state, outside: true } : state,
+      state: {
+        ...((flags ? essayCtx.freeText : ctx.outside) ? { ...state, outside: true } : state),
+        ...(flags && essayCtx.outside ? { short: true } : {}),
+      },
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
+      quotes: flags ? quotedRuns(text, [...essayCtx.free, ...history.quoted]) : [],
+      quotesChecked: flags,
     };
   }
 
@@ -333,6 +378,7 @@ async function axisTurn(opts: {
   if (sources.size) emit("sources", { sources: [...sources] });
   const evidence = await gatherEvidence({
     request, u, chatStudentId: studentId, roster, ledger, connected, retrievalReady: retrievalOn, speculative, signal, onStep: step,
+    freeRule: flags,
   });
   for (const s of evidence.sources) sources.add(s);
 
@@ -354,11 +400,16 @@ async function axisTurn(opts: {
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
   // So does whatever in the system prompt someone other than the counselor wrote: the student record's
   // uploaded files and student-written sections, the roster's high schools, deadlines and student tasks.
-  const outside =
-    hasFiles ||
-    ledger.all().some((p) => p.kind === "upload" || p.kind === "drive" || p.kind === "onedrive" || p.kind === "outlook" || p.kind === "gmail") ||
-    ctx.outside ||
-    evidence.outside;
+  const outsidePassages = ledger.all().some((p) => OUTSIDE_PASSAGES.has(p.kind));
+  // Under the free-text rule: what this turn read that is free text (the chat's files, a file's or an email's
+  // passages, a long student-written value in the record or the evidence). Before it: any outside content.
+  const outside = flags
+    ? hasFiles || outsidePassages || ctx.freeText || evidence.freeText
+    : hasFiles || outsidePassages || ctx.outside || evidence.outside;
+  // The previous turn read free text, or an answer that quoted some is among the replayed messages.
+  const inherited = history.state?.outside === true || (flags && history.flagged);
+  // Everything free the turn could see, for the quote check after the answer.
+  const seen: Free = [...ctx.free, ...evidence.freeBlocks, ...history.quoted, ...files.texts.map((text) => ({ source: "attachment", text }))];
   const toolCtx: ToolContext = {
     request, conversationId: opts.conversationId, studentId, roster, ledger, connected, retrievalReady: retrievalOn, signal,
     memo: new Map(),
@@ -366,7 +417,9 @@ async function axisTurn(opts: {
       actions.push(a);
       emit("action", a);
     },
-    turn: newTurnBudget(outside, history.state?.outside === true),
+    // Under the rule, short student-written fields read this turn (the record, the evidence) or the turn before
+    // still make an instant change a student or family sees wait (ops/run.ts COUNSELOR_ONLY).
+    turn: newTurnBudget(outside, inherited, flags, flags && (ctx.outside || evidence.outside), flags && history.state?.short === true),
     onOperation: (e) => {
       actions.push(e);
       emit("action", e);
@@ -375,6 +428,7 @@ async function axisTurn(opts: {
   const exec: LoopOptions["exec"] = async (c, sig) => {
     const out = await runTool(toolCtx, c.name, c.input, sig);
     index.add(out.content);
+    if (out.freeBlocks?.length) seen.push(...out.freeBlocks);
     return out;
   };
   // Specialists research; a change is only ever made by the agent answering the counselor.
@@ -471,6 +525,10 @@ async function axisTurn(opts: {
     const answer = gate.blocked ? gate.text : res.text;
     const { citations, invalid } = resolveCitations(answer, ledger);
     const text = dropInvalidCitations(answer, invalid);
+    // The runs of 8+ words the saved answer repeated from free text the turn saw: the files, the passages from
+    // outside (found by the planner, the specialists or a tool), the record, the evidence, earlier quoted runs.
+    const passages = ledger.all().filter((p) => OUTSIDE_PASSAGES.has(p.kind)).map((p) => ({ source: `${p.kind}:${p.title}`, text: p.text }));
+    const quotes = flags ? quotedRuns(text, [...seen, ...passages]) : [];
     if (citations.length) emit("citations", { citations });
     await closeRun(run, res.stop === "refusal" ? "blocked" : "succeeded", total, {
       stop: res.stop, refusal: res.refusalCategory, calls: res.calls, tools: res.tools, passages: ledger.size, cited: citations.length,
@@ -480,9 +538,11 @@ async function axisTurn(opts: {
     });
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
-      state: { ...state, outside: toolCtx.turn.sawOutside },
+      state: { ...state, outside: toolCtx.turn.sawOutside, ...(flags ? { short: toolCtx.turn.sawShort } : {}) },
       verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
+      quotes,
+      quotesChecked: flags,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
@@ -495,6 +555,8 @@ async function axisTurn(opts: {
 
 /** The pre-warm's inputs: the tools and the two cached system blocks a turn about this student would send. */
 export async function warmInputs(request: FastifyRequest, studentId: string | null) {
-  const [ctx, connected] = await Promise.all([loadContext(request, studentId), getConnectors().connected(request).catch(() => [])]);
+  // The record a question turn would send: short-only under the free-text rule, so the warm cache matches it.
+  const flags = await flagsReady(request.db).catch(() => false);
+  const [ctx, connected] = await Promise.all([loadContext(request, studentId, false, flags), getConnectors().connected(request).catch(() => [])]);
   return { system: systemBlocks(ctx.record, ctx.roster, null, new Date(), signerLine(request.profile)), tools: toolList(connected, retrievalReady()) };
 }

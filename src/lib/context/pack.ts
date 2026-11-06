@@ -3,6 +3,8 @@
  * dropped whole when they don't fit, never cut mid-record; student-written,
  * imported and document text inside escaped data blocks.
  */
+import { entryFree } from "./freeText.js";
+
 export type Section = {
   name: string;
   label: string;
@@ -13,7 +15,8 @@ export type Section = {
    * a student, an import or a document supplied belongs in `untrusted`.
    */
   body: string;
-  untrusted?: { source: string; text: string }[];
+  /** `free`: whether the entry is free text (lib/context/freeText.ts); unset, the rule decides. */
+  untrusted?: { source: string; text: string; free?: boolean }[];
 };
 
 export const UNTRUSTED_DATA_RULE =
@@ -23,13 +26,14 @@ const escText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").re
 /** Attribute values also escape the quote that would end the attribute; content keeps its quotes. */
 const escAttr = (s: string) => escText(s).replace(/"/g, "&quot;");
 
-export function wrapUntrusted(source: string, text: string): string {
-  return `<data source="${escAttr(source)}" kind="untrusted">${escText(text)}</data>`;
+/** `free: false` marks a block of short fields (`length="short"`), so a built prompt says which blocks are free text. */
+export function wrapUntrusted(source: string, text: string, free = true): string {
+  return `<data source="${escAttr(source)}" kind="untrusted"${free ? "" : ' length="short"'}>${escText(text)}</data>`;
 }
 
 export function renderSection(s: Section): string {
   const parts = [`## ${s.label}`, s.body];
-  for (const u of s.untrusted ?? []) parts.push(wrapUntrusted(u.source, u.text));
+  for (const u of s.untrusted ?? []) parts.push(wrapUntrusted(u.source, u.text, entryFree(u)));
   return parts.filter(Boolean).join("\n");
 }
 

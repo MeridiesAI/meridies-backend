@@ -7,6 +7,13 @@
  * plus fixed-enum values and numbers. Everything a student, an import or a
  * document supplied, names and titles included, goes into the section's
  * `untrusted` list and reaches the prompt as an escaped data block.
+ *
+ * Free-text rule (lib/context/freeText.ts): each untrusted entry says whether
+ * it is free text. A block of joined short fields is free only when one of its
+ * values is over 80 characters; a description, the headline and each intake
+ * answer are entries of their own, so a long one can be left out alone;
+ * documents and essay bodies are always free; what the counselor wrote
+ * (meetings, notes, the strength profile) never is.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "../errors.js";
@@ -18,6 +25,7 @@ import type { SectionName } from "./profiles.js";
 import type { ContextUsage, StudentContext } from "./types.js";
 import { plainGradYear, plainName } from "./identity.js";
 import { researchTaskIds } from "../research/origin.js";
+import { anyLong } from "./freeText.js";
 
 type Row = Record<string, unknown>;
 type Omitted = ContextUsage["omitted"][number];
@@ -67,11 +75,11 @@ const tag = (prefix: string, name: string): string => `${prefix}:${name.replace(
 
 const empty = (section: SectionName): LoaderResult => ({ section: null, omitted: [{ section, reason: "empty" }] });
 
-/** A section whose only content is free text: one escaped block, no trusted body. */
-const textSection = (name: SectionName, label: string, source: string, lines: string[], body = ""): LoaderResult =>
+/** A section whose content is untrusted lines in one escaped block, beside an optional trusted body. */
+const textSection = (name: SectionName, label: string, source: string, lines: string[], free: boolean, body = ""): LoaderResult =>
   lines.length === 0 && !body
     ? empty(name)
-    : { section: { name, label, body, untrusted: lines.length ? [{ source, text: lines.join("\n") }] : [] } };
+    : { section: { name, label, body, untrusted: lines.length ? [{ source, text: lines.join("\n"), free }] : [] } };
 
 // A scale is shown as plain text only when it is a bare number ("4.0", "100").
 const SAFE_SCALE = /^\d{1,3}(\.\d{1,2})?$/;
@@ -87,9 +95,14 @@ const profile: Loader = async (db, studentId, opts) => {
   const lines = opts.trustedOnly
     ? compact([kv("Name", plainName(r.full_name)), kv("Graduation year", plainGradYear(r.grad_year))])
     : compact([kv("Name", r.full_name), kv("Graduation year", r.grad_year), kv("High school", r.high_school),
-      kv("Hometown", r.hometown), kv("Headline", r.headline)]);
+      kv("Hometown", r.hometown)]);
+  const base = textSection("profile", "Student", "profile", lines,
+    !opts.trustedOnly && anyLong([r.full_name, r.grad_year, r.high_school, r.hometown]));
+  // The headline is its own entry: a long one is free text, left out of a question turn on its own.
+  const headline = opts.trustedOnly ? null : kv("Headline", r.headline);
+  if (headline && base.section) base.section.untrusted = [...(base.section.untrusted ?? []), { source: "headline", text: headline, free: anyLong([r.headline]) }];
   return {
-    ...textSection("profile", "Student", "profile", lines),
+    ...base,
     ...(opts.trustedOnly ? { outside: false } : {}),
     facts: {
       gradYear: str(r.grad_year) || null,
@@ -132,7 +145,8 @@ const academics: Loader = async (db, studentId) => {
     strings(r.strength_areas).length ? `Strength areas: ${strings(r.strength_areas).join(", ")}` : null,
     strings(r.strength_subjects).length ? `Strength subjects: ${strings(r.strength_subjects).join(", ")}` : null,
   ]);
-  const res = textSection("academics", "Academics", "academics", free, body);
+  const res = textSection("academics", "Academics", "academics", free,
+    anyLong([...(scaleIsSafe ? [] : [r.gpa_scale]), r.class_rank, r.class_rank_value, r.rigor_subjects, r.strength_areas, r.strength_subjects]), body);
   return { ...res, facts: { gpa: { value: unweighted ?? weighted, scale }, sat, act } };
 };
 
@@ -146,7 +160,7 @@ const personal: Loader = async (db, studentId) => {
     typeof r.first_gen === "boolean" && `First-generation college student: ${r.first_gen ? "yes" : "no"}`,
     str(r.citizenship) && `Citizenship: ${str(r.citizenship)}`,
   ]).join("\n");
-  const res = textSection("personal", "Personal", "intended-majors", majors.length ? [`Intended majors: ${majors.join(", ")}`] : [], body);
+  const res = textSection("personal", "Personal", "intended-majors", majors.length ? [`Intended majors: ${majors.join(", ")}`] : [], anyLong(majors), body);
   return { ...res, facts: { intendedMajors: majors } };
 };
 
@@ -156,7 +170,7 @@ const activities: Loader = async (db, studentId) => {
       "weeks_per_year", "description", "source"]))
     .eq("student_id", studentId).order("sort_order").limit(30));
   if (rows.length === 0) return empty("activities");
-  const untrusted: { source: string; text: string }[] = [];
+  const untrusted: { source: string; text: string; free: boolean }[] = [];
   rows.forEach((a, i) => {
     const name = str(a.name) || "Untitled";
     const details = compact([
@@ -164,8 +178,8 @@ const activities: Loader = async (db, studentId) => {
       strings(a.grade_levels).length ? `Grades: ${strings(a.grade_levels).join(", ")}` : null,
       kv("Hours per week", num(a.hours_per_week)), kv("Weeks per year", num(a.weeks_per_year)), kv("Entered via", a.source),
     ]).join("; ");
-    untrusted.push({ source: "activity-details", text: details });
-    if (str(a.description)) untrusted.push({ source: tag("activity", name), text: str(a.description) });
+    untrusted.push({ source: "activity-details", text: details, free: anyLong([a.name, a.position, a.organization, a.category, a.grade_levels, a.source]) });
+    if (str(a.description)) untrusted.push({ source: tag("activity", name), text: str(a.description), free: anyLong([a.description]) });
   });
   const categories = [...new Set(rows.map((a) => str(a.category)).filter(Boolean))];
   return {
@@ -178,7 +192,8 @@ const awards: Loader = async (db, studentId) => {
   const rows = await many(db.from("awards").select(columns("awards", ["name", "level", "year"]))
     .eq("student_id", studentId).order("sort_order").limit(30));
   return textSection("awards", "Awards", "awards",
-    rows.map((a) => compact([str(a.name) || "Untitled", kv("level", a.level), kv("year", a.year)]).join("; ")));
+    rows.map((a) => compact([str(a.name) || "Untitled", kv("level", a.level), kv("year", a.year)]).join("; ")),
+    anyLong(rows.flatMap((a) => [a.name, a.level, a.year])));
 };
 
 const courses: Loader = async (db, studentId) => {
@@ -187,7 +202,8 @@ const courses: Loader = async (db, studentId) => {
     .eq("student_id", studentId).order("sort_order").limit(40));
   return textSection("courses", "Courses", "courses",
     rows.map((c) => compact([str(c.name), kv("type", c.type), kv("grade", c.grade), kv("status", c.status),
-      kv("school year", c.school_year), kv("entered via", c.source)]).join("; ")));
+      kv("school year", c.school_year), kv("entered via", c.source)]).join("; ")),
+    anyLong(rows.flatMap((c) => [c.name, c.type, c.grade, c.status, c.school_year, c.source])));
 };
 
 const testScores: Loader = async (db, studentId) => {
@@ -195,7 +211,8 @@ const testScores: Loader = async (db, studentId) => {
     .select(columns("test_scores", ["exam", "kind", "score", "taken_on", "source"]))
     .eq("student_id", studentId).order("sort_order").limit(40));
   return textSection("testScores", "Test scores", "test-scores",
-    rows.map((t) => compact([str(t.exam), kv("score", t.score), kv("kind", t.kind), kv("taken", t.taken_on), kv("entered via", t.source)]).join("; ")));
+    rows.map((t) => compact([str(t.exam), kv("score", t.score), kv("kind", t.kind), kv("taken", t.taken_on), kv("entered via", t.source)]).join("; ")),
+    anyLong(rows.flatMap((t) => [t.exam, t.score, t.kind, t.taken_on, t.source])));
 };
 
 const colleges: Loader = async (db, studentId) => {
@@ -203,7 +220,8 @@ const colleges: Loader = async (db, studentId) => {
     .select(columns("student_colleges", ["name", "round", "fit", "status"]))
     .eq("student_id", studentId).order("sort_order").limit(40));
   return textSection("colleges", "College list", "college-list",
-    rows.map((c) => compact([str(c.name), kv("round", c.round), kv("fit", c.fit), kv("status", c.status)]).join("; ")));
+    rows.map((c) => compact([str(c.name), kv("round", c.round), kv("fit", c.fit), kv("status", c.status)]).join("; ")),
+    anyLong(rows.flatMap((c) => [c.name, c.round, c.fit, c.status])));
 };
 
 const intake: Loader = async (db, studentId) => {
@@ -211,7 +229,18 @@ const intake: Loader = async (db, studentId) => {
     .eq("student_id", studentId).maybeSingle());
   const a = r?.answers;
   if (!a || (typeof a === "object" && Object.keys(a).length === 0)) return empty("intake");
-  return { section: { name: "intake", label: "Intake answers", body: "", untrusted: [{ source: "intake", text: JSON.stringify(a) }] } };
+  // One entry per answer, so a 200-character answer is free text and a 40-character one is a short field.
+  const entries = typeof a === "object" && !Array.isArray(a) ? Object.entries(a as Row) : [["answers", a] as [string, unknown]];
+  return {
+    section: {
+      name: "intake", label: "Intake answers", body: "",
+      untrusted: entries.map(([key, value]) => ({
+        source: tag("intake", key),
+        text: `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+        free: anyLong([key, value]),
+      })),
+    },
+  };
 };
 
 const meetingNotes: Loader = async (db, studentId) => {
@@ -225,6 +254,8 @@ const meetingNotes: Loader = async (db, studentId) => {
       untrusted: rows.map((n) => ({
         source: `meeting:${str(n.meeting_date) || "undated"}`,
         text: compact([str(n.title), str(n.summary), strings(n.tags).length ? `Tags: ${strings(n.tags).join(", ")}` : null]).join("\n"),
+        // The counselor's own notes: never someone else's free text.
+        free: false,
       })),
     },
   };
@@ -236,7 +267,7 @@ const upcomingMeetings: Loader = async (db, studentId) => {
     .eq("student_id", studentId).gte("starts_at", new Date().toISOString()).neq("status", "cancelled")
     .order("starts_at").limit(8));
   return textSection("upcomingMeetings", "Upcoming meetings", "upcoming-meetings",
-    rows.map((m) => compact([str(m.starts_at), str(m.title), kv("status", m.status), kv("agenda", m.agenda)]).join("; ")));
+    rows.map((m) => compact([str(m.starts_at), str(m.title), kv("status", m.status), kv("agenda", m.agenda)]).join("; ")), false);
 };
 
 const deadlines: Loader = async (db, studentId) => {
@@ -244,7 +275,8 @@ const deadlines: Loader = async (db, studentId) => {
     .select(columns("deadlines", ["title", "school", "type", "due_date", "level", "done"]))
     .eq("student_id", studentId).order("due_date").limit(20));
   return textSection("deadlines", "Deadlines", "deadlines",
-    rows.map((d) => compact([str(d.due_date), str(d.title), kv("school", d.school), kv("type", d.type), kv("level", d.level), kv("done", d.done)]).join("; ")));
+    rows.map((d) => compact([str(d.due_date), str(d.title), kv("school", d.school), kv("type", d.type), kv("level", d.level), kv("done", d.done)]).join("; ")),
+    anyLong(rows.flatMap((d) => [d.title, d.school, d.type, d.level])));
 };
 
 const polygon: Loader = async (db, studentId) => {
@@ -253,7 +285,7 @@ const polygon: Loader = async (db, studentId) => {
     .select(columns("student_polygon_axes", ["label", "score", "max_score", "note"]))
     .eq("student_id", studentId).eq("hidden", false).order("sort_order"));
   return textSection("polygon", "Strength profile", "strength-profile",
-    rows.map((a) => compact([`${str(a.label)}: ${num(a.score) ?? "unscored"} of ${num(a.max_score) ?? "?"}`, kv("note", a.note)]).join("; ")));
+    rows.map((a) => compact([`${str(a.label)}: ${num(a.score) ?? "unscored"} of ${num(a.max_score) ?? "?"}`, kv("note", a.note)]).join("; ")), false);
 };
 
 const tasks: Loader = async (db, studentId, opts) => {
@@ -274,7 +306,9 @@ const tasks: Loader = async (db, studentId, opts) => {
   return {
     ...textSection("tasks", "Open tasks", "tasks",
       rows.map((t) => compact([str(t.title), kv("kind", t.kind), kv("status", t.status), kv("due", t.due_date),
-        t.source === "student" ? "added by the student" : null]).join("; "))),
+        t.source === "student" ? "added by the student" : null]).join("; ")),
+      // Every title counts: a counselor task accepted from Research has a web page's words.
+      anyLong(rows.map((t) => t.title))),
     outside: unvouched || rows.some((t) => t.source !== "counselor"),
   };
 };
@@ -301,14 +335,15 @@ const essays: Loader = async (db, studentId, opts) => {
     .select(`${columns("essays", essayCols)}, document:documents(${columns("documents", ["available_to_llm", "kind_confirmed"])})`)
     .eq("student_id", studentId).order("sort_order").limit(30));
   if (rows.length === 0) return empty("essays");
-  const untrusted: { source: string; text: string }[] = [{
+  const untrusted: { source: string; text: string; free: boolean }[] = [{
     source: "essay-details",
     text: rows.map((e, i) => compact([`${i + 1}. ${str(e.title)}`, kv("prompt", e.prompt), kv("school", e.school),
       kv("status", e.status), kv("words", num(e.word_count))]).join("; ")).join("\n"),
+    free: anyLong(rows.flatMap((e) => [e.title, e.prompt, e.school, e.status])),
   }];
   if (opts.essayBodies) {
     for (const e of rows) {
-      if (essayBodyReadable(e.document_id, e.document) && str(e.body)) untrusted.push({ source: tag("essay", str(e.title)), text: str(e.body) });
+      if (essayBodyReadable(e.document_id, e.document) && str(e.body)) untrusted.push({ source: tag("essay", str(e.title)), text: str(e.body), free: true });
     }
   }
   return { section: { name: "essays", label: "Essays", body: `${rows.length} essays.`, untrusted } };
@@ -331,7 +366,7 @@ const documents: Loader = async (db, studentId, opts) => {
       .in("id", allowed.map((d) => str(d.id))));
     for (const t of texts) parsedById.set(str(t.id), (t.parsed_data as Row | null) ?? null);
   }
-  const untrusted: { source: string; text: string }[] = [];
+  const untrusted: { source: string; text: string; free: boolean }[] = [];
   const items: string[] = [];
   const omitted: Omitted[] = [];
   let uncategorized = 0;
@@ -355,7 +390,7 @@ const documents: Loader = async (db, studentId, opts) => {
       continue;
     }
     const filename = str(d.filename);
-    untrusted.push({ source: tag("document", filename), text: body });
+    untrusted.push({ source: tag("document", filename), text: body, free: true });
     items.push(filename);
   }
   if (uncategorized > 0) omitted.push({ section: "documents", reason: "not-categorized", count: uncategorized });

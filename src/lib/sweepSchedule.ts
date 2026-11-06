@@ -25,6 +25,7 @@ import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { env } from "../env.js";
 import { runEscalationSweep } from "./accountability.js";
+import { purgeAxisTrash } from "./axisTrash.js";
 import { beat } from "./heartbeat.js";
 import { serviceClient } from "./supabase.js";
 import { approvedCounselorIds } from "./access.js";
@@ -191,6 +192,8 @@ export async function runScheduledSweep(
   log.info(summary, `accountability sweep (${trigger}) finished`);
   await recordSweepAudit(log, { actorId: null, trigger, ...summary });
   await beat("accountability-sweep", true, undefined, log);
+  // The AxIS trash rides on the sweep's schedule; it takes its own hourly lease and never throws.
+  await purgeAxisTrash(log);
   return { ran: true, ...summary };
 }
 

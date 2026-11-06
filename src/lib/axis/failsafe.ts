@@ -40,6 +40,34 @@ export function isSchemaMissing(err: unknown): boolean {
 
 export const axisUnavailable = (message = AXIS_UNAVAILABLE_MESSAGE) => new HttpError(503, message, AXIS_UNAVAILABLE);
 
+/**
+ * Whether 20261108000004 (ai_messages.outside_quotes) is in: the free-text rule, the question turn's short
+ * record and the quote flag turn on only together with it (spec §3.3). Before it, today's wider rule holds.
+ * A zero-row probe; ready is kept for the process, missing is asked again after 30 s.
+ */
+let flagsOk = false;
+let flagsMissingUntil = 0;
+export async function flagsReady(db: { from(table: string): { select(cols: string): { limit(n: number): PromiseLike<{ error: { code?: string } | null }> } } }): Promise<boolean> {
+  if (flagsOk) return true;
+  if (Date.now() < flagsMissingUntil) return false;
+  const { error } = await db.from("ai_messages").select("outside_quotes").limit(0);
+  if (!error) {
+    flagsOk = true;
+    return true;
+  }
+  if (isSchemaMissing(error)) {
+    flagsMissingUntil = Date.now() + 30_000;
+    return false;
+  }
+  throw error;
+}
+
+/** Tests only. */
+export function resetFlagsReadyForTest(): void {
+  flagsOk = false;
+  flagsMissingUntil = 0;
+}
+
 /** The JSON body of the fallback signal: `error` is what the app's ApiError reads, `message` the same text. */
 export const unavailableBody = (message = AXIS_UNAVAILABLE_MESSAGE) => ({ error: message, message, code: AXIS_UNAVAILABLE });
 

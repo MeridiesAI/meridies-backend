@@ -617,17 +617,18 @@ export const blasts: OpGroup = {
       request: () => ({ method: "GET", url: "/blasts/audiences" }),
       reply: (body) => {
         const a = asRecord(body);
-        // Class years and school names are typed text; statuses are the college list's fixed set.
-        const list = (rows: unknown, safe: boolean) =>
+        // Class years and school names are typed text; statuses are the college list's fixed set, wrapped all the
+        // same so every value the route returns reaches the model as data (the free-text rule reads the blocks).
+        const list = (rows: unknown) =>
           asArray(rows)
             .slice(0, 60)
-            .map((r) => `${safe ? str(r.value) : untrusted(r.value)} (${str(r.count) ?? "0"})`)
+            .map((r) => `${untrusted(r.value)} (${str(r.count) ?? "0"})`)
             .join(", ") || "none";
         return [
           `roster: the entire roster (${str(a.rosterCount) ?? "0"} students)`,
-          `class-year (audience_value): ${list(a.classYears, false)}`,
-          `school (audience_value, the school's name exactly): ${list(a.schools, false)}`,
-          `status (audience_value): ${list(a.statuses, true)}`,
+          `class-year (audience_value): ${list(a.classYears)}`,
+          `school (audience_value, the school's name exactly): ${list(a.schools)}`,
+          `status (audience_value): ${list(a.statuses)}`,
           `selection: pass student_ids (at most ${BLAST_SELECTION_MAX}) instead.`,
         ].join("\n");
       },

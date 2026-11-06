@@ -33,6 +33,7 @@ import type { SourceLedger } from "./ledger.js";
 import { COLLEGE_ATTRIBUTES, STUDENT_ATTRIBUTES, type Attribute } from "./lexicon.js";
 import type { Understanding } from "./nlu.js";
 import { loadRosterRisk } from "./risk.js";
+import { anyLong } from "../context/freeText.js";
 
 export type DirectAnswer = {
   frame: "roster-count" | "caseload-risk" | "upcoming" | "student-facts" | "college-facts";
@@ -45,6 +46,13 @@ export type DirectAnswer = {
    * turn, so the engine carries this forward like a turn that read outside content.
    */
   outside: boolean;
+  /**
+   * The narrower rule (lib/context/freeText.ts), used once 20261108000004 is in: a value the answer shows is
+   * over 80 characters. A title, a school or a major of that length or less is a short field.
+   */
+  freeText: boolean;
+  /** Those values, for the quote check. */
+  freeBlocks?: { source: string; text: string }[];
 };
 
 export type CompileContext = {
@@ -101,7 +109,7 @@ export async function compileDirect(u: Understanding, ctx: CompileContext): Prom
   if (u.judgement || !isLookup(u)) return null;
 
   if (!ctx.chatStudentId && !u.students.length && /\bhow many students\b/.test(u.norm)) {
-    return { frame: "roster-count", text: `You have ${ctx.roster.size} active student${ctx.roster.size === 1 ? "" : "s"}.`, trace: ["Counted your roster"], sources: ["Roster"], outside: false };
+    return { frame: "roster-count", text: `You have ${ctx.roster.size} active student${ctx.roster.size === 1 ? "" : "s"}.`, trace: ["Counted your roster"], sources: ["Roster"], outside: false, freeText: false };
   }
 
   const studentAttrs = u.attributes.filter((a) => STUDENT_ATTRIBUTES.has(a));
@@ -148,7 +156,7 @@ async function caseloadRisk(ctx: CompileContext, horizon: number): Promise<Direc
         ...ranked.map((r, i) => `${i + 1}. ${plain(r.name, 60)}: ${r.reasons.join("; ")}.`),
       ].join("\n")
     : `Nobody on your roster has overdue work, a red flag or a deadline at risk ${span}.`;
-  return { frame: "caseload-risk", text, trace: ["Ranked the caseload by urgency"], sources: ["Tasks", "Calendar"], outside: ranked.some((r) => r.outside) };
+  return { frame: "caseload-risk", text, trace: ["Ranked the caseload by urgency"], sources: ["Tasks", "Calendar"], outside: ranked.some((r) => r.outside), freeText: false };
 }
 
 async function upcoming(ctx: CompileContext, u: Understanding, studentId: string | null, now: Date): Promise<DirectAnswer> {
@@ -157,6 +165,9 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
   const meetings = /\b(meeting|meetings|call|calls|session|sessions|calendar|schedule|coming up)\b/.test(u.norm) || !u.attributes.includes("deadline");
   const items = await upcomingItems(ctx.request, { studentId: id, window, meetings, roster: ctx.roster, limit: 100 });
   const who = (it: UpcomingItem) => (id ? "" : `${plain(ctx.roster.get(it.studentId)?.name ?? "Student", 60)} · `);
+  // What a line shows of an item someone else wrote: free text when over 80 characters (the title shows up to 100).
+  const freeIn = (it: UpcomingItem) => it.outside && anyLong([plain(it.title, 100)]);
+  const freeOf = (list: UpcomingItem[]) => list.filter(freeIn).map((it) => ({ source: it.kind, text: plain(it.title, 100) }));
   const line = (it: UpcomingItem) =>
     `${shortDate(it.date, now)}${it.overdue ? " (overdue)" : ""} · ${who(it)}${plain(it.title, 100)}${it.detail ? `, ${plain(it.detail, 60)}` : ""}${it.kind === "task" && it.status ? ` · ${it.status.replace("-", " ")}` : it.kind === "meeting" ? " · meeting" : ""}`;
   const name = id ? firstName(ctx.roster.get(id)?.name ?? (await studentFacts(ctx.request, id))?.name ?? "") : "";
@@ -167,12 +178,13 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
       trace: ["Checked deadlines, tasks and meetings"],
       sources: ["Calendar", "Tasks"],
       outside: false,
+      freeText: false,
     };
   }
   if (SINGULAR_NEXT.test(u.norm)) {
     const kind = /\bmeeting\b/.test(u.norm) ? "meeting" : /\btask\b/.test(u.norm) ? "task" : /\bdeadline\b/.test(u.norm) ? "deadline" : null;
     const next = items.find((i) => !i.overdue && (!kind || i.kind === kind));
-    if (next) return { frame: "upcoming", text: `Next${kind ? ` ${kind}` : ""}: ${line(next)}.`, trace: ["Checked deadlines, tasks and meetings"], sources: ["Calendar", "Tasks"], outside: next.outside };
+    if (next) return { frame: "upcoming", text: `Next${kind ? ` ${kind}` : ""}: ${line(next)}.`, trace: ["Checked deadlines, tasks and meetings"], sources: ["Calendar", "Tasks"], outside: next.outside, freeText: freeIn(next), freeBlocks: freeOf([next]) };
   }
   const shown = items.slice(0, 12);
   const more = items.length - shown.length;
@@ -186,6 +198,8 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
     trace: ["Checked deadlines, tasks and meetings"],
     sources: ["Calendar", "Tasks"],
     outside: shown.some((i) => i.outside),
+    freeText: shown.some(freeIn),
+    freeBlocks: freeOf(shown),
   };
 }
 
@@ -198,8 +212,17 @@ async function studentFactsAnswer(ctx: CompileContext, studentId: string, viaCha
   // Which printed values are text the student (or an import, or the questionnaire) typed: rank, major,
   // school, testing status and a class year that isn't four digits. Numbers aren't.
   let outside = false;
-  const typed = <T>(v: T): T => {
+  let freeText = false;
+  const freeBlocks: { source: string; text: string }[] = [];
+  // `parts`: the separate values a joined line shows (a list of majors), each judged on its own.
+  const typed = <T>(v: T, parts?: string[]): T => {
     outside = true;
+    for (const part of parts ?? [v]) {
+      if (typeof part === "string" && anyLong([part])) {
+        freeText = true;
+        freeBlocks.push({ source: "record", text: part });
+      }
+    }
     return v;
   };
   const satLine = () =>
@@ -222,12 +245,12 @@ async function studentFactsAnswer(ctx: CompileContext, studentId: string, viaCha
     else if (a === "act") lines.push(actLine());
     else if (a === "tests") lines.push(satLine(), actLine());
     else if (a === "rank") lines.push(f.classRank ? `${n}'s class rank: ${typed(plain(f.classRank, 60))}.` : `${n} has no class rank on file.`);
-    else if (a === "major") lines.push(f.majors.length ? `${n}'s intended major${f.majors.length === 1 ? " is" : "s are"} ${typed(f.majors.map((m) => plain(m, 60)).join(", "))}.` : `${n} has no intended major on file.`);
+    else if (a === "major") lines.push(f.majors.length ? `${n}'s intended major${f.majors.length === 1 ? " is" : "s are"} ${typed(f.majors.map((m) => plain(m, 60)).join(", "), f.majors.map((m) => plain(m, 60)))}.` : `${n} has no intended major on file.`);
     else if (a === "class_year") lines.push(f.gradYear ? `${n} is in the class of ${plainGradYear(f.gradYear) ?? typed(plain(f.gradYear, 10))}.` : `${n} has no graduation year on file.`);
     else if (a === "school") lines.push(f.highSchool ? `${n} attends ${typed(plain(f.highSchool, 100))}.` : `${n} has no high school on file.`);
   }
   if (!lines.length) return null;
-  return { frame: "student-facts", text: [...new Set(lines)].join("\n"), trace: [`Read ${n}'s record`], sources: ["Student profile", "Grades and scores"], outside };
+  return { frame: "student-facts", text: [...new Set(lines)].join("\n"), trace: [`Read ${n}'s record`], sources: ["Student profile", "Grades and scores"], outside, freeText, freeBlocks };
 }
 
 async function collegeFigures(ctx: CompileContext, ids: string[], asks: Attribute[]): Promise<DirectAnswer | null> {
@@ -256,5 +279,5 @@ async function collegeFigures(ctx: CompileContext, ids: string[], asks: Attribut
     blocks.push(facts.length > 1 ? `- ${sentence}` : sentence);
   }
   if (stale) blocks.push("These figures haven't been re-verified against the source in over a year.");
-  return { frame: "college-facts", text: blocks.join("\n"), trace: [`Looked up ${facts.length === 1 ? plain(facts[0]!.name, 80) : `${facts.length} schools`} in the College Scorecard data`], sources: ["College catalog"], outside: false };
+  return { frame: "college-facts", text: blocks.join("\n"), trace: [`Looked up ${facts.length === 1 ? plain(facts[0]!.name, 80) : `${facts.length} schools`} in the College Scorecard data`], sources: ["College catalog"], outside: false, freeText: false };
 }

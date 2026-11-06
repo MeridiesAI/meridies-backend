@@ -53,6 +53,22 @@ import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 import { researchTaskIds } from "../lib/research/origin.js";
+import { assertGpaFitsScale } from "../lib/gpaCheck.js";
+import { isSchemaMissing } from "../lib/axis/failsafe.js";
+import {
+  academicsFor,
+  ACADEMICS_COLUMNS,
+  columnFor,
+  HAND_IN_CHANGED,
+  HAND_IN_KEYS,
+  HAND_IN_VALUES_MISSING,
+  infoPatchFrom,
+  patchValue,
+  stampConfirmed,
+  storedValues,
+  withCurrent,
+  type HandInKey,
+} from "../lib/handInValues.js";
 
 type Row = Record<string, unknown>;
 
@@ -221,12 +237,15 @@ export async function hydrate(
   }
   const trackerBy = new Map<string, Row>();
   for (const t of tracker.data ?? []) trackerBy.set(t.deliverable_id as string, t as Row);
+  // A hand-in's values are shown beside the profile's value now: one academics read, only when a check has values.
+  const academics = await academicsFor(request.db, (tracker.data ?? []) as Row[]);
 
   return tasks.map((t) =>
     toTask(t, {
       stages: stageBy.get(t.id as string) ?? [],
       documents: docBy.get(t.id as string) ?? [],
       tracker: trackerBy.get(t.id as string) ?? null,
+      academics: academics.get(String(t.student_id)) ?? null,
       // Unreadable: every counselor task may be one (AxIS then treats them as outside content).
       ...(request.profile.role === "counselor" ? { fromResearch: t.source !== "student" && (research === null || research.has(t.id as string)) } : {}),
     })
@@ -1023,8 +1042,97 @@ export default async function taskRoutes(app: FastifyInstance) {
       .order("checked_at", { ascending: false })
       .limit(50);
     if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toTrackerCheck(r as Row));
+    const academics = await academicsFor(request.db, (data ?? []) as Row[]);
+    return (data ?? []).map((r) => toTrackerCheck(r as Row, academics.get(String(r.student_id)) ?? null));
   });
+
+  // ---- Hand-in values (20261108000005; lib/handInValues.ts) -----------------
+  //
+  // The counselor confirms what AxIS copied off a handed-in file, sending each value the card showed with the
+  // profile's value the card showed beside it. A value the profile can take is written only where the profile
+  // still holds that value (apply_hand_in_values, on the counselor's own client, so RLS decides); one edited since
+  // is kept and reported. A value the profile can't take ("AP Biology 5") is confirmed without being saved.
+  const confirmValuesBody = z
+    .object({
+      values: z
+        .array(
+          z
+            .object({
+              key: z.enum(HAND_IN_KEYS as [HandInKey, ...HandInKey[]]),
+              printed: z.string().max(200),
+              profileWas: z.union([z.string().max(200), z.number(), z.null()]),
+            })
+            .strict()
+        )
+        .min(1)
+        .max(4)
+        .refine((vs) => new Set(vs.map((v) => v.key)).size === vs.length, "Name each value once"),
+    })
+    .strict();
+
+  app.post(
+    "/:id/checks/:checkId/values/confirm",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("tasks:confirm-values", 30, 60)] },
+    async (request) => {
+      const { id, checkId } = z.object({ id: z.string().uuid(), checkId: z.string().uuid() }).parse(request.params);
+      const body = confirmValuesBody.parse(request.body);
+      const { data: task, error: taskErr } = await request.db.from("deliverables").select("student_id").eq("id", id).maybeSingle();
+      if (taskErr) throw fromPostgrest(taskErr);
+      if (!task) throw notFound("That task isn't on file");
+      const studentId = await resolveStudentId(request, String(task.student_id), "edit");
+
+      const { data: row, error } = await request.db
+        .from("deliverable_tracker_checks")
+        .select("*")
+        .eq("id", checkId)
+        .eq("deliverable_id", id)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!row) throw notFound("That check isn't on this task");
+      if (!("extracted_values" in row)) throw new HttpError(503, HAND_IN_VALUES_MISSING, "hand_in_values_unavailable");
+      const stored = storedValues(row.extracted_values) ?? [];
+      const chosen = body.values.map((asked) => ({ asked, value: stored.find((v) => v.key === asked.key) }));
+      if (chosen.some((c) => !c.value || c.value.printed !== c.asked.printed)) throw conflict(HAND_IN_CHANGED);
+      const values = chosen.map((c) => c.value!);
+
+      // The info card's rules, before anything is written or marked.
+      const patch = infoPatchFrom(values);
+      await assertGpaFitsScale(request.db, studentId, {
+        ...(patch.gpaWeighted !== undefined ? { gpaWeighted: patch.gpaWeighted } : {}),
+        ...(patch.gpaUnweighted !== undefined ? { gpaUnweighted: patch.gpaUnweighted } : {}),
+      });
+      const fields = chosen.flatMap((c) => {
+        const column = columnFor(c.value!.key, c.value!.printed);
+        const value = column ? patchValue(patch, column) : undefined;
+        return column && value !== undefined ? [{ key: c.value!.key, column, value, expected: c.asked.profileWas }] : [];
+      });
+
+      let saved: HandInKey[] = [];
+      let kept: { key: HandInKey; current: string | number | null }[] = [];
+      if (fields.length > 0) {
+        const { data: out, error: applyErr } = await request.db.rpc("apply_hand_in_values", {
+          p_student: studentId,
+          p_fields: fields.map(({ column, value, expected }) => ({ column, value, expected })),
+        });
+        if (applyErr) throw isSchemaMissing(applyErr) ? new HttpError(503, HAND_IN_VALUES_MISSING, "hand_in_values_unavailable") : fromPostgrest(applyErr);
+        const answer = (out ?? {}) as { saved?: string[]; kept?: { column?: string; current?: unknown }[] };
+        const savedColumns = new Set(answer.saved ?? []);
+        saved = fields.filter((f) => savedColumns.has(f.column)).map((f) => f.key);
+        kept = (answer.kept ?? []).flatMap((k) => {
+          const f = fields.find((x) => x.column === k.column);
+          const current = typeof k.current === "number" || typeof k.current === "string" ? k.current : null;
+          return f ? [{ key: f.key, current }] : [];
+        });
+      }
+      const unsaveable = values.filter((v) => !fields.some((f) => f.key === v.key)).map((v) => v.key);
+      const next = await stampConfirmed(checkId, stored, [...saved, ...unsaveable], {
+        id: request.auth.userId,
+        name: (request.profile.full_name as string | null | undefined) ?? null,
+      });
+      const { data: academics } = await request.db.from("student_academics").select(ACADEMICS_COLUMNS).eq("student_id", studentId).maybeSingle();
+      return { values: withCurrent(next, (academics as Row | null) ?? null), saved, kept };
+    }
+  );
 
   /**
    * Run the tracker for one task.
