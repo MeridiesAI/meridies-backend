@@ -386,8 +386,12 @@ export async function forwardToCounselor(svc: SupabaseClient, counselorId: strin
     : `${base}/dashboard/counselor/contact-pipeline${m.contactId ? `?contact=${m.contactId}` : ""}`;
   const about = m.studentName ? ` about ${m.studentName}` : "";
   const isText = m.channel === "sms";
+  // A sender not on file is not shown under the family member's name: the
+  // forward's From line and subject would otherwise read as theirs, with
+  // Reply-To pointing at the stranger.
+  const fromName = m.senderKnown ? m.fromName : "Unverified sender";
   const template = {
-    heading: `${m.fromName} replied${isText ? " by text" : ""}${about}`,
+    heading: `${fromName} replied${isText ? " by text" : ""}${about}`,
     paragraphs: [
       ...(m.senderKnown
         ? []
@@ -400,13 +404,13 @@ export async function forwardToCounselor(svc: SupabaseClient, counselorId: strin
     ],
     cta: { label: "Open in Meridies", url: link },
     footnote: isText
-      ? `It's on their timeline in Meridies, where you can text ${m.fromName} back.`
-      : `You can reply to this email to answer ${m.fromName} directly. It's also on their timeline in Meridies.`,
+      ? `It's on their timeline in Meridies, where you can text ${fromName} back.`
+      : `You can reply to this email to answer ${fromName} directly. It's also on their timeline in Meridies.`,
   };
   const res = await sendEmail({
     to,
     subject: isText
-      ? `${m.fromName} texted you${about}`.slice(0, 300)
+      ? `${fromName} texted you${about}`.slice(0, 300)
       : `Re: ${m.subject ?? `Your message${about}`}`.slice(0, 300),
     html: brandedEmail(template),
     text: brandedText(template),
@@ -414,7 +418,7 @@ export async function forwardToCounselor(svc: SupabaseClient, counselorId: strin
     recipient_kind: "counselor",
     recipient_id: counselorId,
     ...(isText ? {} : { replyTo: m.sender }),
-    fromName: m.fromName,
+    fromName,
     logger: m.log,
   });
   return res.sent;
