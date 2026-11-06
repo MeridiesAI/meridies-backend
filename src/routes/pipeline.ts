@@ -687,6 +687,9 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       .strict()
       .parse(request.body);
     const ws = await loadWorkspace(request);
+    if (b.ownerId && b.ownerId !== request.auth.userId && !ws.isAdmin) {
+      throw forbidden("Only a firm admin can give a new family to another consultant");
+    }
 
     // The same family twice is the usual way a pipeline goes wrong. The email
     // is the match; "Add anyway" sends allowDuplicate.
@@ -736,6 +739,11 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       .parse(request.body);
     const ws = await loadWorkspace(request);
     const current = await loadContactRow(request, id);
+    // The owner can bill the family (crm_can_bill), so only a firm admin or the
+    // current owner hands a family to someone; a seat can't claim one.
+    if (b.ownerId !== undefined && b.ownerId !== ((current.owner_id as string | null) ?? null) && !ws.isAdmin && current.owner_id !== request.auth.userId) {
+      throw forbidden("Only a firm admin or this family's owner can change who owns them");
+    }
 
     // A new address that another card already has: say so, once. Re-saving the
     // address a card already holds never asks.
