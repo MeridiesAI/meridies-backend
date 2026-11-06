@@ -41,7 +41,7 @@ export function isSchemaMissing(err: unknown): boolean {
 export const axisUnavailable = (message = AXIS_UNAVAILABLE_MESSAGE) => new HttpError(503, message, AXIS_UNAVAILABLE);
 
 /**
- * Whether 20261108000004 (ai_messages.outside_quotes) is in: the free-text rule, the question turn's short
+ * Whether 20261110000005 (ai_messages.outside_quotes) is in: the free-text rule, the question turn's short
  * record and the quote flag turn on only together with it (spec §3.3). Before it, today's wider rule holds.
  * A zero-row probe; ready is kept for the process, missing is asked again after 30 s.
  */

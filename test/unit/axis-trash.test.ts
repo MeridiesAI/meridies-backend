@@ -23,7 +23,7 @@ test("each refusal reason has its sentence", () => {
   assert.equal(restoreSentence("parent-missing"), "This can't be restored: what it belonged to has been deleted.");
   assert.equal(restoreSentence("already"), "That was already restored.");
   assert.equal(restoreSentence("not-approved"), "This can't be restored: your counselor access isn't active.");
-  assert.equal(TRASH_MISSING, "AxIS can't delete things until the database update 20261108000003_axis_trash is applied.");
+  assert.equal(TRASH_MISSING, "AxIS can't delete things until the database update 20261110000004_axis_trash is applied.");
 });
 
 test("every DELETE op is covered by the trash or excluded with a reason", () => {

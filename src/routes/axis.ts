@@ -160,7 +160,7 @@ export default async function axisRoutes(app: FastifyInstance) {
               citations: turn.citations,
               trace: turn.trace,
               // The runs the answer quoted from free text (lib/axis/quotes.ts), [] when clean. Only once
-              // 20261108000004 is in (quotesChecked), so the column is never named before it exists; capped to fit it.
+              // 20261110000005 is in (quotesChecked), so the column is never named before it exists; capped to fit it.
               ...(turn.quotesChecked ? { outside_quotes: storableRuns(turn.quotes) } : {}),
               sources: turn.sources,
               ai_run_id: turn.runId,
@@ -360,7 +360,7 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (!claimed) throw conflict("That change was already undone.");
     const handBack = () => request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
     if (trash) {
-      // A confirmed delete: the database puts its rows back (axis_trash_restore, 20261108000003), as the counselor.
+      // A confirmed delete: the database puts its rows back (axis_trash_restore, 20261110000004), as the counselor.
       const { data: out, error: restoreErr } = await request.db.rpc("axis_trash_restore", { p_action: id });
       const answer = (out ?? {}) as { ok?: boolean; reason?: string; restored?: number; paused?: string[] };
       if (restoreErr || answer.ok !== true) {
