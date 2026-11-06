@@ -421,7 +421,7 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
 
 /**
  * Moves the task and writes the verdict. Accepted only completes the task. The values go to the check's own list,
- * unverified; before 20261108000005 they stay in the findings, labelled unverified.
+ * unverified; before 20261110000006 they stay in the findings, labelled unverified.
  */
 export async function recordReview(svc: Svc, task: Row, documentId: string | null, result: ReviewResult): Promise<void> {
   // The task moves first and the verdict is written last: a client polling for

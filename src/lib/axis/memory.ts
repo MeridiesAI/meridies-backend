@@ -10,7 +10,7 @@
  *    without a model (lib/axis/nlu.ts).
  *
  * Replayed messages are the counselor's text and AxIS's answers only (tool
- * results are never stored). Once 20261108000004 is in, an answer that quoted
+ * results are never stored). Once 20261110000005 is in, an answer that quoted
  * 8+ words of free text carries those runs (`outside_quotes`, lib/axis/quotes.ts):
  * while it is among the replayed messages the chat is flagged (`History.flagged`),
  * and the fold replaces each run with "[quote from <source>]", so the summary
@@ -40,7 +40,7 @@ export type History = {
   turns: Anthropic.Beta.BetaMessageParam[];
   state: DialogueState | null;
   /**
-   * A replayed answer quoted free text, or was never checked for quotes (saved before 20261108000004, or by /chat):
+   * A replayed answer quoted free text, or was never checked for quotes (saved before 20261110000005, or by /chat):
    * the chat stays flagged (changes wait for Confirm) while it is replayed.
    */
   flagged: boolean;
@@ -48,7 +48,7 @@ export type History = {
   quoted: { source: string; text: string }[];
 };
 
-/** The columns history reads: the text, and its quote marks once 20261108000004 is in. */
+/** The columns history reads: the text, and its quote marks once 20261110000005 is in. */
 const messageColumns = (flags: boolean) => `role, content, created_at${flags ? ", outside_quotes" : ""}`;
 const flagsOn = (request: FastifyRequest) => flagsReady(request.db).catch(() => false);
 

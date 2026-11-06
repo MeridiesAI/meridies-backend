@@ -118,7 +118,7 @@ export async function intakeItemsByInvitation(
         .eq("role", "submission"),
       request.db
         .from("deliverable_tracker_latest")
-        // `*`: extracted_values is there only after 20261108000005.
+        // `*`: extracted_values is there only after 20261110000006.
         .select("*")
         .in("deliverable_id", ids),
     ]);
