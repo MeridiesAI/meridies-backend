@@ -42,6 +42,7 @@ import type { ContextUsage } from "../lib/context/types.js";
 import { forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { assertAiAllowed } from "../lib/practiceSettings.js";
 import { ProseGate } from "../lib/proseGuard.js";
 
 /** How the AxIS trace names a context section; two sections can share a label. */
@@ -276,6 +277,7 @@ export default async function chatRoutes(app: FastifyInstance) {
       if (requestedStudent) studentId = await resolveStudentId(request, requestedStudent, "view");
 
       const tool = getChatTool(body.tool ?? (conv.module as string));
+      if (tool.gate) await assertAiAllowed(request, tool.gate);
 
       // Persist the user's turn and keep the conversation's scope/title fresh.
       const { data: userMsg, error: umErr } = await request.db
