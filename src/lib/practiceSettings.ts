@@ -58,6 +58,8 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   // Resume bullets are drafted from the student's record, so the practice's AI summaries switch governs them.
   "resume",
   "meeting-summary",
+  // A family's messages and replies go to the model to be translated (lib/translate.ts).
+  "message-translate",
 ]);
 
 /**

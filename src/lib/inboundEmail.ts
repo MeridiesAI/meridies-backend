@@ -26,6 +26,7 @@ import { env, resendBase } from "../env.js";
 import { isCounselorApproved } from "./access.js";
 import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { pgFailure } from "./errors.js";
+import { translateStoredReply } from "./inboundTranslate.js";
 import { consumeRateLimit } from "./limits.js";
 import { extractText } from "./links.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
@@ -325,6 +326,15 @@ export async function handleInboundEmail(
     await stopSequencesOnReply(svc, String(route.contact_id), log);
   }
 
+  // The English of a reply in another language, written on the row; never throws, never slows the webhook past its deadline.
+  const translation = await translateStoredReply(svc, {
+    inboundId,
+    counselorId,
+    studentId: route.student_id ? String(route.student_id) : null,
+    body,
+    log,
+  });
+
   const forwarded = await forwardToCounselor(svc, counselorId, {
     channel: "email",
     fromName: who.name,
@@ -333,6 +343,7 @@ export async function handleInboundEmail(
     studentName: who.studentName,
     subject,
     body,
+    bodyEn: translation.bodyEn,
     contactId: route.contact_id ? String(route.contact_id) : null,
     studentId: route.student_id ? String(route.student_id) : null,
     log,
@@ -365,6 +376,8 @@ export type CounselorNotice = {
   studentName: string | null;
   subject: string | null;
   body: string;
+  /** The English of a reply in another language, shown under the original. */
+  bodyEn?: string | null;
   contactId: string | null;
   studentId: string | null;
   log: Log;
@@ -397,6 +410,16 @@ export async function forwardToCounselor(svc: SupabaseClient, counselorId: strin
         .map((p) => p.trim())
         .filter(Boolean)
         .slice(0, 12),
+      ...(m.bodyEn
+        ? [
+            "In English:",
+            ...m.bodyEn
+              .split(/\n{2,}/)
+              .map((p) => p.trim())
+              .filter(Boolean)
+              .slice(0, 12),
+          ]
+        : []),
     ],
     cta: { label: "Open in Meridies", url: link },
     footnote: isText
