@@ -457,6 +457,11 @@ export default async function fileRoutes(app: FastifyInstance) {
       // every roster student, so an upload never lands nowhere.
       else if (studentId) folderId = await studentFolderId(request, studentId);
 
+      // A counselor's upload has a confirmed type (kind_confirmed defaults to true), so its text is
+      // queued for AI now, as confirming a type does. A student's own upload isn't: the queue columns
+      // are the counselor's side in the database, and the counselor confirming its type queues it.
+      const queueText = request.profile.role === "counselor" && (b.availableToLlm ?? true);
+
       const { data, error } = await request.db
         .from("documents")
         .insert({
@@ -476,10 +481,12 @@ export default async function fileRoutes(app: FastifyInstance) {
           ai_access: b.aiAccess ?? "default",
           ferpa_waived: b.ferpaWaived ?? false,
           uploaded_by: request.auth.userId,
+          ...(queueText ? { extraction_requested_at: new Date().toISOString() } : {}),
         })
         .select("*")
         .single();
       if (error) throw fromPostgrest(error);
+      if (queueText) requestExtraction([String(data.id)], request.log);
 
       // The accountability engine reads these rows; an upload that skips this
       // is a student who looks stalled when they aren't. The student reads the log, so a restricted file's

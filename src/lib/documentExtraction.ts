@@ -1,12 +1,12 @@
 /**
- * Text for AI after a counselor confirms a file's type (spec §4.3; Elvin 10/15: queued, two at
- * a time, progress shown). The queue is in-process; the database is the durable part: a
- * confirmation sets `extraction_requested_at` and leaves `parse_status = 'pending'`, a worker
+ * Text for AI after a counselor confirms a file's type, or uploads one the AI may read (spec §4.3;
+ * Elvin 10/15: queued, two at a time, progress shown). The queue is in-process; the database is the
+ * durable part: a confirmation sets `extraction_requested_at` and leaves `parse_status = 'pending'`, a worker
  * claims a row by moving it to `parsing` under a 2-minute lease (and counts an attempt), and the
  * result clears the marker. Recovery (on boot and every minute) returns an expired lease to the
  * queue, and after 3 attempts marks the row failed, so every item reaches a final state and the
  * app's polling always ends; a request still pending after 24 hours is marked failed too. Rows without the
- * marker (everything that existed before) are never touched: there is no backfill.
+ * marker are never touched; the one backfill is 20261110000008 (counselor uploads left at pending).
  *
  * Runs on the service client, outside the request: every row is re-checked when it runs
  * (still confirmed, still allowed for AI, its counselor still approved), and the text write is
