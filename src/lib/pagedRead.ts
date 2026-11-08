@@ -4,9 +4,9 @@
  * PostgREST answers at most `max_rows` (1,000, supabase/config.toml) rows a
  * query whatever `.limit()` asks, so a single read silently cut every export
  * table at 1,000 rows. Each table is now read in pages of `PAGE_SIZE` in a
- * stable order (`ORDER_KEYS`: the table's primary key) until a short page or
- * the per-table cap; at the cap a one-row probe says whether anything was
- * left out, and only then is the table reported `truncated`.
+ * stable order (`ORDER_KEYS`: the table's primary key) until an EMPTY page
+ * (never a short one: max_rows may be lower than the page) or the per-table
+ * cap; at the cap a one-row probe says whether anything was left out, and only then is the table reported `truncated`.
  */
 
 export const PAGE_SIZE = 1000;
@@ -46,7 +46,7 @@ type Row = Record<string, unknown>;
 export type PageFetch = (from: number, to: number) => PromiseLike<{ data: unknown[] | null; error: unknown }>;
 
 /**
- * Reads pages [from, to] (inclusive, PostgREST's `range`) until a short page or `cap` rows. An error is
+ * Reads pages [from, to] (inclusive, PostgREST's `range`) until an empty page or `cap` rows. An error is
  * returned with the rows read so far, never thrown; `onPage` may throw (ReadStopped) to stop.
  */
 export async function readPaged(
@@ -61,12 +61,17 @@ export async function readPaged(
     const to = Math.min(from + pageSize, cap) - 1;
     const { data, error } = await fetchPage(from, to);
     if (error) return { rows, truncated: false, error };
-    const page = (data ?? []) as Row[];
-    opts.onPage?.(page);
+    const page = ((data ?? []) as Row[]).slice(0, to - from + 1);
+    if (page.length) opts.onPage?.(page);
     rows.push(...page);
-    if (page.length < to - from + 1) return { rows, truncated: false, error: null };
+    // Only an empty page ends the table: a short one may just be the server's max_rows, which can be lower
+    // than the page asked for. `from` moves on by the rows actually received.
+    if (page.length === 0) return { rows, truncated: false, error: null };
   }
   const probe = await fetchPage(cap, cap);
   if (probe.error) return { rows, truncated: false, error: probe.error };
   return { rows, truncated: (probe.data ?? []).length > 0, error: null };
 }
+
+// Offsets are not a snapshot: a row inserted or deleted between two pages can be read twice or missed at a
+// page boundary. Good enough for an export; a consistent copy would need one transaction.

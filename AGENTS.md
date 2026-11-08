@@ -3348,6 +3348,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `pageGuard`) is `{ id, status: "too_large" }` and the batch goes on: **the app (11c) then fetches that
   student with `GET /account/students/:id/export`**, which has no batch cap (its 60 an hour applies).
   Students that each fit but not together make the batch 413 `export_too_large`: retry with fewer.
+  Paging stops only on an empty page (never a short one, so a lower `max_rows` can't cut a table), but
+  offset paging is not snapshot-consistent: a row inserted or deleted between pages can be duplicated or
+  missed at a page boundary. **For 11c:** the `GET /account/students/:id/export` fallback and the self
+  export have no size guard (up to 5,000 rows for each of the ~60 tables).
   `POST /account/export/drive` `{ studentIds }` or `{ scope: "roster-summary" }` (whole caseload, at most
   250, else 413 `roster_too_large`; 10 an hour) creates ONE Google Sheet "Meridies export <date>" in the caller's Drive under the
   existing `drive.file` scope (multipart CSV upload converted to Sheets): name, email, grad year,

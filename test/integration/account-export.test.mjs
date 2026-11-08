@@ -41,6 +41,7 @@ check(
     JSON.stringify(byId[random]) === JSON.stringify({ id: random, status: "not_found" }),
   JSON.stringify([byId[foreign.id], byId[random]])
 );
+check("every table was readable in the batch (a bad order key would show up in notIncluded)", Array.isArray(byId[s1.id]?.json?.notIncluded) && byId[s1.id].json.notIncluded.length === 0, JSON.stringify(byId[s1.id]?.json?.notIncluded));
 check("nothing of the foreign student leaks anywhere in the answer", !JSON.stringify(r.body).includes(foreign.email));
 const gcsv = byId[s1.id]?.csv?.guardians ?? "";
 check("each table with rows has a CSV with a header", gcsv.startsWith("id,") && gcsv.includes("full_name") && typeof byId[s1.id]?.csv?.profile === "string", gcsv.slice(0, 200));
@@ -52,6 +53,8 @@ const docs = byId[s1.id]?.documents ?? [];
 check("the student's documents are listed by name", docs.length === 1 && docs[0].filename === "transcript.pdf" && docs[0].storagePath === `${s1.id}/doc-transcript.pdf`, JSON.stringify(docs));
 check("the cost is one unit per id asked for (4)", (await bucket(batchKey(c.id))) === "4", await bucket(batchKey(c.id)));
 check("the per-student export's bucket isn't touched", (await bucket(`account:student-export:${c.id}`)) === "none");
+const s1Single = await call(c.token, "GET", `/account/students/${s1.id}/export`);
+check("…and in the per-student export", s1Single.status === 200 && Array.isArray(s1Single.body.notIncluded) && s1Single.body.notIncluded.length === 0, JSON.stringify(s1Single.body.notIncluded));
 
 // ---- Validation, roles, approval ----------------------------------------------------------------
 const tooMany = await call(c.token, "POST", "/account/export/students", { studentIds: Array.from({ length: 26 }, () => randomUUID()) });

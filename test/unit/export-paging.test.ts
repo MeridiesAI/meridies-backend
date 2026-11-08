@@ -1,6 +1,7 @@
 // lib/pagedRead.ts: every export table read is paged in a stable order, so
-// PostgREST's max_rows (1,000) can't silently cut a table short, up to a
-// per-table cap; `truncated` is reported only when the cap is really hit.
+// PostgREST's max_rows can't silently cut a table short (whatever it is set
+// to: paging ends only on an empty page), up to a per-table cap; `truncated`
+// is reported only when the cap is really hit.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ORDER_KEYS, PAGE_SIZE, ReadStopped, TABLE_ROW_CAP, orderKeysFor, readPaged } from "../../src/lib/pagedRead.js";
@@ -21,12 +22,12 @@ test("pages are 1,000 rows and the cap is 5,000 per table", () => {
   assert.equal(TABLE_ROW_CAP, 5000);
 });
 
-test("1,200 rows all come back, in two pages", async () => {
+test("1,200 rows all come back; paging ends on an empty page", async () => {
   const t = table(1200);
   const r = await readPaged(t.fetchPage);
   assert.equal(r.rows.length, 1200);
   assert.equal(r.truncated, false);
-  assert.deepEqual(t.calls, [[0, 999], [1000, 1999]]);
+  assert.deepEqual(t.calls, [[0, 999], [1000, 1999], [1200, 2199]]);
   assert.deepEqual(r.rows.map((x) => (x as { id: number }).id), Array.from({ length: 1200 }, (_, i) => i));
 });
 
@@ -42,7 +43,7 @@ test("exactly the cap is not truncated (a one-row probe says so)", async () => {
   const r = await readPaged(t.fetchPage);
   assert.equal(r.rows.length, 5000);
   assert.equal(r.truncated, false);
-  assert.deepEqual(t.calls.at(-1), [5000, 5000]);
+  assert.deepEqual(t.calls, [[0, 999], [1000, 1999], [2000, 2999], [3000, 3999], [4000, 4999], [5000, 5000]]);
 });
 
 test("past the cap: the first 5,000 rows and truncated", async () => {
@@ -58,6 +59,37 @@ test("a smaller cap and page size are honoured", async () => {
   assert.equal(r.rows.length, 20);
   assert.equal(r.truncated, true);
   assert.deepEqual(t.calls, [[0, 9], [10, 19], [20, 20]]);
+});
+
+test("a server that answers fewer rows than asked (max_rows 500) still gives every row", async () => {
+  const t = table(1200, 500);
+  const r = await readPaged(t.fetchPage);
+  assert.equal(r.rows.length, 1200);
+  assert.equal(r.truncated, false);
+  assert.deepEqual(t.calls, [[0, 999], [500, 1499], [1000, 1999], [1200, 2199]]);
+  assert.deepEqual(r.rows.map((x) => (x as { id: number }).id), Array.from({ length: 1200 }, (_, i) => i));
+});
+
+test("max_rows 100: 5,001 rows give the first 5,000 and truncated", async () => {
+  const t = table(5001, 100);
+  const r = await readPaged(t.fetchPage);
+  assert.equal(r.rows.length, 5000);
+  assert.equal(new Set(r.rows.map((x) => (x as { id: number }).id)).size, 5000);
+  assert.equal(r.truncated, true);
+  assert.equal(t.calls.length, 51);
+  assert.deepEqual(t.calls.at(-1), [5000, 5000]);
+});
+
+test("exact boundaries: 1,000 and 2,000 rows end on an empty page, not truncated", async () => {
+  const a = table(1000);
+  const ra = await readPaged(a.fetchPage);
+  assert.equal(ra.rows.length, 1000);
+  assert.equal(ra.truncated, false);
+  assert.deepEqual(a.calls, [[0, 999], [1000, 1999]]);
+  const b = table(2000);
+  const rb = await readPaged(b.fetchPage);
+  assert.equal(rb.rows.length, 2000);
+  assert.deepEqual(b.calls, [[0, 999], [1000, 1999], [2000, 2999]]);
 });
 
 test("an error is returned with what was read, not thrown", async () => {
