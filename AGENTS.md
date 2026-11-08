@@ -161,6 +161,7 @@ src/
 │   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out
 │   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)
 │   ├── pay.ts             # /pay/:token   public: an invoice's pay link, opens Stripe Checkout
+│   ├── agreements.ts      # /agreements (counselor) + /agree/:token (public): typed-name acceptance, OFF unless AGREEMENTS_ENABLED=true
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
@@ -517,6 +518,30 @@ forget it.
   `stripeReady`); otherwise status says `configured: false`, the other routes
   and the pay page answer 503, and the tracker is what it was. Not in
   `REQUIRED_SCHEMA`.
+- **Agreements: typed-name acceptance, NOT a certified e-signature, switched OFF** (`20261111000010`;
+  `routes/agreements.ts`, `lib/agreements.ts`, `lib/agreementConsent.ts`). A counselor who may bill a Contact Pipeline
+  contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;
+  `GET /agreements?contactId=`, `GET /agreements/:id` with its acceptance, `POST /agreements/:id/void` for draft|sent).
+  `POST /agreements/:id/send` mints a link on the caller's own client (`issue_agreement_link`, SECURITY DEFINER, checks
+  `crm_can_bill` for auth.uid(); 32 random bytes, sha256 in `agreement_tokens`, service role only, 30 days) and emails
+  the card's parent (else student) address, 400 `contact_no_email` without one; the delivery record keeps no link.
+  `GET /agree/:token` (public; CSP with no script, no-store, noindex, no-referrer) shows the text and a name field and a
+  consent box, and **changes nothing**; `POST` takes exactly `signerName` + `consent=yes` and `accept_agreement`
+  (service role only) records it in one transaction: one `agreement_acceptances` row (unique per agreement; typed name,
+  UTC time, IP, user agent, the body's sha256, the consent version, and a plain-text certificate ending "Typed-name
+  acceptance; not a certified electronic signature."), the agreement `accepted`, an `audit_log` row, and the contact
+  moved to its workspace's "Contract signed" stage when that stage is ahead of it (open contacts only). A second submit
+  shows "already accepted" (409), never a second row; expired and void links 410, unknown 404. Both parties get a copy
+  (certificate + text). Limits: 30 a minute per address, 60 views and 10 accept tries an hour per link. **Immutable:**
+  the body hash is computed by a trigger, title and body are fixed once sent, nothing changes once accepted or void, and
+  an acceptance has no update/delete grant for anyone (service_role included) plus a trigger refusing update, delete and
+  truncate even as postgres; an accepted agreement RESTRICTs deleting its contact. Text only (no PDF; `storage_path`
+  stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
+  unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
+  'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open
+  decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
+  the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
+  `test/integration/agreements.test.mjs` (CI runs the API with the switch on).
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a
@@ -3498,6 +3523,7 @@ npm run dev               # http://localhost:4000
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
 | `IMPORTS_ROLLOUT` / `IMPORTS_PILOT` | The Import page: `off`, `pilot` (default; only the practices in `IMPORTS_PILOT`, firm or solo counselor ids, comma-separated) or `all`. Ready to apply is never gated |
 | `IMPORTS_AI` | `on` (default) or `off`: the AI column mapping's kill switch |
+| `AGREEMENTS_ENABLED` | `true` turns on agreements (`/agreements`, `/agree/:token`); default off, every route 404 `agreements_off`. Keep off in production until the consent wording in `lib/agreementConsent.ts` is reviewed |
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
