@@ -76,6 +76,20 @@ as $$
 declare
   v_client boolean := coalesce(current_setting('role', true), 'none') in ('authenticated', 'anon');
 begin
+  if tg_op = 'INSERT' and current_setting('meridies.axis_restore', true) = 'on' then
+    -- AxIS Restore (20261108000003) puts back a row its trash kept when the contact was deleted, as it was: a sent
+    -- agreement stays sent with its times, so its link works again. Never an accepted one: a signed agreement can't
+    -- be deleted (its acceptance RESTRICTs), so no trash row can honestly hold one, and a restore must not be able
+    -- to forge that state. The hash is recomputed and the workspace re-read, as on any insert.
+    if new.status not in ('draft', 'sent', 'void') or new.accepted_at is not null then
+      raise exception 'An accepted agreement can''t be restored' using errcode = '42501';
+    end if;
+    select c.firm_id into new.firm_id from public.pipeline_contacts c where c.id = new.contact_id;
+    new.body_sha256 := encode(sha256(convert_to(new.body_text, 'UTF8')), 'hex');
+    new.storage_path := null;
+    return new;
+  end if;
+
   if tg_op = 'INSERT' then
     new.status := 'draft';
     new.sent_at := null;
@@ -356,3 +370,26 @@ $$;
 
 revoke all on function public.accept_agreement(text, text, text, inet, text, text, text, timestamptz, text) from public, anon, authenticated;
 grant execute on function public.accept_agreement(text, text, text, inet, text, text, text, timestamptz, text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- AxIS trash (20261108000003): a deleted contact's agreements are kept
+-- ---------------------------------------------------------------------------
+-- An AxIS delete of a contact keeps every row it reaches by cascade, so Restore can put them back. `agreements`
+-- cascades from `pipeline_contacts` (captured) and `agreement_tokens` from `agreements`, so both are captured, with
+-- the "parent" rule: they come back only with a contact the restorer may have back. `agreement_acceptances` is not:
+-- its key RESTRICTs, so a contact with a signed agreement can't be deleted at all (DELETE /pipeline/contacts answers
+-- 409 agreement_on_file) and an acceptance never reaches the trash. During a restore `agreements_guard` keeps the
+-- row as it was but refuses an accepted one (above). Skipped when the trash migration isn't in.
+do $$
+begin
+  if to_regclass('private.axis_trash_rules') is not null
+     and to_regprocedure('private.attach_axis_trash(regclass, text[], boolean)') is not null then
+    insert into private.axis_trash_rules (table_name, rule, columns, student_col) values
+      ('agreements', 'parent', '{contact_id}', null),
+      ('agreement_tokens', 'parent', '{agreement_id}', null)
+    on conflict (table_name) do update set rule = excluded.rule, columns = excluded.columns, student_col = excluded.student_col;
+    perform private.attach_axis_trash('public.agreements');
+    perform private.attach_axis_trash('public.agreement_tokens');
+  end if;
+end;
+$$;

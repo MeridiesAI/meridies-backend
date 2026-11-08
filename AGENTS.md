@@ -544,7 +544,11 @@ forget it.
   `current_user` (always the owner inside it): a client can only void a draft or sent agreement, never accept one.
   `DELETE /pipeline/contacts/:id` answers 409 `agreement_on_file` for a contact with a signed agreement, and
   `DELETE /account` 409 `signed_agreements_kept` when the account wrote one or created its contact ("ask Meridies to
-  close the account"); a draft, sent or void agreement goes with its contact. Text only (no PDF; `storage_path`
+  close the account"); a draft, sent or void agreement goes with its contact. **AxIS trash:** `agreements` and
+  `agreement_tokens` are captured (rule `parent`), so an AxIS-deleted contact's unsigned agreements and their links
+  come back on Restore exactly as they were (the guard keeps a restored row's status and times, recomputes the hash and
+  refuses an accepted one); `agreement_acceptances` is not captured because its RESTRICT means it never reaches the
+  trash. Text only (no PDF; `storage_path`
   stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
   unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
   'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open

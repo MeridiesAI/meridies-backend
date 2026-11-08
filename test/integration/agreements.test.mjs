@@ -13,7 +13,7 @@
 // service role, even postgres); the body can't change once sent; both copies
 // are emailed with the certificate; audit_log; the contact moves to "Contract
 // signed"; the public routes' limits trip.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { API, SB, call, check, rest, sql, user } from "./harness.mjs";
 
 const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -277,6 +277,50 @@ const ep = await pub("POST", `/agree/${expToken}`, { body: "signerName=Pat+Agree
 check("and can't be accepted", ep.status === 410 && await sql(`select count(*) from public.agreement_acceptances where agreement_id='${E}'`) === "0" && await sql(`select status from public.agreements where id='${E}'`) === "sent");
 const resent = await call(S.token, "POST", `/agreements/${E}/send`);
 check("sending again mints a fresh link", resent.status === 200 && await sql(`select count(*) from public.agreement_tokens where agreement_id='${E}' and expires_at > now()`) === "1");
+
+// ---- AxIS trash: a deleted contact's unsigned agreements are kept and come back as they were ----------------
+// (20261108000003: every row a covered delete reaches by cascade must be captured, axis-trash-db.test.mjs.)
+{
+  const tStage = (await call(S.token, "GET", "/pipeline")).body.stages[0];
+  const tEmail = `ag-trash-parent-${tag}@families.test`;
+  const tc = (await call(S.token, "POST", "/pipeline/contacts", { stageId: tStage.id, studentName: `Trash Family ${tag}`, parentEmail: tEmail })).body;
+  const sentTitle = `Trash sent ${tag}`;
+  const tSent = (await call(S.token, "POST", "/agreements", { contactId: tc.id, title: sentTitle, bodyText: "kept when sent" })).body.id;
+  await call(S.token, "POST", `/agreements/${tSent}/send`);
+  const tToken = await linkFor(tEmail, sentTitle);
+  const tVoid = (await call(S.token, "POST", "/agreements", { contactId: tc.id, title: `Trash void ${tag}`, bodyText: "kept when void" })).body.id;
+  await call(S.token, "POST", `/agreements/${tVoid}/void`);
+  const tDraft = (await call(S.token, "POST", "/agreements", { contactId: tc.id, title: `Trash draft ${tag}`, bodyText: "kept as draft" })).body.id;
+  const snap = (id) => sql(`select row_to_json(a)::text from (select id, status, title, body_text, body_sha256, consent_version, firm_id, counselor_id, created_at, sent_at, accepted_at, voided_at from public.agreements where id='${id}') a`);
+  const before = [await snap(tSent), await snap(tVoid), await snap(tDraft)];
+  const tokensBefore = await sql(`select string_agg(token_hash || '@' || expires_at, ',' order by token_hash) from public.agreement_tokens where agreement_id='${tSent}'`);
+
+  const action = randomUUID();
+  const gone = await rest(S.token, "DELETE", `/rest/v1/pipeline_contacts?id=eq.${tc.id}`, undefined, { "x-meridies-axis-action": action, Prefer: "return=representation" });
+  check("an AxIS-marked delete of the contact goes through", gone.status === 200 && (await sql(`select count(*) from public.agreements where contact_id='${tc.id}'`)) === "0", JSON.stringify(gone.body));
+  const kept = await sql(`select coalesce(string_agg(table_name, ',' order by table_name), '') from (select distinct table_name from private.axis_trash where action_id='${action}' and table_name like 'agreement%') x`);
+  check("the agreements and their link are kept in the trash", kept === "agreement_tokens,agreements", kept);
+  check("the link stops working while deleted", (await pub("GET", `/agree/${tToken}`, { from: ip() })).status === 404);
+
+  const back = await rest(S.token, "POST", "/rest/v1/rpc/axis_trash_restore", { p_action: action });
+  check("Restore puts them back", back.status === 200 && back.body?.ok === true, JSON.stringify(back.body));
+  const after = [await snap(tSent), await snap(tVoid), await snap(tDraft)];
+  check("each agreement comes back exactly as it was (status, text, hash, times)", JSON.stringify(after) === JSON.stringify(before), `${after.join(" | ")}`);
+  check("its link comes back with the same hash and expiry", (await sql(`select string_agg(token_hash || '@' || expires_at, ',' order by token_hash) from public.agreement_tokens where agreement_id='${tSent}'`)) === tokensBefore);
+  check("and opens the sent agreement again", (await pub("GET", `/agree/${tToken}`, { from: ip() })).status === 200);
+  check("no acceptance appears", (await sql(`select count(*) from public.agreement_acceptances where agreement_id in ('${tSent}','${tVoid}','${tDraft}')`)) === "0");
+
+  // A restore can't forge a signed state: a trash row claiming "accepted" is refused and nothing is written.
+  const forgedId = randomUUID();
+  const forgedAction = randomUUID();
+  const forgedRow = JSON.parse(await snap(tDraft));
+  Object.assign(forgedRow, { id: forgedId, status: "accepted", accepted_at: new Date().toISOString(), contact_id: tc.id, body_sha256: "0".repeat(64), storage_path: null });
+  await sql(`insert into private.axis_trash (action_id, table_name, row_pk, row_data, kind, deleted_by)
+             values ('${forgedAction}', 'agreements', '{"id":"${forgedId}"}', '${JSON.stringify(forgedRow).replace(/'/g, "''")}'::jsonb, 'delete', '${S.id}')`);
+  const forged = await rest(S.token, "POST", "/rest/v1/rpc/axis_trash_restore", { p_action: forgedAction });
+  check("a restore can't put back an accepted agreement", forged.body?.ok !== true && (await sql(`select count(*) from public.agreements where id='${forgedId}'`)) === "0", JSON.stringify(forged.body));
+  await sql(`delete from private.axis_trash where action_id='${forgedAction}'`);
+}
 
 // ---- Deleting what holds a signed agreement ------------------------------------------------------------
 const delContact = await call(S.token, "DELETE", `/pipeline/contacts/${contact.id}`);
