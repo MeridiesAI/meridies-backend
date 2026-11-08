@@ -17,16 +17,21 @@
  *
  * The essay guardrail: no op here carries essay or supplement prose. Essay ops
  * set the record (title, prompt, school, status, word limit, due date, link),
- * never its text. The sheets' free-text answers, which go into the student's
- * application as written (an activity's description and UC organization
- * description, an honor's UC eligibility and "how you earned it"), are left
- * out too: only names, categories, grades, hours and levels.
+ * never its text. The sheets' free-text answers go into the student's
+ * application as written, so AxIS never writes them. One exception: an
+ * activity's `description` may be filed, but only as an exact copy of the
+ * counselor's own message or the student's resume or activity list, checked in
+ * code before the card is filed (lib/axis/drafts). The UC organization
+ * description, the UC activity description and an honor's UC write-ups stay out.
+ *
+ * Adding or changing an activity always asks first: the activity draft files
+ * one card per draft (application.add_activities), with a row per activity.
  *
  * Catalog ids come from colleges.find; a student's files from files.list_documents.
  */
 import { z } from "zod";
 import { GRADES, RECOGNITION, TIMINGS, UC_CATEGORIES, UC_LEVELS } from "../../../studentApplication.js";
-import { op, type OpGroup, type OpHelpers } from "../types.js";
+import { op, type CardRow, type OpGroup, type OpHelpers } from "../types.js";
 import { asArray, asRecord, changeLines, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
 import { docName } from "./files.js";
 
@@ -792,9 +797,11 @@ export const applicationEssays: OpGroup = {
 
 // ==== Activities and Awards & Honors sheets ========================================
 
-const activityFields = {
+export const activityFields = {
   organization: z.string().max(300).nullable(),
   position: z.string().max(300).nullable(),
+  // Only ever an exact copy of the counselor's message or the student's resume (lib/axis/drafts/provenance.ts).
+  description: z.string().max(2000).nullable(),
   category: trimmed(100).nullable(),
   grade_levels: z.array(z.enum(GRADES)).max(5),
   timing: z.array(z.enum(TIMINGS)).max(1),
@@ -827,6 +834,10 @@ const ACTIVITY_LABELS = {
   sort_order: "Order",
 };
 
+/** The Common App's limit for an activity description; the card notes a longer one. */
+export const COMMON_APP_DESCRIPTION_MAX = 150;
+const OVER_LIMIT = "Over the Common App's 150-character limit.";
+
 const HONOR_LABELS = {
   name: "Honor",
   grade_levels: "Grades",
@@ -840,6 +851,7 @@ const activityBody = (i: Partial<Record<keyof typeof activityFields, unknown>>) 
   defined({
     organization: i.organization,
     position: i.position,
+    description: i.description,
     category: i.category,
     grade_levels: i.grade_levels,
     timing: i.timing,
@@ -863,6 +875,107 @@ const honorBody = (i: Partial<Record<keyof typeof honorFields, unknown>>) =>
 /** Card lines for a sheet row: an emptied list reads "cleared", not blank. */
 const sheetLines = (i: Record<string, unknown>, labels: Record<string, string>) =>
   changeLines(Object.fromEntries(Object.entries(i).map(([k, v]) => [k, Array.isArray(v) && v.length === 0 ? null : v])), labels);
+
+/** An activity card's lines: the sheet's fields, then the description whole (a card never shows a cut one). */
+const activityLines = (i: Record<string, unknown>) => {
+  const { description, ...rest } = i;
+  const lines = sheetLines(rest, ACTIVITY_LABELS);
+  if ("description" in i) {
+    lines.push(
+      description === null
+        ? "Description: cleared"
+        : `Description: "${String(description)}"${String(description).length > COMMON_APP_DESCRIPTION_MAX ? ` ${OVER_LIMIT}` : ""}`
+    );
+  }
+  return lines;
+};
+
+/** A draft row's key on a batch card. */
+const ROW_KEY = z.string().regex(/^r([1-9]|10)$/);
+/** How the model names a draft row it is filling in (lib/axis/drafts). */
+const draftRow = { draft_row: ROW_KEY.optional() };
+
+/** One row of application.add_activities: the activity, its key, and where each value came from. */
+const batchRow = z
+  .object({
+    key: ROW_KEY,
+    organization: z.string().max(300).nullable().optional(),
+    position: z.string().max(300).nullable().optional(),
+    category: trimmed(100).nullable().optional(),
+    grade_levels: z.array(z.enum(GRADES)).max(5).optional(),
+    timing: z.array(z.enum(TIMINGS)).max(1).optional(),
+    hours_per_week: z.number().min(0).max(168).nullable().optional(),
+    weeks_per_year: z.number().int().min(0).max(52).nullable().optional(),
+    continuing: z.boolean().nullable().optional(),
+    uc_category: z.enum(UC_CATEGORIES).nullable().optional(),
+    description: z.string().max(2000).nullable().optional(),
+    sources: z.record(z.string().max(80)).optional(),
+    read_as: z.record(z.string().max(120)).optional(),
+  })
+  .strict();
+export type BatchRow = z.infer<typeof batchRow>;
+
+/** The fields a card row reports as not given when blank. */
+const WANTED: [keyof BatchRow, string][] = [
+  ["organization", "organization"], ["position", "position"], ["category", "category"], ["grade_levels", "grades"],
+  ["timing", "timing"], ["hours_per_week", "hours per week"], ["weeks_per_year", "weeks per year"], ["continuing", "continuing"],
+];
+const blank = (v: unknown) => v === undefined || v === null || (Array.isArray(v) && v.length === 0) || v === "";
+const withRead = (r: BatchRow, field: string, text: string) => {
+  const raw = r.read_as?.[field];
+  return raw && raw !== text ? `${text} (from '${raw}')` : text;
+};
+
+/**
+ * One line per activity on a batch card: its values, how a converted value was read, what wasn't given, where the
+ * values came from, and the description whole. e.g.
+ * `Code Club · Cofounder/Teacher · grades 11 · timing break (from 'summer') · 6 h/wk · 2 wk/yr · not given: category · sources: your message`
+ */
+export function activityRowLine(r: BatchRow): string {
+  const parts: string[] = [];
+  if (!blank(r.organization)) parts.push(plainText(r.organization, 300));
+  if (!blank(r.position)) parts.push(plainText(r.position, 300));
+  if (!blank(r.category)) parts.push(withRead(r, "category", `category ${r.category}`));
+  if (!blank(r.grade_levels)) parts.push(withRead(r, "grade_levels", `grades ${r.grade_levels!.join(", ")}`));
+  if (!blank(r.timing)) parts.push(withRead(r, "timing", `timing ${r.timing![0]}`));
+  if (!blank(r.hours_per_week)) parts.push(withRead(r, "hours_per_week", `${r.hours_per_week} h/wk`));
+  if (!blank(r.weeks_per_year)) parts.push(withRead(r, "weeks_per_year", `${r.weeks_per_year} wk/yr`));
+  if (!blank(r.continuing)) parts.push(withRead(r, "continuing", r.continuing ? "continuing" : "not continuing"));
+  if (!blank(r.uc_category)) parts.push(withRead(r, "uc_category", `UC ${r.uc_category}`));
+  const missing = WANTED.filter(([k]) => blank(r[k])).map(([, label]) => label);
+  if (missing.length) parts.push(`not given: ${missing.join(", ")}`);
+  const sources = [...new Set(Object.entries(r.sources ?? {}).filter(([k]) => k !== "description").map(([, v]) => v))];
+  if (sources.length) parts.push(`sources: ${sources.join(", ")}`);
+  let line = parts.join(" · ");
+  if (!blank(r.description)) {
+    const d = String(r.description);
+    line += ` · description (${r.sources?.description ?? "your message"}): "${d}"${d.length > COMMON_APP_DESCRIPTION_MAX ? ` ${OVER_LIMIT}` : ""}`;
+  }
+  return line;
+}
+
+/** A batch card's row view for the app: values without the description's text. */
+function cardRow(r: BatchRow): CardRow {
+  const fields: CardRow["fields"] = {};
+  for (const k of ["organization", "position", "category", "grade_levels", "timing", "hours_per_week", "weeks_per_year", "continuing", "uc_category"] as const) {
+    if (!blank(r[k])) fields[k] = r[k] as CardRow["fields"][string];
+  }
+  const d = blank(r.description) ? null : String(r.description);
+  return {
+    key: r.key,
+    label: plainText(r.organization ?? r.position ?? "New activity", 80),
+    fields,
+    sources: r.sources ?? {},
+    readAs: r.read_as ?? {},
+    missing: WANTED.filter(([k]) => blank(r[k])).map(([, label]) => label),
+    description: d ? { chars: d.length, source: r.sources?.description ?? "your message", overLimit: d.length > COMMON_APP_DESCRIPTION_MAX } : null,
+  };
+}
+
+const batchFields = (r: BatchRow) => {
+  const { key: _k, sources: _s, read_as: _r, ...fields } = r;
+  return activityBody(fields);
+};
 
 const optional = <T extends Record<string, z.ZodTypeAny>>(fields: T) =>
   Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.optional()])) as { [K in keyof T]: z.ZodOptional<T[K]> };
@@ -901,14 +1014,14 @@ export const applicationSheets: OpGroup = {
     op({
       name: "application.add_activity",
       kind: "write",
-      risk: "auto",
-      title: "Add a row to a student's Activities sheet (no descriptions: those are the student's own words).",
-      doc: "{ student_id, organization? ≤300, position? ≤300, category? ≤100, grade_levels? [9|10|11|12|PG], timing? [school|break|year] (one), hours_per_week? 0-168, weeks_per_year? 0-52, continuing? bool, uc_category?: coursework-other|educational-prep|extracurricular|volunteer|work, sort_order? 0-999 }",
-      input: z.object({ student_id: uuid, ...optional(activityFields) }).strict(),
+      risk: "confirm",
+      title: "Add an activity to a student's Activities sheet. Call it with any detail the counselor gives, even partial, in their words.",
+      doc: "{ student_id, draft_row? r1-r10, organization? ≤300, position? ≤300, category? ≤100, grade_levels? [9|10|11|12|PG], timing? [school|break|year], hours_per_week? 0-168, weeks_per_year? 0-52, continuing? bool, uc_category?: coursework-other|educational-prep|extracurricular|volunteer|work, description? exact copy }",
+      input: z.object({ student_id: uuid, ...draftRow, ...optional(activityFields) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/application/activities", body: { studentId: i.student_id, ...activityBody(i) } }),
       describe: (i, h) => `Add activity ${i.organization ? `"${plainText(i.organization, 80)}"` : "a row"} to ${h.studentName(i.student_id)}'s Activities sheet`,
-      details: (i) => sheetLines(i, ACTIVITY_LABELS),
+      details: (i) => activityLines(i),
       undo: (i, body) => {
         const id = idOf(body);
         return id ? { op: "application.delete_activity", input: { student_id: i.student_id, activity_id: id } } : null;
@@ -933,17 +1046,20 @@ export const applicationSheets: OpGroup = {
     op({
       name: "application.update_activity",
       kind: "write",
-      risk: "auto",
-      title: "Change a row on a student's Activities sheet.",
-      doc: "{ student_id, activity_id, any add_activity field } (null clears; grade_levels/timing [] clear)",
-      input: z.object({ student_id: uuid, activity_id: uuid, ...optional(activityFields) }).strict(),
+      risk: "confirm",
+      title: "Change a row on a student's Activities sheet (same rules as add_activity).",
+      doc: "{ student_id, activity_id, draft_row? r1-r10, any add_activity field } (null clears; grade_levels/timing [] clear)",
+      input: z.object({ student_id: uuid, activity_id: uuid, ...draftRow, ...optional(activityFields) }).strict(),
       takesStudent: true,
       request: (i) => ({ method: "PATCH", url: `/application/activities/${seg(i.activity_id)}`, body: activityBody(i) }),
       describe: async (i, h) => {
         const a = await findActivity(h, i.student_id, i.activity_id);
         return `Update ${activityLabel(a)}${a ? ` on ${h.studentName(i.student_id)}'s Activities sheet` : ""}`;
       },
-      details: (i) => sheetLines(i, ACTIVITY_LABELS),
+      details: (i) => {
+        const { student_id: _s, activity_id: _a, draft_row: _d, ...fields } = i;
+        return activityLines(fields);
+      },
       snapshot: (i, h) => findActivity(h, i.student_id, i.activity_id),
       undo: (i, _body, before) => {
         const b = asRecord(before);
@@ -951,6 +1067,7 @@ export const applicationSheets: OpGroup = {
         const prev: Record<string, unknown> = { student_id: i.student_id, activity_id: i.activity_id };
         if ("organization" in i) prev.organization = textOrNull(b.organization);
         if ("position" in i) prev.position = textOrNull(b.position);
+        if ("description" in i) prev.description = textOrNull(b.description);
         if ("category" in i) prev.category = textOrNull(b.category);
         if ("grade_levels" in i) {
           const grades = enumArray(GRADES, b.gradeLevels);
@@ -1016,6 +1133,49 @@ export const applicationSheets: OpGroup = {
         return `Delete ${activityLabel(a)}${a ? ` from ${h.studentName(i.student_id)}'s Activities sheet` : ""}`;
       },
       warning: "The row is deleted, with the description the student wrote for it.",
+    }),
+    op({
+      name: "application.add_activities",
+      kind: "write",
+      risk: "confirm",
+      title: "Several activities on one card, filed by AxIS from an activity draft. To add an activity, use add_activity.",
+      doc: "{ student_id, rows: [{ key r1-r10, add_activity's fields… }] (1-10) }",
+      input: z.object({ student_id: uuid, rows: z.array(batchRow).min(1).max(10) }).strict(),
+      takesStudent: true,
+      request: (i) => ({ method: "POST", url: "/application/activities/batch", body: { studentId: i.student_id, rows: i.rows.map(batchFields) } }),
+      describe: (i, h) =>
+        i.rows.length === 1
+          ? `Add activity ${i.rows[0]!.organization ? `"${plainText(i.rows[0]!.organization, 80)}"` : "a row"} to ${h.studentName(i.student_id)}'s Activities sheet`
+          : `Add ${i.rows.length} activities to ${h.studentName(i.student_id)}'s Activities sheet`,
+      details: (i) => i.rows.map(activityRowLine),
+      rows: (i) => i.rows.map(cardRow),
+      select: (i, keys) => ({ ...i, rows: i.rows.filter((r) => keys.includes(r.key)) }),
+      confirmRows: (i, body) =>
+        i.rows.map((r, n) => {
+          const res = asArray(asRecord(body).results)[n];
+          return res?.ok === true && typeof res.id === "string"
+            ? { key: r.key, ok: true, id: res.id }
+            : { key: r.key, ok: false, message: typeof res?.message === "string" ? res.message : "That row wasn't saved." };
+        }),
+      undo: (i, body) => {
+        const ids = asArray(asRecord(body).results).filter((r) => r.ok === true && typeof r.id === "string").map((r) => r.id as string);
+        return ids.length ? { op: "application.delete_activities", input: { student_id: i.student_id, activity_ids: ids, only_unedited: true } } : null;
+      },
+    }),
+    op({
+      name: "application.delete_activities",
+      kind: "write",
+      risk: "confirm",
+      title: "Delete several rows from a student's Activities sheet.",
+      doc: "{ student_id, activity_ids [≤10], only_unedited? bool (keep rows changed since they were added) }",
+      input: z.object({ student_id: uuid, activity_ids: z.array(uuid).min(1).max(10), only_unedited: z.boolean().optional() }).strict(),
+      takesStudent: true,
+      request: (i) => ({
+        method: "DELETE",
+        url: `/application/activities${qs({ studentId: i.student_id, ids: i.activity_ids.join(","), ...(i.only_unedited ? { onlyUnedited: "true" } : {}) })}`,
+      }),
+      describe: (i, h) => `Delete ${i.activity_ids.length} rows from ${h.studentName(i.student_id)}'s Activities sheet`,
+      warning: "The rows are deleted, with any descriptions the student wrote for them.",
     }),
     op({
       name: "application.delete_honor",

@@ -53,7 +53,7 @@ function sample(t: ZodTypeAny, key = ""): unknown {
       if (checks.some((c) => c.kind === "time")) return "09:30:00";
       const re = checks.find((c) => c.kind === "regex")?.regex;
       if (re) {
-        for (const cand of ["2026-11-01", "09:30", "2026-11-01T15:00:00Z", "2026-27", "2026-2027", "2026-11", "#12402e", "2027", "NY", "+15555550123", "https://example.com/page", "someone@example.com", "AB", "ab", "a", "1", "abc", "x-y"]) if (re.test(cand)) return cand;
+        for (const cand of ["r1", "2026-11-01", "09:30", "2026-11-01T15:00:00Z", "2026-27", "2026-2027", "2026-11", "#12402e", "2027", "NY", "+15555550123", "https://example.com/page", "someone@example.com", "AB", "ab", "a", "1", "abc", "x-y"]) if (re.test(cand)) return cand;
       }
       const min = checks.find((c) => c.kind === "min")?.value ?? 1;
       const max = checks.find((c) => c.kind === "max")?.value ?? 40;

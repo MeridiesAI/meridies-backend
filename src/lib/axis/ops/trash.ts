@@ -33,6 +33,7 @@ export const TRASH_COVERED: ReadonlySet<string> = new Set([
   "college_list.remove",
   "essays.delete",
   "application.delete_activity",
+  "application.delete_activities",
   "application.delete_honor",
   "aid.delete_award_letter",
   "aid.delete_award_item",

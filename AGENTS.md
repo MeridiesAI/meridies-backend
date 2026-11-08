@@ -2254,6 +2254,21 @@ anyone copying it.
 - **Never in the catalog:** student-only routes, anything that runs a model,
   binary uploads, OAuth, imports, account export/deletion, catalog-editor
   routes, and essay prose.
+- **Activities always ask first** (activity drafts, spec
+  `docs/superpowers/specs/2026-10-30-axis-activity-drafts-design.md`). `add_activity`
+  and `update_activity` are Confirm-tier. Adds in a conversation's draft are
+  filed as one `application.add_activities` card with a row per activity
+  (`POST /application/activities/batch`). Confirm takes `rows: ["r1", …]` to
+  keep only the ticked rows, and answers each row's new id. Its Undo
+  (`application.delete_activities` with `only_unedited`) keeps rows edited since
+  they were saved and names them. A card whose values came from a chat file or a
+  student document carries `reason: "outside-content"`, so Confirm all skips it.
+- **The one description exception.** An activity's `description` may be filed
+  only as an exact copy of the counselor's own message, or of the student's
+  `resume` / `activity-list` document that `documentAiDecision` allows. This is
+  checked in code before the card is filed (`lib/axis/drafts/provenance.ts`), and
+  `proseRefusal` still runs on it. AxIS-written descriptions, UC descriptions and
+  honors' UC write-ups stay out.
 
 **Deletes are kept 30 days and restorable** (`20261108000003`, `lib/axis/ops/trash.ts`, AxIS security PR B).
 A Confirm-tier delete on `TRASH_COVERED` (31 ops; `axis-trash.test.ts` fails on a DELETE op that is in neither

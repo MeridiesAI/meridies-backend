@@ -25,7 +25,7 @@ import { wrapUntrusted } from "../../context/pack.js";
 import { essayShaped, narrativeWords } from "../../proseGuard.js";
 import { assertAllowedCall, counselorMessage, dispatch, failureMessage, isTransient } from "./dispatch.js";
 import { getOp, headingOf, riskOf } from "./registry.js";
-import type { OpCall, OpDef, OpHelpers, UndoStep } from "./types.js";
+import type { CardRow, OpCall, OpDef, OpHelpers, RowOutcome, UndoStep } from "./types.js";
 import { freeBlocks } from "../../context/freeText.js";
 
 export const MAX_WRITES_PER_TURN = 20;
@@ -172,6 +172,8 @@ export type OperationPayload = {
   message?: string | null;
   /** A confirmed delete kept in the trash: until when its Undo (Restore) works. */
   restoreUntil?: string | null;
+  /** A card with rows (several activities): one entry per row, for the app's checkboxes. */
+  rows?: CardRow[];
 };
 
 /** A confirmed delete whose rows are in the trash (lib/axis/ops/trash.ts): its Undo is a Restore. */
@@ -373,8 +375,14 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
   return { content: content || "Nothing found.", fresh: !!content, freeBlocks: blocks };
 }
 
+/**
+ * How a caller (the activity draft) shapes a write: `outside` marks a card whose values came from someone else's
+ * words (a file, a student document) as outside content, so Confirm all skips it; `onFiled` gets the card's id.
+ */
+export type WriteOptions = { outside?: boolean; onFiled?: (id: string) => void };
+
 /** `perform_action`: run it now, or file it for the counselor's Confirm. */
-export async function runWrite(ctx: OpContext, name: string, raw: unknown): Promise<OpOutput> {
+export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts: WriteOptions = {}): Promise<OpOutput> {
   const def = getOp(name);
   if (!def || def.kind !== "write") return { content: `There is no action called ${name}. Use an action name from the catalog.`, isError: true, fresh: false };
   if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
@@ -416,12 +424,18 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
     risk = "confirm";
     reason = "many-changes";
   }
+  // A card that always asks (an activity) still says why it is flagged when its values came from outside.
+  if (risk === "confirm" && reason === null && opts.outside) reason = "outside-content";
   ctx.turn.writes++;
   if (risk === "auto") ctx.turn.autoWrites++;
 
   const warning = risk === "confirm" ? (def.warning ?? null) : null;
-  const summaryOutside = ctx.turn.tainted || ctx.turn.sawOutside || (describedFromRead && typeof described === "string" && described.trim() !== "");
-  const stored = fitPayload({ op: def.name, area: headingOf(def.name), summary, details, warning, reason, outside: summaryOutside, input });
+  const summaryOutside =
+    ctx.turn.tainted || ctx.turn.sawOutside || opts.outside === true || (describedFromRead && typeof described === "string" && described.trim() !== "");
+  const rowView = def.rows ? safelySync(() => def.rows!(input)) : null;
+  const stored = fitPayload({
+    op: def.name, area: headingOf(def.name), summary, details, warning, reason, outside: summaryOutside, input, ...(rowView ? { rows: rowView } : {}),
+  });
   if (!stored) return notRun("that change is too large for AxIS to file or record. Nothing was changed; tell the counselor to make it in the app.");
   // A card the counselor confirms must show all of it (a message's whole body): never a trimmed one.
   if (risk === "confirm" && stored.details !== details) {
@@ -429,6 +443,7 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   }
   const show = (status: OperationStatus, undoable: boolean, message: string | null = null): OperationPayload => ({
     op: stored.op, area: stored.area, summary, details: stored.details, warning, reason, status, undoable, message,
+    ...(stored.rows ? { rows: stored.rows } : {}),
   });
 
   if (risk === "confirm") {
@@ -442,6 +457,7 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
         fresh: false,
       };
     }
+    opts.onFiled?.(rec.id);
     if (!ctx.signal.aborted) ctx.onOperation({ id: rec.id, type: "operation", studentId, payload: show("pending", false) });
     const why = reason === "outside-content" ? " (it would normally run at once, but this turn read outside content)" : reason === "many-changes" ? " (many changes in one message)" : "";
     return {
@@ -471,8 +487,8 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
 // ---- The counselor's click ---------------------------------------------------------
 
 export type DecisionResult =
-  | { status: "confirmed"; result: { ok: true; summary: string; undoable: boolean; undo?: UndoStep; trash?: true; restoreUntil?: string } }
-  | { status: "failed"; result: { ok: false; message: string } };
+  | { status: "confirmed"; result: { ok: true; summary: string; undoable: boolean; undo?: UndoStep; trash?: true; restoreUntil?: string; rows?: RowOutcome[] } }
+  | { status: "failed"; result: { ok: false; message: string; rows?: RowOutcome[] } };
 
 /** A failure the counselor may simply retry: the route releases its claim and answers with this. */
 export class TransientOperationError extends HttpError {
@@ -486,7 +502,11 @@ export class TransientOperationError extends HttpError {
  * operation must still exist, its stored input must still validate, and the
  * counselor must still be able to edit the student.
  */
-export async function confirmOperation(request: FastifyRequest, row: { id?: string; student_id: string | null; payload: unknown }): Promise<DecisionResult> {
+export async function confirmOperation(
+  request: FastifyRequest,
+  row: { id?: string; student_id: string | null; payload: unknown },
+  opts: { keep?: string[] } = {}
+): Promise<DecisionResult> {
   const p = (row.payload ?? {}) as Partial<StoredPayload>;
   const def = typeof p.op === "string" ? getOp(p.op) : undefined;
   if (!def || def.kind !== "write") return { status: "failed", result: { ok: false, message: "AxIS can no longer do that. Ask again." } };
@@ -495,7 +515,13 @@ export async function confirmOperation(request: FastifyRequest, row: { id?: stri
   if (trashed && !(await trashReady(request.db))) throw new HttpError(503, TRASH_MISSING, "axis_trash_unavailable");
   const parsed = def.input.safeParse(p.input ?? {});
   if (!parsed.success) return { status: "failed", result: { ok: false, message: "That proposal no longer fits. Ask AxIS again." } };
-  const input = parsed.data as Record<string, unknown>;
+  let input = parsed.data as Record<string, unknown>;
+  // A card with rows: only the rows the counselor kept run, and the result must still be a valid input.
+  if (opts.keep && def.select) {
+    const kept = def.input.safeParse(safelySync(() => def.select!(input, opts.keep!)));
+    if (!kept.success) return { status: "failed", result: { ok: false, message: "None of the chosen rows are on this card." } };
+    input = kept.data as Record<string, unknown>;
+  }
   try {
     await studentFor({ request }, def, input, "edit");
   } catch (err) {
@@ -520,12 +546,20 @@ export async function confirmOperation(request: FastifyRequest, row: { id?: stri
   if (trashed) {
     return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: true, trash: true, restoreUntil: restoreUntil(new Date()) } };
   }
+  const rows = def.confirmRows ? (safelySync(() => def.confirmRows!(input, res.body)) ?? []) : null;
+  // Every row refused: nothing happened, so the card failed (with each row's reason).
+  if (rows && rows.length && rows.every((r) => !r.ok)) {
+    return { status: "failed", result: { ok: false, message: rows[0]!.message ?? "None of the rows could be saved.", rows } };
+  }
   const undo = reversalOf(def, input, res.body, before);
-  return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}) } };
+  return {
+    status: "confirmed",
+    result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}), ...(rows ? { rows } : {}) },
+  };
 }
 
-/** Runs the reversal stored on an executed or confirmed row. Throws an HttpError the route passes on. */
-export async function undoOperation(request: FastifyRequest, row: { result: unknown }): Promise<void> {
+/** Runs the reversal stored on an executed or confirmed row and answers the route's body. Throws an HttpError the route passes on. */
+export async function undoOperation(request: FastifyRequest, row: { result: unknown }): Promise<unknown> {
   const step = undoStepOf(row.result);
   if (!step) throw new HttpError(409, "That change can't be undone from here.");
   const def = getOp(step.op)!;
@@ -534,6 +568,7 @@ export async function undoOperation(request: FastifyRequest, row: { result: unkn
   if (isTransient(res.status)) throw new TransientOperationError(failureMessage(res));
   // 401 would read as "signed out" in the app; the token just authenticated, so it is a refusal like any other.
   if (res.status >= 400) throw new HttpError(res.status === 404 || res.status === 401 ? 409 : res.status, `Couldn't undo: ${failureMessage(res)}`);
+  return res.body;
 }
 
 // ---- What AxIS remembers between turns ----------------------------------------------------
