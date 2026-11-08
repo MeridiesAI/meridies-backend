@@ -6,6 +6,9 @@
  *                                           a counselor: their profile, roster and
  *                                           practice work)
  *   GET    /account/students/:id/export     one student's record, for their counselor
+ *   POST   /account/export/students         up to 25 of the counselor's students at once: each one's
+ *                                           JSON and a CSV per table (no file bytes; documents listed)
+ *   POST   /account/export/drive            a roster summary as one Google Sheet in the caller's Drive
  *   DELETE /account                         delete the caller's own account
  *
  * Exports read through the caller's RLS-bound client, so each one contains
@@ -17,10 +20,25 @@
 import { forgetUser } from "../lib/aiBudget.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, conflict, fromPostgrest, unavailable } from "../lib/errors.js";
-import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { badRequest, conflict, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
+import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { forgetAxisTrash } from "../lib/axisTrash.js";
-import { limit } from "../lib/limits.js";
+import { consumeUnits, limit } from "../lib/limits.js";
+import { sheetClient, sheetTitle } from "../lib/driveExport.js";
+import {
+  BATCH_EXPORT_UNITS_PER_HOUR,
+  EXPORT_BATCH_MAX,
+  ExportBudget,
+  FILES_NOT_INCLUDED_NOTE,
+  MAX_SUMMARY_STUDENTS,
+  SUMMARY_COUNTS,
+  assembleStudent,
+  exportCost,
+  rosterSummaryCsv,
+  splitByCaseload,
+  type BatchStudent,
+  type SummaryRow,
+} from "../lib/studentExport.js";
 import { serviceClient } from "../lib/supabase.js";
 
 type Row = Record<string, unknown>;
@@ -60,6 +78,50 @@ async function exportStudent(request: FastifyRequest, studentId: string) {
   });
   return { profile: profile.data, records, notIncluded: skipped };
 }
+
+/**
+ * Which of `ids` the caller may see: `caseloadStudentIds` (roster with archived, shared students, and the
+ * caller), or, past its 250-id cap, the same rule asked about these ids only. RLS applies on top either way.
+ */
+async function visibleAmong(request: FastifyRequest, ids: string[]): Promise<string[]> {
+  const caseload = await caseloadStudentIds(request);
+  if (caseload) return caseload;
+  const me = request.auth.userId;
+  const [own, shared] = await Promise.all([
+    request.db.from("profiles").select("id").eq("counselor_id", me).in("id", ids),
+    request.db.from("student_collaborators").select("student_id").eq("counselor_id", me).in("student_id", ids),
+  ]);
+  if (own.error) throw fromPostgrest(own.error);
+  if (shared.error) throw fromPostgrest(shared.error);
+  return [
+    ...((own.data ?? []) as Array<{ id: string }>).map((r) => r.id),
+    ...((shared.data ?? []) as Array<{ student_id: string }>).map((r) => r.student_id),
+  ];
+}
+
+/** Runs `fn` over `items`, at most `width` at a time, results in input order. */
+async function mapLimited<T, R>(items: T[], width: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+  return out;
+}
+
+const studentIdsSchema = z.array(z.string().uuid()).min(1).max(EXPORT_BATCH_MAX);
+const batchBody = z.object({ studentIds: studentIdsSchema }).strict();
+const driveBody = z.union([
+  z.object({ studentIds: studentIdsSchema }).strict(),
+  z.object({ scope: z.literal("roster-summary") }).strict(),
+]);
+
+const tooLarge = () =>
+  new HttpError(413, "That batch is too large to export at once. Export fewer students at a time.", "export_too_large");
 
 export default async function accountRoutes(app: FastifyInstance) {
   app.get("/export", { preHandler: [app.authenticate, limit("account:export", 10, 3600)], config: { allowPending: true } }, async (request, reply) => {
@@ -113,6 +175,104 @@ export default async function accountRoutes(app: FastifyInstance) {
       const sid = await resolveStudentId(request, id, "view");
       reply.header("Content-Disposition", `attachment; filename="meridies-student-${sid}.json"`);
       return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, sid)) };
+    }
+  );
+
+  /**
+   * Up to 25 students in one request, for a counselor taking their roster with them. Each id on the caller's
+   * caseload gets the per-student export's JSON plus a CSV per table with rows (formula-guarded, lib/csv.ts) and
+   * its documents listed by name; file bytes are never included. Any other id, someone else's student or a uuid
+   * that doesn't exist, is `{ id, status: "not_found" }` and is never read. Cost-based limit: one unit per
+   * distinct id from 200 an hour (`account:export-batch`), charged before anything is read and never from the
+   * per-student export's bucket. Not open to a pending counselor (the per-student export isn't either).
+   */
+  app.post("/export/students", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request) => {
+    const { studentIds } = batchBody.parse(request.body);
+    const me = request.auth.userId;
+    const within = await consumeUnits(`account:export-batch:${me}`, exportCost(studentIds), BATCH_EXPORT_UNITS_PER_HOUR, 3600, request.log);
+    if (!within) {
+      throw new HttpError(429, `You can export up to ${BATCH_EXPORT_UNITS_PER_HOUR} students an hour. Try again later.`, "export_rate_limited");
+    }
+    const { allowed, notFound } = splitByCaseload(studentIds, await visibleAmong(request, studentIds), me);
+    const exportedAt = new Date().toISOString();
+    const budget = new ExportBudget();
+    const done = new Map<string, BatchStudent>();
+    // One student at a time, so a batch never holds more than the cap plus one record.
+    for (const id of allowed) {
+      // Like the per-student export, a shared student's profile row may be null (profiles RLS lets only the
+      // primary counselor read it); their records still come through the caller's RLS.
+      const exported = await exportStudent(request, id);
+      const student = assembleStudent(id, exported as Parameters<typeof assembleStudent>[1], exportedAt);
+      if (!budget.take(student.rows, student.bytes)) throw tooLarge();
+      done.set(id, student);
+    }
+    const asked = new Set([...allowed, ...notFound]); // every id, lowercased, once
+    return {
+      exportedAt,
+      kind: "student-batch",
+      filesIncluded: false,
+      filesNote: FILES_NOT_INCLUDED_NOTE,
+      students: studentIds
+        .map((raw) => raw.toLowerCase())
+        .filter((id) => asked.delete(id))
+        .map((id): BatchStudent => done.get(id) ?? { id, status: "not_found" }),
+    };
+  });
+
+  /**
+   * A roster summary (name, email, grad year, status, counts) as one Google Sheet in the caller's own Drive,
+   * under the drive.file scope they already granted. `{ studentIds }` (caseload ids only; others are skipped)
+   * or `{ scope: "roster-summary" }` (the whole caseload, up to 250). 409 drive_not_granted, 502 drive_failed.
+   * The CSV and tokens are never logged or returned.
+   */
+  app.post(
+    "/export/drive",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("account:export-drive", 10, 3600)] },
+    async (request) => {
+      const body = driveBody.parse(request.body);
+      const me = request.auth.userId;
+      let ids: string[];
+      if ("studentIds" in body) {
+        ids = splitByCaseload(body.studentIds, await visibleAmong(request, body.studentIds), me).allowed;
+      } else {
+        const caseload = await caseloadStudentIds(request);
+        if (!caseload) throw tooLarge();
+        ids = caseload.filter((id) => id !== me);
+      }
+      if (ids.length > MAX_SUMMARY_STUDENTS) throw tooLarge();
+
+      let rows: SummaryRow[] = [];
+      if (ids.length) {
+        const { data, error } = await request.db
+          .from("profiles")
+          .select("id, full_name, email, grad_year, archived_at")
+          .in("id", ids)
+          .eq("role", "student");
+        if (error) throw fromPostgrest(error);
+        const people = (data ?? []) as Array<{ id: string; full_name: string | null; email: string | null; grad_year: string | number | null; archived_at: string | null }>;
+        people.sort((a, b) => (a.full_name ?? "").localeCompare(b.full_name ?? ""));
+        rows = await mapLimited(people, 4, async (p) => {
+          const counts = await Promise.all(
+            SUMMARY_COUNTS.map(async ([, table]) => {
+              const r = await request.db.from(table).select("id", { count: "exact", head: true }).eq("student_id", p.id);
+              if (r.error) throw fromPostgrest(r.error);
+              return r.count ?? 0;
+            })
+          );
+          const byKey = Object.fromEntries(SUMMARY_COUNTS.map(([key], i) => [key, counts[i]!])) as Record<(typeof SUMMARY_COUNTS)[number][0], number>;
+          return {
+            name: p.full_name,
+            email: p.email,
+            gradYear: p.grad_year === null ? null : String(p.grad_year),
+            status: p.archived_at ? "archived" : "active",
+            ...byKey,
+          } satisfies SummaryRow;
+        });
+      }
+
+      const title = sheetTitle();
+      const { webViewLink } = await sheetClient().createSheet(me, { title, csv: rosterSummaryCsv(rows) }, request.log);
+      return { webViewLink, title, rows: rows.length };
     }
   );
 

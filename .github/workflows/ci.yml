@@ -136,6 +136,8 @@ jobs:
           RESEARCH_FAKE: fixture
           # Translation test double (no model call): "[es] text" out, "[xx] text" read as language xx in; refuses to boot in production.
           TRANSLATE_FAKE: fixture
+          # Google Sheets export double (no call to Google; account-export.test.mjs); refuses to boot in production.
+          DRIVE_EXPORT_FAKE: fixture
           # The Import page for every test counselor, with presets only (no model calls).
           IMPORTS_ROLLOUT: all
           IMPORTS_AI: "off"
@@ -151,6 +153,8 @@ jobs:
       - name: Persona suite
         env:
           API_URL: http://127.0.0.1:4100
+          # account-export.test.mjs checks no exported text or token reached the API's log.
+          API_LOG: api.log
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
         run: npm run test:integration
 
