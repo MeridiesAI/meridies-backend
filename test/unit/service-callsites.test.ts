@@ -103,6 +103,10 @@ const REVIEWED = [
   // caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request value) after
   // asking isCounselorApproved; writes one notification (no essay text) and reads that counselor's settings and email.
   "lib/essayNotice.ts",
+  // routes/reports.ts: approve-send, inside an approved counselor's own request (authenticate + requireRole), after
+  // resolveStudentId(edit) and their own RLS client claimed the report and wrote the message rows; the service role
+  // writes only the audit_log row naming the caller and that report (no student data).
+  "routes/reports.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
