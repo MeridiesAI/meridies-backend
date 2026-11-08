@@ -19,6 +19,7 @@ import accessReviewRoutes from "./routes/accessReview.js";
 import kpiUnsubscribeRoutes from "./routes/kpiUnsubscribe.js";
 import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
+import guardianRoutes from "./routes/guardians.js";
 import chatRoutes from "./routes/chat.js";
 import axisRoutes from "./routes/axis.js";
 import collegeRoutes from "./routes/colleges.js";
@@ -185,6 +186,7 @@ export function buildApp() {
   app.register(taskRoutes, { prefix: "/tasks" });
   app.register(fileRoutes, { prefix: "/files" });
   app.register(blastRoutes, { prefix: "/blasts" });
+  app.register(guardianRoutes, { prefix: "/guardians" });
   app.register(firmRoutes, { prefix: "/firms" });
   app.register(opportunityRoutes, { prefix: "/opportunities" });
   app.register(preferenceRoutes, { prefix: "/preference-cards" });
