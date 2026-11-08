@@ -38,6 +38,30 @@ plan. Where this plan differs, it is because main changed after the design (list
   so the provenance check reads it first through the existing `extractChatFiles` (Task 2). Image and scan
   transcripts are model-written, so they never count as a source (spec 4.5's reason still holds).
 
+## Plan review (Elvin, 11/8)
+
+Approved with these changes. They are written into the tasks named below, and this block wins if anything else in
+the plan disagrees.
+
+1. **A Confirm that lands mid-correction:** `dismissCards` returns the number of cards it actually dismissed. If a
+   draft's pending card was confirmed meanwhile, no replacement is filed. Instead the cards are synced (the rows are
+   now saved) and the correction becomes an `update_activity` card. *(Tasks 5 and 7.)*
+2. **Concurrent saves:** `saveDraft` saves only if the conversation's `updated_at` still equals what `loadDraft`
+   read. Otherwise it reloads, merges this turn's changes and retries once; a second conflict reports `saveFailed`.
+   *(Task 5.)*
+3. **Bare numbers:** they trace only from counselor messages sent since the draft opened, and only numbers no unit
+   claimed ("grade 10" is a grade). After AxIS asked for fields, the reply's bare numbers trace only those fields.
+   *(Tasks 1, 2 and 8.)*
+4. **Free-text phrases:** a value must cover at least half of the content words of the phrase it sits in, not
+   merely be a whole-word substring of it. *(Task 2.)*
+5. **Server-only column:** `ai_conversations.draft_rows` loses client insert and update; only the server writes it,
+   through the service client. *(Task 5.)*
+6. **Batch Undo:** it skips rows edited since they were saved and reports them by name. *(Tasks 3 and 4.)*
+7. **The eval key:** GitHub never shows a secret's value, so nobody can check that `ANTHROPIC_API_KEY` isn't the
+   production key. The workflow therefore switches to `AXIS_EVAL_ANTHROPIC_API_KEY`, a key Elvin creates in a
+   spend-limited workspace (**my call**: a dedicated name makes the separation checkable). If Elvin confirms the
+   current secret is already such a key, the old name stays. *(Task 9; Elvin's steps under "After the last task".)*
+
 ## Global Constraints
 
 - Counselor-facing copy, exactly:
@@ -76,6 +100,8 @@ plan. Where this plan differs, it is because main changed after the design (list
   flag the card (`reason: "outside-content"`); messages and notes don't.
 - Logs: one `axis turn` line per turn holding `path`, `intent`, `draft`, outcome codes (field names only), `calls`, `maxCalls` and
   `conversationId`. Never message text, values, student names or student ids.
+- `ai_conversations.draft_rows` is written only by the server (the service client, keyed on id and owner). Clients may
+  read it but never insert or update it.
 - Evals use made-up fixture students only. Never real data. Claude never touches production; Elvin applies the
   migration from plain Terminal on main (dry-run first) before the backend PR merges.
 
@@ -114,7 +140,8 @@ plan. Where this plan differs, it is because main changed after the design (list
     `uc_category` gives a `UcCategory`. `category` gives one exact `ACTIVITY_TYPES` label.
   - `type Mentions = { grades: Grade[]; timing: Timing[]; hours: number[]; weeks: number[]; continuing: boolean[]; uc: UcCategory[]; category: string[] }`
   - `mentionsIn(text: string, opts?: { bare?: boolean }): Mentions`. Every value the table below reads in free text.
-    With `bare`, unitless numbers 9–12 also count as grades and 0–168 as hours or weeks (provenance only).
+    With `bare`, unitless numbers 9–12 also count as grades and 0–168 as hours or weeks (provenance only). A
+    number a unit already claimed ("grade 10", "6hr") is never bare.
   - `hasActivityValue(text: string): boolean`. Any unit-bearing mention (for the sorter; `bare` off).
   - `ACTIVITY_TYPES` and `type ActivityType` from `studentApplication.ts`.
 
@@ -160,6 +187,7 @@ test("numbers without a unit are not activity values, unless bare is asked for",
   assert.equal(hasActivityValue("is her 1450 good for UCLA?"), false);
   assert.equal(hasActivityValue("what are her grades?"), false);
   assert.deepEqual(mentionsIn("6", { bare: true }).hours, [6]);
+  assert.deepEqual(mentionsIn("grade 10", { bare: true }).hours, [], "a number a unit claimed is never bare");
 });
 ```
 
@@ -195,10 +223,23 @@ test("numbers without a unit are not activity values, unless bare is asked for",
     - If any of the chat's attachments has `extract_kind` null, it awaits `extractChatFiles(request, conversationId)`
       first (it claims files, so the after-turn reader then finds nothing to do).
     - `hasTranscriptsOnly()` answers whether the chat has files whose only text is a transcript.
-  - `traceValue(set: SourceSet, field: ActivityField, value: unknown): Promise<Trace | null>`. Free text (organization,
-    position) matches through `freeTextKey` as a whole-word substring. Structured values must appear in
-    `mentionsIn(source.text, { bare: source.kind === "message" })`; for grades, every grade must be mentioned in one
-    source. Order is messages, notes, files, documents, and the first match wins. Messages give label `your message`.
+  - `type TraceContext = { openedMsg?: string; asked?: { fields: ActivityField[]; afterMsg: string } }`. Message ids
+    come from the draft header (Task 5). `SourceSet` keeps the user messages in `created_at` order with their ids.
+  - `traceValue(set: SourceSet, field: ActivityField, value: unknown, tc: TraceContext = {}): Promise<Trace | null>`.
+    Order is messages, notes, files, documents, and the first match wins. Messages give label `your message`.
+    - **Free text** (organization, position), from Plan review item 4:
+      - Split each source into phrases on newlines and `, ; | · . ! ? : ( )`, and on `/` or `-` only when spaces
+        surround them (so "Cofounder/Teacher" stays one phrase).
+      - A phrase's content words are its `freeTextKey` words minus `STOPWORDS` (`lib/axis/text.ts`) and the
+        instruction words add, put, please, change, update, set, make, list, sheet, row, activity, activities, his, her,
+        their, it.
+      - The value passes when its `freeTextKey` is a whole-word run inside one phrase and its word count is at least
+        half of that phrase's content-word count. A value that itself contains a delimiter is checked against the run
+        of phrases it covers.
+    - **Structured values** must appear in `mentionsIn(source.text, { bare })`, and for grades every grade must be
+      mentioned in one source. `bare` holds only for messages at or after `tc.openedMsg`, from Plan review item 3. With
+      no `openedMsg`, only the newest message counts. For a message after `tc.asked.afterMsg`, its bare numbers trace
+      only `tc.asked.fields`.
   - `traceDescription(set: SourceSet, value: string): Promise<Trace | null>`. An exact substring of a typed message, or
     of a `resume` / `activity-list` document's text with every whitespace run collapsed to one space on both sides.
     Labels are `your message`, `resume` or `activity list`. Files and other kinds never count.
@@ -216,9 +257,17 @@ test("a typed name passes whatever its case and punctuation; a made-up one doesn
   assert.equal(await traceValue(set, "position", "Host, library workshop"), null);
 });
 test("accented names pass when typed", async () => { /* "Club de Fútbol" typed, "club de futbol" value -> null; "Club de Fútbol" -> your message */ });
-test("structured values trace through the normalizers, bare numbers only in messages", ...);
-//   message "Grade 11 Summer / 6hr week" -> grades ["11"], timing ["break"], hours 6 trace; hours 8 -> null;
-//   message "6" (an answer) -> hours 6 traces; a document containing "6" alone does not
+test("a fragment of a longer name doesn't trace; a name inside an instruction does", async () => {
+  // "add code kidds adventure, cofounder/teacher": "Adventure" -> null; "Code Kidds Adventure" -> your message
+  // "add Code Club to his activities sheet": "Code Club" -> your message
+});
+test("structured values trace through the normalizers", ...);
+//   message "Grade 11 Summer / 6hr week" -> grades ["11"], timing ["break"], hours 6 trace; hours 8 -> null
+test("bare numbers trace only from messages since the draft opened, and only the fields asked for", async () => {
+  // "she was in grade 10" (before openedMsg) then the draft opens: hours 10 -> null
+  // after asked { fields: ["hours_per_week"], afterMsg }: reply "6" traces hours 6, not weeks 6
+  // a document containing "6" alone never traces
+});
 test("a value only in a document is labelled with the document and marked outside", ...);
 test("a document the AI may not read is never a source", ...);           // available_to_llm false -> null
 test("a meeting note is a source and isn't outside", ...);               // label "meeting notes (Oct 12)", outside false
@@ -252,8 +301,10 @@ test("descriptions: exact copies from a message or a resume only", async () => {
     - Each row runs in order through the same `capRows("activities")` check and insert the collection uses, so a row
       past the 30-row cap fails alone.
     - Answers 200 `{ results: ({ ok: true; id: string } | { ok: false; message: string })[] }` in request order.
-  - `DELETE /application/activities?studentId=<uuid>&ids=<uuid>,<uuid>` (≤10 ids). It deletes only rows of that student
-    and answers 200 `{ deleted: number }`.
+  - `DELETE /application/activities?studentId=<uuid>&ids=<uuid>,<uuid>[&onlyUnedited=true]` (≤10 ids). It deletes
+    only rows of that student and answers 200 `{ deleted: number, skipped: { id: string; organization: string | null }[] }`.
+    With `onlyUnedited`, a row whose `updated_at` is later than its `created_at` (edited since it was saved; the
+    `activities_set_updated_at` trigger moves it) is skipped and listed, from Plan review item 6.
 
 - [ ] **Step 1: Write the failing integration tests**
 
@@ -262,6 +313,7 @@ test("a batch saves each row and answers per row, in order", ...);            //
 test("a row past the 30-row cap fails alone; the rest still save", ...);      // 29 rows seeded, batch of 2 -> [ok, {ok:false, message:/at most 30 rows/}]
 test("a batch for a student the counselor can't edit is refused whole", ...); // 403/404, nothing written
 test("the batch delete removes only that student's rows", ...);               // another student's id in ids stays
+test("with onlyUnedited, a row edited after it was saved is kept and listed", ...); // PATCH one row, then delete both -> deleted 1, skipped [that row]
 test("a description is saved as sent", ...);
 ```
 
@@ -312,13 +364,19 @@ test("a description is saved as sent", ...);
     - `describe` is `Add activity "X" to {name}'s Activities sheet` for one row, otherwise `Add N activities to …`;
     - `details` gives one line per row from `activityRowLine(row)`;
     - `rows`, `select` and `confirmRows` map `results[i]` to `rows[i].key`;
-    - `undo` is `application.delete_activities` with the saved ids.
+    - `undo` is `application.delete_activities` with the saved ids and `only_unedited: true` (Plan review item 6).
+  - `undoOperation(request, row)` now returns the route's answer body (it returned nothing before). The undo route
+    reads `skipped`:
+    - when some rows were skipped, the card is `undone` and its `result.message` becomes `Undone, except {orgs}:
+      edited after they were saved.`, and the answer carries `skipped`;
+    - when every row was skipped, the claim is handed back and the route answers 409 `Every row was edited after it
+      was saved, so nothing was undone.`
   - `activityRowLine(row): string` (exported). Fields joined with ` · `, converted values as `timing break (from
     'summer')`, then `not given: …`, `sources: your message, Resume.pdf`, and the description whole in quotes with
     `(resume)` and the 150-character note. Example:
     `Code Club · Cofounder/Teacher · grades 11 · timing break (from 'summer') · 6 h/wk · 2 wk/yr · not given: category · sources: your message`.
-  - New op `application.delete_activities` (confirm, DELETE, `{ student_id, activity_ids ≤10 }`), added to
-    `TRASH_COVERED` (the `activities` table already has its trash rule).
+  - New op `application.delete_activities` (confirm, DELETE, `{ student_id, activity_ids ≤10, only_unedited?: boolean }`),
+    added to `TRASH_COVERED` (the `activities` table already has its trash rule).
   - `export { activityFields }` from `catalog/application.ts` (now with `description`).
 
 - [ ] **Step 1: Write the failing tests**
@@ -343,6 +401,7 @@ test("Confirm answers per row; a refused row doesn't stop the others; all refuse
 //   route answers [ok id1, {ok:false, message:"A sheet holds at most 30 rows"}] -> confirmed, rows[1].message set,
 //   undo = delete_activities [id1]; both refused -> failed with the first message
 test("Undo of a batch card deletes exactly the rows it saved", ...);
+test("Undo skips a row edited since it was saved and names it; all edited is a 409 with the claim handed back", ...);
 test("the batch op never sends draft_row, key, sources or read_as to the route", ...);
 ```
 
@@ -374,8 +433,14 @@ test("the batch op never sends draft_row, key, sources or read_as to the route",
   - Migration:
     - `alter table public.ai_conversations add column if not exists draft_rows jsonb`;
     - CHECK `draft_rows is null or (jsonb_typeof = 'array' and jsonb_array_length ≤ 10 and octet_length ≤ 32000)`;
-    - a header comment in the style of `20261108000004` (deploy order: the migration first, not in REQUIRED_SCHEMA,
-      and the column takes the table's grants).
+    - **The server alone writes `draft_rows`** (Plan review item 5), following `20261108000001_axis_file_text.sql`.
+      A column revoke can't beat a table-level grant, so `revoke insert, update on public.ai_conversations from
+      authenticated, anon` and grant them back per column on every column except `draft_rows`. Find every column from
+      the migrations, and grep each `.from("ai_conversations")` write in `src/` so nothing the API writes today loses
+      its grant. Reads keep the table's select grant.
+    - a header comment in the style of `20261108000004` (deploy order: the migration first, not in REQUIRED_SCHEMA).
+  - Test: `test/integration/axis-drafts-grants.test.mjs`. The owner's own PostgREST PATCH of `draft_rows` is refused
+    (42501), while a PATCH of `title` and `POST /chat/conversations` still work.
   - `clock.ts`:
     - `axisNow(): Date` returns real time plus an offset that is always 0 unless eval clock mode is on;
     - `advanceClock(ms: number): void` throws unless `evalClockOn()`;
@@ -386,20 +451,36 @@ test("the batch op never sends draft_row, key, sources or read_as to the route",
       follows `translateFakeRefusal`'s shape.
   - `state.ts`:
     - Types:
-      - `DraftHeader = { kind: "activity"; student_id: string; student_name: string; opened_at: string; updated_at: string; asked_at?: string; expired_at?: string; switch_to?: { student_id: string; name: string } }`
+      - `DraftHeader = { kind: "activity"; student_id: string; student_name: string; opened_at: string; updated_at: string; opened_msg?: string; asked?: { at: string; fields: ActivityField[]; after_msg: string }; expired_at?: string; switch_to?: { student_id: string; name: string } }`.
+        `opened_msg` is the id of the counselor message that opened the draft. `asked` records the fields AxIS asked
+        for, and `after_msg` is the counselor message whose answer asked them (Plan review item 3). A set `asked` means
+        "asked once".
       - `DraftRow = { key: string; op: "add" | "update"; activity_id?: string; fields: Partial<Record<ActivityField, unknown>>; sources: Partial<Record<ActivityField, { label: string; outside: boolean }>>; read_as: Partial<Record<ActivityField, string>>; status: "collecting" | "card" | "saved" | "dismissed" | "skipped" | "failed"; card_id?: string; message?: string }`
       - `DraftNote = { kind: "filed" | "replaced" | "saved" | "rejected" | "missing" | "failed" | "refused-student" | "refused-unrelated" | "cancelled" | "opened" | "expired"; key?: string; field?: string; reason?: string }`
-      - `Draft = { ready: boolean; header: DraftHeader | null; rows: DraftRow[]; notes: DraftNote[]; switchAccepted?: boolean }`
-        (`switchAccepted` lasts one turn, never saved)
+      - `Draft = { ready: boolean; version: string | null; header: DraftHeader | null; rows: DraftRow[]; notes: DraftNote[]; touched: Touched; switchAccepted?: boolean }`.
+        `version` is the conversation's `updated_at` as `loadDraft` read it. `touched` and `switchAccepted` last one
+        turn and are never saved.
+      - `Touched = { header: Set<keyof DraftHeader>; rows: Map<string, { fields: Set<ActivityField>; status: boolean; created: boolean }> }`.
+        Every write to a draft goes through `touchField`, `touchStatus` or `touchHeader`, so the merge below knows what
+        this turn changed.
     - `anyOutside(row: DraftRow): boolean`: some value's source is `outside`.
     - Constants and the schema: `DRAFT_TTL_MS = 30 * 60 * 1000`, `MAX_DRAFT_ROWS = 10`, `draftHeaderSchema`.
     - `draftsReady(db)`: a `select draft_rows limit 0` probe cached like `flagsReady`.
     - `loadDraft(request, conversationId, header: DraftHeader | undefined): Promise<Draft>`. It reads `draft_rows` only
       when there is a header. Rows that fail their schema are dropped.
-    - `saveDraft(request, conversationId, state: DialogueState, draft: Draft): Promise<boolean>`. One update of
-      `{ state: { ...state, draft: header ?? undefined }, draft_rows: rows.length ? rows : null }`.
-      - Before the column exists, it writes `state` without the draft and answers `false` when a row is still
-        `collecting`.
+    - `saveDraft(request, conversationId, state: DialogueState, draft: Draft, db = serviceClient()): Promise<boolean>`.
+      - One update of `{ state: { ...state, draft: header ?? undefined }, draft_rows: rows.length ? rows : null }`
+        through the service client, filtered on `id`, `owner_id = request.auth.userId` and `updated_at =
+        draft.version` (Plan review item 2; the `ai_conversations_set_updated_at` trigger moves `updated_at` on every
+        write).
+      - No row updated means another write came first. Then it reloads (`loadDraft`), applies `mergeDraft(fresh,
+        draft)` and retries once. A second miss answers `false`.
+      - `mergeDraft(fresh: Draft, ours: Draft): Draft` starts from `fresh` and applies only what `ours.touched` names:
+        header fields; per row, the touched fields (value, source, `read_as`) and status with `card_id`. A row this turn
+        created whose key `fresh` already uses for a different organization moves to the next free key. More than 10
+        rows answers `false`.
+      - With no service client, or before the column exists, it writes `state` without the draft through
+        `request.db` and answers `false` when a row is still `collecting`.
       - Any error also answers `false`; it never throws.
     - `syncCards(request, draft): Promise<void>`:
       - reads `axis_actions` (status, result) for the rows' `card_id`s;
@@ -410,9 +491,10 @@ test("the batch op never sends draft_row, key, sources or read_as to the route",
     - `isOpen(draft): boolean`: a row is `collecting` or `card`.
     - `isStale(draft, now): boolean`: `now - updated_at > DRAFT_TTL_MS`.
     - `closeIfDone(draft): void`: no open row means header null and rows [].
-    - `dismissCards(ctx: Pick<OpContext, "request" | "onOperation">, draft, ids: string[], message: string): Promise<void>`.
+    - `dismissCards(ctx: Pick<OpContext, "request" | "onOperation">, draft, ids: string[], message: string): Promise<number>`.
       It sets status `dismissed`, `result: { ok: false, message }`, `decided_at`, `.eq("status","pending")`, and
-      emits each card's stored payload with status `dismissed` and that message.
+      emits each card's stored payload with status `dismissed` and that message. It answers how many it actually
+      dismissed; a card the counselor confirmed or dismissed first doesn't count (Plan review item 1).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -423,7 +505,12 @@ test("a card confirmed with r1 only: r1 saved, r2 skipped", ...);
 test("a row the route refused is failed with the route's reason", ...);
 test("saving before the column exists keeps the state and reports the lost draft", ...);
 test("a failed save answers false and never throws", ...);
-test("dismissing cards touches only pending ones and tells the app", ...);
+test("two concurrent turns adding different fields lose neither", async () => {
+  // both load version v1; turn A sets hours and saves (version moves); turn B sets weeks: its save misses,
+  // reloads, merges, retries -> the saved row has hours and weeks; header fields each turn touched are kept
+});
+test("two concurrent turns that each start a new row keep both, under different keys", ...);
+test("dismissing cards touches only pending ones, tells the app, and answers how many", ...);   // one already confirmed -> 0
 test("clock mode: off without the flag; refuses production, a remote project, any non-local host; on with a local stack", () => {
   assert.equal(evalClockRefusal({}), null);
   assert.match(evalClockRefusal({ AXIS_EVAL_CLOCK: "on", NODE_ENV: "production", SUPABASE_URL: "http://127.0.0.1:54321" })!, /refusing to start/);
@@ -509,14 +596,14 @@ the description from her resume" scores `action`.
   `activityFields`, `Draft`, `dismissCards`, `MAX_DRAFT_ROWS`), `resolveStudentId`.
 - Produces:
   - `ACTIVITY_OPS: ReadonlySet<string>` holds the three activity op names.
-  - `type DraftTurn = { draft: Draft; verdict: Verdict | "none"; now: Date; sources: (studentId: string) => SourceSet; studentName: (id: string) => string; fileNow: boolean }`
+  - `type DraftTurn = { draft: Draft; verdict: Verdict | "none"; now: Date; messageId?: string; sources: (studentId: string) => SourceSet; studentName: (id: string) => string; fileNow: boolean }`
   - `draftWrite(ctx: OpContext, turn: DraftTurn, name: string, raw: unknown): Promise<OpOutput>`, in order:
     1. `verdict === "unrelated"` gives `notRun("there's an open activity draft; ask the counselor to continue it")` and
        a `refused-unrelated` note.
     2. Resolve `student_id` (default: the chat's student) with edit access. If a draft is open for another student,
        refuse with `Not done: there's an open activity draft for {a}; don't add anything for another student. The
        counselor will be asked.` It sets `header.switch_to`, adds a `refused-student` note, and merges nothing.
-    3. With no draft, open one pinned to that student (an `opened` note).
+    3. With no draft, open one pinned to that student, with `opened_msg = turn.messageId` (an `opened` note).
     4. For `add_activities` from the model, each row is handled as an add.
     5. Pick the row:
        - `draft_row` if given;
@@ -526,11 +613,12 @@ the description from her resume" scores `action`.
        - else a new row (`r{n}`). An 11th row refuses that row by name with `a draft holds 10 activities; file this
          card first`.
     6. Each field given: `normalizeField`, then the `activityFields[field]` schema (description: ≤1000, or
-       `DESCRIPTION_REFUSAL` via `traceDescription`), then `traceValue`. A failure is a `rejected` note with the field
+       `DESCRIPTION_REFUSAL` via `traceDescription`), then `traceValue` with `{ openedMsg: header.opened_msg, asked:
+       header.asked }`. A failure is a `rejected` note with the field
        and its plain reason (`IMAGE_ONLY_HINT` appended when `hasTranscriptsOnly()`), and the field isn't merged. A pass
        merges value, source and `read_as`.
-    7. A merge into a row whose card is pending sets that row back to `collecting` (the card is replaced in
-       `fileIfReady`).
+    7. A merge into a row whose card is pending keeps the row `card`, and `touched` marks its changed fields;
+       `fileIfReady` replaces the card.
     8. An update row with at least one field is filed at once as its own `application.update_activity` card through
        `runWrite(ctx, …, { outside: ctx.turn.tainted || anyOutside(row), onFiled })`.
     9. `fileIfReady(ctx, turn, turn.fileNow)`.
@@ -539,8 +627,14 @@ the description from her resume" scores `action`.
         and always `Don't say whether anything was saved, tried or needs Confirm; status lines written by the server follow your answer.`
   - `fileIfReady(ctx: OpContext, turn: DraftTurn, force: boolean): Promise<void>`. It acts when every open add row has
     an organization, and either none is missing position, grades, timing, hours or weeks, or `force` is true, or
-    `header.asked_at` was set before this turn. Then:
-    - dismiss any pending add card of the draft with `Replaced by an updated card.` (a `replaced` note);
+    `header.asked` was set before this turn. Then:
+    - when the draft has a pending add card and this turn touched one of its rows, `dismissCards(…, "Replaced by an
+      updated card.")` (a `replaced` note). If that answers 0, the counselor acted first (Plan review item 1): run
+      `syncCards`, then
+      - each touched row now `saved` gets a new update row (`op: "update"`, its `activity_id`, only the fields this
+        turn touched, their sources), filed as an `application.update_activity` card as in step 8;
+      - each touched row now `dismissed` goes back to `collecting`, because the counselor is correcting it;
+      - no add card is filed for rows that are `saved`;
     - file one `application.add_activities` card with every open add row through `runWrite(ctx, …, { outside:
       ctx.turn.tainted || rows.some(anyOutside), onFiled })`;
     - set those rows to `card` with `card_id` (a `filed` note);
@@ -579,6 +673,11 @@ test("a value the counselor never wrote is refused by name and the rest is kept"
 test("200 hours a week is refused in plain words; no raw zod reaches the model or the lines", ...);
 test("after asking once, the next draft turn files with blanks", ...);
 test("a correction while the card waits replaces it, with every row", ...);                     // old dismissed "Replaced by an updated card.", new card pending
+test("Confirm landing during a correction turn: one sheet row and one update card, no replacement", async () => {
+  // r1's card is confirmed (result rows [{ key: "r1", ok: true, id }]) after the turn loaded the draft; the turn
+  // sends "actually 8 hours": dismissCards answers 0 -> sync -> r1 saved with id -> one update_activity card
+  // { activity_id: id, hours_per_week: 8 }; no new add_activities card; the old card stays confirmed
+});
 test("two activities in one go make one card with two rows", ...);
 test("an eleventh activity is refused by name; the first ten stay", ...);                         // Review Focus 5
 test("an update of a saved row is its own card, checking only the changed fields", ...);
@@ -602,7 +701,7 @@ test("the draft block lists descriptions by length and source, never their text"
 ### Task 8: The engine runs the draft
 
 **Files:**
-- Modify: `src/lib/axis/engine.ts`, `src/lib/axis/tools.ts` (`ToolContext.draft?: DraftTurn`; `perform_action`
+- Modify: `src/routes/axis.ts` (skip `saveState` when `turn.stateSaved`), `src/lib/axis/engine.ts`, `src/lib/axis/tools.ts` (`ToolContext.draft?: DraftTurn`; `perform_action`
   hands `ACTIVITY_OPS` to `draftWrite`), `src/lib/axis/profiles.ts` ("Making changes" lines)
 - Test: `test/unit/axis-draft-engine.test.ts` (with `scriptedApi` tool calls; extend `test/unit/axis-fakes.ts` with
   `insert` and the tables below)
@@ -631,11 +730,16 @@ test("the draft block lists descriptions by length and source, never their text"
      `markShort(toolCtx.turn)`.
   5. **unrelated:** runs as today, and its final text gets `LINES.reminder(name)`. **none:** runs as today. An activity
      op opens a draft through `draftWrite`.
-  6. After `runLoop`, for `draft` turns: `fileIfReady(force = asked_at set before this turn || isFileNow(content))`. If
-     open rows still miss fields with no card, set `asked_at = now`.
+  6. After `runLoop`, for `draft` turns: `fileIfReady(force = header.asked set before this turn || isFileNow(content))`.
+     If open rows still miss fields with no card, set `header.asked = { at: now, fields: <the missing fields>, after_msg:
+     opts.messageId }`, so the reply's bare numbers trace only those fields. The `DraftTurn` gets `messageId:
+     opts.messageId`.
   7. On every path:
      - `closeIfDone`;
-     - compute the final `state` (`draft: header`) and `saveDraft` **before returning** (so before `done`);
+     - compute the final `state` (`draft: header`) and `saveDraft` **before returning** (so before `done`). When the
+       turn saved it this way (the conversation has or had a draft), `TurnResult.stateSaved = true`, and the route
+       (`src/routes/axis.ts`) skips its after-`done` `saveState`. A plain client write of `state` would otherwise undo
+       a merged header;
      - render `statusLines` (with `saveFailed` when the save answered false) and append them as one `delta`
        (`\n\n` + lines), before the citation and quote checks run on the final text.
   8. One log line per turn: `request.log.info({ axis: { path, intent, draft, outcomes, calls, maxCalls, conversationId, ms } }, "axis turn")`.
@@ -661,6 +765,7 @@ test("after 30 minutes with only a card left: no line, the card still confirmabl
 test("the panel switched to another student: the add is refused, the switch question asked, nothing filed", ...); // Review Focus 3
 test("yes to the switch drops the old draft and opens one for the new student", ...);
 test("the draft is saved before the turn returns, and a failed save says so", ...);
+test("a turn that saved the draft is marked stateSaved; a turn with no draft isn't", ...);
 test("the draft survives nextState and the state schema across turns", ...);
 test("status lines follow the model's text and come from code", ...);
 test("a college matched by a fragment isn't fetched while drafting", ...);                       // "City Library" with a "City" college in the index
@@ -685,7 +790,9 @@ test("every path logs one axis turn line with no text, values, names or student 
   `src/routes/axisEval.ts`
 - Modify: `evals/axis/run.mjs`, `evals/axis/score.mjs`, `evals/axis/README.md`, `src/index.ts` (boot refusal),
   `src/app.ts` (register `axisEval` only when `evalClockOn()`), `src/env.ts` (`AXIS_EVAL_CLOCK: blankIsUnset(z.enum(["on"]).optional())`),
-  `.github/workflows/axis-evals.yml` (API env `AXIS_EVAL_CLOCK: "on"`, `timeout-minutes: 90`)
+  `.github/workflows/axis-evals.yml` (API env `AXIS_EVAL_CLOCK: "on"`, `timeout-minutes: 90`, and both
+  `secrets.ANTHROPIC_API_KEY` uses become `secrets.AXIS_EVAL_ANTHROPIC_API_KEY`, notice text included; the API process
+  still reads it as `ANTHROPIC_API_KEY`, from Plan review item 7)
 - Test: `test/unit/axis-eval-score.test.ts`, `test/unit/axis-evals-workflow.test.ts`, `test/unit/axis-eval-clock.test.ts`
 
 **Interfaces:**
@@ -731,6 +838,7 @@ test("a case with resisted null is never a resistance drop; a gated failure stil
 test("2 of 3 passes and is marked flaky; 1 of 3 fails", ...);                 // a pure helper in run.mjs, exported for the test
 test("the clock route exists only in clock mode and needs the cron secret", ...);
 test("the workflow starts the API in clock mode and allows 90 minutes", ...); // added to axis-evals-workflow.test.ts
+test("the workflow reads only the eval key's secret, never ANTHROPIC_API_KEY's", ...); // no "secrets.ANTHROPIC_API_KEY" anywhere in the file
 ```
 
 - [ ] **Step 2: Run them.** Expected: FAIL.
@@ -755,12 +863,25 @@ test("the workflow starts the API in clock mode and allows 90 minutes", ...); //
 - [ ] `npm test` and `npm run typecheck` pass. Run the integration suite locally and paste the commands and output
   into the PR.
 - [ ] Re-check the newest migration on `origin/main`. Rename `20261111000001` if anything newer landed.
+- [ ] Split the migration into its own small PR, so it reaches `main` (and production) before the code. Nothing reads
+  the column until the main PR lands.
+- [ ] Give Elvin the eval key steps (Plan review item 7), checked against the Console docs on the day:
+  1. Open https://platform.claude.com/settings/workspaces, click **Create workspace**, name it `axis-evals`.
+  2. Open the `axis-evals` workspace, then **Spend limits**. Set $20 a month with an alert at 50%, and save.
+  3. Open https://platform.claude.com/settings/keys, create a key in `axis-evals` named `axis-eval-ci`, and copy it.
+  4. In GitHub, open meridies-backend → **Settings** → **Secrets and variables** → **Actions** → **New repository
+     secret**. Name it `AXIS_EVAL_ANTHROPIC_API_KEY`, paste the key into the Secret field, and click **Add secret**.
+  5. After the main PR merges, delete the old `ANTHROPIC_API_KEY` repository secret (only `axis-evals.yml` read
+     it). Then check in the Console which key it was; if it was the production key, rotate that key.
 - [ ] Open the backend PR. Its description includes Elvin's steps:
-  1. In plain Terminal, on `main` of meridies-backend, after `git pull`, run `supabase db push --dry-run`.
-  2. You should see only `20261111000001_axis_activity_drafts.sql` listed.
-  3. Run `supabase db push`, and answer `Y`.
-  4. Merge the PR.
-  5. Optionally run **Actions → AxIS evals → Run workflow** on main and check that the drafts suite is green.
+  1. Merge the small migration PR.
+  2. In plain Terminal, in meridies-backend on `main`, run `git pull`, then `supabase db push --linked --dry-run`.
+  3. You should see only `20261111000001_axis_activity_drafts.sql` listed. If anything else is listed, stop and paste
+     the output.
+  4. Run `supabase db push --linked`, and answer `Y`.
+  5. Merge the main PR.
+  6. Optionally, once the eval key is in, run **Actions → AxIS evals → Run workflow** on main and check that the
+     drafts suite is green.
 - [ ] Not in this plan: the app PR (bcha). It covers checkbox rows sending `rows` on Confirm, the Save & edit button
   (it confirms, then opens the sheet with `result.rows[].id` highlighted), live `dismissed` card updates with their
   `message`, and per-value source labels from `payload.rows`. Its contract is Task 4's interfaces. It gets its own
