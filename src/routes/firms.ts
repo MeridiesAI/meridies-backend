@@ -40,11 +40,7 @@ import { newInviteToken } from "../lib/invites.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { toFirm } from "../lib/serialize.js";
-
-const hexColor = z
-  .string()
-  .trim()
-  .regex(/^#[0-9A-Fa-f]{6}$/, "Use a #RRGGBB colour");
+import { accentColorSource, assertFirmBrandingEditor, firmBrandingUpdate, hexColor } from "../lib/branding.js";
 
 const brandingBody = z
   .object({
@@ -58,7 +54,7 @@ const brandingBody = z
     // interpolated into styles by the client, so a named colour or a css
     // function must never get through.
     accentColor: hexColor.nullable().optional(),
-    accentColorSource: z.enum(["default", "logo", "banner", "manual"]).optional(),
+    accentColorSource: accentColorSource.optional(),
   })
   .strict();
 
@@ -92,31 +88,12 @@ export default async function firmRoutes(app: FastifyInstance) {
       const firmId = request.profile.firm_id;
       if (!firmId) throw notFound("You're not part of a firm yet");
 
-      const { data: membership } = await request.db
-        .from("firm_members")
-        .select("seat_role")
-        .eq("firm_id", firmId)
-        .eq("profile_id", request.auth.userId)
-        .maybeSingle();
-      if (!membership || !["owner", "admin"].includes(String(membership.seat_role))) {
-        throw forbidden("Only a firm owner or admin can change branding");
-      }
+      // Shared with PUT /branding (lib/branding.ts), so the two saves can't drift.
+      await assertFirmBrandingEditor(request, firmId);
 
-      const update: Record<string, unknown> = {};
+      const update: Record<string, unknown> = firmBrandingUpdate(b, new Date().toISOString());
       if (b.name !== undefined) update.name = b.name;
       if (b.website !== undefined) update.website = b.website;
-      if (b.logoUrl !== undefined) {
-        update.logo_url = b.logoUrl;
-        update.logo_updated_at = new Date().toISOString();
-      }
-      if (b.bannerUrl !== undefined) update.banner_url = b.bannerUrl;
-      if (b.accentColor !== undefined) {
-        update.accent_color = b.accentColor;
-        // A colour arriving without a stated source was typed by a person.
-        update.accent_color_source = b.accentColorSource ?? (b.accentColor ? "manual" : "default");
-      } else if (b.accentColorSource !== undefined) {
-        update.accent_color_source = b.accentColorSource;
-      }
 
       const { data, error } = await request.db
         .from("firms")
