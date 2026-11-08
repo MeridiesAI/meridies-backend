@@ -174,22 +174,43 @@ export async function activeTypes(svc: SupabaseClient, counselorId: string): Pro
   return ((data ?? []) as Row[]).map(toMeetingType);
 }
 
-/** The counselor's scheduled Meridies meetings that could touch [from, to) once widened by the buffer. */
-export async function meetingBusy(svc: SupabaseClient, counselorId: string, from: string, to: string, bufferMinutes: number): Promise<BusyInterval[]> {
+/** The longest meeting type (minutes): a slot starting just before `to` still runs this far past it. */
+const MAX_TYPE_MINUTES = 180;
+
+/**
+ * A meeting a reschedule is moving: it never blocks its own new time, neither as a
+ * Meridies meeting (by id) nor as its own event on the counselor's calendar (the busy
+ * interval with exactly its start and end, when it has an event there).
+ */
+export type IgnoreMeeting = { id: string; startsAt: string; endsAt: string | null; onCalendar: boolean };
+
+/**
+ * The counselor's scheduled Meridies meetings that could touch a slot starting in
+ * [from, to) once widened by the buffer (a slot starting just before `to` runs up to
+ * MAX_TYPE_MINUTES past it).
+ */
+export async function meetingBusy(
+  svc: SupabaseClient,
+  counselorId: string,
+  from: string,
+  to: string,
+  bufferMinutes: number,
+  ignoreId: string | null = null
+): Promise<BusyInterval[]> {
   const pad = bufferMinutes * 60_000;
   // A meeting is at most a day long in practice; reach back a day so one that started earlier still counts.
   const lo = new Date(Date.parse(from) - pad - 24 * 3_600_000).toISOString();
-  const hi = new Date(Date.parse(to) + pad).toISOString();
+  const hi = new Date(Date.parse(to) + pad + MAX_TYPE_MINUTES * 60_000).toISOString();
   const { data, error } = await svc
     .from("meetings")
-    .select("starts_at, ends_at")
+    .select("id, starts_at, ends_at")
     .eq("counselor_id", counselorId)
     .eq("status", "scheduled")
     .gte("starts_at", lo)
     .lt("starts_at", hi)
     .limit(2000);
   if (error) throw fromPostgrest(error);
-  return ((data ?? []) as Row[]).map((m) => {
+  return ((data ?? []) as Row[]).filter((m) => !ignoreId || str(m.id) !== ignoreId).map((m) => {
     const start = Date.parse(str(m.starts_at));
     const end = m.ends_at ? Date.parse(str(m.ends_at)) : start + OPEN_ENDED_MEETING_MS;
     return { start: new Date(start).toISOString(), end: new Date(end).toISOString() };
@@ -266,6 +287,13 @@ export async function calendarBusy(
   return out;
 }
 
+/** Calendar busy time without the moving meeting's own event (the interval with exactly its times). */
+function withoutOwnEvent(busy: BusyInterval[], ignore: IgnoreMeeting): BusyInterval[] {
+  const start = Date.parse(ignore.startsAt);
+  const end = ignore.endsAt ? Date.parse(ignore.endsAt) : start + OPEN_ENDED_MEETING_MS;
+  return busy.filter((b) => !(Date.parse(b.start) === start && Date.parse(b.end) === end));
+}
+
 export type SlotsAnswer = {
   timeZone: string;
   typeId: string;
@@ -279,9 +307,10 @@ export type SlotsAnswer = {
 export async function slotsFor(
   request: FastifyRequest,
   ctx: Extract<StudentBookingContext, { ok: true }>,
-  type: MeetingTypeDto,
+  type: Pick<MeetingTypeDto, "id" | "durationMinutes">,
   window: { from: string; to: string },
-  now = new Date()
+  now = new Date(),
+  ignore: IgnoreMeeting | null = null
 ): Promise<SlotsAnswer> {
   const s = ctx.settings;
   const base = { timeZone: s.timeZone, typeId: type.id, durationMinutes: type.durationMinutes };
@@ -289,12 +318,13 @@ export async function slotsFor(
   if (!clamped) return { ...base, from: null, to: null, slots: [] };
   const calWindow = busyWindow(clamped.from, clamped.to, s.bufferMinutes, s.timeZone);
 
-  const [meetings, calendar] = await Promise.all([
-    meetingBusy(ctx.svc, ctx.counselorId, clamped.from, clamped.to, s.bufferMinutes),
+  const [meetings, rawCalendar] = await Promise.all([
+    meetingBusy(ctx.svc, ctx.counselorId, clamped.from, clamped.to, s.bufferMinutes, ignore?.id ?? null),
     // Asked for whole local days (widened by the buffer first), so requests seconds apart share listBusy's
     // 60 s cache and its rate-limit charge; computeSlots still filters by the exact window and `now`.
     calendarBusy(ctx.svc, ctx.counselorId, calWindow.from, calWindow.to, s.timeZone, request.log),
   ]);
+  const calendar = ignore?.onCalendar ? withoutOwnEvent(rawCalendar, ignore) : rawCalendar;
   const starts = computeSlots({
     timeZone: s.timeZone,
     weeklyHours: s.weeklyHours,
