@@ -14,7 +14,11 @@
  *              student's own events (`student_calendar_events`, `personal`).
  *   deadline   also each school's application deadline on the student's
  *              college list (`student_colleges.deadline`), id `college:<row>`,
- *              until a decision is in.
+ *              until a decision is in, and the counselor's internal date for
+ *              it ("Your deadline", `custom_deadline`), id `college-custom:<row>`.
+ *   milestone  also a student's planned SAT/ACT date (`student_academics`),
+ *              id `test:<student>`, pseudo-type `test`, until it is taken
+ *              (never for a test-optional student).
  *
  * Saved Events Hub events ("Professional events", kind `event`) are owned by
  * the Events Hub routes and merged by the client; the type reassignments that
@@ -25,9 +29,10 @@
  * that is by definition a grid (the Tasks view still lists it).
  */
 
+import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyRequest } from "fastify";
 import { fromPostgrest } from "./errors.js";
-import { caseloadStudentIds } from "./guards.js";
+import type { Role } from "./serialize.js";
 
 type Row = Record<string, unknown>;
 
@@ -157,28 +162,73 @@ export type FeedQuery = {
   includeCancelled: boolean;
 };
 
-export async function loadAssignments(request: FastifyRequest): Promise<TypeAssignmentDto[]> {
-  if (request.profile.role !== "counselor") return [];
-  const { data, error } = await request.db
+/** Who the feed is for, and the client it reads with. */
+export type FeedContext = {
+  /**
+   * The caller's RLS-bound client, or the service client for the public iCal
+   * feed (no user is signed in there), in which case every read below must be
+   * scoped by `ownerId` / `caseload` in the query itself.
+   */
+  db: SupabaseClient;
+  /** The caller, or the counselor whose iCal token it is. */
+  ownerId: string;
+  role: Role;
+  /**
+   * A counselor's whole calendar: every student they may view (their roster,
+   * archived included, the students shared with them, and themselves), as
+   * `private.can_view_student` decides. MANDATORY for a counselor's whole
+   * calendar: without it the builder throws rather than read unscoped. Read in
+   * batches of FEED_ID_CHUNK, so a big practice works.
+   */
+  caseload?: string[];
+};
+
+/** Ids named in one `.in()` filter (a URL), so a caseload of any size is read in batches. */
+export const FEED_ID_CHUNK = 200;
+
+/**
+ * Batch reads in flight at once for one feed build, across every
+ * student-spanning table: a 2,000-student caseload is 40 reads, and they must
+ * not all hit PostgREST together.
+ */
+export const FEED_BATCH_CONCURRENCY = 4;
+
+export function inChunks<T>(list: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+async function loadAssignmentsFor(db: SupabaseClient, ownerId: string): Promise<TypeAssignmentDto[]> {
+  const { data, error } = await db
     .from("calendar_event_type_assignments")
     .select("event_kind, event_ref, builtin_type, type_id")
-    .eq("owner_id", request.auth.userId)
+    .eq("owner_id", ownerId)
     .limit(5000);
   if (error) throw fromPostgrest(error);
   return (data ?? []).map((r) => toAssignment(r as Row));
 }
 
-export async function loadEventTypes(request: FastifyRequest): Promise<EventTypeDto[]> {
-  if (request.profile.role !== "counselor") return [];
-  const { data, error } = await request.db
+async function loadEventTypesFor(db: SupabaseClient, ownerId: string): Promise<EventTypeDto[]> {
+  const { data, error } = await db
     .from("calendar_event_types")
     .select("*")
-    .eq("owner_id", request.auth.userId)
+    .eq("owner_id", ownerId)
     .order("sort_order")
     .order("created_at")
     .limit(200);
   if (error) throw fromPostgrest(error);
   return (data ?? []).map((r) => toEventType(r as Row));
+}
+
+export async function loadAssignments(request: FastifyRequest): Promise<TypeAssignmentDto[]> {
+  if (request.profile.role !== "counselor") return [];
+  return loadAssignmentsFor(request.db, request.auth.userId);
+}
+
+export async function loadEventTypes(request: FastifyRequest): Promise<EventTypeDto[]> {
+  if (request.profile.role !== "counselor") return [];
+  return loadEventTypesFor(request.db, request.auth.userId);
 }
 
 const ROUND_NAMES: Record<string, string> = {
@@ -191,6 +241,117 @@ const ROUND_NAMES: Record<string, string> = {
   rolling: "Rolling",
   priority: "Priority",
 };
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `2027-01-05` -> `Jan 5, 2027`. */
+function longDay(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return `${MONTHS[(m ?? 1) - 1]} ${d}, ${y}`;
+}
+
+type Window = { from: string; to: string };
+const inWindow = (date: string | null, w: Window): date is string => !!date && date >= w.from && date <= w.to;
+
+const NO_EXTRAS = { attendeeIds: [] as string[], meetingStatus: null, taskId: null, school: null };
+
+/**
+ * A college list row's dates: the school's own deadline (`college:<row>`)
+ * and the counselor's internal one, "Your deadline" (`college-custom:<row>`,
+ * `student_colleges.custom_deadline`), each only when it falls inside the
+ * window and the counselor hasn't entered the same school and date by hand
+ * as a deadline. Both share the row id as `ref`, so a type reassignment of
+ * one moves both. The rows are already filtered by status (undecided only).
+ */
+export function collegeFeedItems(
+  rows: Row[],
+  w: Window,
+  handEntered: Set<string>,
+  typeOf: (kind: FeedKind, ref: string) => string
+): CalendarFeedItem[] {
+  const items: CalendarFeedItem[] = [];
+  for (const r of rows) {
+    const ref = s(r.id);
+    const name = s(r.name);
+    const student = s(r.student_id);
+    const school = ns(r.deadline);
+    const custom = ns(r.custom_deadline);
+    const done = s(r.status) === "submitted";
+    const shown = (date: string) => !handEntered.has(`${student}|${date}|${name.toLowerCase()}`);
+    const common = {
+      ...NO_EXTRAS,
+      kind: "deadline" as const,
+      ref,
+      type: typeOf("deadline", ref),
+      startsAt: null,
+      endsAt: null,
+      allDay: true,
+      studentId: student,
+      done,
+      school: name,
+    };
+    if (inWindow(school, w) && shown(school)) {
+      const round = ns(r.round);
+      items.push({
+        ...common,
+        id: `college:${ref}`,
+        title: `${name} application due`,
+        date: school,
+        detail: round ? `${ROUND_NAMES[round] ?? round} deadline` : null,
+      });
+    }
+    if (inWindow(custom, w) && shown(custom)) {
+      items.push({
+        ...common,
+        id: `college-custom:${ref}`,
+        title: `${name}: your deadline`,
+        date: custom,
+        detail: school && school !== custom ? `The school's deadline is ${longDay(school)}` : null,
+      });
+    }
+  }
+  return items;
+}
+
+const TEST_STATUS_LABEL: Record<string, string> = {
+  prepping: "Prepping",
+  scheduled: "Scheduled",
+  retaking: "Retaking",
+};
+
+/**
+ * A student's planned SAT/ACT date (`student_academics.planned_test_date`)
+ * as a `milestone` of the pseudo-type `test` (like `personal`, not a
+ * FeedKind: `calendar_event_type_assignments.event_kind` is check-constrained),
+ * id `test:<student>`. Skipped once the test is taken or the student is
+ * test-optional.
+ */
+export function testFeedItems(rows: Row[], w: Window): CalendarFeedItem[] {
+  const items: CalendarFeedItem[] = [];
+  for (const r of rows) {
+    const date = ns(r.planned_test_date);
+    const status = ns(r.test_status);
+    if (!inWindow(date, w)) continue;
+    if (status === "taken" || status === "test-optional") continue;
+    const student = s(r.student_id);
+    items.push({
+      ...NO_EXTRAS,
+      id: `test:${student}`,
+      kind: "milestone",
+      ref: student,
+      type: "test",
+      title: "Planned test date",
+      date,
+      startsAt: null,
+      endsAt: null,
+      allDay: true,
+      studentId: student,
+      detail: (status && TEST_STATUS_LABEL[status]) ?? null,
+      done: false,
+    });
+  }
+  return items;
+}
 
 /** Postgres / PostgREST answers for a table that isn't there yet. */
 export function isMissingTable(error: { code?: string } | null | undefined): boolean {
@@ -213,8 +374,8 @@ export const toPersonalEvent = (r: Row) => ({
  * A student's own events in a window (`student_calendar_events`, migration
  * 20261105000017). A database without the table answers nothing, not an error.
  */
-async function loadPersonalEvents(request: FastifyRequest, studentId: string, from: string, to: string): Promise<Row[]> {
-  const { data, error } = await request.db
+async function loadPersonalEvents(db: SupabaseClient, studentId: string, from: string, to: string): Promise<Row[]> {
+  const { data, error } = await db
     .from("student_calendar_events")
     .select("id, student_id, title, detail, on_date, starts_at, ends_at")
     .eq("student_id", studentId)
@@ -234,15 +395,25 @@ async function loadPersonalEvents(request: FastifyRequest, studentId: string, fr
 
 /**
  * Build the feed. `q.studentId` is set only after the route proved the caller
- * may view that student; a student caller is always scoped to themselves.
+ * may view that student; a student caller is always scoped to themselves. A
+ * counselor's whole calendar needs `ctx.caseload` (see FeedContext): the
+ * student-spanning reads name those students, batch by batch, and never run
+ * unscoped, because under the service role (the iCal feed) nothing else would
+ * hold them to this counselor's students.
  */
 export async function buildCalendarFeed(
-  request: FastifyRequest,
+  ctx: FeedContext,
   q: FeedQuery
 ): Promise<{ items: CalendarFeedItem[]; eventTypes: EventTypeDto[]; assignments: TypeAssignmentDto[] }> {
-  const isStudent = request.profile.role === "student";
-  const me = request.auth.userId;
+  const { db } = ctx;
+  const isStudent = ctx.role === "student";
+  const me = ctx.ownerId;
   const scopeStudent = isStudent ? me : q.studentId;
+  if (!scopeStudent && !ctx.caseload) {
+    throw new Error("A counselor's whole calendar needs their caseload");
+  }
+  // One batch per FEED_ID_CHUNK students; `undefined` = one student, already scoped.
+  const batches: Array<string[] | undefined> = scopeStudent ? [undefined] : inChunks(ctx.caseload ?? [], FEED_ID_CHUNK);
 
   // Meetings are timed; widen the instant window by a day either side so a
   // session late in the evening in `tz` is not lost to UTC, then filter by
@@ -250,21 +421,49 @@ export async function buildCalendarFeed(
   const fromInstant = `${addDays(q.from, -1)}T00:00:00Z`;
   const toInstant = `${addDays(q.to, 2)}T00:00:00Z`;
 
+  /** Each student-spanning read, once per batch, its rows concatenated. */
+  type Q = PromiseLike<{ data: unknown[] | null; error: PostgrestError | null }>;
+  // One small pool for every batch read of this build (FEED_BATCH_CONCURRENCY in flight).
+  let running = 0;
+  const waiting: Array<() => void> = [];
+  async function pooled<T>(run: () => PromiseLike<T>): Promise<T> {
+    // A finished read hands its slot straight to the next waiting one, so the count never overshoots.
+    if (running >= FEED_BATCH_CONCURRENCY) await new Promise<void>((go) => waiting.push(go));
+    else running++;
+    try {
+      return await run();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else running--;
+    }
+  }
+  async function perBatch(build: (ids: string[] | undefined) => Q): Promise<Row[]> {
+    // Each answer keeps its batch's place, so the rows come back in caseload order.
+    const answers = await Promise.all(batches.map((ids) => pooled(() => build(ids))));
+    const rows: Row[] = [];
+    for (const r of answers) {
+      if (r.error) throw fromPostgrest(r.error);
+      rows.push(...((r.data ?? []) as Row[]));
+    }
+    return rows;
+  }
+  const one = scopeStudent ?? "";
+
   // ---- deadlines ----
-  let deadlines = request.db
-    .from("deadlines")
-    .select("id, student_id, title, school, type, due_date, done, description")
-    .gte("due_date", q.from)
-    .lte("due_date", q.to);
-  if (scopeStudent) deadlines = deadlines.eq("student_id", scopeStudent);
-  if (!q.includeDone) deadlines = deadlines.eq("done", false);
+  const deadlines = (ids: string[] | undefined) => {
+    let b = db.from("deadlines").select("id, student_id, title, school, type, due_date, done, description").gte("due_date", q.from).lte("due_date", q.to);
+    b = ids ? b.in("student_id", ids) : b.eq("student_id", one);
+    if (!q.includeDone) b = b.eq("done", false);
+    return b.order("due_date").limit(3000);
+  };
 
   // ---- meetings ----
   // A student's own and the ones they are invited to arrive through RLS; a
   // counselor reads the calendar they own.
   let attendeeMeetingIds: string[] | null = null;
   if (scopeStudent) {
-    const { data, error } = await request.db
+    const { data, error } = await db
       .from("meeting_attendees")
       .select("meeting_id")
       .eq("student_id", scopeStudent)
@@ -272,7 +471,7 @@ export async function buildCalendarFeed(
     if (error) throw fromPostgrest(error);
     attendeeMeetingIds = (data ?? []).map((r) => s((r as Row).meeting_id));
   }
-  let meetings = request.db
+  let meetings = db
     .from("meetings")
     .select("id, student_id, counselor_id, title, starts_at, ends_at, status, agenda, location, mode")
     .gte("starts_at", fromInstant)
@@ -287,16 +486,19 @@ export async function buildCalendarFeed(
   if (!q.includeCancelled) meetings = meetings.neq("status", "cancelled");
 
   // ---- tasks (with their stages) ----
-  let tasks = request.db
-    .from("deliverables")
-    .select("id, student_id, title, status, due_date, instructions, deadline_id, deliverable_stages(id, name, detail, due_date, done, deadline_id, sequence)");
-  if (scopeStudent) tasks = tasks.eq("student_id", scopeStudent);
-  // RLS already hides counselor-only tasks from a student; say so here too.
-  if (isStudent) tasks = tasks.eq("visible_to_student", true);
-  if (!q.includeDone) tasks = tasks.neq("status", "complete");
+  const tasks = (ids: string[] | undefined) => {
+    let b = db
+      .from("deliverables")
+      .select("id, student_id, title, status, due_date, instructions, deadline_id, deliverable_stages(id, name, detail, due_date, done, deadline_id, sequence)");
+    b = ids ? b.in("student_id", ids) : b.eq("student_id", one);
+    // RLS already hides counselor-only tasks from a student; say so here too.
+    if (isStudent) b = b.eq("visible_to_student", true);
+    if (!q.includeDone) b = b.neq("status", "complete");
+    return b.limit(1000);
+  };
 
   // ---- practice events ----
-  let practice = request.db
+  let practice = db
     .from("calendar_events")
     .select("*")
     .gte("on_date", q.from)
@@ -307,38 +509,45 @@ export async function buildCalendarFeed(
     if (scopeStudent) practice = practice.eq("student_id", scopeStudent);
   }
 
-  // ---- college list deadlines (the school's own date, until a decision) ----
-  let colleges = request.db
-    .from("student_colleges")
-    .select("id, student_id, name, round, deadline, status")
-    .gte("deadline", q.from)
-    .lte("deadline", q.to)
-    .in("status", q.includeDone ? ["not-started", "in-progress", "submitted"] : ["not-started", "in-progress"]);
-  if (scopeStudent) colleges = colleges.eq("student_id", scopeStudent);
+  // ---- college list dates: the school's own deadline or the counselor's
+  // internal one ("Your deadline") in the window, until a decision ----
+  const colleges = (ids: string[] | undefined) => {
+    const b = db
+      .from("student_colleges")
+      .select("id, student_id, name, round, deadline, custom_deadline, status")
+      .or(`and(deadline.gte.${q.from},deadline.lte.${q.to}),and(custom_deadline.gte.${q.from},custom_deadline.lte.${q.to})`)
+      .in("status", q.includeDone ? ["not-started", "in-progress", "submitted"] : ["not-started", "in-progress"]);
+    return (ids ? b.in("student_id", ids) : b.eq("student_id", one)).order("deadline").limit(3000);
+  };
 
-  // A counselor's whole calendar: name their students, so the two reads that
-  // span students use the index instead of RLS-checking every practice's rows.
-  if (!scopeStudent) {
-    const caseload = await caseloadStudentIds(request);
-    if (caseload) {
-      deadlines = deadlines.in("student_id", caseload);
-      tasks = tasks.in("student_id", caseload);
-      colleges = colleges.in("student_id", caseload);
-    }
-  }
+  // ---- planned test dates (until taken; never for a test-optional student) ----
+  const academics = (ids: string[] | undefined) => {
+    const b = db
+      .from("student_academics")
+      .select("student_id, planned_test_date, test_status")
+      .gte("planned_test_date", q.from)
+      .lte("planned_test_date", q.to);
+    return (ids ? b.in("student_id", ids) : b.eq("student_id", one)).order("planned_test_date").limit(3000);
+  };
 
-  const [dl, mt, tk, pe, eventTypes, assignments, cl, personal] = await Promise.all([
-    deadlines.order("due_date").limit(3000),
+  const counselor = ctx.role === "counselor";
+  const [dlRows, mt, tkRows, pe, eventTypes, assignments, clRows, personal, acRows] = await Promise.all([
+    perBatch(deadlines),
     meetings.order("starts_at").limit(2000),
-    tasks.limit(1000),
+    perBatch(tasks),
     practice.order("on_date").limit(2000),
-    loadEventTypes(request),
-    loadAssignments(request),
-    colleges.order("deadline").limit(3000),
+    counselor ? loadEventTypesFor(db, me) : Promise.resolve([] as EventTypeDto[]),
+    counselor ? loadAssignmentsFor(db, me) : Promise.resolve([] as TypeAssignmentDto[]),
+    perBatch(colleges),
     // One student's own events: the student themselves, or a counselor looking at that student.
-    scopeStudent ? loadPersonalEvents(request, scopeStudent, q.from, q.to) : Promise.resolve([] as Row[]),
+    scopeStudent ? loadPersonalEvents(db, scopeStudent, q.from, q.to) : Promise.resolve([] as Row[]),
+    perBatch(academics),
   ]);
-  for (const r of [dl, mt, tk, pe, cl]) if (r.error) throw fromPostgrest(r.error);
+  for (const r of [mt, pe]) if (r.error) throw fromPostgrest(r.error);
+  const dl = { data: dlRows };
+  const tk = { data: tkRows };
+  const cl = { data: clRows };
+  const ac = { data: acRows };
 
   const moved = new Map(assignments.map((a) => [`${a.eventKind}:${a.eventRef}`, a.type]));
   const typeOf = (kind: FeedKind, ref: string) => moved.get(`${kind}:${ref}`) ?? kind;
@@ -431,29 +640,8 @@ export async function buildCalendarFeed(
   const handEntered = new Set(
     ((dl.data ?? []) as Row[]).map((r) => `${s(r.student_id)}|${s(r.due_date)}|${s(r.school).toLowerCase()}`)
   );
-  for (const r of (cl.data ?? []) as Row[]) {
-    const ref = s(r.id);
-    const name = s(r.name);
-    const date = s(r.deadline);
-    if (handEntered.has(`${s(r.student_id)}|${date}|${name.toLowerCase()}`)) continue;
-    const round = ns(r.round);
-    items.push({
-      ...base,
-      id: `college:${ref}`,
-      kind: "deadline",
-      ref,
-      type: typeOf("deadline", ref),
-      title: `${name} application due`,
-      date,
-      startsAt: null,
-      endsAt: null,
-      allDay: true,
-      studentId: s(r.student_id),
-      detail: round ? `${ROUND_NAMES[round] ?? round} deadline` : null,
-      done: s(r.status) === "submitted",
-      school: name,
-    });
-  }
+  items.push(...collegeFeedItems((cl.data ?? []) as Row[], q, handEntered, typeOf));
+  items.push(...testFeedItems((ac.data ?? []) as Row[], q));
 
   for (const r of personal) {
     const ref = s(r.id);
@@ -481,7 +669,7 @@ export async function buildCalendarFeed(
   const meetingRows = (mt.data ?? []) as Row[];
   const attendees = new Map<string, string[]>();
   if (meetingRows.length > 0) {
-    const { data, error } = await request.db
+    const { data, error } = await db
       .from("meeting_attendees")
       .select("meeting_id, student_id")
       .in(

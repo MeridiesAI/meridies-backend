@@ -36,9 +36,10 @@ import {
 } from "../lib/caseloadTransfer.js";
 import { crmError, fillTemplate, loadWorkspace, paragraphs } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail } from "../lib/email.js";
-import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 
 type Row = Record<string, unknown>;
 
@@ -187,6 +188,33 @@ export default async function managementRoutes(app: FastifyInstance) {
         const list = nest(byAssignee.get(c.id) ?? []);
         return { ...c, tasks: list, openTaskCount: list.filter((t) => !t.done).length };
       }),
+    };
+  });
+
+  /**
+   * The firm roster (migration 20261111000005, `firm_roster()`): every active student of the firm's
+   * consultants, NAMES ONLY (id, name, class year, counselor), for an owner or admin to filter Student
+   * Profiles by consultant. Opening a student still needs `can_view_student`; this widens nothing.
+   * A member, a solo counselor or a student is refused (403); 503 before the migration.
+   */
+  app.get("/firm-roster", { preHandler: [...counselor, limit("management:read", 120, 60)] }, async (request) => {
+    const { data, error } = await request.db.rpc("firm_roster");
+    if (error) {
+      if (isResultsNotApplied(error)) {
+        throw new HttpError(503, "The firm roster isn't switched on yet", "firm_roster_unavailable");
+      }
+      if (error.code === "42501") throw forbidden("Only a firm owner or admin can see the firm roster");
+      throw crmError(error);
+    }
+    const consultants = await loadConsultants(request);
+    return {
+      students: ((data ?? []) as Row[]).map((r) => ({
+        id: String(r.id),
+        name: String(r.full_name ?? ""),
+        gradYear: (r.grad_year as string | null) ?? null,
+        counselorId: String(r.counselor_id),
+      })),
+      consultants: consultants.map((c) => ({ id: c.id, name: c.name, seatRole: c.seatRole, studentCount: c.studentCount })),
     };
   });
 
