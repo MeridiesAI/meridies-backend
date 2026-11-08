@@ -144,6 +144,9 @@ jobs:
           # Time saved: heartbeats on, emails to the local mail catcher. No postal address,
           # as in production: the footer carries the contact email.
           KPI_TRACKING_ENABLED: "true"
+          # Agreements (typed-name acceptance): off in production until the consent wording is reviewed; on here so
+          # test/integration/agreements.test.mjs runs the whole flow.
+          AGREEMENTS_ENABLED: "true"
           DEV_MAIL_URL: http://127.0.0.1:54324
           # Student booking: calendar busy time from a file, not Google/Microsoft; refuses to boot in production.
           BOOKING_BUSY_FIXTURE: /tmp/booking-busy.json

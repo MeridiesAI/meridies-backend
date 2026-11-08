@@ -29,8 +29,9 @@ import { serviceClient } from "./supabase.js";
 /** What the gate logs through: a request's logger, or a job's. */
 export type BudgetLog = { warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
 
-export type SystemSubject = "events-discovery";
-export const SYSTEM_CALLS_PER_MONTH: Record<SystemSubject, number> = { "events-discovery": 2000 };
+export type SystemSubject = "events-discovery" | "catalog-proposals";
+/** catalog-proposals: one Haiku read per college run (lib/catalogProposals.ts), a few hundred schools a month at most. */
+export const SYSTEM_CALLS_PER_MONTH: Record<SystemSubject, number> = { "events-discovery": 2000, "catalog-proposals": 500 };
 
 export type BudgetSubject = { userId: string } | { system: SystemSubject };
 export type CallEstimate = { model: string; maxOutputTokens: number; promptTokens: number; webSearches?: number; module?: string };
