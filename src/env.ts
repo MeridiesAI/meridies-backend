@@ -54,6 +54,10 @@ const envSchema = z.object({
   // inbound one starting "[xx] " is read as language xx with the rest as its English. Same rules as RESEARCH_FAKE:
   // only with NODE_ENV development or test, the server refuses to start otherwise (lib/translate.ts).
   TRANSLATE_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Eval-only: AxIS's clock can be moved forward through POST /axis/eval/clock (the real-model evals' draft expiry
+  // cases). The server refuses to start with it unless NODE_ENV isn't production and SUPABASE_URL is a local stack
+  // (lib/axis/clock.ts).
+  AXIS_EVAL_CLOCK: blankIsUnset(z.enum(["on"]).optional()),
   // The model that translates a family's messages; defaults to DEEP_MODEL (lib/translate.ts). A model the
   // private.ai_prices table doesn't price is charged at the table's highest rates, so add its row first.
   TRANSLATE_MODEL: blankIsUnset(z.string().min(5).max(80).optional()),

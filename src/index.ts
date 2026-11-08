@@ -4,6 +4,7 @@ import { bookingBusyFixtureRefusal } from "./lib/booking.js";
 import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
 import { researchFakeRefusal } from "./lib/research/bootGuard.js";
 import { translateFakeRefusal } from "./lib/translate.js";
+import { evalClockRefusal } from "./lib/axis/clock.js";
 
 const app = buildApp();
 
@@ -23,6 +24,14 @@ if (translateRefusal) {
   process.exit(1);
 }
 if (env.TRANSLATE_FAKE) app.log.warn("TRANSLATE_FAKE is on: translations are canned, not a model's");
+
+// The evals' clock: only on a local stack and never in production, read raw like the doubles above.
+const clockRefusal = evalClockRefusal({ AXIS_EVAL_CLOCK: env.AXIS_EVAL_CLOCK, NODE_ENV: process.env.NODE_ENV, SUPABASE_URL: env.SUPABASE_URL });
+if (clockRefusal) {
+  app.log.error(clockRefusal);
+  process.exit(1);
+}
+if (env.AXIS_EVAL_CLOCK) app.log.warn("AXIS_EVAL_CLOCK is on: AxIS's clock can be moved forward (evals only)");
 
 // And for the booking busy-time stand-in: it would offer students slots over a counselor's real calendar.
 const busyRefusal = bookingBusyFixtureRefusal({ BOOKING_BUSY_FIXTURE: env.BOOKING_BUSY_FIXTURE, NODE_ENV: process.env.NODE_ENV });

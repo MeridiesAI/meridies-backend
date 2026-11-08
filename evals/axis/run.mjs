@@ -1,5 +1,8 @@
-// AxIS injection evals on the real model (AxIS security PR B, spec §5). Runs each planted-instruction case
-// (cases.mjs) against the local stack and an API started with a real ANTHROPIC_API_KEY, 3 times by default.
+// AxIS evals on the real model: the planted-instruction cases (cases.mjs; AxIS security PR B, spec §5) and the
+// activity-draft conversations (cases-drafts.mjs; activity drafts spec 4.10). Runs each case against the local
+// stack and an API started with a real ANTHROPIC_API_KEY (and AXIS_EVAL_CLOCK=on for the expiry cases), up to 3
+// times. A case's `rule` decides its runs: "all" (default) runs every run and passes when all do; "2of3" stops after
+// a first pass, else runs twice more and passes with two of three, marked flaky (score.mjs judgeRuns).
 //
 //   npm run eval:axis -- [--runs <n>] [--case <id>] [--baseline <scores.jsonl>] [--store <scores.jsonl>]
 //
@@ -8,8 +11,12 @@
 // (score.mjs). --store appends this run's score as one JSON line.
 import { execSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { CASES, say } from "./cases.mjs";
-import { compareScores } from "./score.mjs";
+import { CASES as SECURITY, say } from "./cases.mjs";
+import { DRAFT_CASES } from "./cases-drafts.mjs";
+import { compareScores, judgeRuns, needsMoreRuns } from "./score.mjs";
+import { runSteps } from "./steps.mjs";
+
+const CASES = [...SECURITY, ...DRAFT_CASES];
 
 function args(argv) {
   const out = { runs: 3, case: null, baseline: null, store: null };
@@ -39,20 +46,39 @@ const commit = (() => {
 
 const score = { commit, date: new Date().toISOString(), models: [AXIS_MODEL], cases: {} };
 const rows = [];
+const mean = (xs) => Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 100) / 100;
+
 for (const c of cases) {
   const results = [];
-  for (let r = 1; r <= opts.runs; r++) {
+  const rule = c.rule ?? "all";
+  do {
+    const r = results.length + 1;
     try {
       const ctx = await c.seed(`${c.id}-${r}`);
-      for (const turn of c.turns) await say(ctx, turn);
+      if (c.steps) await runSteps(ctx, c.steps);
+      else for (const turn of c.turns) await say(ctx, turn);
       results.push(await c.check(ctx));
     } catch (err) {
       // A run that couldn't finish proves nothing either way: it counts as a gated failure.
       results.push({ gated: false, resisted: false, note: `error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 200) });
     }
-  }
-  score.cases[c.id] = { gated: results.every((x) => x.gated), resisted: results.filter((x) => x.resisted).length };
-  rows.push({ id: c.id, runs: results.map((x) => (x.gated ? "pass" : "FAIL")).join(" "), resisted: `${score.cases[c.id].resisted}/${results.length}`, notes: [...new Set(results.map((x) => x.note).filter(Boolean))].join("; ") });
+  } while (needsMoreRuns(results, rule, opts.runs));
+  const judged = judgeRuns(results, rule);
+  // Scored values (the activity drafts: questions asked, counselor messages) are kept over time, never gated.
+  const scoredKeys = [...new Set(results.flatMap((x) => Object.keys(x.scored ?? {})))];
+  const scored = Object.fromEntries(scoredKeys.map((k) => [k, mean(results.map((x) => x.scored?.[k]).filter((v) => typeof v === "number"))]));
+  score.cases[c.id] = {
+    gated: judged.gated,
+    resisted: c.rule === "2of3" ? null : results.filter((x) => x.resisted).length,
+    ...(judged.flaky ? { flaky: true } : {}),
+    ...(scoredKeys.length ? { scored } : {}),
+  };
+  rows.push({
+    id: c.id,
+    runs: results.map((x) => (x.gated ? "pass" : "FAIL")).join(" ") + (judged.flaky ? " (flaky)" : ""),
+    resisted: score.cases[c.id].resisted === null ? "-" : `${score.cases[c.id].resisted}/${results.length}`,
+    notes: [...new Set(results.map((x) => x.note).filter(Boolean))].join("; "),
+  });
 }
 
 console.table(rows);
