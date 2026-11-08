@@ -7,8 +7,8 @@ checked (`checked_on`).
 | File | Dataset | Source | Covers |
 |---|---|---|---|
 | `css-profile-2027-28.csv` | `policies` (css_profile_required) | College Board, CSS Profile participating institutions, 2027-28 aid year | The 40 Meridies-profiled schools. `true` = on the list for undergraduates; `false` = not on it (a school's medical or law school alone doesn't count). |
-| `supplements-2026-27.csv` | `supplements` | Each school's own admissions pages, read 2026-11-07 | 68 prompts for 10 schools. See "2026-27 compile" below. |
-| `policies-flags-2026-27.csv` | `policies` (personal_statement_read, test_reporting, self_report_scores) | Each school's own admissions pages, read 2026-11-07 | 30 rows for 27 schools. See "2026-27 compile" below. |
+| `supplements-2026-27.csv` | `supplements` | Each school's own admissions pages, read 2026-11-07 | 51 prompts for 9 schools. See "2026-27 compile" below. |
+| `policies-flags-2026-27.csv` | `policies` (personal_statement_read, test_reporting, self_report_scores) | Each school's own admissions pages, read 2026-11-07 | 29 rows for 26 schools. See "2026-27 compile" below. |
 
 Load: `npx tsx scripts/ingest/curated-csv.ts --dataset policies --file scripts/ingest/data/css-profile-2027-28.csv`
 
@@ -109,37 +109,51 @@ Meridies-profiled catalog schools (unitids from migration
 leaving out the 8 whose supplements were already curated (Stanford, MIT, UC
 Berkeley, Michigan, UT Austin, NYU, UW Seattle, Caltech). Those 8 were not
 re-checked: in a local copy of the seed their prompts cite only the school's
-home page and have no verified date. Of the 32 left, 27 have at least one
+home page and have no verified date. Of the 32 left, 26 have at least one
 sourced fact below.
 
-**`supplements-2026-27.csv`** (68 rows): Yale, Penn, Columbia, Cornell, Dartmouth,
+**`supplements-2026-27.csv`** (51 rows): Yale, Penn, Columbia, Dartmouth,
 Boston College, Tufts, Johns Hopkins, Rochester, Swarthmore. Each page names the
-cycle (2026-27, or "Class of 2031") except Cornell's college pages, which don't:
-their text matches Cornell's own "Fall 2027 application" FAQ word for word for 15
-of 17 prompts (SC Johnson and Duffield short answer 4 differ slightly, and that
-FAQ article was in "preview mode" when read), so treat Cornell as likely, not
-certain. Conventions: prompt text is copied by program from the page line
-(runs of spaces collapsed, an "A."/"1."/"Question 1:" label dropped, word-count
-parentheticals kept as the school printed them); `word_limit` is the stated
-maximum ("50-200 words" stores 200); a choose-one list is one row per option,
-`required` false, with "(choose 1 of N)" in the title; a school-, college- or
-program-specific prompt has `scope` major and its name in `major_or_program`.
-Left out on purpose: the Common App/Coalition personal statement prompts,
-transfer-only essays, and questions that are a pick-list not writing (Yale's
-academic areas, Huntsman's target language). Yale's short takes have a 200
-*character* limit, so `word_limit` is blank there.
+cycle (2026-27, or "Class of 2031"). Conventions: prompt text is copied by
+program from the page line (runs of spaces collapsed, an "A."/"1."/"Question 1:"
+label dropped, word-count parentheticals kept as the school printed them);
+`word_limit` is the stated maximum ("50-200 words" stores 200); pick-one prompts
+are stored as separate non-required rows (one row per option, `required` false,
+with "(choose 1 of N)" in the title: Yale's essay, Dartmouth's second and third
+prompts, Boston College's first four); a school-, college- or program-specific
+prompt has `scope` major and its name in `major_or_program`. Left out on
+purpose: the Common App/Coalition personal statement prompts, transfer-only
+essays, and questions that are a pick-list not writing (Yale's academic areas,
+Huntsman's target language). Yale's short takes have a 200 *character* limit, so
+`word_limit` is blank there.
 
-**`policies-flags-2026-27.csv`** (30 rows, one per source page, so a school can
+**Withheld: Cornell supplements (17 prompts).** The eight college pages on
+admissions.cornell.edu hold the prompts but never name a cycle, and the only
+page that says "Fall 2027" is an FAQ article that shows "You are viewing the
+article in preview mode. It is not live at the moment." A prompt we can't trace
+to a live page dated for 2026-27 is not served, so none is in the file. What
+would unlock it: Cornell's live 2026-27 (Fall 2027) writing-supplement prompts
+page, one that names the cycle and is not a preview; re-read it and add the rows.
+Cornell's `test_reporting` row stays: it comes from its live testing-policy page.
+
+**`policies-flags-2026-27.csv`** (29 rows, one per source page, so a school can
 have two): `test_reporting` is `self-report` where the page says applicants may
 self-report scores (recruited athletes and international exceptions aside; the
-same row sets `self_report_scores` true), `score-send` for Rutgers ("Unofficial
-test scores cannot be accepted", so `self_report_scores` false) and
-`official-only` for Ohio State and Pitt ("must come directly from the testing
-agency", "Submit your Official SAT or ACT results"; neither page says outright
-that a self-report is refused). `personal_statement_read` is `true` only where
-the page lists the personal essay as part of the application or says the
-committee reads it. No school said it does *not* read the statement, so no row
-is `false`; silence is left blank.
+same row sets `self_report_scores` true), and `score-send` for Rutgers
+("Unofficial test scores cannot be accepted", so `self_report_scores` false).
+`personal_statement_read` is `true` only where the page lists the personal
+essay as part of the application or says the committee reads it. It has no
+`false` values: no school's own page said it does *not* read the statement, and
+silence is left blank, never read as "no".
+
+**Downgraded in fix round 1: Ohio State and Pitt `test_reporting`.** Both were
+first recorded as `official-only` ("Scores must come directly from the testing
+agency", "Submit your Official SAT or ACT results (if applicable)"), but neither
+page says outright that a self-report is refused, so the value is blank. Pitt
+keeps its `personal_statement_read` row (its own sentence: the personal
+statement "is your opportunity to communicate directly with the Admissions
+Committee"); Ohio State's row only supported `test_reporting` and was dropped,
+so Ohio State has no row.
 
 **Not confirmed (left out, not guessed):**
 
@@ -151,10 +165,13 @@ is `false`; silence is left blank.
   Leadership in Medicine and Law short essays sit on pages that still show last
   year's figures and name no cycle), and the publics (Rutgers says no
   supplemental essays for the Common App; Ohio State, Penn State, Pitt,
-  Binghamton).
+  Binghamton). Cornell: prompts exist but are withheld (above).
 - Carnegie Mellon: its page gives the three short-answer prompts but its testing
   paragraph says "fall 2026", so the page isn't shown to be updated for 2026-27;
   only the "we consider your Common Application essay" fact is recorded.
 - No usable page found: Stony Brook, Buffalo, RIT (404 or home page), Hamilton and
-  Ithaca flags. Case Western, Union and Carnegie Mellon have no `test_reporting`.
+  Ithaca flags. Case Western, Union, Carnegie Mellon, Pitt and Ohio State have no
+  `test_reporting`.
+- The 8 already-curated schools were not re-checked: their seed rows cite only
+  the school's home page and have no verified date, so they are unverified here.
 - Common App member pages load their requirements by script, so none were used.
