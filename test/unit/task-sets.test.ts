@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   addDays,
+  APPLY_MAX_NEW_TASKS,
   applyBody,
+  applySize,
+  isMarkerViolation,
+  withKeys,
   dueDateFor,
   nextMonthDay,
   studentsInClass,
@@ -158,4 +162,46 @@ test("a set row serializes with mine/shared and its items", () => {
 
 test("the daily student-email cap keeps a 100-student apply inside it", () => {
   assert.ok(TASK_SET_EMAIL_DAILY_CAP >= 100 && TASK_SET_EMAIL_DAILY_CAP <= 300);
+});
+
+// ---- stable item keys ---------------------------------------------------------------------------
+
+test("an item may carry a key: 1-64 letters, digits, _ or -", () => {
+  assert.ok(ok(taskSetItem, { title: "A", key: "0b6a2c1e-6a43-4c7e-9d0f-1a2b3c4d5e6f" }));
+  assert.ok(ok(taskSetItem, { title: "A", key: "brag_sheet-1" }));
+  assert.ok(!ok(taskSetItem, { title: "A", key: "" }));
+  assert.ok(!ok(taskSetItem, { title: "A", key: "x".repeat(65) }));
+  assert.ok(!ok(taskSetItem, { title: "A", key: "has space" }));
+});
+
+test("withKeys keeps a sent key, gives every other item a new one, and refuses duplicates", () => {
+  const out = withKeys([{ title: "A", key: "keep-me" }, { title: "B" }, { title: "C" }]);
+  assert.equal(out[0].key, "keep-me");
+  assert.ok(out[1].key && out[2].key && out[1].key !== out[2].key && out[1].key !== "keep-me");
+  assert.equal(out[1].title, "B");
+  assert.throws(() => withKeys([{ title: "A", key: "dup" }, { title: "B", key: "dup" }]), /same key|duplicate/i);
+});
+
+test("a set body with duplicate keys is refused", () => {
+  assert.ok(!ok(taskSetBody, { name: "S", items: [{ title: "A", key: "k" }, { title: "B", key: "k" }] }));
+  assert.ok(!ok(taskSetPatch, { items: [{ title: "A", key: "k" }, { title: "B", key: "k" }] }));
+});
+
+// ---- the size guard -----------------------------------------------------------------------------
+
+test("an apply may make at most 300 NEW tasks; the answer says how many students fit", () => {
+  assert.equal(APPLY_MAX_NEW_TASKS, 300);
+  // 11 students x 30 items, nothing assigned yet: too large, 10 students fit.
+  assert.deepEqual(applySize(11, 30, 0), { ok: false, toCreate: 330, limit: 300, perStudent: 30, maxStudents: 10 });
+  // The same request after most were made (a retry after a timeout) goes through.
+  assert.deepEqual(applySize(11, 30, 300), { ok: true, toCreate: 30, limit: 300, perStudent: 30, maxStudents: 10 });
+  assert.equal(applySize(10, 30, 0).ok, true);
+  assert.equal(applySize(100, 1, 0).maxStudents, 300);
+});
+
+test("only a unique violation on the set marker's index reads as already assigned", () => {
+  assert.ok(isMarkerViolation({ code: "23505", message: 'duplicate key value violates unique constraint "deliverables_task_set_item_key_uidx"' }));
+  assert.ok(!isMarkerViolation({ code: "23505", message: 'duplicate key value violates unique constraint "deliverables_pkey"' }));
+  assert.ok(!isMarkerViolation({ code: "23514", message: "deliverables_task_set_item_key_uidx" }));
+  assert.ok(!isMarkerViolation(null));
 });

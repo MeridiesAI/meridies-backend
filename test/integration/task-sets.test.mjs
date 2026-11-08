@@ -44,6 +44,8 @@ const items = [
 let r = await call(C.token, "POST", "/task-sets", { name: "Junior spring", items });
 check("a counselor saves a set", r.status === 201 && r.body.mine === true && r.body.shared === false && r.body.items.length === 2, JSON.stringify(r.body).slice(0, 200));
 const set = r.body;
+const [k0, k1] = (set.items ?? []).map((i) => i.key);
+check("the server gives every item a key", typeof k0 === "string" && typeof k1 === "string" && k0 !== k1, JSON.stringify(set.items?.map((i) => i.key)));
 
 r = await call(C.token, "POST", "/task-sets", { name: "Too many", items: Array.from({ length: 31 }, () => ({ title: "A" })) });
 check("31 items are refused", r.status === 400, `${r.status}`);
@@ -92,18 +94,19 @@ check("apply answers per student", r.status === 200 && r.body.created === 4 && r
 const res1 = r.body.results?.[c1.id];
 check("each student's result names a task and both items", Boolean(res1?.taskId) && res1.items?.length === 2 && res1.items.every((i) => i.status === "created" && i.taskId), JSON.stringify(res1));
 check("4 deliverables carry the set", (await setRows(set.id)) === 4);
-check("each item index once per student", (await count(`select count(distinct (student_id, task_set_item)) from public.deliverables where task_set_id = '${set.id}'`)) === 4);
+check("each item index once per student", (await count(`select count(distinct (student_id, task_set_item_key)) from public.deliverables where task_set_id = '${set.id}'`)) === 4);
 check("the essay's stages were made", (await count(`select count(*) from public.deliverable_stages s join public.deliverables d on d.id = s.deliverable_id where d.task_set_id = '${set.id}' and d.student_id = '${c1.id}'`)) === 3);
-const brag = await sql(`select due_date::text from public.deliverables where task_set_id = '${set.id}' and task_set_item = 0 and student_id = '${c1.id}'`);
+const brag = await sql(`select due_date::text from public.deliverables where task_set_id = '${set.id}' and task_set_item_key = '${k0}' and student_id = '${c1.id}'`);
 const today = new Date().toISOString().slice(0, 10);
 const plus14 = new Date(Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10) + 14)).toISOString().slice(0, 10);
 const tzDay = Math.abs(Date.parse(brag) - Date.parse(plus14)) <= 86_400_000;
 check("an offset is days after today", tzDay, `${brag} vs ${plus14}`);
-const essayDue = await sql(`select due_date::text from public.deliverables where task_set_id = '${set.id}' and task_set_item = 1 and student_id = '${c1.id}'`);
+const essayDue = await sql(`select due_date::text from public.deliverables where task_set_id = '${set.id}' and task_set_item_key = '${k1}' and student_id = '${c1.id}'`);
 check("a month and day is its next occurrence", /^\d{4}-11-01$/.test(essayDue) && essayDue >= today, essayDue);
 check("tasks made from a set are counselor tasks", (await count(`select count(*) from public.deliverables where task_set_id = '${set.id}' and source <> 'counselor'`)) === 0);
 const emails = (await count(`select count(*) from public.message_deliveries where template = 'task-assigned' and student_id in ('${c1.id}', '${c2.id}')`)) - before;
 check("one assignment email per student per apply, not one per item", emails === 2, `${emails}`);
+check("every task stores the email choice the counselor made (only the send is skipped)", (await count(`select count(*) from public.deliverables where task_set_id = '${set.id}' and notify_email`)) === 4);
 check("every task still gets its in-app notice", (await count(`select count(*) from public.notifications where recipient_id in ('${c1.id}', '${c2.id}') and title like 'New task:%'`)) >= 4);
 
 r = await call(C.token, "POST", `/task-sets/${set.id}/apply`, { studentIds: [c1.id, c2.id] });
@@ -112,9 +115,9 @@ check("... with the existing task named", r.body.results?.[c1.id]?.taskId === re
 check("... and no new rows", (await setRows(set.id)) === 4);
 
 // A race past the pre-check still lands on the unique index.
-const dup = await rest(C.token, "POST", "/rest/v1/deliverables", { student_id: c1.id, kind: "custom", title: "Dup", status: "not-started", source: "counselor", created_by: C.id, task_set_id: set.id, task_set_item: 0 });
+const dup = await rest(C.token, "POST", "/rest/v1/deliverables", { student_id: c1.id, kind: "custom", title: "Dup", status: "not-started", source: "counselor", created_by: C.id, task_set_id: set.id, task_set_item_key: k0 });
 check("the database refuses a second task for the same item", dup.status === 409 && /23505/.test(JSON.stringify(dup.body)), `${dup.status} ${JSON.stringify(dup.body).slice(0, 120)}`);
-const squat = await rest(c4.token, "POST", "/rest/v1/deliverables", { student_id: c4.id, kind: "custom", title: "Mine", status: "not-started", source: "student", created_by: c4.id, task_set_id: set.id, task_set_item: 0 });
+const squat = await rest(c4.token, "POST", "/rest/v1/deliverables", { student_id: c4.id, kind: "custom", title: "Mine", status: "not-started", source: "student", created_by: c4.id, task_set_id: set.id, task_set_item_key: k0 });
 check("a student's own to-do can't carry a set marker", squat.status >= 400, `${squat.status}`);
 
 // ---------------------------------------------------------------------------
@@ -159,6 +162,51 @@ check("no email went", (await count(`select count(*) from public.message_deliver
 await sql(`delete from private.rate_limit_buckets where key = 'task-set-email:${C.id}'`);
 
 // ---------------------------------------------------------------------------
+// Editing a set after it was applied: the marker is the item's key, not its place
+// ---------------------------------------------------------------------------
+r = await call(C.token, "POST", "/task-sets", { name: "Editable", items: [{ title: "Alpha" }, { title: "Beta" }, { title: "Gamma" }] });
+const ed = r.body;
+const [ka, kb, kc] = ed.items.map((i) => i.key);
+r = await call(C.token, "POST", `/task-sets/${ed.id}/apply`, { studentIds: [c4.id], notifyEmail: false });
+check("the editable set is applied once", r.status === 200 && r.body.created === 3, JSON.stringify(r.body).slice(0, 200));
+// Reorder (Gamma first), insert Delta, remove Beta.
+r = await call(C.token, "PATCH", `/task-sets/${ed.id}`, { items: [{ title: "Gamma", key: kc }, { title: "Delta" }, { title: "Alpha", key: ka }] });
+check("PATCH keeps the keys it was sent", r.status === 200 && r.body.items[0].key === kc && r.body.items[2].key === ka, JSON.stringify(r.body.items));
+const kd = r.body.items?.[1]?.key;
+check("... and gives the new item a new key", typeof kd === "string" && ![ka, kb, kc].includes(kd));
+r = await call(C.token, "POST", `/task-sets/${ed.id}/apply`, { studentIds: [c4.id], notifyEmail: false });
+check("re-applying makes only the genuinely new item", r.status === 200 && r.body.created === 1 && r.body.alreadyAssigned === 2, JSON.stringify(r.body).slice(0, 300));
+const lines = r.body.results?.[c4.id]?.items ?? [];
+check("... Delta is the one made, Gamma and Alpha are already assigned", lines.map((l) => `${l.title}:${l.status}`).join() === "Gamma:already-assigned,Delta:created,Alpha:already-assigned", JSON.stringify(lines));
+const titles = await sql(`select string_agg(title, ',' order by title) from public.deliverables where task_set_id = '${ed.id}' and student_id = '${c4.id}'`);
+check("... nothing duplicated, nothing wrongly skipped", titles === "Alpha,Beta,Delta,Gamma", titles);
+r = await call(C.token, "PATCH", `/task-sets/${ed.id}`, { items: [{ title: "X", key: ka }, { title: "Y", key: ka }] });
+check("duplicate keys are refused", r.status === 400, `${r.status}`);
+r = await call(C.token, "POST", "/task-sets", { name: "Dup keys", items: [{ title: "X", key: "same" }, { title: "Y", key: "same" }] });
+check("... on create too", r.status === 400, `${r.status}`);
+
+// ---------------------------------------------------------------------------
+// The size guard: at most 300 NEW tasks an apply, counted after what exists
+// ---------------------------------------------------------------------------
+const big = await call(C.token, "POST", "/task-sets", { name: "Thirty", items: Array.from({ length: 30 }, (_, i) => ({ title: `Item ${i}` })) });
+const eleven = [];
+for (let i = 0; i < 11; i++) eleven.push(await studentOf(C, `tset-big${i}`));
+const elevenIds = eleven.map((s) => s.id);
+await sql(`update public.profiles set grad_year = '2030' where id in (${elevenIds.map((id) => `'${id}'`).join(",")})`);
+r = await call(C.token, "POST", `/task-sets/${big.body.id}/apply`, { studentIds: elevenIds, notifyEmail: false });
+check("11 students x 30 items is too large", r.status === 400 && r.body.code === "apply_too_large" && r.body.limit === 300 && r.body.perStudent === 30 && r.body.maxStudents === 10, JSON.stringify(r.body).slice(0, 300));
+check("... and nothing was made", (await setRows(big.body.id)) === 0);
+r = await call(C.token, "POST", `/task-sets/${big.body.id}/apply`, { classYear: "2030", notifyEmail: false });
+check("the class-year form names the students so the app can split them", r.status === 400 && r.body.code === "apply_too_large" && r.body.maxStudents === 10 && [...(r.body.studentIds ?? [])].sort().join() === [...elevenIds].sort().join(), JSON.stringify(r.body).slice(0, 300));
+// As if a first attempt made items 1..29 for everyone and then timed out.
+const bigKeys = big.body.items.map((i) => i.key);
+await sql(`insert into public.deliverables (student_id, kind, title, status, source, created_by, task_set_id, task_set_item_key)
+  select s, 'custom', 'pre', 'not-started', 'counselor', '${C.id}', '${big.body.id}', k
+  from unnest(array[${elevenIds.map((id) => `'${id}'`).join(",")}]::uuid[]) s, unnest(array[${bigKeys.slice(1).map((k) => `'${k}'`).join(",")}]::text[]) k`);
+r = await call(C.token, "POST", `/task-sets/${big.body.id}/apply`, { studentIds: elevenIds, notifyEmail: false });
+check("a retry where most are already made goes through", r.status === 200 && r.body.created === 11 && r.body.alreadyAssigned === 319, JSON.stringify(r.body).slice(0, 200));
+
+// ---------------------------------------------------------------------------
 // Deleting a set keeps its tasks
 // ---------------------------------------------------------------------------
 check("the owner deletes a set", (await call(C.token, "DELETE", `/task-sets/${s2.body.id}`)).status === 204);
@@ -192,6 +240,26 @@ r = await call(O.token, "GET", `/tasks?studentId=${c1.id}`);
 check("the roster doesn't widen who can open a student", r.status === 404 || r.status === 403, `${r.status}`);
 const peek = await rest(O.token, "GET", `/rest/v1/deliverables?student_id=eq.${c1.id}&select=id`);
 check("RLS still hides a colleague's student's tasks", peek.status === 200 && peek.body.length === 0, JSON.stringify(peek.body).slice(0, 100));
+
+// A pending consultant's students are not on the roster.
+const P = await user("tset-pending-member", "counselor", { approved: false });
+await sql(`insert into public.firm_members (firm_id, profile_id, seat_role) values ('${firm}', '${P.id}', 'counselor')`);
+await sql(`update public.profiles set firm_id = '${firm}' where id = '${P.id}'`);
+const p1 = await studentOf(P, "tset-p1");
+r = await call(O.token, "GET", "/management/firm-roster");
+check("an unapproved consultant's students are left off", r.status === 200 && !r.body.students.some((s) => s.id === p1.id) && r.body.students.some((s) => s.id === c1.id));
+
+// A shared set stops being readable when its owner leaves the firm.
+const L = await user("tset-leaver");
+await sql(`insert into public.firm_members (firm_id, profile_id, seat_role) values ('${firm}', '${L.id}', 'counselor')`);
+await sql(`update public.profiles set firm_id = '${firm}' where id = '${L.id}'`);
+const ls = await call(L.token, "POST", "/task-sets", { name: "Leaver's", items: [{ title: "A" }], shared: true });
+check("the colleague reads the leaver's shared set", (await call(O.token, "GET", "/task-sets")).body.some((s) => s.id === ls.body.id));
+await sql(`delete from public.firm_members where firm_id = '${firm}' and profile_id = '${L.id}'`);
+await sql(`update public.profiles set firm_id = null where id = '${L.id}'`);
+check("... and not after the owner left the firm", !(await call(O.token, "GET", "/task-sets")).body.some((s) => s.id === ls.body.id));
+const peekSet = await rest(O.token, "GET", `/rest/v1/task_sets?id=eq.${ls.body.id}&select=id`);
+check("... RLS agrees", peekSet.status === 200 && peekSet.body.length === 0, JSON.stringify(peekSet.body));
 
 // The Create task button is unchanged.
 r = await call(C.token, "POST", "/tasks", { studentId: c4.id, title: "One-off", stages: [{ name: "Step", dueDate: plus14 }], notifyEmail: false });

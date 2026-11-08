@@ -12,6 +12,7 @@
  * `test/integration/task-sets.test.mjs`.
  */
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { validMonthDay } from "./stageTemplates.js";
 
@@ -28,6 +29,8 @@ export const TASK_KINDS = [
 
 export const TASK_SET_MAX_ITEMS = 30;
 export const APPLY_MAX_STUDENTS = 100;
+/** NEW tasks one apply may make (what already exists isn't counted, so a retry after a timeout gets through). */
+export const APPLY_MAX_NEW_TASKS = 300;
 /** Assignment emails a counselor's set applies may send a day; past it the tasks are made and the email is skipped. */
 export const TASK_SET_EMAIL_DAILY_CAP = 200;
 
@@ -67,6 +70,8 @@ const stageItem = z
 
 export const taskSetItem = z
   .object({
+    /** Stable across edits: the server assigns it, the client sends it back to keep it. The task marker. */
+    key: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "An item key is 1-64 letters, digits, _ or -").optional(),
     title: z.string().trim().min(1).max(300),
     kind: z.enum(TASK_KINDS).optional(),
     instructions: z.string().trim().max(8000).optional(),
@@ -79,7 +84,40 @@ export const taskSetItem = z
 
 export type TaskSetItem = z.infer<typeof taskSetItem>;
 
-const items = z.array(taskSetItem).min(1).max(TASK_SET_MAX_ITEMS);
+const uniqueKeys = (list: { key?: string }[]) => {
+  const keys = list.map((i) => i.key).filter((k): k is string => k !== undefined);
+  return new Set(keys).size === keys.length;
+};
+
+const items = z
+  .array(taskSetItem)
+  .min(1)
+  .max(TASK_SET_MAX_ITEMS)
+  .refine(uniqueKeys, "Two items have the same key");
+
+/** Every item with a key: a sent key is kept, an item without one gets a new uuid. Duplicates throw. */
+export function withKeys<T extends { key?: string }>(list: T[]): (T & { key: string })[] {
+  if (!uniqueKeys(list)) throw new Error("Two items have the same key");
+  return list.map((i) => ({ ...i, key: i.key ?? randomUUID() }));
+}
+
+/** Whether an apply that would make `toCreate` new tasks fits, and how many students of `perStudent` items would. */
+export function applySize(students: number, perStudent: number, existing: number) {
+  const toCreate = students * perStudent - existing;
+  return {
+    ok: toCreate <= APPLY_MAX_NEW_TASKS,
+    toCreate,
+    limit: APPLY_MAX_NEW_TASKS,
+    perStudent,
+    maxStudents: Math.floor(APPLY_MAX_NEW_TASKS / Math.max(1, perStudent)),
+  };
+}
+
+/** A unique violation on the set marker's own index (and no other constraint) means "already assigned". */
+export function isMarkerViolation(error: { code?: string; message?: string; details?: string } | null | undefined): boolean {
+  if (!error || error.code !== "23505") return false;
+  return /deliverables_task_set_item_key_uidx/.test(`${error.message ?? ""} ${error.details ?? ""}`);
+}
 const name = z.string().trim().min(1).max(80);
 
 /** `shared: true` lets the rest of the caller's firm read (and apply) it; only the owner changes it. */

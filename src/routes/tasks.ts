@@ -70,7 +70,7 @@ import {
   type HandInKey,
 } from "../lib/handInValues.js";
 
-import { TASK_KINDS } from "../lib/taskSets.js";
+import { isMarkerViolation, TASK_KINDS } from "../lib/taskSets.js";
 
 type Row = Record<string, unknown>;
 
@@ -245,8 +245,14 @@ export async function hydrate(
 
 export type CreateTaskInput = z.infer<typeof createTaskBody>;
 
-/** Where a task made from a saved set came from (`deliverables.task_set_id` / `task_set_item`). */
-export type TaskSetMarker = { taskSetId: string; taskSetItem: number };
+/** Where a task made from a saved set came from (`deliverables.task_set_id` / `task_set_item_key`). */
+export type TaskSetMarker = { taskSetId: string; itemKey: string };
+
+export type CreateTaskOptions = {
+  marker?: TaskSetMarker;
+  /** Store `notifyEmail` as asked but don't send the email now (a set's apply emails once per student). */
+  skipEmailSend?: boolean;
+};
 
 export type CreatedTask =
   | {
@@ -255,7 +261,7 @@ export type CreatedTask =
       task: Row;
       notification: { email: boolean; sms: SmsNotifyState; error: string | null };
     }
-  /** Only with a marker: the unique index says this student already has this item (23505). */
+  /** Only with a marker: the marker's unique index says this student already has this item (23505). */
   | { alreadyAssigned: true };
 
 /**
@@ -264,13 +270,13 @@ export type CreatedTask =
  * so a delivery failure leaves a real task behind. Shared by `POST /tasks` and `POST /task-sets/:id/apply`.
  *
  * The CALLER has already checked edit access to `b.studentId` (`resolveStudentId(..., "edit")`); RLS
- * still applies to every write. With `marker`, a unique violation on the set's index is reported as
- * `alreadyAssigned` rather than thrown.
+ * still applies to every write. With `marker`, a unique violation on the marker's own index is reported
+ * as `alreadyAssigned` rather than thrown; any other violation still throws.
  */
 export async function createTaskForStudent(
   request: FastifyRequest,
   b: CreateTaskInput,
-  marker?: TaskSetMarker
+  { marker, skipEmailSend = false }: CreateTaskOptions = {}
 ): Promise<CreatedTask> {
   const visible = b.visibleToStudent !== false;
   const kind = b.kind ?? "custom";
@@ -318,12 +324,12 @@ export async function createTaskForStudent(
       notify_sms: b.notifySms ?? false,
       visible_to_student: visible,
       // Only named when there is one, so the Create task button never reads the set columns.
-      ...(marker ? { task_set_id: marker.taskSetId, task_set_item: marker.taskSetItem } : {}),
+      ...(marker ? { task_set_id: marker.taskSetId, task_set_item_key: marker.itemKey } : {}),
     })
     .select("*")
     .single();
   if (error) {
-    if (marker && error.code === "23505") return { alreadyAssigned: true };
+    if (marker && isMarkerViolation(error)) return { alreadyAssigned: true };
     throw fromPostgrest(error);
   }
 
@@ -380,7 +386,7 @@ export async function createTaskForStudent(
     event: "created",
     actor_id: request.auth.userId,
     metadata: marker
-      ? { stages: stages.length, documents: documents.length, taskSetId: marker.taskSetId, taskSetItem: marker.taskSetItem }
+      ? { stages: stages.length, documents: documents.length, taskSetId: marker.taskSetId, taskSetItemKey: marker.itemKey }
       : { stages: stages.length, documents: documents.length },
   });
 
@@ -394,7 +400,7 @@ export async function createTaskForStudent(
         dueDate,
         stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
         documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
-        email: b.notifyEmail ?? true,
+        email: skipEmailSend ? false : (b.notifyEmail ?? true),
         sms: b.notifySms ?? false,
       })
     : { email: false, sms: "skipped" as SmsNotifyState, error: null };
