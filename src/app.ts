@@ -80,6 +80,7 @@ import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
+import calendarIcalRoutes from "./routes/calendarIcal.js";
 // SV Demo v2: the student view
 import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
@@ -235,6 +236,8 @@ export function buildApp() {
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
+  // Absolute paths (/calendar/ical, /calendar/ical/:token.ics): no prefix.
+  app.register(calendarIcalRoutes);
   // SV Demo v2 routes: the student view. profileUpdateRoutes sits at the root
   // because it also serves the counselor's /students/:id/profile-updates.
   app.register(meRoutes, { prefix: "/me" });
