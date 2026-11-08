@@ -176,3 +176,19 @@ export function parseWeeklyHours(
   }
   return { ok: true, value };
 }
+
+/** The longest window one slots request may ask about. */
+export const MAX_SLOT_WINDOW_DAYS = 14;
+
+/**
+ * The window a student's slot request is answered for: from no earlier than
+ * now, to no later than `maxDaysAhead` from now and at most
+ * MAX_SLOT_WINDOW_DAYS after its start. Null when nothing is left.
+ */
+export function clampWindow(input: { from: string; to: string; now: string | Date; maxDaysAhead: number }): { from: string; to: string } | null {
+  const now = new Date(input.now).getTime();
+  const from = Math.max(new Date(input.from).getTime(), now);
+  const to = Math.min(new Date(input.to).getTime(), from + MAX_SLOT_WINDOW_DAYS * DAY, now + Math.max(0, input.maxDaysAhead) * DAY);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
+  return { from: new Date(from).toISOString(), to: new Date(to).toISOString() };
+}

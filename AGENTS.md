@@ -74,6 +74,8 @@ src/
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
+│   ├── bookingSlots.ts    # student booking: free slots from weekly hours, busy time, buffer, notice (pure, DST-safe)
+│   ├── booking.ts         # student booking: settings/types DTOs, the student's counselor, slots with busy time
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── parentCopy.ts      # what a parent is told (email + text wording), who is reachable; pure
 │   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
@@ -172,6 +174,8 @@ src/
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
+│   ├── studentBooking.ts  # /me/booking   a student's bookable types and free slots
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
 │   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
@@ -792,6 +796,28 @@ forget it.
   sends nothing and charges nothing. A new route that calls a provider about
   a stored row, or charges a limit keyed by a stored owner, checks ownership
   the same way.
+- **Student self-booking, part 1** (`20261111000001`; `lib/bookingSlots.ts`, `lib/booking.ts`, `routes/booking.ts`,
+  `routes/studentBooking.ts`, `listBusy` in `lib/suiteApi.ts`). `booking_settings` (one row per counselor: `enabled`,
+  IANA `time_zone`, `weekly_hours` jsonb `{"0".."6": [{start, end}]}` in "HH:MM" with "24:00" allowed as an end, notice,
+  max days ahead, buffer, cancel cutoff, `students_can_reschedule`) and `booking_meeting_types` (15-180 minutes; modes
+  google-meet, teams, in-person, phone) are owner-only like `calendar_event_types`; a student reads them only through
+  `/me/booking`, where the counselor is the caller's own `profiles.counselor_id`, approved (fail closed) with booking
+  on; an unapproved counselor and booking off both answer `reason: "not_available"` (slots: 404
+  `booking_not_available`). Slots are the weekly hours in the counselor's zone minus their scheduled meetings (no end
+  = an hour) and their connected calendar's busy time, each widened by the buffer; at most 14 days a request, clamped to
+  max days ahead; only free times are returned. **Busy time** uses only scopes already granted: Google `events.list` on
+  `primary` (skips transparent and cancelled; all-day = the counselor's whole local day), Graph `GET /me/calendarView`
+  (`Prefer: outlook.timezone="UTC"`, skips free and cancelled); never `freebusy.query` or `getSchedule`. 60 s cache,
+  `busy:<counselor>` 30 a minute; no calendar connected is no busy time, an unreadable calendar is 503
+  `calendar_busy_unavailable` (never offer slots over unknown busy time). Tests stub it with `__busy` (unit) or
+  `BOOKING_BUSY_FIXTURE` (a JSON file, ignored in production). **`public.book_meeting_slot(p_student, p_counselor,
+  p_starts_at, p_ends_at, p_mode, p_title, p_agenda)`** (SECURITY DEFINER, EXECUTE to service_role only) books under
+  `pg_advisory_xact_lock(hashtext('booking:' || counselor))` after re-checking the relationship, approval, `enabled`
+  and overlap with the buffer; errors `slot_taken` (23P01), `booking_disabled`, `not_your_counselor`, `invalid_slot`.
+  `meetings.booked_by_student` is set only there (a guard trigger refuses a user session's write). **Deploy order:**
+  either; not in `REQUIRED_SCHEMA`; without it the routes answer 503 `booking_unavailable` (`bookingReady`). Part 2
+  (book, reschedule, cancel, invites) is not built yet. Tests: `test/unit/booking-slots.test.ts`,
+  `booking-busy.test.ts`, `test/integration/booking-settings.test.mjs`.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the

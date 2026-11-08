@@ -76,6 +76,10 @@ const envSchema = z.object({
   // Tests only, like RESEND_API_BASE: Twilio's REST calls (sending, searching and
   // buying numbers, the Messaging Service) go to this origin. Ignored in production.
   TWILIO_API_BASE: blankIsUnset(z.string().url().optional()),
+  // Tests only: a JSON file { "<counselor id>": [{ "start": ISO, "end": ISO }] } read as each
+  // counselor's calendar busy time for student booking, instead of asking Google or Microsoft.
+  // Ignored in production (see `bookingBusyFixture`).
+  BOOKING_BUSY_FIXTURE: blankIsUnset(z.string().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 
@@ -216,6 +220,8 @@ export const twilioBase = twilioOverride ?? "https://api.twilio.com";
 export const twilioMessagingBase = twilioOverride ?? "https://messaging.twilio.com";
 /** Resend's API origin. Only a non-production process may point it elsewhere. */
 export const resendBase = ((env.NODE_ENV === "production" ? undefined : env.RESEND_API_BASE) ?? "https://api.resend.com").replace(/\/+$/, "");
+/** A stand-in for counselors' calendar busy time (integration tests). Never in production. */
+export const bookingBusyFixture = env.NODE_ENV === "production" ? undefined : env.BOOKING_BUSY_FIXTURE;
 export const hasCronSecret = Boolean(env.CRON_SECRET);
 export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
 /** Card payments need both Stripe keys, the service role (webhook, pay page) and a public API origin (pay links). */

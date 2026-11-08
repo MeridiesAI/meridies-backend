@@ -216,3 +216,22 @@ test("parseWeeklyHours refuses bad shapes", () => {
   ];
   for (const b of bad) assert.equal(parseWeeklyHours(b).ok, false, JSON.stringify(b));
 });
+
+test("clampWindow starts no earlier than now, spans at most 14 days and stops at max days ahead", async () => {
+  const { clampWindow } = await import("../../src/lib/bookingSlots.js");
+  const now = "2027-01-01T00:00:00.000Z";
+  assert.deepEqual(clampWindow({ from: "2026-12-01T00:00:00Z", to: "2027-01-03T00:00:00Z", now, maxDaysAhead: 30 }), {
+    from: "2027-01-01T00:00:00.000Z",
+    to: "2027-01-03T00:00:00.000Z",
+  });
+  assert.deepEqual(clampWindow({ from: "2027-01-02T00:00:00Z", to: "2027-03-01T00:00:00Z", now, maxDaysAhead: 60 }), {
+    from: "2027-01-02T00:00:00.000Z",
+    to: "2027-01-16T00:00:00.000Z",
+  });
+  assert.deepEqual(clampWindow({ from: "2027-01-02T00:00:00Z", to: "2027-01-12T00:00:00Z", now, maxDaysAhead: 5 }), {
+    from: "2027-01-02T00:00:00.000Z",
+    to: "2027-01-06T00:00:00.000Z",
+  });
+  assert.equal(clampWindow({ from: "2027-02-01T00:00:00Z", to: "2027-02-03T00:00:00Z", now, maxDaysAhead: 5 }), null);
+  assert.equal(clampWindow({ from: "2027-01-03T00:00:00Z", to: "2027-01-02T00:00:00Z", now, maxDaysAhead: 5 }), null);
+});
