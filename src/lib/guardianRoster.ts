@@ -21,7 +21,7 @@
 
 import { z } from "zod";
 import { toCsv } from "./csv.js";
-import { badRequest } from "./errors.js";
+import { HttpError, badRequest } from "./errors.js";
 
 export const ROSTER_DEFAULT_LIMIT = 100;
 export const ROSTER_MAX_LIMIT = 500;
@@ -29,6 +29,18 @@ export const ROSTER_MAX_LIMIT = 500;
 export const ROSTER_CSV_MAX_ROWS = 5000;
 /** The most guardian rows one request reads before it filters (memory bound, far above any caseload). */
 export const ROSTER_READ_CAP = 20_000;
+
+/** The CSV is over its row cap after the filters: a class year or a search brings it under. */
+export const csvTooLarge = () =>
+  new HttpError(
+    413,
+    `That is more than ${ROSTER_CSV_MAX_ROWS.toLocaleString("en-US")} parents for one download. Narrow it by class year or a search and try again.`,
+    "roster_too_large"
+  );
+
+/** The caseload is too big to read at once (the list or the CSV): only a class year narrows what is read. */
+export const readTooLarge = () =>
+  new HttpError(413, "This caseload has too many parents to read at once. Narrow it by class year and try again.", "roster_too_large");
 
 // ---- the query -------------------------------------------------------------------
 

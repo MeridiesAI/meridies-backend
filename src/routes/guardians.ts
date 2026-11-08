@@ -17,20 +17,23 @@
  * colleague: `guardians` RLS lets a collaborator read their parents, but
  * `profiles` RLS does not let them read the student's name (the same fact that
  * leaves them out of the roster Sheet, `routes/account.ts`), and a parent with
- * no student to show is no use. They are counted in `sharedNotShown` so the
- * list never silently looks complete.
+ * no student to show is no use. They are counted in `sharedNotShown` (and, on
+ * the CSV, the `X-Shared-Not-Shown` header) so the list never silently looks
+ * complete. That count ignores `q`, `classYear` and `includeArchived`.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { HttpError, fromPostgrest } from "../lib/errors.js";
+import { fromPostgrest } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole } from "../lib/guards.js";
 import {
   ROSTER_CSV_MAX_ROWS,
   ROSTER_READ_CAP,
   buildRoster,
+  csvTooLarge,
   filterStudents,
   pageRoster,
   parseRosterQuery,
+  readTooLarge,
   rosterCsv,
   rosterFilename,
   toRosterGuardian,
@@ -46,24 +49,17 @@ type Row = Record<string, unknown>;
 /** URL length: the most ids one `in (...)` filter names. */
 const IN_CHUNK = 200;
 
-const tooLarge = () =>
-  new HttpError(
-    413,
-    `That is more than ${ROSTER_CSV_MAX_ROWS.toLocaleString("en-US")} parents. Narrow it by class year or a search and try again.`,
-    "roster_too_large"
-  );
-
 function chunks<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }
 
-/** Every page of a read, or a 413 when it won't fit; a database error is thrown as ours. */
-async function readAll(fetchPage: PageFetch): Promise<Row[]> {
-  const r = await readPaged(fetchPage);
+/** Every page of a read (at most `cap` rows), or a 413 when it won't fit; a database error is thrown as ours. */
+async function readAll(fetchPage: PageFetch, cap?: number): Promise<Row[]> {
+  const r = await readPaged(fetchPage, { cap });
   if (r.error) throw fromPostgrest(r.error as { code?: string; message?: string });
-  if (r.truncated) throw tooLarge();
+  if (r.truncated) throw readTooLarge();
   return r.rows;
 }
 
@@ -108,16 +104,18 @@ async function countGuardiansOf(request: FastifyRequest, studentIds: readonly st
 async function readGuardians(request: FastifyRequest, studentIds: readonly string[]): Promise<RosterGuardian[]> {
   const out: RosterGuardian[] = [];
   for (const chunk of chunks(studentIds, IN_CHUNK)) {
-    const rows = await readAll((from, to) =>
-      request.db
-        .from("guardians")
-        .select("id, student_id, full_name, email, phone, relationship, alerts_enabled, receives_reports")
-        .in("student_id", chunk)
-        .order("id")
-        .range(from, to)
+    // One allowance for the whole request, not one per chunk: the cap is on what a request reads.
+    const rows = await readAll(
+      (from, to) =>
+        request.db
+          .from("guardians")
+          .select("id, student_id, full_name, email, phone, relationship, alerts_enabled, receives_reports")
+          .in("student_id", chunk)
+          .order("id")
+          .range(from, to),
+      ROSTER_READ_CAP - out.length
     );
     for (const r of rows) out.push(toRosterGuardian(r));
-    if (out.length > ROSTER_READ_CAP) throw tooLarge();
   }
   return out;
 }
@@ -152,13 +150,15 @@ export default async function guardianRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate, requireRole("counselor"), limit("guardians:roster-csv", 10, 3600)] },
     async (request, reply) => {
       const query = parseRosterQuery(request.query);
-      const { students, guardians } = await loadDirectory(request, query);
+      const { students, guardians, sharedNotShown } = await loadDirectory(request, query);
       const rows = buildRoster(students, guardians, query.q);
-      if (rows.length > ROSTER_CSV_MAX_ROWS) throw tooLarge();
+      if (rows.length > ROSTER_CSV_MAX_ROWS) throw csvTooLarge();
       return reply
         .header("Content-Type", "text/csv; charset=utf-8")
         .header("Content-Disposition", `attachment; filename="${rosterFilename(new Date())}"`)
         .header("Cache-Control", "no-store")
+        // The file can't carry a note, so the count the list returns as `sharedNotShown` rides in a header (the app fetches server-side).
+        .header("X-Shared-Not-Shown", String(sharedNotShown))
         .send(rosterCsv(rows.map((r) => r.entry)));
     }
   );

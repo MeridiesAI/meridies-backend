@@ -580,12 +580,20 @@ forget it.
   `fanout-limits.test.ts` lists both). **A shared student's parents are not listed.** `guardians` RLS lets a
   collaborator read them, but `profiles` RLS does not let a collaborator read the student's row (the same reason the
   roster Sheet skips them), so the list can't name the student. They are left out and counted in `sharedNotShown`
-  (0 when none) so the list never silently looks complete; a firm colleague's unshared students are not in the
-  caseload at all. The CSV (`text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="meridies-parents-
+  (0 when none; the CSV carries the same number in an `X-Shared-Not-Shown` response header, since a file has no
+  room for a note and the app fetches it server-side) so the list never silently looks complete. **The count ignores
+  `q`, `classYear` and `includeArchived`**: it is every parent of a student shared with the caller that this list
+  can't show, not "hidden by the filters". App copy should read "N parents of students shared with you that this
+  list can't show", never "N more matching". A firm colleague's unshared students are not in the caseload at all.
+  `q` is only ever a plain substring matched in code (no PostgREST filter, LIKE pattern or regex is built from it), so
+  `x,id.neq.0`, `%`, `*`, `\` and `(` are ordinary characters (tested). The CSV (`text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="meridies-parents-
   YYYY-MM-DD.csv"` with the UTC date, `Cache-Control: no-store`, no byte-order mark, CRLF) uses the same filters, no
   paging, and is built with `lib/csv.ts`, so any cell starting with `=`, `+`, `-` or `@` gets a leading apostrophe
   (a phone number written `+1 555...` therefore shows with one). Over 5,000 rows it answers 413 `roster_too_large`
-  (narrow with `classYear` or `q`; a caseload that would need more than 20,000 rows read does too, on the list as well).
+  ("more than 5,000 parents for one download", narrow with `classYear` or a search). Separately, a request reads at
+  most 20,000 parents (one allowance across all its chunks, before `q` is applied): past it, the list and the CSV both
+  answer 413 `roster_too_large` with different words ("too many parents to read at once", only `classYear` narrows
+  what is read, since `classYear` and `includeArchived` filter students before their parents are read and `q` does not).
   10 an hour. Tests: `test/unit/guardian-roster.test.ts`, `test/integration/guardians-roster.test.mjs`.
 - **Seasonal stage emails** (`20261110000003`; `lib/stageTemplates.ts`, `routes/emailTemplates.ts`, `routes/blasts.ts`).
   Nine rough drafts of the mass emails a practice sends through the year (starting the college search, essay ideas,

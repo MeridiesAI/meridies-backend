@@ -12,9 +12,11 @@ import {
   ROSTER_DEFAULT_LIMIT,
   ROSTER_MAX_LIMIT,
   buildRoster,
+  csvTooLarge,
   filterStudents,
   pageRoster,
   parseRosterQuery,
+  readTooLarge,
   rosterCsv,
   rosterFilename,
   studentSurname,
@@ -201,6 +203,28 @@ test("buildRoster: q never matches an id, a phone or a field that isn't listed a
   assert.deepEqual(buildRoster(students, [g], "555-0100"), []);
 });
 
+test("buildRoster: q is only ever a plain substring, never a filter, pattern or expression", () => {
+  const students = [student(S1, "Maya Lee")];
+  const gs = [
+    guardian(S1, "Ann Lee", { email: "ann@example.com" }),
+    guardian(S1, "Jo (Joanne) O'Neil, Sr."),
+    guardian(S1, "Pat 100% Back\\Slash *Star*"),
+  ];
+  const names = (q: string) => buildRoster(students, gs, q).map((e) => e.entry.name);
+  // None of these is in any name, so none matches: nothing is parsed as a PostgREST filter, a LIKE pattern or a regex.
+  for (const q of ["x,id.neq.0", "id.neq.0", "_", ".*", "a,b", "or(id.eq.1)", "';--", "ann@example.com or 1=1"]) {
+    assert.deepEqual(names(q), [], `q=${JSON.stringify(q)}`);
+  }
+  // A character that is in a name finds exactly that name, as typed.
+  assert.deepEqual(names("("), ["Jo (Joanne) O'Neil, Sr."]);
+  assert.deepEqual(names(")"), ["Jo (Joanne) O'Neil, Sr."]);
+  assert.deepEqual(names("(Joanne)"), ["Jo (Joanne) O'Neil, Sr."]);
+  assert.deepEqual(names("o'neil, sr"), ["Jo (Joanne) O'Neil, Sr."]);
+  assert.deepEqual(names("%"), ["Pat 100% Back\\Slash *Star*"]);
+  assert.deepEqual(names("*"), ["Pat 100% Back\\Slash *Star*"]);
+  assert.deepEqual(names("\\"), ["Pat 100% Back\\Slash *Star*"]);
+});
+
 // ---- paging ----------------------------------------------------------------------
 
 function sample(count: number) {
@@ -333,6 +357,22 @@ test("rosterFilename: the UTC date", () => {
   assert.equal(rosterFilename(new Date("2026-03-01T01:00:00+14:00")), "meridies-parents-2026-02-28.csv");
 });
 
+// ---- the 413 wording -------------------------------------------------------------
+
+test("the two 413s each say what actually happened, and share one code", () => {
+  const csv = csvTooLarge();
+  const read = readTooLarge();
+  for (const e of [csv, read]) {
+    assert.equal(e.statusCode, 413);
+    assert.equal(e.code, "roster_too_large");
+  }
+  assert.match(csv.message, /more than 5,000 parents/);
+  assert.match(csv.message, /class year or a search/);
+  // The read cap (20,000, or one read past its allowance) is not about 5,000, and a search doesn't narrow what is read.
+  assert.ok(!/5,000|search/.test(read.message), read.message);
+  assert.match(read.message, /class year/);
+});
+
 // ---- both routes carry a DB-backed limiter ---------------------------------------
 
 test("the directory routes carry the DB-backed limits the brief names", () => {
@@ -340,6 +380,7 @@ test("the directory routes carry the DB-backed limits the brief names", () => {
   assert.match(src, /app\.get\(\s*"\/roster"\s*,\s*\{[^}]*requireRole\("counselor"\)[^}]*limit\("guardians:roster", 60, 60\)/);
   assert.match(src, /app\.get\(\s*"\/roster\.csv"\s*,\s*\{[^}]*requireRole\("counselor"\)[^}]*limit\("guardians:roster-csv", 10, 3600\)/);
   assert.ok(!/serviceClient/.test(src), "the directory reads as the caller: RLS is the backstop");
+  assert.match(src, /\.header\("X-Shared-Not-Shown", String\(sharedNotShown\)\)/, "the CSV carries the shared count the list returns");
 });
 
 /** Minimal RFC 4180 line reader for the one-record rows the tests build. */

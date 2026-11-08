@@ -221,6 +221,9 @@ const csv = await raw(a.token, "/guardians/roster.csv");
 check("CSV answers 200 as text/csv; charset=utf-8", csv.status === 200 && csv.headers.get("content-type") === "text/csv; charset=utf-8", `${csv.status} ${csv.headers.get("content-type")}`);
 check("CSV is an attachment named for today's UTC date", csv.headers.get("content-disposition") === `attachment; filename="meridies-parents-${today}.csv"`, csv.headers.get("content-disposition"));
 check("CSV is not cached", csv.headers.get("cache-control") === "no-store", csv.headers.get("cache-control"));
+check("CSV carries the shared-student count the list returns, in X-Shared-Not-Shown", csv.headers.get("x-shared-not-shown") === "1", String(csv.headers.get("x-shared-not-shown")));
+const fCsv = await raw(f1.token, "/guardians/roster.csv");
+check("…and 0 when nothing is shared with the caller", fCsv.status === 200 && fCsv.headers.get("x-shared-not-shown") === "0", `${fCsv.status} ${fCsv.headers.get("x-shared-not-shown")}`);
 check("CSV has no byte-order mark", csv.buf[0] !== 0xef && csv.text.charCodeAt(0) !== 0xfeff);
 check("CSV lines end CRLF, never a bare line feed", csv.text.endsWith("\r\n") && !/(?<!\r)\n/.test(csv.text));
 const table = parseCsv(csv.text);
@@ -240,6 +243,25 @@ check("an empty CSV is just the header", csvEmpty.status === 200 && parseCsv(csv
 const csvBad = await raw(a.token, "/guardians/roster.csv?includeArchived=maybe");
 check("CSV with a bad filter is 400", csvBad.status === 400, String(csvBad.status));
 
+// ---- q is a plain substring, never a filter ----------------------------------------
+const qc = await user("gr-q");
+const qs1 = await studentOf(qc, "gr-qs1");
+await setStudent(qs1, "Quinn Query", "2027");
+const joId = await addGuardian(qs1, { name: "Jo (Joanne) O'Neil, Sr.", email: `jo-${tag}@example.com` });
+const patId = await addGuardian(qs1, { name: "Pat 100% Back\\Slash *Star*", email: `pat-${tag}@example.com` });
+await addGuardian(qs1, { name: "Plain Parent", email: `plain-${tag}@example.com` });
+const qSearch = async (term) => call(qc.token, "GET", `/guardians/roster?q=${encodeURIComponent(term)}`);
+for (const term of ["x,id.neq.0", "id.neq.0", "or(id.eq.1)", "_", ".*", "a,b", "';--", "student_id.not.is.null", "x) or (id.neq.0"]) {
+  const r = await qSearch(term);
+  check(`q=${term} is a plain substring: 200, nothing matches`, r.status === 200 && r.body?.total === 0 && (r.body?.guardians ?? []).length === 0, `${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+}
+for (const [term, id] of [["(", joId], [")", joId], ["(Joanne)", joId], ["o'neil, sr", joId], ["%", patId], ["*", patId], ["\\", patId], ["100%", patId]]) {
+  const r = await qSearch(term);
+  check(`q=${term} finds only the name that contains it`, r.status === 200 && r.body?.total === 1 && r.body.guardians[0].id === id, `${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+}
+const qCsv = await raw(qc.token, `/guardians/roster.csv?q=${encodeURIComponent("x,id.neq.0")}`);
+check("the CSV treats q the same way (header only, no error)", qCsv.status === 200 && parseCsv(qCsv.text).length === 1, `${qCsv.status} ${qCsv.text.slice(0, 120)}`);
+
 // ---- a caseload past 250 students (the directory reads the roster itself) ----------
 const big = await user("gr-big");
 const stamp = `${tag}-big`;
@@ -252,7 +274,18 @@ await sql(`insert into public.guardians (student_id, full_name, email)
   select p.id, 'Parent ' || lpad(n::text, 2, '0') || ' of ' || p.full_name, 'p' || n || '-' || substr(p.id::text, 1, 8) || '@example.com'
   from public.profiles p cross join generate_series(1, 21) n where p.counselor_id = '${big.id}'`);
 
+// A student a colleague shared with this counselor: the fallback reads student_collaborators to count them, and
+// their parents stay out of the list.
+const bigShared = await studentOf(b, "gr-bigshared");
+await setStudent(bigShared, "Bigshared Student", "2031");
+const bigSharedParents = [
+  await addGuardian(bigShared, { name: "Bigshared Parent One", email: `bsp1-${tag}@example.com` }),
+  await addGuardian(bigShared, { name: "Bigshared Parent Two", email: `bsp2-${tag}@example.com` }),
+];
+await sql(`insert into public.student_collaborators (student_id, counselor_id, access) values ('${bigShared.id}', '${big.id}', 'read')`);
+
 const bigSeen = new Set();
+let bigShareCount = null;
 let bigCursor = null;
 let bigPages = 0;
 let bigTotal = null;
@@ -264,6 +297,7 @@ for (;;) {
     break;
   }
   bigTotal = p.body.total;
+  bigShareCount ??= p.body.sharedNotShown;
   bigFirst ??= p.body.guardians[0];
   for (const r of p.body.guardians) bigSeen.add(r.id);
   bigPages++;
@@ -271,14 +305,31 @@ for (;;) {
   bigCursor = p.body.nextCursor;
 }
 check("a 251-student caseload lists every parent across pages (5,271) and none of anyone else's", bigTotal === 5271 && bigSeen.size === 5271 && bigPages === 11, `${bigTotal} ${bigSeen.size} ${bigPages}`);
+check("…a shared student's parents are left out and counted (the fallback reads student_collaborators)", bigShareCount === 2 && bigSharedParents.every((id) => !bigSeen.has(id)), `sharedNotShown ${bigShareCount}`);
 check("…ordered by the student's surname, then the parent", bigFirst?.studentName === "Big Student 001" && bigFirst?.name === "Parent 01 of Big Student 001", JSON.stringify(bigFirst));
 const bigCsv = await raw(big.token, "/guardians/roster.csv");
 const bigCsvBody = bigCsv.status === 413 ? JSON.parse(bigCsv.text) : null;
-check("a CSV over 5,000 rows is 413 roster_too_large", bigCsv.status === 413 && bigCsvBody?.code === "roster_too_large" && !bigCsv.headers.get("content-disposition"), `${bigCsv.status} ${bigCsv.text.slice(0, 160)}`);
+check("a CSV over 5,000 rows is 413 roster_too_large, and says why", bigCsv.status === 413 && bigCsvBody?.code === "roster_too_large" && /more than 5,000 parents/.test(bigCsvBody?.error ?? "") && !bigCsv.headers.get("content-disposition"), `${bigCsv.status} ${bigCsv.text.slice(0, 200)}`);
 const bigCsvNarrow = await raw(big.token, "/guardians/roster.csv?classYear=2031");
 check("…and a class year brings it under the cap (210 parents)", bigCsvNarrow.status === 200 && parseCsv(bigCsvNarrow.text).length === 211, `${bigCsvNarrow.status} ${parseCsv(bigCsvNarrow.text).length}`);
+check("…its shared-student count rides in the header, and the shared parents aren't in the file", bigCsvNarrow.headers.get("x-shared-not-shown") === "2" && !bigCsvNarrow.text.includes("Bigshared"), String(bigCsvNarrow.headers.get("x-shared-not-shown")));
 const bigOther = await call(big.token, "GET", `/guardians/roster?q=${encodeURIComponent("Otto Elsewhere")}`);
 check("a big caseload can't search into another practice", bigOther.status === 200 && bigOther.body.total === 0);
+
+// ---- past the 20,000-parent read cap (251 students x 81 parents = 20,331) ----------
+await sql(`insert into public.guardians (student_id, full_name, email)
+  select p.id, 'Parent ' || lpad(n::text, 2, '0') || ' of ' || p.full_name, 'p' || n || '-' || substr(p.id::text, 1, 8) || '@example.com'
+  from public.profiles p cross join generate_series(22, 81) n where p.counselor_id = '${big.id}'`);
+const hugeList = await call(big.token, "GET", "/guardians/roster?limit=500");
+check(
+  "a caseload over the read cap answers the list with 413 roster_too_large, in words that don't blame a 5,000-row download",
+  hugeList.status === 413 && hugeList.body?.code === "roster_too_large" && !/5,000/.test(hugeList.body?.error ?? "") && /class year/.test(hugeList.body?.error ?? ""),
+  `${hugeList.status} ${JSON.stringify(hugeList.body).slice(0, 200)}`
+);
+const hugeCsv = await raw(big.token, "/guardians/roster.csv");
+check("…and the CSV too", hugeCsv.status === 413 && JSON.parse(hugeCsv.text).code === "roster_too_large" && !/5,000/.test(JSON.parse(hugeCsv.text).error ?? ""), `${hugeCsv.status} ${hugeCsv.text.slice(0, 160)}`);
+const hugeNarrow = await call(big.token, "GET", "/guardians/roster?limit=500&classYear=2031");
+check("a class year brings the list back under the cap (10 students x 81 parents)", hugeNarrow.status === 200 && hugeNarrow.body?.total === 810 && hugeNarrow.body?.sharedNotShown === 2, `${hugeNarrow.status} ${JSON.stringify(hugeNarrow.body).slice(0, 160)}`);
 
 // ---- rate limits -------------------------------------------------------------------
 const rl = await user("gr-rl");
