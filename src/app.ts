@@ -73,6 +73,7 @@ import eventRoutes from "./routes/events.js";
 // v10 sync imports: management-pipeline
 import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
+import taskSetRoutes from "./routes/taskSets.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
@@ -234,6 +235,7 @@ export function buildApp() {
   app.register(payRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
+  app.register(taskSetRoutes, { prefix: "/task-sets" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
   // Absolute paths (/calendar/ical, /calendar/ical/:token.ics): no prefix.
