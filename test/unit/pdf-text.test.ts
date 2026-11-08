@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { PDFJS_OPTIONS } from "../../src/lib/pdfText.options.js";
-import { extractInThisThread } from "../../src/lib/pdfText.extract.js";
+import { extractInThisThread, pageTextFromItems } from "../../src/lib/pdfText.extract.js";
 import { bundledPdfjsVersion, extractPdfText, pdfQueueStats, pdfQueueWaitingPriorities, PDF_LIMITS } from "../../src/lib/pdfText.js";
-import { fontMatrixPdf, javascriptPdf, textPdf } from "../fixtures/pdf/build.js";
+import { fontMatrixPdf, javascriptPdf, multiLinePdf, textPdf } from "../fixtures/pdf/build.js";
 
 const atLeast = (v: string, min: string) => {
   const a = v.split(".").map(Number), b = min.split(".").map(Number);
@@ -31,6 +31,36 @@ test("text comes out of a normal PDF, in a worker", async () => {
     assert.match(r.text, /Official Transcript/);
     assert.equal(r.pages, 2);
   }
+});
+
+const linesOf = (text: string) => text.split("\n").map((l) => l.replace(/\s+/g, " ").trim()).filter(Boolean);
+
+test("a page of several lines keeps its line breaks (a resume is not one blob)", async () => {
+  const resume = ["Maya Chen", "Lincoln High School, Class of 2027", "- Captain, Tejas Robotics (12 members)", "- Volunteer, Food Bank (2 yrs)", "Skills: Python, Spanish"];
+  const r = await extractInThisThread(multiLinePdf(resume), 50, 200_000);
+  assert.deepEqual(linesOf(r.text), resume);
+});
+
+test("separate text runs on one baseline stay on one line", async () => {
+  const r = await extractInThisThread(multiLinePdf([["Hello", "World"], "Next line"]), 50, 200_000);
+  assert.deepEqual(linesOf(r.text), ["Hello World", "Next line"]);
+});
+
+test("pageTextFromItems: hasEOL ends a line, marked content is skipped, a page ends in one newline", () => {
+  assert.equal(pageTextFromItems([{ str: "A", hasEOL: true }, { type: "beginMarkedContent" }, { str: "B" }]), "A\nB\n");
+  assert.equal(pageTextFromItems([]), "\n");
+  assert.equal(pageTextFromItems([{ str: "A", hasEOL: true }, { str: "", hasEOL: true }, { str: "B", hasEOL: true }]), "A\nB\n");
+});
+
+test("pageTextFromItems: with no hasEOL, a different baseline starts a new line and a small shift does not", () => {
+  const at = (str: string, x: number, y: number) => ({ str, height: 12, transform: [12, 0, 0, 12, x, y] });
+  assert.equal(pageTextFromItems([at("A", 72, 700), at("B", 72, 684), at("C", 150, 684)]), "A\nB C\n");
+  // A superscript sits a few points off the baseline: still the same line.
+  assert.equal(pageTextFromItems([at("x", 72, 700), at("2", 80, 704)]), "x 2\n");
+});
+
+test("pageTextFromItems does not double a space the text already has", () => {
+  assert.equal(pageTextFromItems([{ str: "Hello " }, { str: " World" }]), "Hello World\n");
 });
 
 test("extraction passes the safety options to every getDocument call", async () => {

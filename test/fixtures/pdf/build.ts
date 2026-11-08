@@ -33,6 +33,28 @@ export function textPdf(pages: string[], opts: { extraCatalog?: string; extraObj
   return buildPdf([...objects, ...(opts.extraObjects ?? [])]);
 }
 
+/**
+ * One page of several lines, Helvetica, each placed with an absolute text matrix 16 pt below the one before.
+ * An entry that is an array shows its runs side by side on that one line (separate text items on one baseline),
+ * the way a resume made of several styled runs per line does. `textPdf` is one line per page and so can't show this.
+ */
+export function multiLinePdf(lines: Array<string | string[]>): Buffer {
+  const stream = [
+    "BT /F1 12 Tf",
+    ...lines.flatMap((line, i) =>
+      (Array.isArray(line) ? line : [line]).map((run, j) => `1 0 0 1 ${72 + j * 120} ${720 - i * 16} Tm (${esc(run)}) Tj`)
+    ),
+    "ET",
+  ].join("\n");
+  return buildPdf([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream, "latin1")} >>\nstream\n${stream}\nendstream`,
+  ]);
+}
+
 /** A PDF whose open action is JavaScript that would set a global if it ever ran. */
 export function javascriptPdf(): Buffer {
   const jsId = 6; // after catalog, pages, font, one page, one content

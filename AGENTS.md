@@ -57,7 +57,7 @@ src/
 │   ├── liveDocuments.ts   # live edit times of linked files, for the task tracker
 │   ├── documentGuess.ts   # the type guess for an unconfirmed import: printed phrases, filename, Google type; no model
 │   ├── documentExtraction.ts # confirmed files to text: durable queue, 2-minute leases, recovery, retry
-│   ├── pdfText.ts         # PDF text in a capped worker thread (+ pdfText.extract / .options / .worker); unpdf 1.8.1
+│   ├── pdfText.ts         # PDF text in a capped worker thread (+ pdfText.extract / .options / .worker); unpdf 1.8.1. Line breaks are kept (`pageTextFromItems`: PDF.js `hasEOL`, else a changed baseline), so a resume reads as its lines, not one blob
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
 │   ├── parentAlertDelivery.ts # carries a queued parent alert; records what happened
 │   ├── massInvite.ts      # Mass invite: deterministic parse first, AxIS sorts second

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { extractInThisThread } from "../../src/lib/pdfText.extract.js";
 import { adjustBody, adjustPrompt, cleanSuggestions, resumeLines, sheetFacts } from "../../src/lib/resumeAdjust.js";
+import { multiLinePdf } from "../fixtures/pdf/build.js";
 
 const resume = [
   "Maya Chen",
@@ -17,6 +19,21 @@ const facts = sheetFacts(
 
 test("resume lines are trimmed and empty ones dropped", () => {
   assert.deepEqual(resumeLines("  A  \n\n B\tC \n"), ["A", "B C"]);
+});
+
+test("a resume PDF reads as one line per resume line, so a single-line edit survives", async () => {
+  const printed = ["Maya Chen", "Lincoln High School, Class of 2027", "- Was in charge of the robotics team", "- Helped at food bank", "Skills: Python, Spanish"];
+  const { text } = await extractInThisThread(multiLinePdf(printed), 50, 200_000);
+  const fromPdf = resumeLines(text);
+  assert.equal(fromPdf.length, printed.length);
+  assert.deepEqual(fromPdf, printed);
+  const out = cleanSuggestions(
+    { suggestions: [{ original: "Was in charge of the robotics team", suggested: "Captained Tejas Robotics, leading 12 members to regionals", reason: "Stronger verb; facts from the record" }] },
+    fromPdf,
+    facts
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.line, 2);
 });
 
 test("a suggestion must edit a line the resume has, with the resume's own text as original", () => {
