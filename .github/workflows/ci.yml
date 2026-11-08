@@ -136,6 +136,8 @@ jobs:
           RESEARCH_FAKE: fixture
           # Translation test double (no model call): "[es] text" out, "[xx] text" read as language xx in; refuses to boot in production.
           TRANSLATE_FAKE: fixture
+          # Meeting-summary test double (no model call): transcripts summarize to their first lines; refuses to boot in production.
+          MEETING_SUMMARY_FAKE: fixture
           # The Import page for every test counselor, with presets only (no model calls).
           IMPORTS_ROLLOUT: all
           IMPORTS_AI: "off"

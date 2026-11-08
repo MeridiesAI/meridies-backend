@@ -21,6 +21,21 @@ export function loggedUrl(url: string): string {
 }
 
 /**
+ * The `req` serializer for every log line: method, URL (as `loggedUrl` keeps
+ * it), host and address. Never the body or headers: a pasted meeting
+ * transcript or notes (POST /ai/meeting-summary) and every bearer token stay
+ * out of Railway's logs.
+ */
+export function serializeReq(req: { method: string; url: string; hostname: string; ip: string }): {
+  method: string;
+  url: string;
+  hostname: string;
+  remoteAddress: string;
+} {
+  return { method: req.method, url: loggedUrl(req.url), hostname: req.hostname, remoteAddress: req.ip };
+}
+
+/**
  * Strip what must never sit in Railway's logs from free text: email addresses,
  * bearer tokens, JWTs (Supabase access tokens), API keys by their known
  * prefixes, phone numbers in E.164 form, and the values of URL query strings

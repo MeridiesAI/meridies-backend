@@ -122,7 +122,8 @@ src/
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
-│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items)
+│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items), transcript map-reduce
+│   ├── transcript.ts      # meeting transcripts: VTT/SRT/pasted text to speaker turns, neutral speaker labels, parts for the map-reduce
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
 │   │   └── ops/           # what AxIS can change: the operation catalog, run through this API as the counselor
@@ -2164,7 +2165,32 @@ turns action items into tasks through `POST /tasks`, so RLS, limits and notifica
 practice's "AI summaries" switch gates it (`"meeting-summary"` is in `SUMMARY_MODULES`). The essay
 shape test is deliberately not applied: a counselor's meeting record is first person ("I told Maya").
 **Deploy order:** either. `20261028000007` adds the `ai_runs` label; before it, only the audit row is skipped.
-Tests: `test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
+**Transcripts** (`kind: "transcript"`, optional: absent means notes, so old clients are unchanged). The counselor
+pastes a transcript in `rawNotes` or sends the exported file as `file: { name, type?, data }` (base64, at most 2 MB;
+`.vtt`, `.srt`, `.txt`/`.md` or `.docx` through `readTranscriptFile` in `lib/documentText.ts`; the essay readers still
+refuse `.vtt`/`.srt`), never both. This route alone takes a 3 MB body. `lib/transcript.ts` (pure) strips the WebVTT/SRT
+structure (header, NOTE/STYLE/REGION blocks, cue ids, timings with their settings, `<v>`/`<c>`/`<i>` and timestamp
+tags, `{\an8}`, entities, BOM, CRLF), drops caption lines the previous cue already showed, merges a speaker's
+consecutive lines, and in pasted text strips leading timestamps and reads "Name:" as a speaker only when the same
+label starts two or more lines (Otter's "Name  0:03" headers too). **Speaker labels never reach the model**: they are
+display names the meeting tool wrote, not words the counselor typed, so each becomes "Speaker 1", "Speaker 2"... in
+order of first appearance, and only the answer maps them back (`restoreSpeakers`; the legend is returned as
+`transcript.speakers`). Names said inside the talk pass as in notes. Limits: 600,000 characters before cleaning,
+200,000 after (413 `transcript_too_long`), fewer than 20 spoken characters is 400 `transcript_empty`, a wrong file 400
+`transcript_file_type` / `transcript_unreadable`. **Map-reduce** (`summarizeTranscript`): whole sentences packed into
+parts of at most 15,000 characters (a new part prefers a speaker turn past 14,000; a run with no punctuation is cut
+at a space; a part starting mid-turn repeats its label), at most 15 parts; one `runStructured` call per part (three at
+a time, the same tool schema, "part i of n") and one merge call, so at most 16 calls, each through the AI switch, the
+budget gate and its own `ai_runs` row. The first failure stops the run (no new part starts, nothing merged, nothing
+stored; the usual 503/429/403). Every answer, each part's and the merge's, goes through `cleanSummary` against the
+**whole** transcript's spoken words (`speakerLabels: true` lets "Speaker 2" through without letting its digit count
+as a stated figure). The practice switch is checked before any call, and transcripts are also capped at 20 an hour
+per counselor. The answer adds `transcript: { characters, parts, modelCalls, speakers }`. Transcript text is never
+logged (`serializeReq` in `lib/requestLog.ts` logs no body). **Test double:** `MEETING_SUMMARY_FAKE=fixture`
+(refused outside `NODE_ENV` development and test, like `RESEARCH_FAKE`; CI sets it on the persona API) answers a
+part with its first line and the merge with the parts joined, still through `cleanSummary`, for notes too. The
+notetaker integration stays off; no migration. Tests: `test/unit/transcript-clean.test.ts`,
+`test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
 
 ### The essay restriction is a hard product constraint
 
