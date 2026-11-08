@@ -20,13 +20,15 @@
 -- review_catalog_proposal(id, decision, note): the review, in ONE transaction.
 -- Only a catalog editor (auth.uid() in catalog_editors) may call it. It locks
 -- the row (and, for a supplement, takes a per-school-and-cycle advisory lock so
--- concurrent supplement approvals run their checks one after another), refuses one already reviewed, re-checks the value or payload, and on
+-- concurrent supplement approvals run their checks one after another),
+-- refuses one already reviewed, re-checks the value or payload, and on
 -- approve writes the curated row: college_supplements (its slot, with
 -- source_url and source_verified_at = now(); refused when the slot holds a
 -- different prompt or the prompt is on file at another slot, so an approval
 -- never overwrites a row students' essays point to; the proposer assigns a
--- new prompt the next free slot itself, never the model), college_policies (only that
--- column, plus sources.<field> = {url, checkedAt, verifiedAt, verifiedBy};
+-- new prompt the next free slot itself, never the model), college_policies
+-- (only that column, plus sources.<field> = {url, checkedAt, verifiedAt,
+-- verifiedBy};
 -- provenance stays 'curated') or colleges.test_policy; then stamps the status,
 -- reviewed_by and reviewed_at. A reject changes only the proposal.
 --
