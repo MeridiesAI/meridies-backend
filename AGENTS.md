@@ -2172,12 +2172,18 @@ refuse `.vtt`/`.srt`), never both. This route alone takes a 3 MB body. `lib/tran
 structure (header, NOTE/STYLE/REGION blocks, cue ids, timings with their settings, `<v>`/`<c>`/`<i>` and timestamp
 tags, `{\an8}`, entities, BOM, CRLF), drops caption lines the previous cue already showed, merges a speaker's
 consecutive lines (a repeat is dropped only when the same speaker said it in this cue or the one before). **Who is a
-speaker:** a `<v ...>` voice tag (up to 200 characters, any text) always; in a VTT/SRT cue, a leading "label:" of up to
-80 characters (letters, digits, spaces and `, . ' - ( ) & / @ _ +`) that reads as a name: every word outside
-parentheses capitalised, a particle (de, van, bin...) or a number, at most six words ("Chen, Maya", "Maya Chen
-(Lincoln High School student)"), or an email, or a short label (five words, no comma) that starts two or more cues;
-never a stoplisted word ("Note", "Agenda", "Next steps"...) or one ending in "!"/"?". So "Here is the plan for
-October: retake the SAT" stays text. In pasted text (no timings) it stays conservative: leading timestamps are
+speaker (heuristic):** a `<v ...>` voice tag (up to 200 characters) always. In a VTT/SRT cue, a leading "label:" of
+up to 80 characters (any letters, CJK included, digits, spaces and `, . ' - ( ) [ ] & / @ _ + | – — ·`) is a speaker
+on its **first** cue when it is short (five words or fewer, separators like "-", "&", "|" not counted: "maya chen",
+"Maya's iPad", "iPhone 12", "Mom and Dad", "Jamal - Lincoln HS", "[Mom]", "李明"), name-shaped (every word outside
+nested parentheses and brackets capitalised, a particle such as de/van/bin, "and", or a number, at most six words:
+"Chen, Maya", "Maya Chen (Lincoln High School student)") or an email; a longer label that isn't name-shaped only when
+it starts two or more cues. Never a whole-label prose heading (Note(s), Agenda, Summary, Remember, Reminder, Total, Key
+Points, Follow Up, Open Questions, Action Items, Next Steps, Deadline(s), Time, Yes, No, Wait, Step/Option/Part/Q/A N,
+day and month names... "Total Recall Productions" is still a name), nor one ending in "!"/"?". The hard rule (a display
+name never reaches the model) outranks prose: a short "The plan: apply early" line is read as a speaker. **It is still
+a heuristic**: a label that fails every rule and starts only one cue reaches the model as text, and names spoken inside
+the talk pass as they do in pasted notes. In pasted text (no timings) it stays conservative: leading timestamps are
 stripped and "label:" is a speaker only when the same label starts two or more lines and is either a short label or
 "Last, First" (one or two capitalised words each side); Otter's "Name  0:03" headers too. **Speaker labels never reach the model**: they are
 display names the meeting tool wrote, not words the counselor typed, so each becomes "Speaker 1", "Speaker 2"... in

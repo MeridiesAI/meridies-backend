@@ -58,8 +58,10 @@ const LEADING_TIME = /^[[(]?(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d+)?[\])]?\s+/;
 const OTTER_HEADER = /^(.{1,40}?)(?:\s{2,}|\t+)(?:\d{1,2}:)?\d{1,2}:\d{2}$/;
 const LABEL_PREFIX = /^([^:]{1,80}?):\s+(.+)$/;
 const LABEL_CHARS = /^[\p{L}\p{M}\d .'’\-()&/@_]+$/u;
-/** What a caption tool may write in a display name: commas, parentheses, emails with "+", periods, digits. */
-const WIDE_LABEL_CHARS = /^[\p{L}\p{M}\d .,'’\-()&/@_+]+$/u;
+/** What a caption tool may write in a display name: commas, (nested) parentheses, [brackets], emails with "+", | – — ·. */
+const WIDE_LABEL_CHARS = /^[\p{L}\p{M}\d .,'’\-()[\]&/@_+|–—·]+$/u;
+/** A token that is only punctuation ("-", "&", "|", "–", "·"): a separator inside a display name, not a word. */
+const SEPARATOR = /^[-&/+|–—·]+$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /** Lower-case words a capitalised name may hold (de la Cruz, van der Berg, bin Salman). */
 const PARTICLES = new Set(["de", "da", "del", "della", "di", "du", "dos", "das", "van", "von", "der", "den", "la", "le", "bin", "binti", "al", "el", "y", "e"]);
@@ -68,16 +70,35 @@ const NOT_SPEAKERS = new Set([
   "actions", "action items", "todo", "to do", "update", "question", "answer", "q", "a", "fyi", "important",
   "reminder", "warning", "tip", "example", "next steps", "takeaway", "takeaways", "goal", "goals", "result",
   "results", "status", "deadline", "deadlines", "location", "attendees", "topic", "topics", "decision", "decisions",
+  "remember", "total", "totals", "key point", "key points", "follow up", "follow-up", "follow ups", "follow-ups",
+  "open question", "open questions", "action item", "yes", "no", "wait", "ok", "okay", "so", "also", "but", "and",
+  "then", "now", "today", "tomorrow", "yesterday", "tonight", "next", "first", "second", "third", "finally", "update",
+  "updates", "plan", "plans", "issue", "issues", "problem", "problems", "idea", "ideas", "pros", "cons", "why", "how",
+  "what", "who", "price", "cost", "score", "scores", "grade", "grades", "link", "links", "email", "phone", "address",
+]);
+/** "Step 1", "Q2", "Option 3", "Part 4": numbered prose headings, never a speaker. */
+const NUMBERED_HEADING = /^(?:step|option|part|item|phase|round|point|question|answer|q|a|day|week)\s*\d{1,3}$/i;
+const CALENDAR_WORDS = new Set([
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "mon", "tue", "tues", "wed", "thu",
+  "thur", "thurs", "fri", "sat", "sun", "january", "february", "march", "april", "may", "june", "july", "august",
+  "september", "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+  "oct", "nov", "dec", "summer", "fall", "autumn", "winter", "spring",
 ]);
 
 const keyOf = (name: string) => name.toLowerCase().replace(/\s+/g, " ").trim();
+
+/** A whole label that is a prose heading ("Note", "Step 1", "Friday"), never a speaker. Whole-label match only. */
+function isStopLabel(s: string): boolean {
+  const k = keyOf(s);
+  return NOT_SPEAKERS.has(k) || NUMBERED_HEADING.test(k) || CALENDAR_WORDS.has(k);
+}
 
 function isLabel(raw: string): boolean {
   const s = raw.trim();
   if (s.length < 1 || s.length > 40) return false;
   if (!/^\p{L}/u.test(s) || !LABEL_CHARS.test(s)) return false;
   if (s.split(/\s+/).length > 5) return false;
-  return !NOT_SPEAKERS.has(keyOf(s));
+  return !isStopLabel(s);
 }
 
 /** "Last, First" (each part one or two capitalised words): the shape a roster export writes. */
@@ -87,31 +108,43 @@ function isCommaName(s: string): boolean {
 
 /** Every word, outside parentheses and around commas, is capitalised, a name particle, or a number: a name, not a sentence. */
 function isNameShaped(s: string): boolean {
-  const core = s.replace(/\([^)]{0,80}\)/g, " ").replace(/,/g, " ");
-  const words = core.split(/\s+/).filter(Boolean);
+  let core = s;
+  // Parentheses out, innermost first (a label is at most 80 characters, so three passes cover any nesting it holds).
+  for (let i = 0; i < 3; i++) core = core.replace(/\([^()]{0,80}\)/g, " ");
+  core = core.replace(/[[\],]/g, " ");
+  const words = core.split(/\s+/).filter((w) => w && !SEPARATOR.test(w) && w.toLowerCase() !== "and");
   if (!words.length || words.length > 6) return false;
-  return words.every((w) => /^\p{Lu}/u.test(w) || PARTICLES.has(w.toLowerCase()) || /^\d+$/.test(w));
+  return words.every((w) => /^\p{Lu}/u.test(w) || PARTICLES.has(w.toLowerCase()) || /^\d+$/.test(w) || /^\p{Lo}/u.test(w));
 }
+
+/** Words of a label, separators left out: what the five-word short-label rule counts. */
+const labelWords = (s: string) => s.split(/\s+/).filter((w) => w && !SEPARATOR.test(w));
 
 /**
  * A caption cue's leading "label:" (VTT/SRT only). Meeting tools write a
  * participant's display name there, which can be "Chen, Maya", "Maya Chen
  * (Lincoln High School student)" or an email, so the bound is 80 characters
- * of a wider set, with no word cap. A name must still read as one: name-shaped
- * (above), an email, or the old short label repeated on two or more cues
- * (`repeated`), so "Here is the plan for October: retake the SAT" stays text.
+ * of a wider set, with no word cap. Accepted on the first cue when it is short
+ * (five words or fewer, separators not counted), name-shaped (above) or an
+ * email; a longer label that isn't name-shaped only when it starts two or more
+ * cues (`repeated`), so "Here is the plan for October: retake the SAT" stays
+ * text. HEURISTIC: a label that fails every rule and starts one cue reaches the
+ * model as text.
  * Never a stoplisted word ("Note"), never ending in "!" or "?", and a final "."
  * only on a short abbreviation ("Jr.", "M.").
  */
 function isTimedLabel(raw: string, repeated: boolean): boolean {
   const s = raw.trim();
   if (s.length < 1 || s.length > 80) return false;
-  if (!/^\p{L}/u.test(s) || !WIDE_LABEL_CHARS.test(s)) return false;
-  if (NOT_SPEAKERS.has(keyOf(s))) return false;
+  if (!/^[\p{L}[(]/u.test(s) || !WIDE_LABEL_CHARS.test(s)) return false;
+  if (isStopLabel(s) || isStopLabel(s.replace(/^\[|\]$/g, ""))) return false;
   if (/[!?]$/.test(s)) return false;
   if (s.endsWith(".") && (s.split(/\s+/).at(-1)?.length ?? 0) > 4) return false;
-  if (EMAIL.test(s) || isNameShaped(s)) return true;
-  return repeated && isLabel(s);
+  // Speaker labels never reaching the model outranks a short prose heading read as a name: a short label
+  // (five words or fewer, separators not counted) is a speaker on its first cue, like any name or email.
+  if (labelWords(s).length <= 5 || EMAIL.test(s) || isNameShaped(s)) return true;
+  // Longer and not name-shaped ("So the thing we decided on is this"): only when it starts two or more cues.
+  return repeated;
 }
 
 /**

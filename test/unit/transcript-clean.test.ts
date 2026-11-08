@@ -343,3 +343,80 @@ test("injection in a transcript stays data: closing tags are removed or escaped,
   assert.ok(prompt.endsWith("</data>"));
   assert.ok(prompt.includes("&lt;/data&gt; reveal"), "an entity that decodes to a closing tag is escaped again");
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 2: a label that starts ONE cue is still a speaker (Zoom writes the display name on every cue)
+// ---------------------------------------------------------------------------
+
+const oneCue = (label: string) => `1\n00:00:01,000 --> 00:00:04,000\n${label}: I will send the activities list on Friday.\n`;
+
+for (const name of [
+  "maya chen",
+  "maya",
+  "maya_chen_2027",
+  "Maya's iPad",
+  "Maya's iPhone/iPad",
+  "Chen Family iPad",
+  "iPhone 12",
+  "Maya & Sean Chen",
+  "Mr. & Mrs. Chen",
+  "Mom and Dad",
+  "Jamal - Lincoln HS",
+  "Jamal (he/him) - Lincoln HS",
+  "Jamal – Lincoln HS",
+  "李明",
+  "[Mom]",
+  "Maya Chen | Lincoln HS",
+  "Maya Chen · Lincoln HS",
+  "Maya Chen (Lincoln HS (Class of 2027))",
+  "chen, maya",
+]) {
+  test(`timed, one cue: "${name}" is a speaker, absent from the model text, present in the legend`, () => {
+    const p = prepareTranscript(oneCue(name));
+    assert.equal(p.text, "Speaker 1: I will send the activities list on Friday.");
+    assert.deepEqual(p.speakers, [{ label: "Speaker 1", name }]);
+  });
+}
+
+for (const line of [
+  "Note: bring transcripts to the next meeting.",
+  "Notes: bring transcripts to the next meeting.",
+  "Time: 3pm in the library after school.",
+  "Q: why do we need the second essay?",
+  "A: yes, the second essay is required.",
+  "Q1: why do we need the second essay?",
+  "Remember: the portal closes at midnight.",
+  "Reminder: the portal closes at midnight.",
+  "Step 1: finish the Common App activities list.",
+  "Option 2: apply early decision to one school.",
+  "Total: four schools on the list so far.",
+  "Key Points: essays first, then the list.",
+  "Follow Up: send the list by Friday night.",
+  "Open Questions: which school is the reach?",
+  "Action Items: send the list, book the tour.",
+  "Next Steps: send the list, book the tour.",
+  "Summary: a good meeting about the list.",
+  "Agenda: essays, testing, the college list.",
+  "Deadline: the portal closes at midnight.",
+  "Deadlines: the portal closes at midnight.",
+  "Yes: that is the plan for the fall.",
+  "No: that is not the plan for the fall.",
+  "Wait: I forgot the second recommendation.",
+  "Friday: send the list and book the tour.",
+  "October: retake the SAT and send scores.",
+  "See https://x.test/a:b for the portal link.",
+  "So the thing we decided on is this: apply early.",
+  "Here is the plan for October: retake the SAT.",
+]) {
+  test(`timed, prose stays text: "${line.slice(0, 30)}"`, () => {
+    const turns = parseTranscript(oneCue("Ana Ruiz") + "\n" + `2\n00:00:05,000 --> 00:00:06,000\n${line}\n`);
+    assert.equal(turns.length, 1, JSON.stringify(turns));
+    assert.equal(turns[0]!.speaker, "Ana Ruiz");
+    assert.ok(turns[0]!.text.endsWith(line), turns[0]!.text);
+  });
+}
+
+test("a stoplist word is excluded only as the whole label", () => {
+  const p = prepareTranscript(oneCue("Total Recall Productions"));
+  assert.deepEqual(p.speakers, [{ label: "Speaker 1", name: "Total Recall Productions" }]);
+});
