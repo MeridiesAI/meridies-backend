@@ -136,12 +136,19 @@ jobs:
           RESEARCH_FAKE: fixture
           # Translation test double (no model call): "[es] text" out, "[xx] text" read as language xx in; refuses to boot in production.
           TRANSLATE_FAKE: fixture
+          # Meeting-summary test double (no model call): transcripts summarize to their first lines; refuses to boot in production.
+          MEETING_SUMMARY_FAKE: fixture
+          # Google Sheets export double (no call to Google; account-export.test.mjs); refuses to boot in production.
+          DRIVE_EXPORT_FAKE: fixture
           # The Import page for every test counselor, with presets only (no model calls).
           IMPORTS_ROLLOUT: all
           IMPORTS_AI: "off"
           # Time saved: heartbeats on, emails to the local mail catcher. No postal address,
           # as in production: the footer carries the contact email.
           KPI_TRACKING_ENABLED: "true"
+          # Agreements (typed-name acceptance): off in production until the consent wording is reviewed; on here so
+          # test/integration/agreements.test.mjs runs the whole flow.
+          AGREEMENTS_ENABLED: "true"
           DEV_MAIL_URL: http://127.0.0.1:54324
           # Student booking: calendar busy time from a file, not Google/Microsoft; refuses to boot in production.
           BOOKING_BUSY_FIXTURE: /tmp/booking-busy.json
@@ -154,6 +161,8 @@ jobs:
       - name: Persona suite
         env:
           API_URL: http://127.0.0.1:4100
+          # account-export.test.mjs checks no exported text or token reached the API's log.
+          API_LOG: api.log
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
           BOOKING_BUSY_FIXTURE: /tmp/booking-busy.json
         run: npm run test:integration

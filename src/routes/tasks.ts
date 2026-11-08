@@ -70,18 +70,9 @@ import {
   type HandInKey,
 } from "../lib/handInValues.js";
 
-type Row = Record<string, unknown>;
+import { isMarkerViolation, TASK_KINDS } from "../lib/taskSets.js";
 
-const TASK_KINDS = [
-  "essay",
-  "common-app-section",
-  "activity-list",
-  "document",
-  "test-registration",
-  "recommendation",
-  "aid-form",
-  "custom",
-] as const;
+type Row = Record<string, unknown>;
 
 /** A stage's deadline lands in the existing tracker, so it needs a type. */
 const DEADLINE_TYPE_BY_KIND: Record<string, string> = {
@@ -103,7 +94,7 @@ const stageInput = z
   })
   .strict();
 
-const createTaskBody = z
+export const createTaskBody = z
   .object({
     studentId: z.string().uuid(),
     kind: z.enum(TASK_KINDS).optional(),
@@ -250,6 +241,171 @@ export async function hydrate(
       ...(request.profile.role === "counselor" ? { fromResearch: t.source !== "student" && (research === null || research.has(t.id as string)) } : {}),
     })
   );
+}
+
+export type CreateTaskInput = z.infer<typeof createTaskBody>;
+
+/** Where a task made from a saved set came from (`deliverables.task_set_id` / `task_set_item_key`). */
+export type TaskSetMarker = { taskSetId: string; itemKey: string };
+
+export type CreateTaskOptions = {
+  marker?: TaskSetMarker;
+  /** Store `notifyEmail` as asked but don't send the email now (a set's apply emails once per student). */
+  skipEmailSend?: boolean;
+};
+
+export type CreatedTask =
+  | {
+      alreadyAssigned: false;
+      taskId: string;
+      task: Row;
+      notification: { email: boolean; sms: SmsNotifyState; error: string | null };
+    }
+  /** Only with a marker: the marker's unique index says this student already has this item (23505). */
+  | { alreadyAssigned: true };
+
+/**
+ * A counselor's assignment, as the Create task button makes it: the task, its stages in order, the
+ * Deadline Command Center mirror, attached documents, the `created` event, then the notification last
+ * so a delivery failure leaves a real task behind. Shared by `POST /tasks` and `POST /task-sets/:id/apply`.
+ *
+ * The CALLER has already checked edit access to `b.studentId` (`resolveStudentId(..., "edit")`); RLS
+ * still applies to every write. With `marker`, a unique violation on the marker's own index is reported
+ * as `alreadyAssigned` rather than thrown; any other violation still throws.
+ */
+export async function createTaskForStudent(
+  request: FastifyRequest,
+  b: CreateTaskInput,
+  { marker, skipEmailSend = false }: CreateTaskOptions = {}
+): Promise<CreatedTask> {
+  const visible = b.visibleToStudent !== false;
+  const kind = b.kind ?? "custom";
+  const stages = b.stages ?? [];
+  // The task's own due date defaults to the last stage's, so a multi-step
+  // task still sorts correctly next to single-deadline work.
+  const stageDates = stages
+    .map((s) => s.dueDate)
+    .filter((d): d is string => Boolean(d))
+    .sort();
+  const dueDate = b.dueDate ?? stageDates.at(-1) ?? null;
+
+  // Documents must be ones the caller can actually see. RLS filters the
+  // read, so a short result means an id that isn't theirs to attach.
+  let documents: Row[] = [];
+  if (b.documentIds?.length) {
+    const { data, error } = await request.db
+      .from("documents")
+      .select("id, filename, title, student_id")
+      .in("id", b.documentIds);
+    if (error) throw fromPostgrest(error);
+    documents = (data ?? []) as Row[];
+    if (documents.length !== b.documentIds.length) {
+      throw badRequest("One of those documents isn't available to attach");
+    }
+  }
+
+  const { data: task, error } = await request.db
+    .from("deliverables")
+    .insert({
+      student_id: b.studentId,
+      kind,
+      title: b.title,
+      instructions: b.instructions ?? null,
+      essay_id: b.essayId ?? null,
+      student_college_id: b.studentCollegeId ?? null,
+      target_words: b.targetWords ?? null,
+      due_date: dueDate,
+      status: "not-started",
+      source: "counselor",
+      created_by: request.auth.userId,
+      assigned_by: request.auth.userId,
+      assigned_at: new Date().toISOString(),
+      notify_email: b.notifyEmail ?? true,
+      notify_sms: b.notifySms ?? false,
+      visible_to_student: visible,
+      // Only named when there is one, so the Create task button never reads the set columns.
+      ...(marker ? { task_set_id: marker.taskSetId, task_set_item_key: marker.itemKey } : {}),
+    })
+    .select("*")
+    .single();
+  if (error) {
+    if (marker && isMarkerViolation(error)) return { alreadyAssigned: true };
+    throw fromPostgrest(error);
+  }
+
+  const taskId = task.id as string;
+
+  // Stages, in the order they were given.
+  if (stages.length > 0) {
+    const rows = stages.map((s, i) => ({
+      deliverable_id: taskId,
+      student_id: b.studentId,
+      name: s.name,
+      detail: s.detail ?? null,
+      due_date: s.dueDate ?? null,
+      sequence: i,
+    }));
+    const { error: stageError } = await request.db
+      .from("deliverable_stages")
+      .insert(rows);
+    if (stageError) throw fromPostgrest(stageError);
+  }
+
+  // Mirror dated stages into the existing deadline tracker rather than
+  // standing up a second one the counselor has to check separately. A
+  // hidden task mirrors nothing: deadlines are the student's to read, so
+  // they are made when the task is shared.
+  if (b.syncDeadlines !== false && visible) {
+    await mirrorStageDeadlines(request, {
+      taskId,
+      studentId: b.studentId,
+      title: b.title,
+      kind,
+      instructions: b.instructions ?? null,
+    });
+  }
+
+  if (documents.length > 0) {
+    const { error: linkError } = await request.db.from("deliverable_documents").insert(
+      documents.map((d) => ({
+        deliverable_id: taskId,
+        document_id: d.id as string,
+        student_id: b.studentId,
+        role: "reference",
+        added_by: request.auth.userId,
+      }))
+    );
+    if (linkError) throw fromPostgrest(linkError);
+  }
+
+  await request.db.from("progress_events").insert({
+    student_id: b.studentId,
+    deliverable_id: taskId,
+    entity_type: "deliverable",
+    entity_id: taskId,
+    event: "created",
+    actor_id: request.auth.userId,
+    metadata: marker
+      ? { stages: stages.length, documents: documents.length, taskSetId: marker.taskSetId, taskSetItemKey: marker.itemKey }
+      : { stages: stages.length, documents: documents.length },
+  });
+
+  // Nobody is told about a task the student can't see.
+  const notification = visible
+    ? await notifyAssignment(request, {
+        taskId,
+        studentId: b.studentId,
+        title: b.title,
+        instructions: b.instructions ?? null,
+        dueDate,
+        stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
+        documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
+        email: skipEmailSend ? false : (b.notifyEmail ?? true),
+        sms: b.notifySms ?? false,
+      })
+    : { email: false, sms: "skipped" as SmsNotifyState, error: null };
+
+  return { alreadyAssigned: false, taskId, task: task as Row, notification };
 }
 
 export default async function taskRoutes(app: FastifyInstance) {
@@ -428,135 +584,17 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const b = createTaskBody.parse(request.body);
       await resolveStudentId(request, b.studentId, "edit");
-
-      const visible = b.visibleToStudent !== false;
-      const kind = b.kind ?? "custom";
-      const stages = b.stages ?? [];
-      // The task's own due date defaults to the last stage's, so a multi-step
-      // task still sorts correctly next to single-deadline work.
-      const stageDates = stages
-        .map((s) => s.dueDate)
-        .filter((d): d is string => Boolean(d))
-        .sort();
-      const dueDate = b.dueDate ?? stageDates.at(-1) ?? null;
-
-      // Documents must be ones the caller can actually see. RLS filters the
-      // read, so a short result means an id that isn't theirs to attach.
-      let documents: Row[] = [];
-      if (b.documentIds?.length) {
-        const { data, error } = await request.db
-          .from("documents")
-          .select("id, filename, title, student_id")
-          .in("id", b.documentIds);
-        if (error) throw fromPostgrest(error);
-        documents = (data ?? []) as Row[];
-        if (documents.length !== b.documentIds.length) {
-          throw badRequest("One of those documents isn't available to attach");
-        }
-      }
-
-      const { data: task, error } = await request.db
-        .from("deliverables")
-        .insert({
-          student_id: b.studentId,
-          kind,
-          title: b.title,
-          instructions: b.instructions ?? null,
-          essay_id: b.essayId ?? null,
-          student_college_id: b.studentCollegeId ?? null,
-          target_words: b.targetWords ?? null,
-          due_date: dueDate,
-          status: "not-started",
-          source: "counselor",
-          created_by: request.auth.userId,
-          assigned_by: request.auth.userId,
-          assigned_at: new Date().toISOString(),
-          notify_email: b.notifyEmail ?? true,
-          notify_sms: b.notifySms ?? false,
-          visible_to_student: visible,
-        })
-        .select("*")
-        .single();
-      if (error) throw fromPostgrest(error);
-
-      const taskId = task.id as string;
-
-      // Stages, in the order they were given.
-      if (stages.length > 0) {
-        const rows = stages.map((s, i) => ({
-          deliverable_id: taskId,
-          student_id: b.studentId,
-          name: s.name,
-          detail: s.detail ?? null,
-          due_date: s.dueDate ?? null,
-          sequence: i,
-        }));
-        const { error: stageError } = await request.db
-          .from("deliverable_stages")
-          .insert(rows);
-        if (stageError) throw fromPostgrest(stageError);
-      }
-
-      // Mirror dated stages into the existing deadline tracker rather than
-      // standing up a second one the counselor has to check separately. A
-      // hidden task mirrors nothing: deadlines are the student's to read, so
-      // they are made when the task is shared.
-      if (b.syncDeadlines !== false && visible) {
-        await mirrorStageDeadlines(request, {
-          taskId,
-          studentId: b.studentId,
-          title: b.title,
-          kind,
-          instructions: b.instructions ?? null,
-        });
-      }
-
-      if (documents.length > 0) {
-        const { error: linkError } = await request.db.from("deliverable_documents").insert(
-          documents.map((d) => ({
-            deliverable_id: taskId,
-            document_id: d.id as string,
-            student_id: b.studentId,
-            role: "reference",
-            added_by: request.auth.userId,
-          }))
-        );
-        if (linkError) throw fromPostgrest(linkError);
-      }
-
-      await request.db.from("progress_events").insert({
-        student_id: b.studentId,
-        deliverable_id: taskId,
-        entity_type: "deliverable",
-        entity_id: taskId,
-        event: "created",
-        actor_id: request.auth.userId,
-        metadata: { stages: stages.length, documents: documents.length },
-      });
-
-      // Nobody is told about a task the student can't see.
-      const notified = visible
-        ? await notifyAssignment(request, {
-            taskId,
-            studentId: b.studentId,
-            title: b.title,
-            instructions: b.instructions ?? null,
-            dueDate,
-            stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
-            documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
-            email: b.notifyEmail ?? true,
-            sms: b.notifySms ?? false,
-          })
-        : { email: false, sms: "skipped" as SmsNotifyState, error: null };
+      const created = await createTaskForStudent(request, b);
+      if (created.alreadyAssigned) throw conflict("That task is already assigned");
 
       const { data: fresh } = await request.db
         .from("deliverables")
         .select("*")
-        .eq("id", taskId)
+        .eq("id", created.taskId)
         .maybeSingle();
 
-      const [dto] = await hydrate(request, [(fresh ?? task) as Row]);
-      return reply.code(201).send({ ...dto, notification: notified });
+      const [dto] = await hydrate(request, [(fresh ?? created.task) as Row]);
+      return reply.code(201).send({ ...dto, notification: created.notification });
     }
   );
 

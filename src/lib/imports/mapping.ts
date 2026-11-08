@@ -20,7 +20,7 @@ import {
   planFromTemplate, templateFrom, templatePlanSchema, validatePlan,
   type Forced, type ParsePlan, type PlanSheet, type ProfiledFile, type SourceSystem,
 } from "./plan.js";
-import { detectSourceSystem, presetSheet, unmappedColumns } from "./presets.js";
+import { detectSourceSystem, presetSheetsFor, unmappedColumns } from "./presets.js";
 import type { FileProfile } from "./profile.js";
 import { importsAiEnabled } from "./rollout.js";
 
@@ -85,7 +85,8 @@ export async function suggestPlan(request: FastifyRequest, importId: string): Pr
       sheets.push(...applied);
     } else {
       untemplated.push(file);
-      sheets.push(...file.profile.sheets.map((s) => presetSheet(file.fileId, s)));
+      // The tool the file names is read first: its guesses (preset-unverified) go before the generic presets.
+      sheets.push(...presetSheetsFor(file));
     }
   }
   const templatePlan = template ? templatePlanSchema.parse(template.parse_plan) : null;
