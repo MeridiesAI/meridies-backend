@@ -85,6 +85,20 @@ test("long-format rows build test scores, courses and activities; score columns 
   ]);
 });
 
+test("a preset-unverified column reads and matches exactly like a preset one, and is not a template's", () => {
+  // SYNTHETIC: not a real CPP/Counselmore export. Only the provenance label differs.
+  const headers = ["Student's Email", "Student's Name", "Cumulative GPA Weighted", "Graduating Class"];
+  const rows = [["jane@x.org", "Jane Doe", "4.1", "2027"], ["rob@x.org", "Rob", "oops", "2027"], ["rob2@x.org", "R2", "oops", "2027"], ["rob3@x.org", "R3", "oops", "2027"], ["rob4@x.org", "R4", "oops", "2027"]];
+  const withSource = (source: Col["source"]): ParsePlan =>
+    plan([{ ...k(0, "email"), source }, { ...k(1, "full_name"), source }, { ...fld(2, "student_academics", "gpa_weighted"), source }, { ...k(3, "grad_year"), source }]);
+  const guessed = applyPlan(withSource("preset-unverified"), [file(sheet(headers, rows))], FIELDS, new Set());
+  const plain = applyPlan(withSource("preset"), [file(sheet(headers, rows))], FIELDS, new Set());
+  assert.deepEqual(guessed, plain);
+  assert.equal(guessed.drift.length, 0, "only a saved layout (template) is held to the drift rule, never a guess");
+  const items = matchRecords(guessed.records, roster);
+  assert.equal(items.find((i) => i.matchKey.email === "jane@x.org")?.studentId, "s-jane");
+});
+
 test("template drift: 20% or more of the mapped cells failing on a template file", () => {
   const p = plan([k(0, "email"), fld(1, "student_academics", "sat_superscore")]);
   const bad = file(sheet(["Email", "SAT"], [["a@b.co", "x"], ["b@b.co", "y"], ["c@b.co", "1400"], ["d@b.co", "1300"], ["e@b.co", "1200"]]));

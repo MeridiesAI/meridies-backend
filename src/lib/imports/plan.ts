@@ -42,12 +42,19 @@ export const parseHintsSchema = z
   })
   .strict();
 
+/**
+ * Where a column's mapping came from. "preset-unverified" is a guess from a
+ * named tool's usual headers (VENDOR_PRESETS in presets.ts), made without a
+ * real export from that tool; the counselor is asked to check it.
+ */
+export const COLUMN_SOURCES = ["preset", "preset-unverified", "template", "ai", "counselor"] as const;
+
 export const columnSchema = z
   .object({
     index: z.number().int().min(0).max(MAX_COLUMNS - 1),
     target: targetSchema,
     parse: parseHintsSchema.optional(),
-    source: z.enum(["preset", "template", "ai", "counselor"]),
+    source: z.enum(COLUMN_SOURCES),
   })
   .strict();
 export type PlanColumn = z.infer<typeof columnSchema>;
