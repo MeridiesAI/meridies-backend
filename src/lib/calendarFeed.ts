@@ -186,6 +186,13 @@ export type FeedContext = {
 /** Ids named in one `.in()` filter (a URL), so a caseload of any size is read in batches. */
 export const FEED_ID_CHUNK = 200;
 
+/**
+ * Batch reads in flight at once for one feed build, across every
+ * student-spanning table: a 2,000-student caseload is 40 reads, and they must
+ * not all hit PostgREST together.
+ */
+export const FEED_BATCH_CONCURRENCY = 4;
+
 export function inChunks<T>(list: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
@@ -416,8 +423,24 @@ export async function buildCalendarFeed(
 
   /** Each student-spanning read, once per batch, its rows concatenated. */
   type Q = PromiseLike<{ data: unknown[] | null; error: PostgrestError | null }>;
+  // One small pool for every batch read of this build (FEED_BATCH_CONCURRENCY in flight).
+  let running = 0;
+  const waiting: Array<() => void> = [];
+  async function pooled<T>(run: () => PromiseLike<T>): Promise<T> {
+    // A finished read hands its slot straight to the next waiting one, so the count never overshoots.
+    if (running >= FEED_BATCH_CONCURRENCY) await new Promise<void>((go) => waiting.push(go));
+    else running++;
+    try {
+      return await run();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else running--;
+    }
+  }
   async function perBatch(build: (ids: string[] | undefined) => Q): Promise<Row[]> {
-    const answers = await Promise.all(batches.map((ids) => build(ids)));
+    // Each answer keeps its batch's place, so the rows come back in caseload order.
+    const answers = await Promise.all(batches.map((ids) => pooled(() => build(ids))));
     const rows: Row[] = [];
     for (const r of answers) {
       if (r.error) throw fromPostgrest(r.error);

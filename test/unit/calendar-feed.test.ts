@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildCalendarFeed, collegeFeedItems, FEED_ID_CHUNK, inChunks, testFeedItems, type FeedKind } from "../../src/lib/calendarFeed.js";
+import { buildCalendarFeed, collegeFeedItems, FEED_BATCH_CONCURRENCY, FEED_ID_CHUNK, inChunks, testFeedItems, type FeedKind } from "../../src/lib/calendarFeed.js";
 
 const window = { from: "2027-01-01", to: "2027-01-31" };
 const typeOf = (kind: FeedKind) => kind;
@@ -157,4 +157,49 @@ test("an empty caseload reads nothing student-spanning", async () => {
   const { db, ins } = fakeDb();
   await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload: [] }, q);
   assert.equal(ins.filter((x) => ["deadlines", "deliverables", "student_colleges", "student_academics"].includes(x.table)).length, 0);
+});
+
+/** A stand-in that answers each batch read a tick later, with one deadline row per student, counting reads in flight. */
+function slowDb() {
+  const SPANNING = new Set(["deadlines", "deliverables", "student_colleges", "student_academics"]);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let reads = 0;
+  const make = (table: string, ids: string[]): unknown =>
+    new Proxy(
+      {},
+      {
+        get(_t, prop) {
+          if (prop === "then") {
+            return (resolve: (v: unknown) => void) => {
+              if (!SPANNING.has(table)) return resolve({ data: [], error: null });
+              reads++;
+              inFlight++;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              setTimeout(() => {
+                inFlight--;
+                const data =
+                  table === "deadlines"
+                    ? ids.map((id) => ({ id: `d-${id}`, student_id: id, title: `D ${id}`, due_date: "2027-01-10", done: false }))
+                    : [];
+                resolve({ data, error: null });
+              }, 2);
+            };
+          }
+          return (...args: unknown[]) => make(table, prop === "in" && args[0] === "student_id" ? (args[1] as string[]) : ids);
+        },
+      }
+    );
+  return { db: { from: (t: string) => make(t, []) } as never, stats: () => ({ maxInFlight, reads }) };
+}
+
+test("a big caseload's batch reads are bounded in flight, and the answer is the same", async () => {
+  const { db, stats } = slowDb();
+  const caseload = Array.from({ length: FEED_ID_CHUNK * 10 }, (_, i) => `s${String(i).padStart(5, "0")}`);
+  const out = await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload }, q);
+  assert.equal(stats().reads, 40, "10 batches for each of the 4 tables");
+  assert.ok(stats().maxInFlight <= FEED_BATCH_CONCURRENCY, `max in flight ${stats().maxInFlight}`);
+  assert.ok(FEED_BATCH_CONCURRENCY >= 1 && FEED_BATCH_CONCURRENCY <= 4);
+  // Every student's deadline, once, in caseload order (all on one day, sorted by title).
+  assert.deepEqual(out.items.map((i) => i.studentId), caseload);
 });
