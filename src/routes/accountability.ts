@@ -9,6 +9,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { registerCollection } from "../lib/collection.js";
 import {
+  ALERT_DEFAULTS,
   alertBlockedReason,
   buildBehindList,
   DEFAULT_SETTINGS,
@@ -18,7 +19,8 @@ import {
   resolveAlertRecipients,
   runEscalationSweep,
 } from "../lib/accountability.js";
-import { badRequest, conflict, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { isSchemaMissing } from "../lib/axis/failsafe.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { deliverParentAlert, type ParentAlertRow } from "../lib/parentAlertDelivery.js";
@@ -111,6 +113,10 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
           quietHoursStart: z.number().int().min(0).max(23).nullable().optional(),
           quietHoursEnd: z.number().int().min(0).max(23).nullable().optional(),
           timezone: z.string().trim().max(60).optional(),
+          // The alert settings (20261111000003): null switches the inactivity alert off.
+          inactiveAlertDays: z.number().int().min(1).max(90).nullable().optional(),
+          notifyOnEssay: z.boolean().optional(),
+          weeklyDigest: z.enum(["off", "draft"]).optional(),
         })
         .strict()
         .parse(request.body);
@@ -130,6 +136,10 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
       if (b.quietHoursStart !== undefined) row.quiet_hours_start = b.quietHoursStart;
       if (b.quietHoursEnd !== undefined) row.quiet_hours_end = b.quietHoursEnd;
       if (b.timezone !== undefined) row.timezone = b.timezone;
+      if (b.inactiveAlertDays !== undefined) row.inactive_alert_days = b.inactiveAlertDays;
+      if (b.notifyOnEssay !== undefined) row.notify_on_essay = b.notifyOnEssay;
+      if (b.weeklyDigest !== undefined) row.weekly_digest = b.weeklyDigest;
+      const setsAlerts = Object.keys(ALERT_DEFAULTS).some((k) => k in row);
 
       // The scope's unique index is on (counselor_id, coalesce(student_id, zero uuid)), an expression
       // PostgREST's on_conflict can't name, so an upsert here always failed: find the row, then
@@ -145,17 +155,27 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
       // A first save starts from what applies now (the student's counselor-wide settings, or ours),
       // so the keys the request leaves out keep their values instead of falling to the column
       // defaults (no quiet hours, alerts back on).
+      // The alert settings are seeded too, so a student's override starts from the counselor's alerts;
+      // on a database without their columns the insert is retried without them.
       let seed: Record<string, unknown> = {};
+      let alertSeed: Record<string, unknown> = {};
       if (!found) {
-        const now = await loadSettings(request, request.auth.userId, b.studentId ?? undefined);
-        seed = Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map((k) => [k, (now as Record<string, unknown>)[k]]));
+        const now = (await loadSettings(request, request.auth.userId, b.studentId ?? undefined)) as Record<string, unknown>;
+        seed = Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map((k) => [k, now[k]]));
+        alertSeed = Object.fromEntries(Object.keys(ALERT_DEFAULTS).map((k) => [k, now[k]]));
       }
-      const { data, error } = found
+      let { data, error } = found
         ? await request.db.from("accountability_settings").update(row).eq("id", found.id as string).select("*").single()
-        : await request.db.from("accountability_settings").insert({ ...seed, ...row }).select("*").single();
+        : await request.db.from("accountability_settings").insert({ ...seed, ...alertSeed, ...row }).select("*").single();
+      if (error && isSchemaMissing(error) && !found && !setsAlerts) {
+        ({ data, error } = await request.db.from("accountability_settings").insert({ ...seed, ...row }).select("*").single());
+      }
+      if (error && isSchemaMissing(error) && setsAlerts) {
+        throw new HttpError(503, "Alert settings aren't switched on yet.", "alert_settings_unavailable");
+      }
 
       if (error) throw fromPostgrest(error);
-      return { ...DEFAULT_SETTINGS, ...(data as object) };
+      return { ...DEFAULT_SETTINGS, ...ALERT_DEFAULTS, ...(data as object) };
     }
   );
 
