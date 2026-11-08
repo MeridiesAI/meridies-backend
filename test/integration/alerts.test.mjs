@@ -145,6 +145,56 @@ const settings = (c, cols) =>
   check("a counselor can't write an alert row", write.status >= 400, `status ${write.status}`);
 }
 
+// ---- Whose activity counts, and a notice that failed -------------------------------------------------------
+{
+  const c = await user("alerts-actor");
+  await settings(c, { inactive_alert_days: 7 });
+  const byCounselor = await studentOf(c, "Helped");
+  const byStudent = await studentOf(c, "Selfmade");
+  await inactiveSince(byCounselor, 30, 20);
+  await inactiveSince(byStudent, 30, 20);
+  await sql(`insert into public.progress_events (student_id, entity_type, event, actor_id, created_at) values ('${byCounselor.id}', 'essay', 'word-count-changed', '${c.id}', now() - interval '1 day')`);
+  await sql(`insert into public.progress_events (student_id, entity_type, event, actor_id, created_at) values ('${byStudent.id}', 'essay', 'word-count-changed', '${byStudent.id}', now() - interval '1 day')`);
+
+  // A notice that can't be written must leave the streak unannounced, so the next sweep tries again.
+  const failing = await studentOf(c, "Failnote");
+  await inactiveSince(failing, 30, 12);
+  const fn = `test_fail_notice_${failing.id.replace(/-/g, "")}`;
+  await sql(`create function public.${fn}() returns trigger language plpgsql as $f$ begin
+               if new.student_id = '${failing.id}' then raise exception 'test: notification refused'; end if; return new; end $f$`);
+  await sql(`create trigger ${fn} before insert on public.notifications for each row execute function public.${fn}()`);
+  try {
+    await sweep();
+  } finally {
+    await sql(`drop trigger if exists ${fn} on public.notifications; drop function if exists public.${fn}()`);
+  }
+  check("a counselor's activity doesn't count as the student's", (await alerts(byCounselor)) === 1 && (await notices(c, byCounselor, "Helped hasn't been active in 20 days")) === 1);
+  check("the student's own activity does", (await alerts(byStudent)) === 0);
+  check("a notice that failed leaves no alert row behind", (await alerts(failing)) === 0 && (await notices(c, failing)) === 0);
+  await sweep();
+  check("...so the next sweep announces the streak", (await alerts(failing)) === 1 && (await notices(c, failing, "Failnote hasn't been active in 12 days")) === 1);
+}
+
+// ---- A student can't write their own last-active mark ------------------------------------------------------
+{
+  const c = await user("alerts-forge");
+  const s = await studentOf(c, "forger");
+  const future = new Date(Date.now() + 365 * 86_400_000).toISOString();
+  const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/profiles?id=eq.${s.id}`, {
+    method: "PATCH",
+    headers: { apikey: process.env.SUPABASE_ANON_KEY, Authorization: `Bearer ${s.token}`, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ last_active_at: future }),
+  });
+  const stored = await sql(`select coalesce(last_active_at::text, '') from public.profiles where id = '${s.id}'`);
+  check("a student's PostgREST write of last_active_at is refused", r.status >= 400 && stored === "", `status ${r.status} stored ${stored}`);
+  const name = await fetch(`${process.env.SUPABASE_URL}/rest/v1/profiles?id=eq.${s.id}`, {
+    method: "PATCH",
+    headers: { apikey: process.env.SUPABASE_ANON_KEY, Authorization: `Bearer ${s.token}`, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify({ hometown: "Ithaca" }),
+  });
+  check("...while their other own columns still save", name.status < 300, `status ${name.status}`);
+}
+
 // ---- Essay notice -----------------------------------------------------------------------------------------
 {
   const c = await user("alerts-essay");
