@@ -23,6 +23,7 @@ import { env } from "../env.js";
 import { readMark } from "../lib/axis/ops/trash.js";
 import { userClient } from "../lib/supabase.js";
 import { blockedAsPending } from "../lib/access.js";
+import { touchLastActive } from "../lib/inactivityAlerts.js";
 import { accountPending, unauthorized } from "../lib/errors.js";
 import type { AuthProfile } from "../lib/serialize.js";
 
@@ -75,7 +76,7 @@ export default fp(async (app) => {
       .select(
         "id, full_name, email, role, role_confirmed, onboarding_step, onboarding_complete, " +
           "counselor_id, firm_id, avatar_url, phone, timezone, title, headline, hometown, " +
-          "high_school, grad_year, counselor_approved_at"
+          "high_school, grad_year, counselor_approved_at, last_active_at"
       )
       .eq("id", userId)
       .maybeSingle();
@@ -96,5 +97,9 @@ export default fp(async (app) => {
     if (blockedAsPending(request.profile, request.routeOptions.config.allowPending)) {
       throw accountPending();
     }
+
+    // The inactivity alert's signal (lib/inactivityAlerts.ts): a student's request marks them active, at
+    // most once an hour, on the service client, after the response's work is under way. Never awaited.
+    touchLastActive(request.profile, request.log);
   });
 });

@@ -29,6 +29,7 @@ import { purgeAxisTrash } from "./axisTrash.js";
 import { beat } from "./heartbeat.js";
 import { serviceClient } from "./supabase.js";
 import { approvedCounselorIds } from "./access.js";
+import { runInactivityPass } from "./inactivityAlerts.js";
 
 const LEASE_NAME = "accountability-sweep";
 /** Long enough for a large roster; a crashed holder frees it after this. */
@@ -51,6 +52,8 @@ export type SweepAuditSummary = {
   failedCounselors: number;
   /** Counselors skipped because their account is not approved. */
   unapproved?: number;
+  /** Inactivity alerts made this run (lib/inactivityAlerts.ts). */
+  inactivityAlerts?: number;
   durationMs: number;
 };
 
@@ -150,6 +153,7 @@ export async function runScheduledSweep(
   let skipped = 0;
   let failedCounselors = 0;
   let unapproved = 0;
+  let inactivityAlerts = 0;
 
   try {
     const byCounselor = await dueStudentsByCounselor(svc, new Date().toISOString());
@@ -176,6 +180,16 @@ export async function runScheduledSweep(
         log.error({ err, counselorId }, "accountability sweep: counselor sweep failed");
       }
     }
+
+    // The inactivity alert has its own roster read (the escalation above starts from open red flags),
+    // under the same lease. It never fails the sweep.
+    try {
+      const pass = await runInactivityPass(svc, log);
+      inactivityAlerts = pass.alerted;
+      failedCounselors += pass.failedCounselors;
+    } catch (err) {
+      log.error({ err }, "accountability sweep: inactivity pass failed");
+    }
   } finally {
     const { error } = await svc.rpc("release_job_lease", { p_name: LEASE_NAME, p_holder: holder });
     if (error) log.warn({ code: error.code }, "accountability sweep: lease release failed");
@@ -187,6 +201,7 @@ export async function runScheduledSweep(
     skipped,
     failedCounselors,
     unapproved,
+    inactivityAlerts,
     durationMs: Date.now() - startedAt,
   };
   log.info(summary, `accountability sweep (${trigger}) finished`);

@@ -33,6 +33,8 @@ export type Profile = {
   grad_year: string | null;
   profile: Record<string, unknown> | null;
   counselor_approved_at: string | null;
+  /** Stamped at most hourly on a student's requests (lib/inactivityAlerts.ts). */
+  last_active_at?: string | null;
 };
 
 /** `request.profile`: the row `authenticate` loads, without the `profile` jsonb. */
