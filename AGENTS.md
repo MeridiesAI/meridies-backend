@@ -112,6 +112,7 @@ src/
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
+│   ├── catalogProposals.ts # cited proposals from a school's own pages: page picking, quote grounding, fact keys (+ Run, Fake)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
@@ -174,7 +175,7 @@ src/
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
-│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
+│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports, catalog proposals)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -804,7 +805,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`, `catalog-proposals`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -1337,6 +1338,32 @@ one bad row loads nothing. `supplements` upserts `college_supplements` prompts o
 (school, cycle, sort_order) and requires an https `source_url` and a `checked_on` date on every row. Checked-in files and their sources are listed in
 `scripts/ingest/data/README.md`.
 
+**Cited proposals from a school's own pages** (`lib/catalogProposals.ts`, `20261111000011`) are how the curated
+facts scale past the hand-compiled schools, without the model ever writing the catalog. For ONE college,
+`POST /internal/catalog/propose { collegeId | unitid, dryRun? }` (CRON_SECRET, 200 with counts) or
+`npx tsx scripts/ingest/propose-catalog.ts --unitid <id> [--dry-run]` (local stack only: `assertLocalStack`) reads its
+home page and up to four admissions/essay/testing pages it links to, on its own domain and subdomains only
+(`onSchoolDomain`; a redirect off it ends the run), through `fetchSitePage`. One Haiku call
+(`runSystemStructured`, module `catalog-proposals`, the `system:catalog-proposals` budget of 500 calls a month, no
+practice switches because it acts for nobody) proposes `personal_statement_read`, `test_reporting` and this cycle's
+supplement prompts (the cycle turns over August 1). `groundCandidates` keeps a candidate only when it cites a page
+that was read and its quote (12+ characters) is on THAT page after folding; a prompt must be on the page and its
+word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support (a
+"self-report" quote filed as official-only) and a prompt for another stated cycle are dropped; everything dropped is
+counted. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;
+`admission_cycle`, a supplement's `payload {cycle, sortOrder, title, prompt, wordLimit}`, `fact_key`); a unique index
+keeps one pending or approved row per fact, and a fact already on file with a source isn't proposed. A rejected fact
+may be proposed again by a later run. **Review** is `review_catalog_proposal(id, decision, note)` (SECURITY DEFINER,
+callable by a catalog editor only, from `POST /colleges/proposals/:id/review` on the editor's own client): one
+transaction that locks the row, refuses one already reviewed (400), re-checks the value or payload, writes the curated
+row (a `college_supplements` upsert on its slot with `source_url` and `source_verified_at = now()`; or only that
+`college_policies` column plus `sources.<field> = {url, checkedAt, verifiedAt, verifiedBy}`; or `colleges.test_policy`)
+and stamps the reviewer. Reject changes only the proposal. `GET /colleges/proposals` carries `admissionCycle` and
+`payload`. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the review falls back to its
+older path for the six research fields and a proposer run answers 503 having written nothing. `RESEARCH_FAKE=fixture`
+swaps the pages and the answer for `lib/catalogProposalsFake.ts`. Tests: `test/unit/catalog-proposals.test.ts`,
+`test/integration/catalog-proposals.test.mjs`.
+
 **Events Hub listings** come the same way: `npx tsx --env-file=.env
 scripts/ingest/events-csv.ts --file <csv> [--dry-run]` (columns in
 `src/lib/ingest/events.ts`). Every row is checked with zod against what
@@ -1789,7 +1816,9 @@ The model never writes a result list and never changes the catalog.
 - Where a cited source disagrees with the catalog, a `catalog_change_proposals`
   row is written (allowed fields and values only, source URL must be one the
   answer cited). Only a `catalog_editors` member (Meridies staff, added with
-  service_role) can approve, and approval is what changes the catalog.
+  service_role) can approve, and approval is what changes the catalog. The same
+  table holds the cited proposals from a school's own pages (see "Resource
+  library and curated datasets").
 - `GET /colleges/:id/student-summary`: counselor bullets from catalog facts and
   the student's record only. No model; every bullet names its basis.
 - `POST /colleges/list-builder` draws candidates from the whole catalog
@@ -1835,7 +1864,7 @@ failed after it started, which may still be billed: the whole reservation stays)
   month; company-wide `AI_DAILY_CEILING_USD` $100 per UTC day. Weighted input counts each
   token at its price relative to the model's uncached input (cache reads at the model's
   read ratio, writes at 2x until the 5m/1h split is recorded). A system job reserves its
-  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000) and the company
+  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000, `catalog-proposals` 500) and the company
   line; `budget-subjects.test.ts` fails on a budget charged to a made-up account.
 - **Refusals:** a user cap answers 429 "You've hit today's AI limit. It resets in 5
   hours." (hours to 00:00 UTC, rounded up) or "Monthly AI usage limit reached."; the
