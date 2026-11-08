@@ -13,7 +13,9 @@ export function loggedUrl(url: string): string {
     .replace(/^\/*access-review\/[^/]*\/?$/, "/access-review/…")
     // The one-click unsubscribe links (routes/kpiUnsubscribe.ts, routes/pipelineUnsubscribe.ts)
     // carry a long-lived capability token in the path; a log line must not be able to use it.
-    .replace(/^\/*(kpi|pipeline)\/unsubscribe\/[^/]*\/?$/, "/$1/unsubscribe/…");
+    .replace(/^\/*(kpi|pipeline)\/unsubscribe\/[^/]*\/?$/, "/$1/unsubscribe/…")
+    // An agreement link (routes/agreements.ts) is the capability to accept it.
+    .replace(/^\/*agree\/[^/]*\/?$/, "/agree/…");
   const keys = query
     ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
     : "";
