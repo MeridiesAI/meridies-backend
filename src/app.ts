@@ -89,6 +89,8 @@ import resumeRoutes from "./routes/resume.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
+import bookingRoutes from "./routes/booking.js";
+import studentBookingRoutes from "./routes/studentBooking.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -255,6 +257,9 @@ export function buildApp() {
   app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
   // AI help for the questionnaire's tables (POST /me/intake/fill).
   app.register(intakeFillRoutes);
+  // Student self-booking: the counselor's hours and types, the student's slots.
+  app.register(bookingRoutes, { prefix: "/booking" });
+  app.register(studentBookingRoutes, { prefix: "/me/booking" });
   startSweepInterval(app);
   startExtractionRecovery(app);
 
