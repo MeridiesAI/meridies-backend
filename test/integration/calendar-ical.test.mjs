@@ -178,5 +178,13 @@ for (let i = 0; i < 62; i++) {
 }
 check("one URL fetched past 60 an hour trips the limit (429)", last === 429 && firstLimited === 60, `first 429 at ${firstLimited}`);
 
+// ---- Revoking is never held up by the make/rotate limit --------------------------------------
+const d = await user(`${tag}-d`);
+let mintStatus = 0;
+for (let i = 0; i < 11; i++) mintStatus = (await call(d.token, "POST", "/calendar/ical")).status;
+check("making or rotating the URL is limited (10 an hour)", mintStatus === 429, String(mintStatus));
+const dRevoke = await call(d.token, "DELETE", "/calendar/ical");
+check("…and revoking still works after that limit is spent", dRevoke.status === 200 && dRevoke.body?.revoked === true, `${dRevoke.status} ${JSON.stringify(dRevoke.body)}`);
+
 // Clean up this suite's accounts (the stack is shared); their rows cascade with their profiles.
 await sql(`delete from auth.users where email like '${tag}-%@test.local'`);

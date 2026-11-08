@@ -171,9 +171,10 @@ export default async function calendarIcalRoutes(app: FastifyInstance) {
     }
   );
 
+  // Revoking is the safety action (a leaked URL): its own generous bucket, never the mint's.
   app.delete(
     "/calendar/ical",
-    { preHandler: [...counselorOnly, limit("calendar:ical:mint", 10, 3600)] },
+    { preHandler: [...counselorOnly, limit("calendar:ical:revoke", 120, 3600)] },
     async (request) => {
       const svc = serviceClient();
       if (!svc) throw unavailable();
