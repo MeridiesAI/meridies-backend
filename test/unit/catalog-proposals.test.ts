@@ -129,7 +129,7 @@ test("a candidate is kept only when its quote is on the page it cites", () => {
     testReporting: { value: "self-report", quote: "Applicants may self-report their test scores", sourceUrl: ESSAYS },
     supplements: [
       {
-        sortOrder: 1,
+        sortOrder: 0,
         title: "Why Example",
         prompt: "Why do you want to attend Example University?",
         wordLimit: 250,
@@ -138,7 +138,7 @@ test("a candidate is kept only when its quote is on the page it cites", () => {
         cycleStated: "2026-2027",
       },
       {
-        sortOrder: 2,
+        sortOrder: 1,
         title: "Made up",
         prompt: "Describe a time you changed your mind.",
         wordLimit: 300,
@@ -151,12 +151,12 @@ test("a candidate is kept only when its quote is on the page it cites", () => {
   const r = groundCandidates(raw, PAGES, CTX);
   assert.deepEqual(
     r.kept.map((c) => (c.field === "supplement" ? `supplement:${c.payload.sortOrder}` : `${c.field}:${c.value}`)),
-    ["personal_statement_read:true", "test_reporting:self-report", "supplement:1"]
+    ["personal_statement_read:true", "test_reporting:self-report", "supplement:0"]
   );
   assert.equal(r.dropped.noQuote, 1, "the made-up prompt is dropped and counted");
   const s = r.kept.find((c) => c.field === "supplement");
   assert.ok(s && s.field === "supplement");
-  assert.deepEqual(s.payload, { cycle: "2026-2027", sortOrder: 1, title: "Why Example", prompt: "Why do you want to attend Example University?", wordLimit: 250 });
+  assert.deepEqual(s.payload, { cycle: "2026-2027", sortOrder: 0, title: "Why Example", prompt: "Why do you want to attend Example University?", wordLimit: 250 });
   assert.equal(s.sourceUrl, ESSAYS);
 });
 
@@ -164,7 +164,7 @@ test("a supplement title the page doesn't use is replaced with a plain one", () 
   const r = groundCandidates(
     {
       supplements: [
-        { sortOrder: 1, title: "Our invented label", prompt: "Why do you want to attend Example University?", wordLimit: 250, quote: "Prompt 1: Why do you want to attend Example University? (250 words)", sourceUrl: ESSAYS },
+        { sortOrder: 0, title: "Our invented label", prompt: "Why do you want to attend Example University?", wordLimit: 250, quote: "Prompt 1: Why do you want to attend Example University? (250 words)", sourceUrl: ESSAYS },
       ],
     },
     PAGES,
@@ -259,6 +259,7 @@ test("the idempotency key names the fact, not the wording around it", () => {
   const s2 = { ...s, payload: { ...s.payload, prompt: "why do you want to attend?" } };
   assert.equal(factKey("c1", s, "2026-2027"), factKey("c1", s2, "2026-2027"), "white space and case don't make a new fact");
   assert.notEqual(factKey("c1", s, "2026-2027"), factKey("c1", { ...s, payload: { ...s.payload, wordLimit: 300 } }, "2026-2027"));
+  assert.equal(factKey("c1", s, "2026-2027"), factKey("c1", { ...s, payload: { ...s.payload, sortOrder: 4 } }, "2026-2027"), "the slot is assigned by us, not part of the fact");
 });
 
 // ---- The run -------------------------------------------------------------------------------------
@@ -267,7 +268,11 @@ function memoryStore(over: Partial<{ policies: Record<string, unknown> | null; s
   const rows: ProposalRow[] = [];
   const store: ProposalStore = {
     college: async (id) => (id === "c1" ? { id: "c1", name: "Example University", website: "https://www.example.edu" } : null),
-    current: async () => ({ policies: over.policies ?? null, supplements: over.supplements ?? [] }),
+    current: async () => ({
+      policies: over.policies ?? null,
+      supplements: over.supplements ?? [],
+      pendingSupplements: rows.filter((r) => r.field === "supplement").map((r) => ({ sortOrder: r.payload!.sortOrder, prompt: r.payload!.prompt })),
+    }),
     insert: async (row) => {
       if (rows.some((r) => r.college_id === row.college_id && r.fact_key === row.fact_key)) return "duplicate";
       rows.push(row);
@@ -302,8 +307,8 @@ const ANSWER = {
   personalStatementRead: { value: true, quote: "We read the Common App personal statement carefully.", sourceUrl: ESSAYS },
   testReporting: { value: "self-report", quote: "Applicants may self-report their test scores", sourceUrl: ESSAYS },
   supplements: [
-    { sortOrder: 1, title: "Why Example", prompt: "Why do you want to attend Example University?", wordLimit: 250, quote: "Prompt 1: Why do you want to attend Example University? (250 words)", sourceUrl: ESSAYS },
-    { sortOrder: 2, title: "Invented", prompt: "Tell us about a hat.", wordLimit: 100, quote: "Prompt 2: Tell us about a hat. (100 words)", sourceUrl: ESSAYS },
+    { sortOrder: 0, title: "Why Example", prompt: "Why do you want to attend Example University?", wordLimit: 250, quote: "Prompt 1: Why do you want to attend Example University? (250 words)", sourceUrl: ESSAYS },
+    { sortOrder: 1, title: "Invented", prompt: "Tell us about a hat.", wordLimit: 100, quote: "Prompt 2: Tell us about a hat. (100 words)", sourceUrl: ESSAYS },
   ],
 };
 
@@ -323,8 +328,8 @@ test("a run reads only the school's own pages and writes pending proposals", asy
     assert.equal(row.admission_cycle, "2026-2027");
   }
   const supp = rows.find((x) => x.field === "supplement")!;
-  assert.deepEqual(supp.payload, { cycle: "2026-2027", sortOrder: 1, title: "Why Example", prompt: "Why do you want to attend Example University?", wordLimit: 250 });
-  assert.equal(supp.proposed_value, "2026-2027#1");
+  assert.deepEqual(supp.payload, { cycle: "2026-2027", sortOrder: 0, title: "Why Example", prompt: "Why do you want to attend Example University?", wordLimit: 250 });
+  assert.equal(supp.proposed_value, "2026-2027#0", "an empty school's first prompt takes slot 0");
 });
 
 test("a second run proposes nothing new", async () => {
@@ -347,7 +352,8 @@ test("a dry run writes nothing", async () => {
 test("a fact the catalog already holds, with a source, is not proposed", async () => {
   const { store, rows } = memoryStore({
     policies: { personal_statement_read: true, test_reporting: null, sources: { personal_statement_read: { url: ESSAYS } } },
-    supplements: [{ sort_order: 1, title: "Why Example", prompt: "Why do you want to attend Example University?", word_limit: 250, source_url: ESSAYS }],
+    // On file at slot 3: matched by its words, not its slot.
+    supplements: [{ sort_order: 3, title: "Why Example", prompt: "why do you want to attend  Example University?", word_limit: 250, source_url: ESSAYS }],
   });
   const r = await proposeForCollege("c1", deps(store, [], ANSWER));
   assert.equal(r.unchanged, 2);
@@ -368,4 +374,156 @@ test("without a model nothing is proposed", async () => {
   const d = { ...deps(store, [], ANSWER), ai: null };
   await assert.rejects(proposeForCollege("c1", d), /model/);
   assert.equal(rows.length, 0);
+});
+
+// ---- Slots: assigned by us, never by the model ---------------------------------------------------------
+
+const P = ["Why do you want to attend Example University?", "Describe a community you belong to.", "What is an idea that excites you?", "Tell us about a challenge you faced.", "What would you study, and why?"];
+const quoteOf = (i: number) => `Prompt ${i + 1}: ${P[i]} (200 words)`;
+
+/** A run over one essay page listing `order` (indexes into P), against curated rows on file. */
+async function slotRun(order: number[], onFile: number[], store?: ReturnType<typeof memoryStore>) {
+  const m = store ?? memoryStore({ supplements: onFile.map((i, slot) => ({ sort_order: slot, title: `Prompt ${slot + 1}`, prompt: P[i], word_limit: 200, source_url: ESSAYS })) });
+  const text = `Supplemental essays. ${order.map((i) => quoteOf(i)).join(" ")}`;
+  const site: Record<string, SitePage> = {
+    "https://www.example.edu": page(HOME, "Home", [{ href: ESSAYS, text: "Supplemental essays" }]),
+    [ESSAYS]: page(ESSAYS, text),
+  };
+  const answer = {
+    supplements: order.map((i, at) => ({ sortOrder: at, title: "x", prompt: P[i], wordLimit: 200, quote: quoteOf(i), sourceUrl: ESSAYS })),
+  };
+  const r = await proposeForCollege("c1", {
+    store: m.store,
+    fetchPage: async (url) => site[url]!,
+    ai: async (o) => o.validate(answer),
+    now: () => new Date("2026-11-07T12:00:00Z"),
+  });
+  return { r, rows: m.rows, m };
+}
+
+test("a school with curated slots 0-3 and one new prompt on the page gets exactly one proposal, at slot 4", async () => {
+  const { r, rows } = await slotRun([0, 1, 2, 3, 4], [0, 1, 2, 3]);
+  assert.equal(r.unchanged, 4, "the four on file are recognised by their words");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.payload!.sortOrder, 4);
+  assert.equal(rows[0]!.payload!.prompt, P[4]);
+  assert.equal(rows[0]!.proposed_value, "2026-2027#4");
+});
+
+test("a page that lists the same prompts in another order proposes no duplicates", async () => {
+  const { r, rows } = await slotRun([4, 3, 2, 1, 0], [0, 1, 2, 3]);
+  assert.equal(r.unchanged, 4);
+  assert.deepEqual(rows.map((x) => [x.payload!.sortOrder, x.payload!.prompt]), [[4, P[4]]]);
+});
+
+test("an empty school gets slots 0..n-1 in the page's order", async () => {
+  const { rows } = await slotRun([2, 0, 1], []);
+  assert.deepEqual(rows.map((x) => [x.payload!.sortOrder, x.payload!.prompt]), [[0, P[2]], [1, P[0]], [2, P[1]]]);
+});
+
+test("a prompt already waiting for review isn't proposed again, and its slot isn't reused", async () => {
+  const first = await slotRun([0], []);
+  assert.equal(first.rows[0]!.payload!.sortOrder, 0);
+  const { r, rows } = await slotRun([1, 0], [], first.m);
+  assert.equal(r.duplicates, 1, "prompt 0 is already pending");
+  assert.deepEqual(rows.map((x) => [x.payload!.sortOrder, x.payload!.prompt]), [[0, P[0]], [1, P[1]]], "the new prompt takes the next free slot");
+});
+
+test("the same prompt twice on a page is proposed once", () => {
+  const text = `Essays. ${quoteOf(0)} Again: ${quoteOf(0)}`;
+  const r = groundCandidates(
+    { supplements: [0, 1].map((at) => ({ sortOrder: at, title: "x", prompt: P[0], wordLimit: 200, quote: quoteOf(0), sourceUrl: ESSAYS })) },
+    [{ url: ESSAYS, text }],
+    CTX
+  );
+  assert.equal(r.kept.length, 1);
+  assert.equal(r.dropped.invalid, 1);
+});
+
+// ---- A flag's value must be what its quote says ----------------------------------------------------------
+
+function flag(field: "personalStatementRead" | "testReporting", value: unknown, quote: string) {
+  const r = groundCandidates({ [field]: { value, quote, sourceUrl: ESSAYS } }, [{ url: ESSAYS, text: `Policy. ${quote} End.` }], CTX);
+  return r.kept.length === 1 ? "kept" : r.dropped.invalid === 1 ? "invalid" : "other";
+}
+
+test("personal statement: true needs a plain statement, false needs a negation", () => {
+  assert.equal(flag("personalStatementRead", true, "We do not read the personal statement."), "invalid", "the reviewer's counter-example");
+  assert.equal(flag("personalStatementRead", false, "We do not read the personal statement."), "kept");
+  assert.equal(flag("personalStatementRead", false, "The personal statement isn't read by our committee."), "kept");
+  assert.equal(flag("personalStatementRead", false, "We no longer review the Common App essay."), "kept");
+  assert.equal(flag("personalStatementRead", false, "Applications are reviewed without the personal statement."), "kept");
+  assert.equal(flag("personalStatementRead", false, "We never consider the personal essay."), "kept");
+  assert.equal(flag("personalStatementRead", true, "Every reader reviews your personal statement closely."), "kept");
+  assert.equal(flag("personalStatementRead", false, "Every reader reviews your personal statement closely."), "invalid");
+  assert.equal(flag("personalStatementRead", true, "Our readers review every application closely."), "invalid", "no mention of the statement");
+});
+
+test("self-report: a self-report mention that isn't negated", () => {
+  assert.equal(flag("testReporting", "self-report", "Applicants may self-report their scores on the application."), "kept");
+  assert.equal(flag("testReporting", "self-report", "Self reported scores are accepted for review."), "kept");
+  assert.equal(flag("testReporting", "self-report", "We do not accept self-reported scores."), "invalid");
+  assert.equal(flag("testReporting", "self-report", "Official score reports are required from every applicant."), "invalid");
+});
+
+test("official-only: self-report refused, or scores must come officially, with no self-report accepted", () => {
+  assert.equal(flag("testReporting", "official-only", "We do not accept self-reported test scores."), "kept");
+  assert.equal(flag("testReporting", "official-only", "Scores must be sent directly from the testing agency."), "kept");
+  assert.equal(flag("testReporting", "official-only", "Official score reports are required for every applicant."), "kept");
+  assert.equal(flag("testReporting", "official-only", "Applicants may self-report; official score reports are required only on enrolling."), "invalid");
+  assert.equal(flag("testReporting", "official-only", "Official transcripts arrive from your high school."), "invalid", "official, but not about scores being required");
+});
+
+test("score-send: needs score-sending wording", () => {
+  assert.equal(flag("testReporting", "score-send", "Send your official scores through the College Board."), "kept");
+  assert.equal(flag("testReporting", "score-send", "Test scores must be sent by the testing agency."), "kept");
+  assert.equal(flag("testReporting", "score-send", "Applicants may self-report their scores and send them later."), "invalid", "self-report accepted");
+  assert.equal(flag("testReporting", "score-send", "Official score reports are required for admission."), "invalid", "no sending wording");
+});
+
+test("not-applicable: needs a test-blind or test-free statement that isn't negated", () => {
+  assert.equal(flag("testReporting", "not-applicable", "Our admissions process is test-blind for all applicants."), "kept");
+  assert.equal(flag("testReporting", "not-applicable", "We are a test free institution for first-year applicants."), "kept");
+  assert.equal(flag("testReporting", "not-applicable", "We are no longer test-blind for first-year applicants."), "invalid");
+  assert.equal(flag("testReporting", "not-applicable", "Scores are optional for all applicants this year."), "invalid");
+});
+
+// ---- Redirects off the school's domain -------------------------------------------------------------------
+
+test("a home page that redirects off the school's domain ends the run before the model", async () => {
+  const { store, rows } = memoryStore();
+  let modelCalled = false;
+  await assert.rejects(
+    proposeForCollege("c1", {
+      store,
+      fetchPage: async () => page("https://parked-domains.example/landing", "For sale"),
+      ai: async (o) => ((modelCalled = true), o.validate(ANSWER)),
+    }),
+    /redirected to another domain/
+  );
+  assert.equal(modelCalled, false);
+  assert.equal(rows.length, 0);
+});
+
+test("a subpage that redirects off the school's domain is dropped, and so is anything cited from it", async () => {
+  const { store, rows } = memoryStore();
+  const offsite = "https://essays-hub.example/example-u";
+  const site: Record<string, SitePage> = {
+    "https://www.example.edu": page(HOME, PAGES[0]!.text, [{ href: ESSAYS, text: "Writing supplement" }]),
+    // Asked for apply.example.edu/essays, answered from another domain.
+    [ESSAYS]: page(offsite, PAGES[1]!.text),
+  };
+  let prompt = "";
+  const r = await proposeForCollege("c1", {
+    store,
+    fetchPage: async (url) => site[url]!,
+    ai: async (o) => {
+      prompt = o.prompt;
+      return o.validate({ ...ANSWER, personalStatementRead: { ...ANSWER.personalStatementRead, sourceUrl: offsite } });
+    },
+  });
+  assert.deepEqual(r.pagesRead, [HOME]);
+  assert.ok(!prompt.includes(offsite), "the off-domain page never reaches the model");
+  assert.equal(rows.length, 0);
+  assert.ok(r.droppedOffDomain >= 1);
 });

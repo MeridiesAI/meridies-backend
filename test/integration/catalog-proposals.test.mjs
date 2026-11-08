@@ -113,7 +113,7 @@ try {
   const supp = mine.find((p) => p.field === "supplement");
   check(
     "the supplement carries its payload and cycle",
-    supp?.admissionCycle === cycle && supp?.payload?.sortOrder === 1 && supp?.payload?.wordLimit === 250 && /^Why do you want to attend/.test(supp?.payload?.prompt ?? ""),
+    supp?.admissionCycle === cycle && supp?.payload?.sortOrder === 0 && supp?.payload?.wordLimit === 250 && /^Why do you want to attend/.test(supp?.payload?.prompt ?? ""),
     JSON.stringify(supp)
   );
 
@@ -131,7 +131,7 @@ try {
     `select concat_ws('|', admission_cycle, sort_order, word_limit, source_url like 'https://apply.t16b-fixture.edu/essays%', source_verified_at > now() - interval '5 minutes', prompt like 'Why do you want to attend%')
        from public.college_supplements where college_id = '${college}'`
   );
-  check("the college_supplements row appears with its source and verified time", row === `${cycle}|1|250|t|t|t`, row);
+  check("the college_supplements row appears, at slot 0 for a school with none, with its source and verified time", row === `${cycle}|0|250|t|t|t`, row);
   check(
     "the proposal records the editor and the time",
     (await sql(`select concat_ws('|', status, reviewed_by, reviewed_at is not null, review_note) from public.catalog_change_proposals where id = '${suppId}'`)) === `approved|${editor.id}|t|checked the page`
@@ -181,6 +181,27 @@ try {
   const bad = await call(editor.token, "POST", `/colleges/proposals/${badId}/review`, { decision: "approve" });
   check("approving a proposal with an invalid payload is refused", bad.status === 400, JSON.stringify(bad.body));
   check("...and writes nothing", (await sql(`select count(*) from public.college_supplements where college_id = '${college}'`)) === "1" && (await sql(`select status from public.catalog_change_proposals where id = '${badId}'`)) === "pending");
+
+  // ---- An approval never overwrites a different prompt -------------------------------------------------
+  const slotRow = () => sql(`select concat_ws('|', prompt, source_url) from public.college_supplements where college_id = '${college}' and admission_cycle = '${cycle}' and sort_order = 0`);
+  const before = await slotRow();
+  const clashId = await returning(
+    `insert into public.catalog_change_proposals (college_id, field, proposed_value, source_url, evidence, admission_cycle, fact_key, payload)
+     values ('${college}', 'supplement', '${cycle}#0', 'https://apply.t16b-fixture.edu/other', 'a quote that is long enough', '${cycle}', repeat('c', 64),
+             '{"cycle":"${cycle}","sortOrder":0,"title":"Other","prompt":"Describe a different thing entirely.","wordLimit":100}') returning id`
+  );
+  const clash = await call(editor.token, "POST", `/colleges/proposals/${clashId}/review`, { decision: "approve" });
+  check("approving a prompt onto a slot that holds a different prompt is refused", clash.status === 400 && /different prompt/i.test(clash.body.error ?? ""), JSON.stringify(clash.body));
+  check("...and the curated prompt there is untouched", (await slotRow()) === before && (await sql(`select status from public.catalog_change_proposals where id = '${clashId}'`)) === "pending", await slotRow());
+  const dupId = await returning(
+    `insert into public.catalog_change_proposals (college_id, field, proposed_value, source_url, evidence, admission_cycle, fact_key, payload)
+     values ('${college}', 'supplement', '${cycle}#5', 'https://apply.t16b-fixture.edu/essays', 'a quote that is long enough', '${cycle}', repeat('d', 64),
+             '{"cycle":"${cycle}","sortOrder":5,"title":"Again","prompt":"why do you want to attend  our university, and what would you add to it?","wordLimit":250}') returning id`
+  );
+  const dup = await call(editor.token, "POST", `/colleges/proposals/${dupId}/review`, { decision: "approve" });
+  check("approving a prompt that is already on file at another slot is refused", dup.status === 400 && /already on file/i.test(dup.body.error ?? ""), JSON.stringify(dup.body));
+  check("...and writes no second copy", (await sql(`select count(*) from public.college_supplements where college_id = '${college}'`)) === "1");
+  await sql(`delete from public.catalog_change_proposals where id in ('${clashId}', '${dupId}', '${badId}')`);
 
   // ---- After approval, the same fact isn't proposed again -----------------------------------------
   const third = await cron({ collegeId: college });

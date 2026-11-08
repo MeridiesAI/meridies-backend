@@ -1348,15 +1348,23 @@ home page and up to four admissions/essay/testing pages it links to, on its own 
 practice switches because it acts for nobody) proposes `personal_statement_read`, `test_reporting` and this cycle's
 supplement prompts (the cycle turns over August 1). `groundCandidates` keeps a candidate only when it cites a page
 that was read and its quote (12+ characters) is on THAT page after folding; a prompt must be on the page and its
-word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support (a
-"self-report" quote filed as official-only) and a prompt for another stated cycle are dropped; everything dropped is
-counted. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;
+word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support and a
+prompt for another stated cycle are dropped; everything dropped is counted. A flag's value must be what its quote
+says (`statementFits` / `reportingFits`, conservative): `false` needs a negation (not, n't, no longer, never,
+without), `true` its absence; `self-report` an un-negated self-report mention; `official-only` a refused self-report
+or official scores required with no self-report; `score-send` sending wording; `not-applicable` an un-negated
+test-blind/test-free. **Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
+already on file in any slot (matched by its folded words) is unchanged, one already pending is a duplicate, and each
+new prompt takes the next free `sort_order` after every curated row and pending proposal, in the page's order; its
+`fact_key` is the prompt and word limit, not the slot. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;
 `admission_cycle`, a supplement's `payload {cycle, sortOrder, title, prompt, wordLimit}`, `fact_key`); a unique index
 keeps one pending or approved row per fact, and a fact already on file with a source isn't proposed. A rejected fact
 may be proposed again by a later run. **Review** is `review_catalog_proposal(id, decision, note)` (SECURITY DEFINER,
 callable by a catalog editor only, from `POST /colleges/proposals/:id/review` on the editor's own client): one
 transaction that locks the row, refuses one already reviewed (400), re-checks the value or payload, writes the curated
-row (a `college_supplements` upsert on its slot with `source_url` and `source_verified_at = now()`; or only that
+row (a `college_supplements` row on its slot with `source_url` and `source_verified_at = now()`, refused (400) when the
+slot holds a different prompt or the prompt is on file at another slot, so an approval never overwrites a row
+students' essays point to; or only that
 `college_policies` column plus `sources.<field> = {url, checkedAt, verifiedAt, verifiedBy}`; or `colleges.test_policy`)
 and stamps the reviewer. Reject changes only the proposal. `GET /colleges/proposals` carries `admissionCycle` and
 `payload`. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the review falls back to its

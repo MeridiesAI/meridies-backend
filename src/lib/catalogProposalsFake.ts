@@ -64,9 +64,9 @@ export const fakeAi: AiCall = async (o) => {
     personalStatementRead: { value: true, quote: FAKE_STATEMENT, sourceUrl: essays },
     testReporting: { value: "self-report", quote: FAKE_TESTING.slice(0, 60), sourceUrl: testing },
     supplements: [
-      { sortOrder: 1, title: "Why us", prompt: FAKE_PROMPT_1, wordLimit: 250, quote: `Prompt 1: ${FAKE_PROMPT_1} (250 words)`, sourceUrl: essays, cycleStated: null },
-      { sortOrder: 2, title: "A made-up prompt", prompt: "Describe a hat you love.", wordLimit: 100, quote: "Prompt 2: Describe a hat you love. (100 words)", sourceUrl: essays, cycleStated: null },
-      { sortOrder: 3, title: "Off-site", prompt: FAKE_PROMPT_1, wordLimit: 250, quote: `Prompt 1: ${FAKE_PROMPT_1} (250 words)`, sourceUrl: "https://essays.example/prompts", cycleStated: null },
+      { sortOrder: 0, title: "Why us", prompt: FAKE_PROMPT_1, wordLimit: 250, quote: `Prompt 1: ${FAKE_PROMPT_1} (250 words)`, sourceUrl: essays, cycleStated: null },
+      { sortOrder: 1, title: "A made-up prompt", prompt: "Describe a hat you love.", wordLimit: 100, quote: "Prompt 2: Describe a hat you love. (100 words)", sourceUrl: essays, cycleStated: null },
+      { sortOrder: 2, title: "Off-site", prompt: FAKE_PROMPT_1, wordLimit: 250, quote: `Prompt 1: ${FAKE_PROMPT_1} (250 words)`, sourceUrl: "https://essays.example/prompts", cycleStated: null },
     ],
   };
   return o.validate(answer);

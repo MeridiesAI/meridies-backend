@@ -20,8 +20,11 @@
 -- review_catalog_proposal(id, decision, note): the review, in ONE transaction.
 -- Only a catalog editor (auth.uid() in catalog_editors) may call it. It locks
 -- the row, refuses one already reviewed, re-checks the value or payload, and on
--- approve writes the curated row: college_supplements (upsert on its slot, with
--- source_url and source_verified_at = now()), college_policies (only that
+-- approve writes the curated row: college_supplements (its slot, with
+-- source_url and source_verified_at = now(); refused when the slot holds a
+-- different prompt or the prompt is on file at another slot, so an approval
+-- never overwrites a row students' essays point to; the proposer assigns a
+-- new prompt the next free slot itself, never the model), college_policies (only that
 -- column, plus sources.<field> = {url, checkedAt, verifiedAt, verifiedBy};
 -- provenance stays 'curated') or colleges.test_policy; then stamps the status,
 -- reviewed_by and reviewed_at. A reject changes only the proposal.
@@ -130,6 +133,18 @@ begin
          or length(v_title) not between 1 and 120 or length(v_prompt) not between 1 and 2000
          or (v_limit is not null and (v_limit <> trunc(v_limit) or v_limit not between 1 and 5000)) then
         raise exception 'That proposal''s supplement isn''t valid' using errcode = '22023';
+      end if;
+      -- Never overwrite a different prompt (students' essays point at these rows), and never file the same
+      -- prompt twice under another slot. Prompts compare case- and white-space-folded.
+      if exists (select 1 from public.college_supplements s
+                  where s.college_id = r.college_id and s.admission_cycle = r.admission_cycle and s.sort_order = v_sort
+                    and lower(regexp_replace(btrim(s.prompt), '\s+', ' ', 'g')) <> lower(regexp_replace(v_prompt, '\s+', ' ', 'g'))) then
+        raise exception 'That slot already holds a different prompt' using errcode = '22023';
+      end if;
+      if exists (select 1 from public.college_supplements s
+                  where s.college_id = r.college_id and s.admission_cycle = r.admission_cycle and s.sort_order <> v_sort
+                    and lower(regexp_replace(btrim(s.prompt), '\s+', ' ', 'g')) = lower(regexp_replace(v_prompt, '\s+', ' ', 'g'))) then
+        raise exception 'That prompt is already on file' using errcode = '22023';
       end if;
       insert into public.college_supplements (college_id, admission_cycle, sort_order, title, prompt, word_limit, source_url, source_verified_at)
       values (r.college_id, r.admission_cycle, v_sort::integer, v_title, v_prompt, v_limit::integer, r.source_url, v_now)
