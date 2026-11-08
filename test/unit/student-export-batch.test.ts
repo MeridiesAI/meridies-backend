@@ -25,10 +25,10 @@ const B = "22222222-2222-4222-8222-222222222222";
 const C = "33333333-3333-4333-8333-333333333333";
 const ME = "44444444-4444-4444-8444-444444444444";
 
-test("a batch is at most 25 students, and the bucket holds a 120-student roster", () => {
+test("a batch is at most 25 students, and the bucket holds a 1,000-student roster in an hour", () => {
   assert.equal(EXPORT_BATCH_MAX, 25);
-  assert.equal(BATCH_EXPORT_UNITS_PER_HOUR, 200);
-  assert.ok(5 * EXPORT_BATCH_MAX >= 120 && 120 <= BATCH_EXPORT_UNITS_PER_HOUR);
+  assert.equal(BATCH_EXPORT_UNITS_PER_HOUR, 1000);
+  assert.equal(BATCH_EXPORT_UNITS_PER_HOUR / EXPORT_BATCH_MAX, 40);
 });
 
 test("cost is one unit per distinct id asked for, caseload or not", () => {

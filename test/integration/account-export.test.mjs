@@ -86,9 +86,9 @@ check("…unless it is shared with them", shared.body?.students?.[0]?.status ===
 // ---- Cost-based rate limit -----------------------------------------------------------------------
 const rl = await user("exp-rl");
 const rlStudent = await studentOf(rl, "exp-rl-s");
-await sql(`insert into private.rate_limit_buckets (key, window_start, count) values ('${batchKey(rl.id)}', now(), 190)`);
+await sql(`insert into private.rate_limit_buckets (key, window_start, count) values ('${batchKey(rl.id)}', now(), 990)`);
 const ten = await call(rl.token, "POST", "/account/export/students", { studentIds: [rlStudent.id, ...Array.from({ length: 9 }, () => randomUUID())] });
-check("190 spent + 10 asked fits the 200 an hour", ten.status === 200, `status ${ten.status}`);
+check("990 spent + 10 asked fits the 1,000 an hour", ten.status === 200, `status ${ten.status}`);
 const one = await call(rl.token, "POST", "/account/export/students", { studentIds: [rlStudent.id] });
 check("one more is a 429", one.status === 429 && one.body?.code === "export_rate_limited", `status ${one.status}`);
 check("…with an hour-based retry hint", Number.isInteger(one.body?.retryAfterSeconds) && one.body.retryAfterSeconds > 0 && one.body.retryAfterSeconds <= 3600, JSON.stringify(one.body));
@@ -97,14 +97,16 @@ check("the per-student export still works when the batch bucket is spent", singl
 const loop = await user("exp-loop");
 const loopIds = [];
 for (let i = 0; i < 25; i++) loopIds.push((await studentOf(loop, `exp-loop-${i}`)).id);
+// 38 full batches (950 units) already spent this hour, seeded rather than looped: the 39th and 40th fit, the 41st doesn't.
+await sql(`insert into private.rate_limit_buckets (key, window_start, count) values ('${batchKey(loop.id)}', now(), 950)`);
 let okBatches = 0;
 let firstRefused = null;
-for (let i = 0; i < 10; i++) {
+for (let i = 0; i < 4; i++) {
   const b = await call(loop.token, "POST", "/account/export/students", { studentIds: loopIds });
   if (b.status === 200) okBatches++;
   else if (firstRefused === null) firstRefused = b.status;
 }
-check("a loop of 25-student batches stops after 8 (200 units)", okBatches === 8 && firstRefused === 429, `ok ${okBatches}, refused ${firstRefused}`);
+check("a loop of 25-student batches stops after 40 (1,000 units)", okBatches === 2 && firstRefused === 429, `ok ${okBatches}, refused ${firstRefused}`);
 
 // ---- Paging past PostgREST's 1,000 rows, the per-table cap, and size ------------------------------
 const pager = await user("exp-pager");

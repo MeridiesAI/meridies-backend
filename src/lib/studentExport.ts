@@ -6,7 +6,7 @@
  *   both come back `not_found`, with the same shape and the same cost, and
  *   neither is ever read, so the answer can't tell a guess that hit someone
  *   else's student from a random uuid.
- * - Cost: one unit per distinct id asked for, from its own hourly bucket
+ * - Cost: one unit per distinct id asked for, from its own hourly bucket of 1,000
  *   (`account:export-batch`), never the per-student export's 60 an hour.
  * - Size: a batch answer is at most `MAX_BATCH_ROWS` rows and
  *   `MAX_BATCH_BYTES` of JSON plus CSV. One student over that on their own is
@@ -25,8 +25,11 @@ type Row = Record<string, unknown>;
 
 /** The most students in one batch; the app loops batches of this size. */
 export const EXPORT_BATCH_MAX = 25;
-/** Units (students) a counselor may export in batches per hour: a 120-student roster is 5 batches. */
-export const BATCH_EXPORT_UNITS_PER_HOUR = 200;
+/**
+ * Units (students) a counselor may export in batches per hour: 40 batches of 25, so a whole roster of up to
+ * 1,000 leaves in one sitting (a partial export that has to start over defeats "take your data with you").
+ */
+export const BATCH_EXPORT_UNITS_PER_HOUR = 1000;
 /** One batch's ceiling, across all its students: rows (each profile counts one) and bytes of JSON plus CSV. */
 export const MAX_BATCH_ROWS = 20_000;
 export const MAX_BATCH_BYTES = 10 * 1024 * 1024;

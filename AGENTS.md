@@ -3335,7 +3335,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   or as a full-width look-alike, gets a leading `'`; typed numbers are left alone) and `documents` (name,
   kind, path, link). Any other id, another practice's student or a random uuid, is exactly
   `{ id, status: "not_found" }` and is never read. File bytes are never included (`filesIncluded: false`,
-  `filesNote`). Cost-based limit: one unit per distinct id from 200 an hour (`account:export-batch:<id>`,
+  `filesNote`). Cost-based limit: one unit per distinct id from 1,000 an hour (40 batches of 25, so a roster of up to 1,000
+  exports in one sitting; the app (11c) can loop the whole roster) (`account:export-batch:<id>`,
   `consumeUnits`, spent before reading, also when refused: 429 `export_rate_limited` with
   `retryAfterSeconds` and `Retry-After`, an hour, the window's longest wait); it never touches
   the per-student export's 60 an hour. **Every export table read is paged** (`lib/pagedRead.ts`:

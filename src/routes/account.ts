@@ -226,7 +226,7 @@ export default async function accountRoutes(app: FastifyInstance) {
    * caseload gets the per-student export's JSON plus a CSV per table with rows (formula-guarded, lib/csv.ts) and
    * its documents listed by name; file bytes are never included. Any other id, someone else's student or a uuid
    * that doesn't exist, is `{ id, status: "not_found" }` and is never read. Cost-based limit: one unit per
-   * distinct id from 200 an hour (`account:export-batch`), charged before anything is read and never from the
+   * distinct id from 1,000 an hour (`account:export-batch`), charged before anything is read and never from the
    * per-student export's bucket. Not open to a pending counselor (the per-student export isn't either).
    */
   app.post("/export/students", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request, reply) => {
