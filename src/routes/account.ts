@@ -462,7 +462,7 @@ export default async function accountRoutes(app: FastifyInstance) {
     if (error) throw closureDbError(error);
     if (!data?.length) throw inProgress();
     await audit(svc, me, "account.closure.cancelled", {});
-    await sendClosureEmail("cancelled", request, existing.purge_after);
+    await sendClosureEmail("cancelled", request, existing.status === "failed" ? null : existing.purge_after);
     return closureView(null, now, purgeFlag(env.ACCOUNT_PURGE_ENABLED));
   });
 }
@@ -508,7 +508,7 @@ async function audit(svc: SupabaseClient, me: string, action: string, metadata: 
 }
 
 /** To the counselor's sign-in email only. Never fails the request: the delivery row records what happened. */
-async function sendClosureEmail(kind: "requested" | "cancelled", request: FastifyRequest, purgeAfter: string) {
+async function sendClosureEmail(kind: "requested" | "cancelled", request: FastifyRequest, purgeAfter: string | null) {
   const to = request.profile.email as string | null | undefined;
   if (!to) return;
   const m = closureEmail(kind, { purgeAfter, timeZone: (request.profile.timezone as string | null | undefined) ?? null, appUrl: env.APP_URL });

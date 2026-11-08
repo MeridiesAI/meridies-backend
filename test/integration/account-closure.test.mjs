@@ -184,6 +184,26 @@ const c = await user("closure-c");
   await call(sc.token, "DELETE", "/account/closure");
 }
 
+// ---- Billing history: invoices and payments RESTRICT their package, so the account can't close itself ----
+{
+  const bc = await user("closure-billing");
+  const board = (await call(bc.token, "GET", "/pipeline")).body;
+  const contact = (await call(bc.token, "POST", "/pipeline/contacts", { stageId: board.stages[0].id, studentName: "Billing Family", parentEmail: `bill-${Date.now()}@families.test` })).body;
+  const fresh = await close(bc);
+  check("a counselor with a contact but no billing rows may close (201)", fresh.status === 201, `${fresh.status} ${JSON.stringify(fresh.body)}`);
+  await call(bc.token, "DELETE", "/account/closure");
+  await call(bc.token, "PUT", `/pipeline/contacts/${contact.id}/package`, { packageName: "Senior package", totalCents: 50000, installments: 1 });
+  const inv = await call(bc.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, { label: "Deposit", amountCents: 20000, dueOn: new Date(Date.now() + 14 * DAY).toISOString().slice(0, 10) });
+  if (inv.status !== 201 && inv.status !== 200) throw new Error(`setup invoice ${inv.status} ${JSON.stringify(inv.body)}`);
+  const billed = await close(bc);
+  const del = await call(bc.token, "DELETE", "/account", { confirm: "delete my account" });
+  check("with an invoice on record: 409 billing_history on the closure and on DELETE /account, in plain words",
+    billed.status === 409 && billed.body?.code === "billing_history" && /invoices or payments on record/.test(billed.body?.error ?? "") &&
+      del.status === 409 && del.body?.code === "billing_history",
+    `${billed.status} ${JSON.stringify(billed.body)} ${del.status}`);
+  check("and nothing was opened or deleted", (await status(bc.id)) === "cancelled" && (await exists(bc.id)));
+}
+
 // ---- The purge: secret, and OFF by default ----
 {
   const no = await cron(API, null);
@@ -210,13 +230,23 @@ if (!PURGE_API) {
   const waiting = await user("closure-waiting");
   await seedConnection(t.id);
   const changed = await user("closure-changed-mind");
-  for (const u of [t, blocked, waiting, changed]) {
+  const billedLate = await user("closure-billed-late");
+  for (const u of [t, blocked, waiting, changed, billedLate]) {
     const r = await close(u);
     if (r.status !== 201) throw new Error(`setup close ${r.status} ${JSON.stringify(r.body)}`);
   }
   // `changed` cancels, and its old date passes: the purge must leave it alone.
   await call(changed.token, "DELETE", "/account/closure");
   await pastDue(changed.id);
+  // `billedLate` asked, then invoiced a family: the purge must hold it before wiping anything.
+  {
+    const board = (await call(billedLate.token, "GET", "/pipeline")).body;
+    const ct = (await call(billedLate.token, "POST", "/pipeline/contacts", { stageId: board.stages[0].id, studentName: "Late Family", parentEmail: `late-${Date.now()}@families.test` })).body;
+    await call(billedLate.token, "PUT", `/pipeline/contacts/${ct.id}/package`, { packageName: "Pkg", totalCents: 30000, installments: 1 });
+    await call(billedLate.token, "POST", `/pipeline/contacts/${ct.id}/invoices`, { label: "Deposit", amountCents: 10000, dueOn: new Date(Date.now() + 14 * DAY).toISOString().slice(0, 10) });
+    await seedConnection(billedLate.id);
+    await pastDue(billedLate.id);
+  }
   // `blocked` takes a student on after asking: the purge must refuse it.
   const late = await studentOf(blocked, "closure-blocked-s");
   await pastDue(t.id);
@@ -224,17 +254,17 @@ if (!PURGE_API) {
   // Nothing else may be due (stray rows from an earlier run of this suite: test accounts only).
   await sql(`update public.account_closures a set purge_after = now() + interval '30 days' from public.profiles p
              where p.id = a.counselor_id and p.email like '%@test.local' and a.status = 'pending' and a.purge_after <= now()
-               and a.counselor_id not in ('${t.id}', '${blocked.id}')`);
+               and a.counselor_id not in ('${t.id}', '${blocked.id}', '${billedLate.id}')`);
   // Counted over profiles that existed before the run, so other suites signing up on a shared stack don't count.
   const cutoff = await sql(`select now()::text`);
   const existing = () => sql(`select count(*) from public.profiles where created_at <= '${cutoff}'`);
   const before = await existing();
 
   const r = await cron(PURGE_API);
-  check("the enabled purge ran: one purged, one blocked", r.status === 200 && r.body?.ran === true && r.body?.purged === 1 && r.body?.blocked === 1 && r.body?.failed === 0,
+  check("the enabled purge ran: one purged, two blocked", r.status === 200 && r.body?.ran === true && r.body?.purged === 1 && r.body?.blocked === 2 && r.body?.failed === 0,
     `${r.status} ${JSON.stringify(r.body)}`);
   check("the throwaway account is gone (auth user and profile)", !(await authExists(t.id)) && !(await exists(t.id)));
-  const revokedMeta = await sql(`select metadata->>'connectionsRevoked' from public.audit_log where entity_id = '${t.id}' and action = 'account.closure.purged'`);
+  const revokedMeta = await sql(`select metadata->'connections'->>'forgotten' from public.audit_log where entity_id = '${t.id}' and action = 'account.closure.purged'`);
   check("its connections were revoked at purge time (recorded) and are gone", /google/.test(revokedMeta) && (await connections(t.id)) === "0", revokedMeta);
   check("a closure cancelled before its date passed is never purged", (await exists(changed.id)) && (await authExists(changed.id)) && (await status(changed.id)) === "cancelled");
   check("its closure row went with it", (await status(t.id)) === "none");
@@ -251,6 +281,12 @@ if (!PURGE_API) {
   check("GET shows it on hold with the reason, no date", why.body?.status === "on_hold" && why.body?.purgeAfter === null && why.body?.daysLeft === null &&
     /still have 1 student/.test(why.body?.blockedReason ?? ""), JSON.stringify(why.body));
   check("its student is untouched", (await exists(late.id)) && (await sql(`select counselor_id from public.profiles where id = '${late.id}'`)) === blocked.id);
+  const held = await call(billedLate.token, "GET", "/account/closure");
+  check("an account with billing history is held (on_hold, billing reason) and nothing was wiped",
+    held.body?.status === "on_hold" && /invoices or payments/.test(held.body?.blockedReason ?? "") && (await connections(billedLate.id)) === "1" &&
+      (await sql(`select count(*) from public.audit_log where entity_id = '${billedLate.id}' and action in ('account.closure.purging', 'account.deleted')`)) === "0",
+    JSON.stringify(held.body));
+  await call(billedLate.token, "DELETE", "/account/closure");
   check("a closure not yet due is untouched", (await exists(waiting.id)) && (await status(waiting.id)) === "pending");
 
   const again = await cron(PURGE_API);

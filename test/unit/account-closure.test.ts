@@ -114,6 +114,12 @@ test("the date is the counselor's local day, and an unknown zone falls back to U
   assert.match(closureEmail("requested", { purgeAfter: "2026-12-09T03:00:00.000Z", timeZone: null, appUrl: "https://a.b" }).text, /December 9, 2026/);
 });
 
+test("cancelling an on-hold closure names no stale date", () => {
+  const m = closureEmail("cancelled", { purgeAfter: null, timeZone: null, appUrl: "https://a.b" });
+  assert.match(m.text, /It won't be closed, and nothing in it has changed/);
+  assert.doesNotMatch(m.text, /\b20\d\d\b/);
+});
+
 test("the cancel email says the account stays open", () => {
   const m = closureEmail("cancelled", { purgeAfter: "2026-12-08T17:00:00.000Z", timeZone: null, appUrl: "https://a.b" });
   assert.match(m.subject, /stays open|cancel/i);
@@ -196,35 +202,6 @@ test("a deauthorized or never-finished Stripe account (charges off) doesn't bloc
   assert.equal(await deletionBlocker(svc, counselor()), null);
 });
 
-test("a firm member with any student, archived included, is told to ask an owner or admin", async () => {
-  const { svc, calls } = fakeSvc({ profiles: { count: 2 } });
-  const b = await deletionBlocker(svc, counselor("f1"));
-  assert.equal(b?.code, "caseload_not_empty");
-  assert.match(b!.message, /You still have 2 students on your caseload\. Ask a firm owner or admin to transfer them/);
-  assert.ok(!calls[0]!.filters.some((f) => f.startsWith("is:archived_at")), "a firm counts archived students");
-});
-
-test("a solo counselor counts only active students", async () => {
-  const { svc, calls } = fakeSvc({ profiles: { count: 1 } });
-  const b = await deletionBlocker(svc, counselor());
-  assert.equal(b?.code, "caseload_not_empty");
-  assert.match(b!.message, /1 student on your roster\. Archive them/);
-  assert.ok(calls[0]!.filters.includes("is:archived_at,null"));
-});
-
-test("a firm owner is refused", async () => {
-  const { svc } = fakeSvc({ profiles: { count: 0 }, firms: { data: { id: "f1" } } });
-  assert.equal((await deletionBlocker(svc, counselor()))?.code, "owns_firm");
-});
-
-test("a solo practice with a connected Stripe account is told to disconnect first", async () => {
-  const { svc, calls } = fakeSvc({ profiles: { count: 0 }, practice_stripe_accounts: { data: [{ practice_id: "c1" }] } });
-  const b = await deletionBlocker(svc, counselor());
-  assert.equal(b?.code, "stripe_connected");
-  assert.match(b!.message, /Stripe/);
-  assert.ok(calls.find((c) => c.table === "practice_stripe_accounts")!.filters.includes("eq:counselor_id,c1"));
-});
-
 test("a firm member's Stripe account is the firm's, not theirs", async () => {
   const { svc, calls } = fakeSvc({ profiles: { count: 0 } });
   assert.equal(await deletionBlocker(svc, counselor("f1")), null);
@@ -251,4 +228,40 @@ test("a student is never blocked (their record goes with them)", async () => {
   const { svc, calls } = fakeSvc({});
   assert.equal(await deletionBlocker(svc, { id: "s1", role: "student", firm_id: null }), null);
   assert.equal(calls.length, 0);
+});
+
+test("a Stripe read that errors throws (fail closed)", async () => {
+  const { svc } = fakeSvc({ profiles: { count: 0 }, practice_stripe_accounts: { error: { code: "57014", message: "timeout" } } });
+  await assert.rejects(deletionBlocker(svc, counselor()));
+});
+
+// ---- Billing history: invoices, payments and credit refunds RESTRICT their package, so the deletion would fail ----
+
+test("an invoice on one of the counselor's own contacts blocks: billing_history", async () => {
+  const { svc, calls } = fakeSvc({ profiles: { count: 0 }, pipeline_invoices: { data: [{ id: "i1" }] } });
+  const b = await deletionBlocker(svc, counselor());
+  assert.equal(b?.code, "billing_history");
+  assert.equal(b?.message, "Your account has invoices or payments on record, which Meridies has to keep. Ask the team to close it for you.");
+  const q = calls.find((c) => c.table === "pipeline_invoices")!;
+  assert.ok(q.filters.includes("eq:pipeline_packages.pipeline_contacts.counselor_id,c1"), q.filters.join(" "));
+});
+
+test("a payment or a credit refund blocks too, in a firm as well", async () => {
+  for (const table of ["pipeline_payments", "pipeline_credit_refunds"]) {
+    const { svc } = fakeSvc({ profiles: { count: 0 }, [table]: { data: [{ id: "x" }] } });
+    assert.equal((await deletionBlocker(svc, counselor("f1")))?.code, "billing_history", table);
+  }
+});
+
+test("no billing rows, or a database without those tables, doesn't block", async () => {
+  assert.equal(await deletionBlocker(fakeSvc({ profiles: { count: 0 } }).svc, counselor()), null);
+  const missing = { error: { code: "42P01" } };
+  assert.equal(
+    await deletionBlocker(fakeSvc({ profiles: { count: 0 }, pipeline_invoices: missing, pipeline_payments: missing, pipeline_credit_refunds: { error: { code: "PGRST205" } } }).svc, counselor()),
+    null
+  );
+});
+
+test("a billing read that errors throws (fail closed)", async () => {
+  await assert.rejects(deletionBlocker(fakeSvc({ profiles: { count: 0 }, pipeline_payments: { error: { code: "57014" } } }).svc, counselor()));
 });

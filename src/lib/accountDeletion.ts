@@ -14,10 +14,13 @@ import { serviceClient } from "./supabase.js";
 
 export type DeletionSubject = { id: string; role: string; firm_id: string | null };
 
-export type DeletionBlockCode = "caseload_not_empty" | "owns_firm" | "stripe_connected" | "signed_agreements_kept";
+export type DeletionBlockCode = "caseload_not_empty" | "owns_firm" | "stripe_connected" | "billing_history" | "signed_agreements_kept";
 export type DeletionBlock = { code: DeletionBlockCode; message: string };
 
 type Log = { info: (obj: object, msg?: string) => void; warn: (obj: object, msg?: string) => void; error: (obj: object, msg?: string) => void };
+
+/** The Payment Tracker rows that RESTRICT a package (20261005050002, 20261029000001). */
+const BILLING_TABLES = ["pipeline_invoices", "pipeline_payments", "pipeline_credit_refunds"] as const;
 
 /** A table (or a relationship to one) this database doesn't have yet: the feature behind it isn't there to block. */
 const NOT_APPLIED = new Set(["PGRST200", "PGRST202", "PGRST204", "PGRST205", "42P01", "42703", "42883"]);
@@ -69,6 +72,26 @@ export async function deletionBlocker(svc: SupabaseClient, who: DeletionSubject)
         message: "Your practice takes card payments through Stripe. Disconnect Meridies in your Stripe dashboard first, then try again.",
       };
     }
+  }
+
+  // Billing history (Payment Tracker): deleting the profile cascades its contacts and their packages, and invoices,
+  // payments and credit refunds RESTRICT their package, so the deletion itself would fail after the cleanup steps
+  // had run. Asked here, the way the RESTRICT sees it: a row on a package whose contact is this counselor's.
+  const billing = await Promise.all(
+    BILLING_TABLES.map((t) =>
+      svc.from(t).select("id, pipeline_packages!inner(pipeline_contacts!inner(counselor_id))").eq("pipeline_packages.pipeline_contacts.counselor_id", me).limit(1)
+    )
+  );
+  let billed = false;
+  billing.forEach((r, i) => {
+    if (r.error) {
+      if (NOT_APPLIED.has(r.error.code ?? "")) return;
+      throw readFailed(BILLING_TABLES[i]!, r.error);
+    }
+    if ((r.data ?? []).length > 0) billed = true;
+  });
+  if (billed) {
+    return { code: "billing_history", message: "Your account has invoices or payments on record, which Meridies has to keep. Ask the team to close it for you." };
   }
 
   // An accepted agreement is a permanent record (the agreements migration, 20261111000010, on its own branch): the

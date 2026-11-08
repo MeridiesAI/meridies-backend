@@ -91,7 +91,7 @@ async function purge(tables: Tables, hooks: Hooks = {}, failDelete = false) {
     now: NOW,
     revoke: async (id) => {
       revoked.push(id);
-      return ["google"];
+      return { forgotten: ["google"], revokedAtProvider: [] };
     },
     remove: async (who: DeletionSubject) => {
       if (failDelete) throw new DeletionFailed("auth-user");
@@ -121,7 +121,7 @@ test("a due closure is claimed, recorded, its connections revoked, then deleted"
     now: NOW,
     revoke: async () => {
       order.push(`revoke after ${actions(t, "a").join(",")}`);
-      return ["google"];
+      return { forgotten: ["google"], revokedAtProvider: ["google"] };
     },
     remove: async () => {
       order.push("remove");
@@ -130,7 +130,7 @@ test("a due closure is claimed, recorded, its connections revoked, then deleted"
   assert.deepEqual(out, { ran: true, due: 1, purged: 1, blocked: 0, failed: 0, skipped: 0 });
   assert.deepEqual(order, ["revoke after account.closure.purging", "remove"]);
   assert.deepEqual(actions(t, "a"), ["account.closure.purging", "account.closure.purged"]);
-  assert.deepEqual(t.audit_log!.at(-1)!.metadata, { role: "counselor", connectionsRevoked: ["google"] });
+  assert.deepEqual(t.audit_log!.at(-1)!.metadata, { role: "counselor", connections: { forgotten: ["google"], revokedAtProvider: ["google"] } });
 });
 
 test("a cancel that lands before the claim wins: skipped, nothing deleted or revoked", async () => {
@@ -169,11 +169,12 @@ test("a deletion that fails leaves the account, marks the row failed with a reas
 
 test("if the purging audit row can't be written, nothing is deleted", async () => {
   const t = world({ account_closures: [closure("a")], profiles: [counselorRow("a")] });
-  const { out, removed, revoked } = await purge(t, { auditError: (row) => row.action === "account.closure.purging" });
+  const { out, removed, revoked, rpcs } = await purge(t, { auditError: (row) => row.action === "account.closure.purging" });
   assert.equal(out.ran && out.failed, 1);
   assert.deepEqual(removed, []);
   assert.deepEqual(revoked, []);
   assert.equal(t.account_closures![0]!.status, "failed");
+  assert.deepEqual(rpcs, ["acquire_job_lease", "release_job_lease"], "the lease is released");
 });
 
 test("another runner holds the lease: locked, nothing read", async () => {
@@ -224,4 +225,39 @@ test("a precondition that fails at purge time holds the account (failed, reason 
   assert.deepEqual(removed, []);
   assert.match(String(t.account_closures![0]!.last_error), /still have 1 student/);
   assert.deepEqual(actions(t, "a"), ["account.closure.blocked"]);
+});
+
+test("a revoke that throws is survived: the deletion still happens and the audit says so", async () => {
+  const t = world({ account_closures: [closure("a")], profiles: [counselorRow("a")] });
+  const removed: string[] = [];
+  const { svc, rpcs } = memorySvc(t);
+  const out = await runClosurePurge(svc, log, {
+    enabled: true,
+    now: NOW,
+    revoke: async () => {
+      throw new Error("provider down");
+    },
+    remove: async (who) => {
+      removed.push(who.id);
+    },
+  });
+  assert.equal(out.ran && out.purged, 1);
+  assert.deepEqual(removed, ["a"]);
+  assert.deepEqual(t.audit_log!.at(-1)!.metadata, { role: "counselor", connections: { error: true } });
+  assert.ok(rpcs.includes("release_job_lease"));
+});
+
+test("re-checked right before the deletion: a row no longer purging is skipped, nothing deleted", async () => {
+  const t = world({ account_closures: [closure("a")], profiles: [counselorRow("a")] });
+  let purgingUpdates = 0;
+  const { out, removed } = await purge(t, {
+    beforeUpdate: (table, values, tables) => {
+      // The first purging update is the claim; the second is the re-check. A cancel lands in between.
+      if (table === "account_closures" && values.status === "purging" && ++purgingUpdates === 2) tables.account_closures![0]!.status = "cancelled";
+    },
+  });
+  assert.equal(out.ran && out.skipped, 1);
+  assert.deepEqual(removed, []);
+  assert.equal(t.account_closures![0]!.status, "cancelled");
+  assert.ok(actions(t, "a").includes("account.closure.skipped"));
 });

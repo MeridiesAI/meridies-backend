@@ -93,15 +93,16 @@ function longDate(iso: string, timeZone: string | null): string {
 }
 
 /** The counselor's confirmation emails. No student names, no counts: only the account's own dates. */
-export function closureEmail(kind: "requested" | "cancelled", o: { purgeAfter: string; timeZone: string | null; appUrl: string }) {
-  const date = longDate(o.purgeAfter, o.timeZone);
+export function closureEmail(kind: "requested" | "cancelled", o: { purgeAfter: string | null; timeZone: string | null; appUrl: string }) {
+  // No date for a cancel of a closure that was on hold: its old date has passed and means nothing now.
+  const date = o.purgeAfter ? longDate(o.purgeAfter, o.timeZone) : null;
   const settings = `${o.appUrl.replace(/\/+$/, "")}/dashboard/counselor/settings`;
   const t =
     kind === "requested"
       ? {
           heading: "Your Meridies account is set to close",
           paragraphs: [
-            `You asked to close your Meridies account. It will be closed on or after ${date}.`,
+            `You asked to close your Meridies account. It will be closed on or after ${date ?? "30 days from today"}.`,
             "Until then your account keeps working as it does today, connections included. You can cancel any time before that date from Settings.",
             "We recommend exporting your data first (Settings › Export), so you keep a copy of your students' records and your practice's work.",
             "If you didn't ask for this, cancel it from Settings and reply to this email.",
@@ -111,13 +112,15 @@ export function closureEmail(kind: "requested" | "cancelled", o: { purgeAfter: s
       : {
           heading: "Your Meridies account stays open",
           paragraphs: [
-            `You cancelled the closing of your Meridies account. It won't be closed on ${date}, and nothing in it has changed.`,
+            date
+              ? `You cancelled the closing of your Meridies account. It won't be closed on ${date}, and nothing in it has changed.`
+              : "You cancelled the closing of your Meridies account. It won't be closed, and nothing in it has changed.",
             "If you didn't cancel it, reply to this email.",
           ],
           cta: { label: "Open Settings", url: settings },
         };
   return {
-    subject: kind === "requested" ? `Your Meridies account will close on ${date}` : "Your Meridies account stays open (closing cancelled)",
+    subject: kind === "requested" ? `Your Meridies account will close on ${date ?? "a date 30 days from now"}` : "Your Meridies account stays open (closing cancelled)",
     html: brandedEmail(t),
     text: brandedText(t),
     template: kind === "requested" ? "account-closure-requested" : "account-closure-cancelled",
@@ -141,23 +144,32 @@ export function pickDue(rows: DueRow[], now: Date): DueRow[] {
     .slice(0, PURGE_BATCH);
 }
 
+export type ConnectionsResult = {
+  /** Providers the account had a stored token for; every stored token is forgotten (deleted) either way. */
+  forgotten: SuiteProvider[];
+  /** Providers that confirmed the revoke (Google only: Microsoft has no per-app revoke call). */
+  revokedAtProvider: SuiteProvider[];
+};
+
 /**
- * The account's Google/Microsoft tokens, revoked at the provider where it has a call (Google) and forgotten, with
- * the visible `integrations` rows. Best effort per provider: a provider that fails is logged (never a token) and
- * the purge goes on, since the deletion removes the stored tokens either way. Returns the providers it had.
+ * The account's Google/Microsoft tokens: revoked at the provider where it has a call (Google) and forgotten, with the
+ * visible `integrations` rows. Best effort per provider: a provider that fails is logged (never a token) and the
+ * purge goes on, since the deletion removes the stored tokens either way.
  */
-export async function revokeConnections(svc: SupabaseClient, id: string, log: Log): Promise<SuiteProvider[]> {
+export async function revokeConnections(svc: SupabaseClient, id: string, log: Log): Promise<ConnectionsResult> {
   const { data } = await svc.from("integration_tokens").select("provider").eq("owner_id", id);
-  const had = ((data ?? []) as Array<{ provider: string }>).map((r) => r.provider).filter((p): p is SuiteProvider => (SUITE_PROVIDERS as readonly string[]).includes(p));
+  const forgotten = ((data ?? []) as Array<{ provider: string }>).map((r) => r.provider).filter((p): p is SuiteProvider => (SUITE_PROVIDERS as readonly string[]).includes(p));
+  const revokedAtProvider: SuiteProvider[] = [];
   for (const provider of SUITE_PROVIDERS) {
     try {
-      await revokeAndForget(id, provider, log);
+      const r = await revokeAndForget(id, provider, log);
+      if (r.revokedAtProvider) revokedAtProvider.push(provider);
       await svc.from("integrations").delete().eq("owner_id", id).eq("provider", provider);
     } catch (err) {
       log.warn({ provider, err: err instanceof Error ? err.message : String(err) }, "account closure purge: token revoke failed");
     }
   }
-  return had;
+  return { forgotten, revokedAtProvider };
 }
 
 /**
@@ -165,8 +177,9 @@ export async function revokeConnections(svc: SupabaseClient, id: string, log: Lo
  * touches nothing. For each row (`pickDue`): a conditional claim to `purging` on the exact row read (a cancel in
  * between wins); the profile must be a counselor; the shared preconditions again (a block marks the row `failed`
  * with the reason and emails nobody: the account stays); the `account.closure.purging` audit row (if it can't be
- * written the row is failed and nothing is deleted); the OAuth tokens revoked; then `deleteAccount` (the DELETE
- * /account path). The closure row goes with the profile, so success is the `account.closure.purged` audit row; a
+ * written the row is failed and nothing is deleted); the OAuth tokens revoked; the row re-checked as still `purging`;
+ * then `deleteAccount` (the DELETE /account path). A deletion that fails after this point leaves the connections
+ * revoked (the account itself is intact). The closure row goes with the profile, so success is the `account.closure.purged` audit row; a
  * deletion that fails marks the row `failed` (the account is intact). `remove`/`revoke` let a test stand in.
  */
 export async function runClosurePurge(
@@ -176,7 +189,7 @@ export async function runClosurePurge(
     enabled: boolean;
     now?: Date;
     remove?: (who: DeletionSubject) => Promise<void>;
-    revoke?: (id: string) => Promise<SuiteProvider[]>;
+    revoke?: (id: string) => Promise<ConnectionsResult>;
   }
 ): Promise<PurgeOutcome> {
   if (!opts.enabled) return { ran: false, reason: "purge_disabled" };
@@ -263,11 +276,19 @@ export async function runClosurePurge(
           continue;
         }
 
-        let revoked: SuiteProvider[] = [];
+        let connections: ConnectionsResult | { error: true } = { error: true };
         try {
-          revoked = await revoke(id);
+          connections = await revoke(id);
         } catch (err) {
           log.warn({ err: err instanceof Error ? err.message : String(err) }, "account closure purge: revoking connections failed");
+        }
+
+        // Still ours? A cancel can't land on a live `purging` row, but re-check right before the deletion anyway.
+        const still = await svc.from("account_closures").update({ status: "purging" }).eq("counselor_id", id).eq("status", "purging").select("counselor_id");
+        if (still.error || !still.data?.length) {
+          await note("account.closure.skipped", { reason: still.error ? "recheck-failed" : "no-longer-purging" });
+          tally.skipped += 1;
+          continue;
         }
 
         try {
@@ -280,7 +301,7 @@ export async function runClosurePurge(
           tally.failed += 1;
           continue;
         }
-        await note("account.closure.purged", { role: who.role, connectionsRevoked: revoked });
+        await note("account.closure.purged", { role: who.role, connections });
         tally.purged += 1;
       } catch (err) {
         await fail("The account couldn't be checked for closing. Confirm again from Settings to retry.");
