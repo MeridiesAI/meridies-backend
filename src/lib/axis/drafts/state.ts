@@ -20,6 +20,8 @@ import type { OpContext, OperationPayload } from "../ops/run.js";
 import { ACTIVITY_FIELDS, freeTextKey, type ActivityField } from "./normalize.js";
 
 export const DRAFT_TTL_MS = 30 * 60 * 1000;
+/** How many times a save tries before it reports the draft lost. */
+const SAVE_ATTEMPTS = 3;
 export const MAX_DRAFT_ROWS = 10;
 const ROW_KEY = /^r([1-9]|10)$/;
 
@@ -50,6 +52,8 @@ export type DraftRow = {
   status: RowStatus;
   card_id?: string;
   message?: string;
+  /** An update row's name: the saved activity it changes (its organization when the change was asked). */
+  label?: string;
 };
 
 const sourceSchema = z.object({ label: z.string().max(120), outside: z.boolean() });
@@ -63,6 +67,7 @@ const draftRowSchema = z.object({
   status: z.enum(["collecting", "card", "saved", "dismissed", "skipped", "failed"]),
   card_id: z.string().max(64).optional(),
   message: z.string().max(300).optional(),
+  label: z.string().max(120).optional(),
 });
 
 export type DraftNote = {
@@ -78,7 +83,8 @@ export type DraftNote = {
 };
 
 /** How a row is named in lines: its organization, else its position, else "the new activity". */
-export const rowLabel = (r: Pick<DraftRow, "fields">): string =>
+export const rowLabel = (r: Pick<DraftRow, "fields" | "label">): string =>
+  (r.label && r.label.trim()) ||
   (typeof r.fields.organization === "string" && r.fields.organization.trim()) ||
   (typeof r.fields.position === "string" && r.fields.position.trim()) ||
   "the new activity";
@@ -88,6 +94,8 @@ export type Touched = {
   header: Set<keyof DraftHeader>;
   rows: Map<string, { fields: Set<ActivityField>; status: boolean; created: boolean }>;
   closed: boolean;
+  /** The opened_at of the draft this turn closed, so a lost race never closes a newer draft another turn opened. */
+  closedOpenedAt?: string;
 };
 
 export type Draft = {
@@ -198,17 +206,20 @@ export async function saveDraft(
       const hit = ((data ?? []) as { updated_at?: unknown }[])[0];
       return hit ? String(hit.updated_at) : null;
     };
-    let version = await write(draft);
-    if (version === null) {
-      const fresh = await loadDraft(request, conversationId);
-      const merged = mergeDraft(fresh, draft);
+    // Another write may land first (the previous turn's memory fold, a concurrent turn): reload, re-apply this
+    // turn's own changes, try again, a few times.
+    let current: Draft = draft;
+    for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt++) {
+      const version = await write(current);
+      if (version !== null) {
+        Object.assign(draft, { header: current.header, rows: current.rows, version });
+        return true;
+      }
+      const merged = mergeDraft(await loadDraft(request, conversationId), draft);
       if (!merged) return false;
-      version = await write(merged);
-      if (version === null) return false;
-      Object.assign(draft, { header: merged.header, rows: merged.rows });
+      current = merged;
     }
-    draft.version = version;
-    return true;
+    return false;
   } catch (err) {
     request.log.warn({ err: err instanceof Error ? err.message : String(err) }, "axis draft not saved");
     return false;
@@ -222,9 +233,21 @@ export async function saveDraft(
  */
 export function mergeDraft(fresh: Draft, ours: Draft): Draft | null {
   const out: Draft = { ...fresh, rows: fresh.rows.map((r) => structuredClone(r)), notes: ours.notes, touched: ours.touched, hadHeader: ours.hadHeader };
-  if (ours.touched.closed && !ours.header) return { ...out, header: null, rows: [] };
-  if (!out.header) out.header = ours.header ? { ...ours.header } : null;
-  else if (ours.header) {
+  const closedHere = ours.touched.closedOpenedAt;
+  // This turn ended with no draft: close the one it closed, never a newer one another turn opened meanwhile.
+  if (!ours.header) {
+    if (!ours.touched.closed) return out;
+    if (fresh.header && fresh.header.opened_at !== closedHere) return out;
+    return { ...out, header: null, rows: [] };
+  }
+  // This turn started a draft: it replaces the one it saw (or none), never a different one another turn opened.
+  if (ours.touched.header.has("opened_at") && fresh.header?.opened_at !== ours.header.opened_at) {
+    if (fresh.header && fresh.header.opened_at !== closedHere) return null;
+    return { ...out, header: { ...ours.header }, rows: ours.rows.map((r) => structuredClone(r)) };
+  }
+  // This turn only changed a draft that another turn has since closed or cancelled: it stays closed.
+  if (!out.header) return out;
+  {
     if (ours.header.student_id !== out.header.student_id) return null;
     const h = out.header as Record<string, unknown>;
     for (const k of ours.touched.header) {
@@ -334,6 +357,7 @@ export function setStatus(d: Draft, row: DraftRow, status: RowStatus, extra: { c
 
 /** Ends the draft: no header, no rows. */
 export function closeDraft(d: Draft): void {
+  if (d.header && !d.touched.closedOpenedAt) d.touched.closedOpenedAt = d.header.opened_at;
   d.header = null;
   d.rows = [];
   d.touched.closed = true;

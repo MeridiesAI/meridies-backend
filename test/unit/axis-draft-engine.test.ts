@@ -156,3 +156,45 @@ test("every path logs one axis turn line with no text, values, names or student 
   }
   assert.deepEqual(lines.map((l) => l.axis.draft), ["opened", "unrelated", "continued"]);
 });
+
+test("an unrelated question that reaches the model never files a card (finding C)", async () => {
+  const w = world();
+  await say(w, "Add Code Club for Ethan, cofounder, grade 11, summer, 6 hrs a week, 2 weeks a year", [
+    add({ organization: "Code Club", position: "cofounder", grade_levels: "11", timing: "summer", hours_per_week: 6, weeks_per_year: 2 }), { text: "Okay." },
+  ]);
+  await say(w, "also Debate Club, captain", [add({ organization: "Debate Club", position: "captain" }), { text: "Grades and hours?" }]);
+  const before = cardsOf(w).length;
+  const card = cardsOf(w).find((c) => c.status === "pending")!;
+  const rows = (((card.payload as Row).input as Row).rows as Row[]).filter((r) => r.key === "r1");
+  Object.assign(card, { status: "confirmed", result: { ok: true, rows: rows.map((r) => ({ key: r.key, ok: true, id: "a2000000-0000-4000-8000-000000000001" })) } });
+  const t = await say(w, "which colleges should he look at for engineering?", [{ text: "A few ideas." }]);
+  assert.equal(t.res.path === "agent" || t.res.path === "specialists", true);
+  assert.equal(cardsOf(w).length, before, "no card filed in an unrelated answer");
+});
+
+test("an unrelated college question mid-draft still gets the catalog's evidence", async () => {
+  const w = world();
+  await opened(w);
+  const t = await say(w, "is Santa Clara University a good fit for him?", [{ text: "Maybe." }]);
+  assert.match(lastUser(t.calls), /Santa Clara University/);
+});
+
+test("a cancel turn still says what was saved since the last answer", async () => {
+  const w = world();
+  await say(w, "Add Code Club for Ethan, cofounder, grade 11, summer, 6 hrs a week, 2 weeks a year", [
+    add({ organization: "Code Club", position: "cofounder", grade_levels: "11", timing: "summer", hours_per_week: 6, weeks_per_year: 2 }), { text: "Okay." },
+  ]);
+  await say(w, "also Debate Club, captain", [add({ organization: "Debate Club", position: "captain" }), { text: "Grades and hours?" }]);
+  const card = cardsOf(w).find((c) => c.status === "pending")!;
+  Object.assign(card, { status: "confirmed", result: { ok: true, rows: [{ key: "r1", ok: true, id: "a2000000-0000-4000-8000-000000000002" }] } });
+  const t = await say(w, "never mind");
+  assert.match(t.text, /^Okay, I dropped the activity draft for Ethan Park\./);
+  assert.match(t.text, /Saved: Code Club on Ethan Park's Activities sheet\./);
+});
+
+test("a turn that never saw the draft returns the version it read, for the route's guarded write", async () => {
+  const w = world();
+  const t = await say(w, "What's his GPA?");
+  assert.equal(t.res.stateSaved, false);
+  assert.equal(typeof t.res.stateVersion, "string");
+});

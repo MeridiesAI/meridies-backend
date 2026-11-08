@@ -47,6 +47,8 @@ export type History = {
   flagged: boolean;
   /** Those quoted words, as free text this turn can see (re-quoting them keeps the flag). */
   quoted: { source: string; text: string }[];
+  /** The conversation's updated_at as read: the route's after-`done` state write lands only if it hasn't moved. */
+  version: string | null;
 };
 
 /** The columns history reads: the text, and its quote marks once 20261108000004 is in. */
@@ -81,7 +83,7 @@ const stateSchema = z.object({
 export async function loadHistory(request: FastifyRequest, conversationId: string): Promise<History> {
   const { data: convRow, error } = await request.db
     .from("ai_conversations")
-    .select("summary, summary_through, state")
+    .select("summary, summary_through, state, updated_at")
     .eq("id", conversationId)
     .maybeSingle();
   // Before 20261018000001 the memory columns don't exist: answer from recent turns alone.
@@ -111,6 +113,7 @@ export async function loadHistory(request: FastifyRequest, conversationId: strin
     state: parsedState.success ? parsedState.data : null,
     flagged: quoted.length > 0 || unchecked,
     quoted,
+    version: typeof conv?.updated_at === "string" ? conv.updated_at : null,
   };
 }
 
@@ -123,9 +126,16 @@ async function chatFileTexts(request: FastifyRequest, conversationId: string): P
     .map((f) => ({ source: `attachment:${String(f.file_name ?? "file")}`, text: f.extracted_text as string }));
 }
 
-/** Never throws: a turn whose state can't be saved has still been answered. */
-export async function saveState(request: FastifyRequest, conversationId: string, state: DialogueState): Promise<void> {
-  const { error } = await request.db.from("ai_conversations").update({ state }).eq("id", conversationId);
+/**
+ * Never throws: a turn whose state can't be saved has still been answered. With `version` (the updated_at the turn
+ * read), the write lands only if nothing wrote the conversation since, so a turn that never saw an activity draft
+ * can't wipe the header another turn just saved (lib/axis/drafts/state.ts); a skipped write only loses this turn's
+ * pronoun memory.
+ */
+export async function saveState(request: FastifyRequest, conversationId: string, state: DialogueState, version?: string | null): Promise<void> {
+  let update = request.db.from("ai_conversations").update({ state }).eq("id", conversationId);
+  if (version) update = update.eq("updated_at", version);
+  const { error } = await update;
   if (error) request.log.warn({ code: error.code }, "axis state not saved");
 }
 

@@ -113,6 +113,8 @@ export type TurnResult = {
    * has or had a draft): the route must not write `state` again after `done`, or it could undo a merged header.
    */
   stateSaved: boolean;
+  /** The conversation's updated_at as the turn read it: the route's own state write is guarded by it. */
+  stateVersion: string | null;
 };
 
 type Free = { source: string; text: string }[];
@@ -346,7 +348,9 @@ async function axisTurn(opts: {
     closeIfDone(draft);
     const involved = draft.hadHeader || draft.header !== null;
     const { draft: _stale, ...plain } = s;
-    const final: DialogueState = { ...plain, ...(draft.header ? { draft: draft.header } : {}) };
+    // A draft this turn couldn't read (a failed load) is carried as it was, never dropped by the route's write.
+    const keep = draft.header ?? (!involved ? history.state?.draft : undefined);
+    const final: DialogueState = { ...plain, ...(keep ? { draft: keep } : {}) };
     // Through the server's own client (saveDraft's default), or the one a test hands in.
     const ok = involved ? await (opts.draftDb === undefined ? saveDraft(request, opts.conversationId, final, draft) : saveDraft(request, opts.conversationId, final, draft, opts.draftDb)) : true;
     const ranOp = draft.notes.length > 0 || draft.touched.rows.size > 0;
@@ -384,13 +388,14 @@ async function axisTurn(opts: {
     const reply = ds.reply ?? continueReply(draft, { name: draft.header?.student_name ?? ds.name });
     emit("route", { intent: u.intent, path: "direct", frame: "activity-draft" });
     emit("status", { phase: "answering" });
-    const fin = await finishDraft(state, false);
+    // Continue's reply already holds the status; a cancel still says what was saved since the last answer.
+    const fin = await finishDraft(state, ds.reply !== null);
     const text = fin.tail ? `${reply}\n\n${fin.tail}` : reply;
     emit("delta", { text });
     logTurn("direct", 0, 0, "activity-draft");
     return {
       path: "direct", text, citations: [], trace, sources: [], actions, understanding: u, state: fin.state,
-      verify: { wanted: false, checks: [], material: [], ledger }, runId: null, quotes: [], quotesChecked: flags, stateSaved: fin.involved,
+      verify: { wanted: false, checks: [], material: [], ledger }, runId: null, quotes: [], quotesChecked: flags, stateSaved: fin.involved, stateVersion: history.version,
     };
   }
 
@@ -426,7 +431,7 @@ async function axisTurn(opts: {
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
         quotes: flags ? quotedRuns(text, [...(direct.freeBlocks ?? []), ...history.quoted]) : [],
         quotesChecked: flags,
-        stateSaved: fin.involved,
+        stateSaved: fin.involved, stateVersion: history.version,
       };
     }
   }
@@ -458,7 +463,7 @@ async function axisTurn(opts: {
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
       quotes: flags ? quotedRuns(text, [...essayCtx.free, ...history.quoted]) : [],
       quotesChecked: flags,
-      stateSaved: fin.involved,
+      stateSaved: fin.involved, stateVersion: history.version,
     };
   }
 
@@ -470,8 +475,7 @@ async function axisTurn(opts: {
   if (sources.size) emit("sources", { sources: [...sources] });
   // While drafting, a college matched by a fragment ("City Library" in a town's name) isn't fetched unless the
   // message asks a college question (spec 4.8).
-  const draftOpen = draft.header !== null && isOpen(draft);
-  const planU = draftOpen && !u.attributes.some((a) => COLLEGE_ATTRIBUTES.has(a)) ? { ...u, colleges: [], ambiguousColleges: [] } : u;
+  const planU = drafting && !u.attributes.some((a) => COLLEGE_ATTRIBUTES.has(a)) ? { ...u, colleges: [], ambiguousColleges: [] } : u;
   const evidence = await gatherEvidence({
     request, u: planU, chatStudentId: studentId, roster, ledger, connected, retrievalReady: retrievalOn, speculative, signal, onStep: step,
     freeRule: flags,
@@ -624,7 +628,8 @@ async function axisTurn(opts: {
     const answer = gate.blocked ? gate.text : res.text;
     const { citations, invalid } = resolveCitations(answer, ledger);
     // The draft: file what is ready, once, after the answer; remember what AxIS still asked for.
-    if (drafting || draft.touched.rows.size > 0) {
+    // A draft turn, or a turn whose model opened a draft; never an unrelated turn (spec 4.1: it can't change the draft).
+    if (drafting || (dt.verdict === "none" && draft.touched.rows.size > 0)) {
       await fileIfReady(toolCtx, dt, dt.fileNow).catch((err) => request.log.warn({ err: errInfo(err) }, "axis draft not filed"));
       const missing = [...new Set(draft.rows.filter((r) => r.op === "add" && r.status === "collecting").flatMap(missingOf))];
       if (draft.header && missing.length && opts.messageId) patchHeader(draft, { asked: { at: now.toISOString(), fields: missing, after_msg: opts.messageId } });
@@ -650,7 +655,7 @@ async function axisTurn(opts: {
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: fin.state,
-      stateSaved: fin.involved,
+      stateSaved: fin.involved, stateVersion: history.version,
       verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
       quotes,

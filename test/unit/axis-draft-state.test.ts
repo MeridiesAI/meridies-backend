@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { advanceClock, axisNow, evalClockRefusal } from "../../src/lib/axis/clock.js";
 import {
+  closeDraft,
   closeIfDone,
   dismissCards,
   isOpen,
@@ -18,7 +19,7 @@ import {
   syncCards,
   type DraftHeader,
 } from "../../src/lib/axis/drafts/state.js";
-import { loadHistory } from "../../src/lib/axis/memory.js";
+import { loadHistory, saveState } from "../../src/lib/axis/memory.js";
 import type { OperationEvent } from "../../src/lib/axis/ops/run.js";
 import { fakeDb, fakeRequest } from "./axis-fakes.js";
 
@@ -212,4 +213,63 @@ test("clock mode: off without the flag; refuses production, a remote project, an
   assert.equal(evalClockRefusal({ AXIS_EVAL_CLOCK: "on", NODE_ENV: "development", SUPABASE_URL: "http://host.docker.internal:54321" }), null);
   assert.throws(() => advanceClock(60_000), /eval clock/, "the flag is off in tests");
   assert.ok(Math.abs(axisNow().getTime() - Date.now()) < 1000, "no offset without the flag");
+});
+
+test("a turn that closed a finished draft doesn't erase a new draft another turn opened meanwhile (finding E i)", async () => {
+  const w = world({ draft: header(), rows: [row("r1", "Code Club", { status: "saved", activity_id: "a1" })] });
+  const a = await loadDraft(w.request, CONV);
+  const b = await loadDraft(w.request, CONV);
+  closeDraft(b);
+  openDraft(b, header({ opened_at: "2026-11-08T12:05:00.000Z", updated_at: "2026-11-08T12:05:00.000Z" }));
+  setValue(b, newRow(b, "add"), "organization", "Debate Club", { label: "your message", outside: false });
+  assert.equal(await saveDraft(w.request, CONV, dialogue, b, w.db), true);
+  closeIfDone(a);
+  assert.equal(await saveDraft(w.request, CONV, dialogue, a, w.db), true);
+  const conv = w.tables.ai_conversations![0]!;
+  assert.equal(((conv.state as Row).draft as Row)?.opened_at, "2026-11-08T12:05:00.000Z", "B's new draft survives");
+  assert.equal(((conv.draft_rows as Row[])[0]!.fields as Row).organization, "Debate Club");
+});
+
+test("a turn that only touched a draft another turn cancelled doesn't bring it back (finding E ii)", async () => {
+  const w = world({ draft: header(), rows: [row("r1", "Code Club")] });
+  const a = await loadDraft(w.request, CONV);
+  const b = await loadDraft(w.request, CONV);
+  closeDraft(b);
+  assert.equal(await saveDraft(w.request, CONV, dialogue, b, w.db), true);
+  setValue(a, a.rows[0]!, "hours_per_week", 6, { label: "your message", outside: false });
+  await saveDraft(w.request, CONV, dialogue, a, w.db);
+  const conv = w.tables.ai_conversations![0]!;
+  assert.equal((conv.state as Row).draft, undefined, "the cancelled draft stays cancelled");
+  assert.equal(conv.draft_rows, null);
+});
+
+test("a save retries past two writes that landed first", async () => {
+  const w = world({ draft: header(), rows: [row("r1", "Code Club")] });
+  const d = await loadDraft(w.request, CONV);
+  setValue(d, d.rows[0]!, "hours_per_week", 6, { label: "your message", outside: false });
+  let bumps = 2;
+  const inner = w.db as unknown as { from(t: string): Record<string, unknown> };
+  const racy = {
+    from(t: string) {
+      if (t === "ai_conversations" && bumps > 0) {
+        bumps--;
+        w.tables.ai_conversations![0]!.updated_at = `bumped-${bumps}`;
+      }
+      return inner.from(t);
+    },
+  };
+  assert.equal(await saveDraft(w.request, CONV, dialogue, d, racy as never), true);
+  assert.equal(((w.tables.ai_conversations![0]!.draft_rows as Row[])[0]!.fields as Row).hours_per_week, 6);
+});
+
+test("the route's after-done state write never lands on a conversation another turn changed (finding D)", async () => {
+  const w = world({ draft: header(), rows: [row("r1", "Code Club")] });
+  const history = await loadHistory(w.request, CONV);
+  assert.equal(history.version, "v1");
+  // Another turn saved a draft header after this turn read the conversation.
+  Object.assign(w.tables.ai_conversations![0]!, { updated_at: "v2" });
+  await saveState(w.request, CONV, { ...dialogue }, history.version);
+  assert.deepEqual(((w.tables.ai_conversations![0]!.state as Row).draft as Row)?.student_id, "s1", "the header is still there");
+  await saveState(w.request, CONV, { ...dialogue, at: "2026-11-08T12:30:00.000Z" }, "v2");
+  assert.equal((w.tables.ai_conversations![0]!.state as Row).at, "2026-11-08T12:30:00.000Z", "a write on the version it read lands");
 });

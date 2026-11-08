@@ -49,3 +49,14 @@ const notArray = await fetch(`${SB}/rest/v1/ai_conversations?id=eq.${id}`, {
   body: JSON.stringify({ draft_rows: { key: "r1" } }),
 });
 check("an object instead of a list is refused cleanly", notArray.status === 400, `status ${notArray.status}`);
+
+// ---- The save's compare-and-set round-trips through PostgREST (lib/axis/drafts/state.ts saveDraft) ----
+const svc = { apikey: ANON, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, "Content-Type": "application/json", Prefer: "return=representation" };
+const seen = (await rest(c.token, "GET", `/rest/v1/ai_conversations?id=eq.${id}&select=updated_at`)).body?.[0]?.updated_at;
+const casHit = await fetch(`${SB}/rest/v1/ai_conversations?id=eq.${id}&owner_id=eq.${c.id}&updated_at=eq.${encodeURIComponent(seen)}`, { method: "PATCH", headers: svc, body: JSON.stringify({ draft_rows: rows }) });
+const hitRows = await casHit.json();
+check("a write on the updated_at it read lands", casHit.status === 200 && hitRows.length === 1, `status ${casHit.status} ${JSON.stringify(hitRows).slice(0, 120)}`);
+const casMiss = await fetch(`${SB}/rest/v1/ai_conversations?id=eq.${id}&owner_id=eq.${c.id}&updated_at=eq.${encodeURIComponent(seen)}`, { method: "PATCH", headers: svc, body: JSON.stringify({ draft_rows: null }) });
+const missRows = await casMiss.json();
+check("a write on a stale updated_at changes nothing", casMiss.status === 200 && missRows.length === 0, `status ${casMiss.status} ${JSON.stringify(missRows).slice(0, 120)}`);
+check("…and the rows are still there", (await sql(`select draft_rows -> 0 ->> 'key' from public.ai_conversations where id = '${id}'`)) === "r1");

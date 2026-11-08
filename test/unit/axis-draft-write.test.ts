@@ -18,7 +18,7 @@ const ACT = "a0000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-11-08T12:00:00Z");
 const NAMES: Record<string, string> = { [S1]: "Avery Lee", [S2]: "Jordan Park" };
 
-function setup(o: { messages: string[]; draft?: Draft; tainted?: boolean; verdict?: DraftTurn["verdict"]; askedBefore?: boolean; fileNow?: boolean; documents?: Row[]; actions?: Row[]; notes?: Row[] }) {
+function setup(o: { messages: string[]; draft?: Draft; tainted?: boolean; verdict?: DraftTurn["verdict"]; askedBefore?: boolean; fileNow?: boolean; documents?: Row[]; actions?: Row[]; notes?: Row[]; sheet?: Row[] }) {
   const tables: Record<string, Row[]> = {
     profiles: [{ id: S1, counselor_id: ME }, { id: S2, counselor_id: ME }],
     ai_messages: o.messages.map((content, i) => ({ id: `m${i + 1}`, conversation_id: CONV, role: "user", content, created_at: `2026-11-08T11:${String(10 + i).padStart(2, "0")}:00Z` })),
@@ -27,7 +27,11 @@ function setup(o: { messages: string[]; draft?: Draft; tainted?: boolean; verdic
     documents: (o.documents ?? []).map((d) => ({ student_id: S1, kind_confirmed: true, available_to_llm: true, ai_access: "default", ferpa_waived: false, ...d })),
     axis_actions: o.actions ?? [],
   };
-  const { request } = fakeOpsRequest(tables, { userId: ME });
+  const sheet = o.sheet ?? [];
+  const { request } = fakeOpsRequest(tables, {
+    userId: ME,
+    answer: (c) => (c.method === "GET" && c.url.startsWith("/application/sheets") ? { status: 200, body: { activities: sheet, honors: [] } } : { status: 200, body: { id: "x" } }),
+  });
   const events: OperationEvent[] = [];
   const ctx: OpContext = {
     request, conversationId: CONV, studentId: S1, roster: { get: (id) => (NAMES[id] ? { name: NAMES[id]! } : undefined) },
@@ -282,4 +286,45 @@ test("the draft block lists descriptions by length and source, never their text"
   assert.match(block, /Activity draft for Avery Lee/);
   assert.match(block, /draft_row/);
   assert.match(block, /Don't say whether anything was saved, tried or needs Confirm/);
+});
+
+test("a correction to a card filed with blanks replaces the card (finding A)", async () => {
+  const s = setup({ messages: ["Add Code Club for Avery, cofounder, add it"], fileNow: true });
+  await draftWrite(s.ctx, s.turn, "application.add_activity", { organization: "Code Club", position: "cofounder" });
+  await fileIfReady(s.ctx, s.turn, true);
+  assert.equal(cards(s.tables).length, 1, "filed with blanks");
+  s.draft.touched.rows.clear();
+  // Next message: the hours.
+  s.tables.ai_messages!.push({ id: "m2", conversation_id: CONV, role: "user", content: "6 hours a week", created_at: "2026-11-08T11:30:00Z" });
+  const next: DraftTurn = { ...s.turn, messageId: "m2", fileNow: false, askedBefore: false };
+  const out = await draftWrite(s.ctx, next, "application.add_activity", { draft_row: "r1", hours_per_week: 6 });
+  assert.doesNotMatch(out.content, /Ask the counselor once/, "a row already on its card is never asked about again");
+  await fileIfReady(s.ctx, next, false);
+  const pending = cards(s.tables).filter((c) => c.status === "pending");
+  assert.equal(pending.length, 1);
+  assert.equal((inputOf(pending[0]!).rows as Row[])[0]!.hours_per_week, 6, "the new card carries the hours");
+  assert.equal(cards(s.tables)[0]!.status, "dismissed");
+});
+
+test("filing a card clears the ask; a new row is asked about before it is filed (finding B)", async () => {
+  const s = setup({ messages: [DETAILS], askedBefore: true });
+  s.draft.header = null;
+  await draftWrite(s.ctx, s.turn, "application.add_activity", { organization: "Code Club", position: "Cofounder", grade_levels: 11, timing: "summer", hours_per_week: 6, weeks_per_year: 2 });
+  s.draft.header!.asked = { at: NOW.toISOString(), fields: ["hours_per_week"], after_msg: "m1" };
+  await fileIfReady(s.ctx, s.turn, false);
+  assert.equal(s.draft.header?.asked, undefined, "the ask is spent once its card is filed");
+  s.draft.touched.rows.clear();
+  s.tables.ai_messages!.push({ id: "m2", conversation_id: CONV, role: "user", content: "also add Debate Club, captain", created_at: "2026-11-08T11:30:00Z" });
+  const next: DraftTurn = { ...s.turn, messageId: "m2", fileNow: false, askedBefore: false };
+  await draftWrite(s.ctx, next, "application.add_activity", { organization: "Debate Club", position: "captain" });
+  await fileIfReady(s.ctx, next, false);
+  assert.equal(cards(s.tables).filter((c) => c.status === "pending").length, 1, "Code Club's card stays; Debate Club waits to be asked about");
+  assert.equal(s.draft.rows.find((r) => r.fields.organization === "Debate Club")?.status, "collecting");
+});
+
+test("a change to a saved activity is named by that activity (finding F)", async () => {
+  const s = setup({ messages: ["make Code Club 8 hours a week"], sheet: [{ id: ACT, organization: "Code Club", position: "Cofounder" }] });
+  await draftWrite(s.ctx, s.turn, "application.update_activity", { activity_id: ACT, hours_per_week: 8 });
+  await fileIfReady(s.ctx, s.turn, false);
+  assert.deepEqual(statusLines(s.draft), ["Waiting for your Confirm: change Code Club on Avery Lee's Activities sheet."]);
 });

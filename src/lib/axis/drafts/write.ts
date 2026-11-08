@@ -12,7 +12,7 @@
 import { HttpError } from "../../errors.js";
 import { resolveStudentId } from "../../guards.js";
 import { activityFields, activityRowLine, type BatchRow } from "../ops/catalog/application.js";
-import { DETAIL_MAX, runWrite, TOO_LONG_FOR_CARD, type OpContext, type OpOutput } from "../ops/run.js";
+import { DETAIL_MAX, helpers, runWrite, TOO_LONG_FOR_CARD, type OpContext, type OpOutput } from "../ops/run.js";
 import { missingOf } from "./lines.js";
 import { ACTIVITY_FIELDS, freeTextKey, normalizeField, type ActivityField } from "./normalize.js";
 import { DESCRIPTION_REFUSAL, IMAGE_ONLY_HINT, provenanceRefusal, traceDescription, traceValue, type SourceSet } from "./provenance.js";
@@ -135,6 +135,7 @@ export async function draftWrite(ctx: OpContext, turn: DraftTurn, name: string, 
     if (!r) continue;
     const missing = missingOf(r);
     if (r.op === "update") lines.push(`Row ${key} changes activity_id ${r.activity_id}; the server files it as a card after your answer.`);
+    else if (r.status === "card") lines.push(`Row ${key} is already on its card; the server updates the card after your answer.`);
     else if (missing.length) lines.push(`Still missing in ${key}: ${missing.join(", ")}. Ask the counselor once, in one message, for just these.`);
     else lines.push(`Row ${key} is complete; the server files it as a card after your answer.`);
   }
@@ -160,6 +161,9 @@ async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op
     if (!row) {
       if (!canAddRow(d)) return refuseRow(d, reply, typeof item.organization === "string" ? item.organization : "this change");
       row = newRow(d, "update", activityId);
+      // Named by the saved activity it changes ("change Code Club"), read from the sheet as the counselor.
+      const label = await savedLabel(ctx, header.student_id, activityId);
+      if (label) row.label = label;
     }
   } else {
     if (key) {
@@ -237,6 +241,14 @@ async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op
   }
 }
 
+/** A saved activity's name (its organization, else its position), or null when it can't be read. */
+async function savedLabel(ctx: OpContext, studentId: string, activityId: string): Promise<string | null> {
+  const body = await helpers(ctx.request, ctx.roster).get<{ activities?: Record<string, unknown>[] }>(`/application/sheets?studentId=${encodeURIComponent(studentId)}`);
+  const a = (body?.activities ?? []).find((x) => x.id === activityId);
+  const name = a ? (typeof a.organization === "string" && a.organization.trim()) || (typeof a.position === "string" && a.position.trim()) : null;
+  return name ? name.slice(0, 120) : null;
+}
+
 function refuseRow(d: Draft, reply: Reply, label: string) {
   reply.notKept.push(`Not kept: ${label}: ${FULL}`);
   d.notes.push({ kind: "rejected", reason: FULL, counselor: "a draft holds 10 activities; confirm this card first", label });
@@ -285,18 +297,25 @@ export async function fileIfReady(ctx: OpContext, turn: DraftTurn, force: boolea
     await fileUpdate(ctx, d, r);
   }
 
-  const adds = () => d.rows.filter((r) => r.op === "add" && (r.status === "collecting" || r.status === "card"));
-  const open = adds();
-  const changed = open.filter((r) => r.status === "card" && touched(r));
-  if (!open.some((r) => r.status === "collecting") && !changed.length) return;
-  if (open.some((r) => missingOf(r).includes("organization"))) return;
-  if (!force && !turn.askedBefore && open.some((r) => missingOf(r).length > 0)) return;
+  const open = d.rows.filter((r) => r.op === "add" && (r.status === "collecting" || r.status === "card"));
+  const onCard = open.filter((r) => r.status === "card");
+  const changed = onCard.filter(touched);
+  // A new row is filed once it has an organization and nothing is missing, or the counselor said to file it as is,
+  // or they were asked once already. A row already on a card (filed with blanks or not) is always carried over.
+  const ready = (r: DraftRow) => !missingOf(r).includes("organization") && (force || turn.askedBefore || missingOf(r).length === 0);
+  const fresh = open.filter((r) => r.status === "collecting" && ready(r));
+  if (!fresh.length && !changed.length) return;
 
-  const pending = [...new Set(open.filter((r) => r.status === "card" && r.card_id).map((r) => r.card_id!))];
+  // One pending add card per draft: the old one is replaced, unless the counselor acted on it first.
+  const carry: DraftRow[] = [];
+  const pending = [...new Set(onCard.filter((r) => r.card_id).map((r) => r.card_id!))];
   if (pending.length) {
     const n = await dismissCards(ctx, d, pending, REPLACED);
     if (n > 0) {
-      for (const r of open) if (r.status === "card") setStatus(d, r, "collecting", { card_id: undefined });
+      for (const r of onCard) {
+        setStatus(d, r, "collecting", { card_id: undefined });
+        carry.push(r);
+      }
       d.notes.push({ kind: "replaced" });
     } else {
       // The counselor acted first (plan review item 1): read what happened, then carry this turn's corrections over.
@@ -304,15 +323,19 @@ export async function fileIfReady(ctx: OpContext, turn: DraftTurn, force: boolea
       for (const r of changed) {
         if (r.status === "saved" && r.activity_id && canAddRow(d)) {
           const u = newRow(d, "update", r.activity_id);
+          u.label = rowLabel(r);
           for (const f of touchedFields(d, r.key)) setValue(d, u, f, r.fields[f], r.sources[f] ?? { label: "your message", outside: false }, r.read_as[f]);
           await fileUpdate(ctx, d, u);
-        } else if (r.status === "dismissed") setStatus(d, r, "collecting");
+        } else if (r.status === "dismissed") {
+          setStatus(d, r, "collecting");
+          carry.push(r);
+        }
       }
     }
   }
 
-  const toFile = adds().filter((r) => r.status === "collecting");
-  if (!toFile.length || toFile.some((r) => missingOf(r).includes("organization"))) return;
+  const toFile = [...new Set([...carry, ...fresh])].filter((r) => r.status === "collecting");
+  if (!toFile.length) return;
   let filed: string | null = null;
   const out = await runWrite(ctx, "application.add_activities", { student_id: d.header.student_id, rows: toFile.map(asBatchRow) }, {
     outside: ctx.turn.tainted || toFile.some(anyOutside),
@@ -321,5 +344,7 @@ export async function fileIfReady(ctx: OpContext, turn: DraftTurn, force: boolea
   if (filed) {
     for (const r of toFile) setStatus(d, r, "card", { card_id: filed });
     d.notes.push({ kind: "filed" });
+    // The ask is spent: a row added later is asked about once before it is filed (spec 4.1, row by row).
+    patchHeader(d, { asked: undefined });
   } else for (const r of toFile) d.notes.push(filingFailed(r, out));
 }

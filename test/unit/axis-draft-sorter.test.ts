@@ -52,6 +52,14 @@ const TABLE: [string, Verdict][] = [
   ["who is behind this week?", "unrelated"],
   ["thanks!", "unrelated"],
   ["summarize her last meeting notes", "unrelated"],
+  // Questions that carry a grade, season or hours word are still questions (checkpoint finding G).
+  ["what should a junior be doing now?", "unrelated"],
+  ["what did he do last summer?", "unrelated"],
+  ["how is his junior year going?", "unrelated"],
+  ["is 10 hours a week too much for him?", "unrelated"],
+  ["how about 6 hours a week", "draft"],
+  ["could you make it 8 hours?", "draft"],
+  ["is Code Club still going?", "draft"],
 ];
 
 test("the sorter table", () => {

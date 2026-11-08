@@ -30,6 +30,15 @@ export const isContinue = (text: string) => CONTINUE.test(whole(text));
 export const isFileNow = (text: string) => FILE_NOW.test(text.toLowerCase().replace(/[’]/g, "'"));
 export const isCorrection = (text: string) => CORRECTION.test(text.toLowerCase().trim());
 
+/** A question, not a reply with details: "what did he do last summer?", "is 10 hours a week too much?". Not a request ("could you…"), nor "how about 6 hours". */
+const QUESTION_LEAD = /^(?:what(?!\s+about)|whats|what's|which|how(?!\s+about)|why|when|who|whose|is|are|was|were|should|do|does|did|has|have|had)\b/;
+const REQUEST_LEAD = /^(?:please |pls )?(?:can|could|would|will) you\b|\bplease\b/;
+export const isQuestion = (text: string) => {
+  const t = text.toLowerCase().replace(/[’]/g, "'").trim();
+  if (REQUEST_LEAD.test(t) || /^(?:how|what) about\b/.test(t)) return false;
+  return /\?\s*$/.test(t) || QUESTION_LEAD.test(t);
+};
+
 /** The message names one of the draft's organizations or positions (whole words, at least 3 characters). */
 function namesDraft(text: string, draft: Draft): boolean {
   const key = ` ${freeTextKey(text)} `;
@@ -48,6 +57,9 @@ export function sortMessage(text: string, u: Pick<Understanding, "intent" | "sco
   // A college matched by a place name in the details ("the Santa Clara library") is no question about a college.
   const asksCollege = (u.attributes ?? []).some((a) => COLLEGE_ATTRIBUTES.has(a));
   const nothingScored = Object.entries(u.scores).every(([k, s]) => s <= 0 || (k === "colleges" && !asksCollege));
+  // A question is unrelated, even with a grade, season or hours word in it, unless it is a change request or
+  // names the draft ("is Code Club still going?").
+  if (isQuestion(text) && u.intent !== "action" && !isCorrection(text) && !namesDraft(text, draft)) return "unrelated";
   if (isYes(text) || hasActivityValue(text) || namesDraft(text, draft) || isCorrection(text) || u.intent === "action" || nothingScored) return "draft";
   return "unrelated";
 }
