@@ -19,6 +19,18 @@ export function requireRole(role: Role) {
 }
 
 /**
+ * For a route both a counselor and a student may use (a student's AI tools): any other role, or none, is refused.
+ * It decides nothing about WHICH student: resolveStudentId still pins a student to themselves.
+ */
+export function requireRoleIn(...roles: Role[]) {
+  return async (request: FastifyRequest, _reply: FastifyReply) => {
+    if (!roles.includes(request.profile.role as Role)) {
+      throw forbidden(`Only ${roles.join(" and ")}s can do that`);
+    }
+  };
+}
+
+/**
  * Whether the caller may archive or restore `studentId`: a counselor writing
  * about someone other than themselves. Edit access (assertCanEditStudent) and
  * RLS decide which counselor; this only keeps a student, who passes the edit

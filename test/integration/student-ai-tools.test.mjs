@@ -73,4 +73,105 @@ const tools = async (who) => flag(await call(who.token, "GET", "/me/ai-tools"));
   check("a student with no counselor reads off", (await tools(loner)) === false);
 }
 
+// ---- S1: Build College Lists ----
+
+const collegeId = (slug) => sql(`select id from public.colleges where slug = '${slug}'`);
+const listRows = (studentId) =>
+  sql(`select coalesce(json_agg(json_build_object('college', c.slug, 'status', sc.status, 'addedByStudent', sc.added_by = sc.student_id, 'fit', sc.fit) order by c.slug), '[]'::json)
+       from public.student_colleges sc join public.colleges c on c.id = sc.college_id where sc.student_id = '${studentId}'`).then(JSON.parse);
+const CRITERIA = { majors: [], sizes: [], settings: [], testOptional: null, miles: 500, origin: null, aid: "No preference", diversity: "No preference" };
+
+{
+  const c = await user("sat-bl-c");
+  const s = await studentOf(c, "sat-bl-s");
+  const other = await studentOf(c, "sat-bl-o");
+  const caltech = await collegeId("caltech"); // 2.7% admitted: a reach for anyone
+  const ithaca = await collegeId("ithaca-college"); // 80% admitted; no scores on file, so read at the published rate: a safety
+  const builderCalls = () => [
+    ["schools", call(s.token, "GET", "/colleges/list-builder/schools")],
+    ["defaults", call(s.token, "GET", `/colleges/list-builder/defaults?studentId=${s.id}`)],
+    ["build", call(s.token, "POST", "/colleges/list-builder", { studentId: s.id, criteria: CRITERIA })],
+    ["add", call(s.token, "POST", "/colleges/list-builder/add", { collegeIds: [ithaca] })],
+    ["chat", call(s.token, "POST", "/ai/college-list-chat", { studentId: s.id, criteria: CRITERIA, view: { perTier: 4, offset: 0, exclude: [] }, message: "closer to home" })],
+  ];
+
+  // Off: every part of it is closed to the student.
+  for (const [name, p] of builderCalls()) {
+    const r = await p;
+    check(`switch off: ${name} is refused for a student`, r.status === 403, `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+  }
+  check("switch off: nothing landed on their list", (await listRows(s.id)).length === 0);
+
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: true });
+
+  // On: the reads work, for the student themself only.
+  let r = await call(s.token, "GET", "/colleges/list-builder/schools");
+  check("on: the builder's schools load for a student", r.status === 200 && Array.isArray(r.body) && r.body.length >= 30, `${r.status}`);
+  r = await call(s.token, "GET", `/colleges/list-builder/defaults?studentId=${s.id}`);
+  check("on: their own defaults load", r.status === 200 && r.body?.criteria && r.body?.student?.id === s.id, `${r.status} ${JSON.stringify(r.body).slice(0, 100)}`);
+  r = await call(s.token, "POST", "/colleges/list-builder", { studentId: s.id, criteria: CRITERIA });
+  check("on: they can build a list", r.status === 200 && r.body?.tiers?.length === 3 && r.body.tiers.some((t) => t.schools.length > 0), `${r.status}`);
+  check("on: the builder names no one else", r.body?.student?.id === s.id);
+  r = await call(s.token, "POST", "/colleges/list-builder", { studentId: other.id, criteria: CRITERIA });
+  check("on: another student's list is refused", r.status === 403, `${r.status}`);
+  r = await call(s.token, "GET", `/colleges/list-builder/defaults?studentId=${other.id}`);
+  check("on: another student's defaults are refused", r.status === 403, `${r.status}`);
+  r = await call(s.token, "POST", "/ai/college-list-chat", { studentId: s.id, criteria: CRITERIA, view: { perTier: 4, offset: 0, exclude: [] }, message: "closer to home" });
+  check("on: the chat passes the gates (it stops at the model, which this stack doesn't have)", r.status !== 403 && r.status !== 401, `${r.status} ${JSON.stringify(r.body).slice(0, 100)}`);
+  r = await call(s.token, "POST", "/ai/college-list-chat", { studentId: other.id, criteria: CRITERIA, view: { perTier: 4, offset: 0, exclude: [] }, message: "closer to home" });
+  check("on: the chat refuses another student", r.status === 403, `${r.status}`);
+
+  // Adding: Interested, added by the student, tagged by the server.
+  r = await call(s.token, "POST", "/colleges/list-builder/add", { collegeIds: [ithaca, caltech] });
+  check("add: two schools", r.status === 200 && r.body?.added?.length === 2 && r.body?.skipped?.length === 0, `${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+  let rows = await listRows(s.id);
+  check("add: they are on the list as Interested (not-started), added by the student", rows.length === 2 && rows.every((x) => x.status === "not-started" && x.addedByStudent === true), JSON.stringify(rows));
+  const fit = (slug) => rows.find((x) => x.college === slug)?.fit;
+  check("add: a 2.7% school is tagged a reach, whatever the student", fit("caltech") === "reach", String(fit("caltech")));
+  check("add: an 80% school with no scores on file is tagged a safety", fit("ithaca-college") === "likely", String(fit("ithaca-college")));
+  check("add: the answer carries the tags the server chose", r.body?.added?.find((x) => x.collegeId === caltech)?.fit === "reach");
+
+  r = await call(s.token, "POST", "/colleges/list-builder/add", { collegeIds: [ithaca, caltech] });
+  check("add again: both are skipped as already on the list", r.status === 200 && r.body?.added?.length === 0 && r.body?.skipped?.length === 2 && r.body.skipped.every((x) => x.reason === "already-on-list"), `${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+  check("add again: no duplicate rows", (await listRows(s.id)).length === 2);
+
+  r = await call(s.token, "POST", "/colleges/list-builder/add", { collegeIds: ["00000000-0000-4000-8000-000000000000"] });
+  check("add: a school that isn't in the catalog is skipped, not an error", r.status === 200 && r.body?.skipped?.[0]?.reason === "not-found", `${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+
+  // The student can't choose the tag, the stage or whose list it is.
+  const stu = await collegeId("stanford");
+  for (const [label, body] of [
+    ["a fit", { collegeIds: [stu], fit: "likely" }],
+    ["a stage", { collegeIds: [stu], stage: "applied" }],
+    ["a student id", { collegeIds: [stu], studentId: other.id }],
+    ["no schools", { collegeIds: [] }],
+    ["37 schools", { collegeIds: Array.from({ length: 37 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`) }],
+    ["a non-uuid", { collegeIds: ["stanford"] }],
+  ]) {
+    r = await call(s.token, "POST", "/colleges/list-builder/add", body);
+    check(`add refuses ${label} (400)`, r.status === 400, `${r.status}`);
+  }
+  check("none of those added a school", (await listRows(s.id)).length === 2);
+
+  rows = await listRows(s.id);
+  const row = await sql(`select id from public.student_colleges where student_id = '${s.id}' and college_id = '${ithaca}'`);
+  r = await call(s.token, "PATCH", `/application/college-list/${row}`, { fit: "reach" });
+  const after = await listRows(s.id);
+  check("a student still can't change a tag afterwards", after.find((x) => x.college === "ithaca-college")?.fit === "likely", `${r.status}`);
+
+  r = await call(c.token, "POST", "/colleges/list-builder/add", { collegeIds: [stu] });
+  check("a counselor can't use the student add (403)", r.status === 403, `${r.status}`);
+
+  // The counselor reads the same list.
+  r = await call(c.token, "GET", `/application/college-list?studentId=${s.id}`);
+  const seen = (r.body?.rows ?? []).map((x) => `${x.name}|${x.stage}|${x.fit}`);
+  check("the counselor sees both under Interested with their tags", r.status === 200 && seen.some((x) => /Caltech|California Institute/i.test(x) && /interested\|reach$/.test(x)) && seen.some((x) => /Ithaca/i.test(x) && /interested\|likely$/.test(x)), JSON.stringify(seen));
+
+  // Turning it off closes the add again; what is already on the list stays.
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: false });
+  r = await call(s.token, "POST", "/colleges/list-builder/add", { collegeIds: [stu] });
+  check("off again: the add is refused", r.status === 403, `${r.status}`);
+  check("off again: the list is as it was", (await listRows(s.id)).length === 2);
+}
+
 console.log(process.exitCode ? "student-ai-tools: FAILED" : "student-ai-tools: ok");
