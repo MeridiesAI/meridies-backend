@@ -79,6 +79,11 @@ const envSchema = z.object({
   // Tests only, like RESEND_API_BASE: Twilio's REST calls (sending, searching and
   // buying numbers, the Messaging Service) go to this origin. Ignored in production.
   TWILIO_API_BASE: blankIsUnset(z.string().url().optional()),
+  // Tests only: a JSON file { "<counselor id>": [{ "start": ISO, "end": ISO }] } read as each
+  // counselor's calendar busy time for student booking, instead of asking Google or Microsoft.
+  // Allowed only with the raw NODE_ENV development or test; index.ts refuses to start otherwise
+  // (lib/booking.ts bookingBusyFixtureRefusal), the RESEARCH_FAKE / TRANSLATE_FAKE rule.
+  BOOKING_BUSY_FIXTURE: blankIsUnset(z.string().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 

@@ -74,6 +74,10 @@ src/
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
+│   ├── bookingSlots.ts    # student booking: free slots from weekly hours, busy time, buffer, notice (pure, DST-safe)
+│   ├── booking.ts         # student booking: settings/types DTOs, the student's counselor, slots with busy time
+│   ├── bookingWrite.ts    # student booking: book / reschedule / cancel rules and write order (injected I/O)
+│   ├── bookingCalendar.ts # student booking: the ONE provider call with the counselor's token (see below)
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── parentCopy.ts      # what a parent is told (email + text wording), who is reachable; pure
 │   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
@@ -173,6 +177,8 @@ src/
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
+│   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
 │   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
@@ -792,7 +798,93 @@ forget it.
   charged, and a meeting whose own student isn't on its owner's caseload
   sends nothing and charges nothing. A new route that calls a provider about
   a stored row, or charges a limit keyed by a stored owner, checks ownership
-  the same way.
+  the same way. **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
+  own book / move / cancel acts on their counselor's calendar with the counselor's token.
+- **Student self-booking, part 1** (`20261111000001`; `lib/bookingSlots.ts`, `lib/booking.ts`, `routes/booking.ts`,
+  `routes/studentBooking.ts`, `listBusy` in `lib/suiteApi.ts`). `booking_settings` (one row per counselor: `enabled`,
+  IANA `time_zone`, `weekly_hours` jsonb `{"0".."6": [{start, end}]}` in "HH:MM" with "24:00" allowed as an end, notice,
+  max days ahead, buffer, cancel cutoff, `students_can_reschedule`) and `booking_meeting_types` (15-180 minutes; modes
+  google-meet, teams, in-person, phone) are owner-only like `calendar_event_types`; a student reads them only through
+  `/me/booking`, where the counselor is the caller's own `profiles.counselor_id`, approved (fail closed) with booking
+  on. `GET /me/booking/types` says why not (`available: false`, `reason`): `counselor_unavailable` (no counselor,
+  or not approved: nothing else is said), `not_set_up` (no settings row), `paused` (`enabled` off), `no_types` (on,
+  no active type); and, whenever an approved counselor has a settings row (paused or not), their two change rules
+  `cutoffHours` and `studentsCanChange`, so the app can say why Reschedule / Cancel are off before a try. Nothing
+  else about the counselor (no hours, notice, buffer, days ahead or calendar state; the zone only when available;
+  `bookingTypesAnswer`). These replaced the earlier `no_counselor` / `not_available`, which no client branched on.
+  The other routes answer 404 `booking_not_available`. Slots are the weekly hours in the counselor's zone minus their scheduled meetings (no end
+  = an hour) and their connected calendar's busy time, each widened by the buffer; at most 14 days a request, clamped to
+  max days ahead; only free times are returned. **Busy time** uses only scopes already granted: Google `events.list` on
+  `primary` (skips transparent and cancelled; all-day = the counselor's whole local day), Graph `GET /me/calendarView`
+  (`Prefer: outlook.timezone="UTC"`, skips free and cancelled); never `freebusy.query` or `getSchedule`. The calendar
+  is asked about whole local days (`busyWindow`), so requests seconds apart hit its 60 s cache and charge
+  `busy:<counselor>` (30 a minute) once. No calendar connected (no grant, or a grant without Calendar) is no busy time;
+  a connected calendar that can't be read stops the slots (never offer them over unknown busy time): a grant that no
+  longer works (the refresh refused, or a 401/403) is 409 `calendar_reconnect_needed`, an outage, a provider 429 or
+  more than 5 pages is 503 `calendar_busy_unavailable`. Tests stub it with `__busy` (unit) or `BOOKING_BUSY_FIXTURE`
+  (a JSON file the API reads instead; index.ts refuses to start with it unless the raw NODE_ENV is development or
+  test, the `RESEARCH_FAKE` rule). **`public.book_meeting_slot(p_student, p_counselor,
+  p_starts_at, p_ends_at, p_mode, p_title, p_agenda)`** (SECURITY DEFINER, EXECUTE to service_role only) books under
+  `pg_advisory_xact_lock(hashtext('booking:' || counselor))` after re-checking the relationship, approval, `enabled`
+  and overlap with the buffer; errors `slot_taken` (23P01), `booking_disabled`, `not_your_counselor`, `invalid_slot`
+  (also a start not in the future).
+  `meetings.booked_by_student` is set only there (a guard trigger refuses a user session's write). **Deploy order:**
+  either; not in `REQUIRED_SCHEMA`; without it the routes answer 503 `booking_unavailable` (`bookingReady`). Tests:
+  `test/unit/booking-slots.test.ts`, `booking-busy.test.ts`, `booking-service.test.ts`,
+  `test/integration/booking-settings.test.mjs`.
+- **Student self-booking, part 2: book, move, cancel** (`20261111000012`; `lib/bookingWrite.ts`,
+  `lib/bookingCalendar.ts`, `routes/studentBooking.ts`). **This reverses "the counselor owns the calendar: a student
+  cannot move their meetings"** (routes/meetings.ts's header now says so): a student may move or cancel their own
+  meetings, through `/me/booking` only; `/meetings` stays counselor-write. Same gate as the reads (own counselor,
+  approved, booking set up and on; else 404 `booking_not_available`), **except a cancel**, which needs the counselor
+  approved and booking set up (a settings row) but not `enabled`: pausing booking never strands a student with a
+  meeting they can't call off (`bookingGate`, `requireEnabled: false`); the cutoff and `students_can_reschedule`
+  still apply to it. A counselor who never saved booking settings keeps the old rule (students change nothing). `POST /me/booking { typeId, startsAt }` (strict, an
+  offset required): the start must be exactly one of the starts `GET /me/booking/slots` offers for that active type
+  right now (`slotOpen`: the same `slotsFor`, calendar busy time included, over a one-minute window; duration and
+  mode come from the type, never the client), else 409 `slot_unavailable`; 404 `type_not_found`. Reserved with
+  `book_meeting_slot` (409 `slot_taken` when two race; the RPC's `booking_disabled` / `not_your_counselor` read as
+  404 `booking_not_available`), titled `<Type> - <first name>`, `send_invites` on. **The counselor's calendar:** for
+  a Meet/Teams type, when the counselor has that provider connected with Calendar (`counselorCalendarConnected`:
+  the grant row's scopes), the conference event is created and `join_url` / `calendar_provider` /
+  `calendar_event_id` stored; not connected books without a link (`joinUrl: null`, `conference: "not-connected"`;
+  in person / phone: `"not-needed"`); a provider failure after reserving deletes the reservation and answers 503
+  `calendar_write_failed`, nothing left behind. `lib/bookingCalendar.ts` is the **only** code that calls a provider
+  with someone else's token, on purpose: a student's action has to land on the counselor's calendar. It is narrow:
+  the token owner is the student's own `profiles.counselor_id` (never client input), the row (read with the service
+  role) must name that counselor and that student as primary, create only on a meeting the student just reserved
+  (`booked_by_student`, no event yet), move/delete only the event the row points at, through the same suiteApi
+  calls (`sendUpdates=none`, no attendees). **Invites** are the counselor routes' round (`prepareInviteRound` /
+  `startInviteDelivery`, SEQUENCE through `private.meetings_ics_sequence`) run on the service client with the
+  booked student as the only attendee, so it reaches the student and the counselor's own copy and nobody else;
+  they spend their own bucket, `meeting-invites:booking:<owner>` 60/h (`prepareInviteRound`'s `bucket: "booking"`),
+  never the counselor's own `meeting-invites:<owner>` allowance. **The counselor is told** (`kind 'system'`
+  notification + `student-booking-counselor` email, 20 a day per student, `booking-notice:<student>`): "Ana booked
+  Check-in on Wed, Nov 11, 9:00 AM EST" in the counselor's booking zone, "moved a meeting to", "cancelled the
+  meeting on", and a body saying who set the meeting up; never more than the first name, type and time.
+  **`PATCH /me/booking/:id { startsAt }` / `DELETE /me/booking/:id`:** any scheduled meeting where the caller is the
+  PRIMARY student (`meetings.student_id`; an attendee-only student gets 404 `meeting_not_found`, like a meeting that
+  doesn't exist), whoever booked it; refused with 409 `already_cancelled`, 409 `not_scheduled` (held, no-show or
+  already started), 409 `ask_your_counselor` (another counselor's meeting, another attendee on it, or guardians
+  invited: the round would reach people the student can't see, so the student is sent to the counselor), 403
+  `student_changes_off` (`students_can_reschedule` off), 409 `inside_cutoff` (less than `cancel_cutoff_hours`
+  real hours away). A move keeps the meeting's length (an open-ended one becomes an hour), is checked on the grid
+  ignoring itself (its own row by id, and the calendar busy interval with exactly its times), then
+  `reschedule_meeting_slot` (`20261111000012`, service role, same advisory lock, overlap excluding itself; errors as
+  `book_meeting_slot` plus `meeting_not_found`), then the event moved (a failure puts the old times back, 503
+  `calendar_write_failed`), `meeting-update` round, notice. A cancel is a conditional `scheduled -> cancelled`
+  (pointer cleared, the counselor routes' cancel), so a second is 409 `already_cancelled` and emails nobody; the
+  event delete is best effort (`calendarRemoved: false` when it failed, true when nothing is left; the failure is
+  logged with the meeting, provider and event ids only, and the counselor's notice adds "It is still on your
+  Google|Outlook calendar; delete it there."), then the `meeting-cancel` round and the notice. **Caps:** 20 book/move/cancel calls an hour per student
+  (`booking-actions:<student>`, 429) and at most 10 upcoming scheduled self-booked meetings (409
+  `too_many_bookings`). No new path carries a token (`lib/requestLog.ts` unchanged). **Deploy order:** after
+  `20261111000001`, either order with the code; without it only PATCH answers 503 `booking_unavailable`. **POST has
+  no idempotency key**: after a lost response a retry gets 409 `slot_unavailable` (the student's own new meeting
+  blocks the slot), so the app refetches the student's meetings before reporting a failure. Not in
+  `REQUIRED_SCHEMA`. Tests: `test/unit/booking-write.test.ts`, `test/integration/booking-write.test.mjs` (needs the
+  API and the run started with `BOOKING_BUSY_FIXTURE`; a counselor's grant row with no Google client configured is
+  the failing provider).
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the
