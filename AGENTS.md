@@ -3381,13 +3381,18 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   firm member with any student, archived included, is told to ask an owner or
   admin to transfer them.
   The checks are `deletionBlocker` (`lib/accountDeletion.ts`), each a 409 with a code: `caseload_not_empty`,
-  `owns_firm`, `stripe_connected` and `signed_agreements_kept` (probed: only on a database with the agreements
-  tables). A read that fails is a 503, never a guess. **`stripe_connected` is a new refusal on `DELETE /account`
+  `owns_firm`, `stripe_connected`, `billing_history` and `signed_agreements_kept` (probed: only on a database with
+  the agreements tables). A read that fails is a 503, never a guess. **`stripe_connected` is a new refusal on `DELETE /account`
   too**: a solo practice whose `practice_stripe_accounts` row has `charges_enabled = true` is told "disconnect
   Meridies in your Stripe dashboard first, then try again". Stripe's `account.application.deauthorized` webhook sets
   `charges_enabled` false, which unblocks; an onboarding never finished never blocks; a firm's account is the firm's
-  (its owner is already refused). Billing history is protected separately: invoices and payments RESTRICT their
-  package, so the deletion itself fails while a family has any (a 503, the account intact). **Runbook, a stuck row**
+  (its owner is already refused). **`billing_history` is new too**: invoices, payments and credit refunds RESTRICT
+  their package, and deleting the profile cascades its contacts and their packages, so an account with any of them
+  (on a contact whose `counselor_id` is the account, firm or solo) could never be deleted: the cleanup steps would run
+  and the auth user deletion would then fail. It is refused up front with "Your account has invoices or payments on
+  record, which Meridies has to keep. Ask the team to close it for you." (fail-closed on a read error, ignored on a
+  database without those tables). **Self-service closure is therefore not possible with billing history**: the team
+  closes such an account by hand (the records have to be kept), and the app should say so. **Runbook, a stuck row**
   (the counselor disconnected in Stripe but the webhook never arrived): check the account in the Stripe dashboard, then
   as `postgres` `update public.practice_stripe_accounts set charges_enabled = false, updated_at = now() where
   counselor_id = '<profile id>';` and ask them to try again. `deleteAccount` is the one deletion path (AxIS trash
@@ -3406,7 +3411,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   student names; template `account-closure-requested`) and writes `account.closure.requested` to `audit_log`. A
   second request while one is pending answers it again (200, no email); after a cancel, or from `on_hold`, it starts a
   fresh 30 days with a new email (201; `account.closure.reopened` for the latter). `DELETE /account/closure` cancels
-  (200 `{ status: "none" }`, email `account-closure-cancelled`), 404 `no_closure` when none is open, 409
+  (200 `{ status: "none" }`, email `account-closure-cancelled`, which names the old date only for a pending closure,
+  never the past date of one on hold), 404 `no_closure` when none is open, 409
   `closure_in_progress` while a purge is working on it; a row stuck in `purging` for over an hour (a crashed run) can
   be cancelled (conditional on the `updated_at` read). `account_closures` has RLS (a counselor selects their own
   row) and the approval gate; there is no client write grant, so the API reads and writes it with the service role
@@ -3422,8 +3428,13 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   (if that insert fails the row is `failed` and nothing is deleted); the Google/Microsoft tokens revoked and
   forgotten with the `integrations` rows (`revokeConnections`: best effort per provider, a failure logged without
   the token); `deleteAccount` (the `DELETE /account` path, `via: "closure"`); then `account.closure.purged` (with
-  `connectionsRevoked`). The closure row cascades with the profile, which is why the outcome is in `audit_log`; a
-  deletion that fails marks the row `failed` (on hold) and nothing retries it until the counselor confirms again.
+  `connections: { forgotten, revokedAtProvider }`, or `{ error: true }` when the revoke threw; Microsoft has no
+  revoke call, so only Google can appear in `revokedAtProvider`). Right before the deletion the row is re-checked as
+  still `purging` (else `account.closure.skipped`, nothing deleted). The closure row cascades with the profile, which
+  is why the outcome is in `audit_log`; a deletion that fails marks the row `failed` (on hold) and nothing retries it
+  until the counselor confirms again. **A deletion that fails after the revoke leaves the account intact but its
+  Google/Microsoft connections revoked** (the counselor reconnects them in Settings if they stay); every precondition,
+  billing history included, is checked before anything is revoked or wiped, so a blocked account loses nothing.
   Students of the account stay (`profiles.counselor_id` is set null). **Deploy order:** the migration first is best,
   either is safe; not in `REQUIRED_SCHEMA`. Without the table the routes answer 503 `account_closure_unavailable`
   and the purge (when on) answers `{ ran: false, reason: "migration-not-applied" }`. **The heartbeat row is not
