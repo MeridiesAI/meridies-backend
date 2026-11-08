@@ -94,6 +94,11 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
+  // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
+  // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't
+  // write; nothing curated changes until a catalog editor approves through review_catalog_proposal.
+  "lib/catalogProposalsRun.ts",
   // routes/calendarIcal.ts: the subscribed calendar feed. GET /calendar/ical/:token.ics is public: the hashed token
   // decides, and lib/calendarIcal.ts (handed the client) asks approvedCounselorIds for the token's counselor before
   // building anything, then names that counselor's own caseload (fullCaseloadStudentIds) in every student-spanning

@@ -118,6 +118,7 @@ src/
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
+│   ├── catalogProposals.ts # cited proposals from a school's own pages: page picking, quote grounding, fact keys (+ Run, Fake)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
@@ -184,7 +185,7 @@ src/
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
-│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
+│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports, catalog proposals)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -933,7 +934,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`, `catalog-proposals`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -1495,13 +1496,67 @@ HEAD, body never read) and flags it `ok` / `broken` (404/410 twice, or gone
 from DNS) / `blocked` (the site refuses robots); nothing is deleted.
 
 Curated facts live on the school, each with a source: `college_policies`
-(superscore, self-reported scores, CSS Profile, STARS, FairTest),
+(superscore, self-reported scores, CSS Profile, STARS, FairTest, whether the
+personal statement is read, how scores are reported),
 `college_application_requirements` (per cycle) and `college_major_admit_rates`
 (UC/CSU by major, SJSU's eligibility index). They are loaded from CSVs the team
 compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
-<policies|requirements|major-admit-rates> --file <csv> [--dry-run]`. A file with
-one bad row loads nothing. Checked-in files and their sources are listed in
+<policies|requirements|major-admit-rates|supplements> --file <csv> [--dry-run]`. A file with
+one bad row loads nothing. `supplements` upserts `college_supplements` prompts on
+(school, cycle, sort_order) and requires an https `source_url` and a `checked_on` date on every row. Checked-in files and their sources are listed in
 `scripts/ingest/data/README.md`.
+
+**Cited proposals from a school's own pages** (`lib/catalogProposals.ts`, `20261111000011`) are how the curated
+facts scale past the hand-compiled schools, without the model ever writing the catalog. For ONE college,
+`POST /internal/catalog/propose { collegeId | unitid, dryRun? }` (CRON_SECRET, 200 with counts) or
+`npx tsx scripts/ingest/propose-catalog.ts --unitid <id> [--dry-run]` (local stack only: `assertLocalStack`) reads its
+home page and up to four admissions/essay/testing pages it links to, on its own domain and subdomains only
+(`onSchoolDomain`; a redirect off it ends the run), through `fetchSitePage`. One Haiku call
+(`runSystemStructured`, module `catalog-proposals`, the `system:catalog-proposals` budget of 500 calls a month, no
+practice switches because it acts for nobody) proposes `personal_statement_read`, `test_reporting` and this cycle's
+supplement prompts (the cycle turns over August 1). `groundCandidates` keeps a candidate only when it cites a page
+that was read and its quote (12+ characters) is on THAT page after folding; a prompt must be on the page and its
+word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support and a
+prompt for another stated cycle are dropped; everything dropped is counted. A flag's value must be what its quote
+says (`statementFits` / `reportingFits`; a safety net under the editor's review, so strictly conservative: when in
+doubt the candidate is dropped and counted). A quote with scoped wording (`SCOPED`: merit, scholarship(s),
+honors/honours, program(s)/programme(s), housing, aid, home-school, early decision/action, applicants or students
+from/applying, applying to/for/through, unless, except, outside the, international, non-US, transfer, "but we
+do/will", however, only for/if/when, before, after a month, deadline) is dropped for every value of both flags. The
+personal statement flag needs the statement named and a read-type verb (read, consider, review, evaluate, use,
+factor, weigh); `false` needs every such verb negated (a negator up to three words before it in its clause, "is not
+read", "isn't read", or "reviewed without the personal statement"), so "not required" or "optional" alone, or any
+un-negated read clause ("but we read it if you submit one"), drops it; `true` needs no verb negated and none an
+instruction to the applicant (first in its clause, or after please/to/sure/should/must/can/could: "Read our tips",
+"Please use"), no negation anywhere (a bare "no" included) and no hedge (rarely, seldom, little or limited weight,
+optional, only if, if you choose/submit/send, may/might be read). Test reporting: a quote about TOEFL, IELTS,
+Duolingo, "english proficiency" or PTE that names neither the SAT nor the ACT is dropped; `self-report` needs a
+self-report mention and no negation anywhere; `official-only` is dropped when required only later (upon enrollment,
+once admitted, after admission, if admitted, before enrolling, ...), and otherwise needs either a self-report
+mention refused in its own clause (a negation up to three words before it, or a negated verb right after it:
+"self-reported scores are not accepted") with nothing saying official scores aren't required (not
+required/mandatory/needed, need not, optional), or, with no self-report mention, official scores or reports
+required (or "directly from the testing agency") and no negation anywhere; `score-send` needs sending wording, no
+self-report mention and no negation anywhere; `not-applicable` needs "test-blind"/"test-free" not negated or
+contrasted (not, n't, no longer, never, neither, unlike).
+**Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
+already on file in any slot (matched by its folded words) is unchanged, one already pending is a duplicate, and each
+new prompt takes the next free `sort_order` after every curated row and pending proposal, in the page's order; its
+`fact_key` is the prompt and word limit, not the slot. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;
+`admission_cycle`, a supplement's `payload {cycle, sortOrder, title, prompt, wordLimit}`, `fact_key`); a unique index
+keeps one pending or approved row per fact, and a fact already on file with a source isn't proposed. A rejected fact
+may be proposed again by a later run. **Review** is `review_catalog_proposal(id, decision, note)` (SECURITY DEFINER,
+callable by a catalog editor only, from `POST /colleges/proposals/:id/review` on the editor's own client): one
+transaction that locks the row, refuses one already reviewed (400), re-checks the value or payload, writes the curated
+row (a `college_supplements` row on its slot with `source_url` and `source_verified_at = now()`, refused (400) when the
+slot holds a different prompt or the prompt is on file at another slot, so an approval never overwrites a row
+students' essays point to; or only that
+`college_policies` column plus `sources.<field> = {url, checkedAt, verifiedAt, verifiedBy}`; or `colleges.test_policy`)
+and stamps the reviewer. Reject changes only the proposal. `GET /colleges/proposals` carries `admissionCycle` and
+`payload`. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the review falls back to its
+older path for the six research fields and a proposer run answers 503 having written nothing. `RESEARCH_FAKE=fixture`
+swaps the pages and the answer for `lib/catalogProposalsFake.ts`. Tests: `test/unit/catalog-proposals.test.ts`,
+`test/integration/catalog-proposals.test.mjs`.
 
 **Events Hub listings** come the same way: `npx tsx --env-file=.env
 scripts/ingest/events-csv.ts --file <csv> [--dry-run]` (columns in
@@ -1955,7 +2010,9 @@ The model never writes a result list and never changes the catalog.
 - Where a cited source disagrees with the catalog, a `catalog_change_proposals`
   row is written (allowed fields and values only, source URL must be one the
   answer cited). Only a `catalog_editors` member (Meridies staff, added with
-  service_role) can approve, and approval is what changes the catalog.
+  service_role) can approve, and approval is what changes the catalog. The same
+  table holds the cited proposals from a school's own pages (see "Resource
+  library and curated datasets").
 - `GET /colleges/:id/student-summary`: counselor bullets from catalog facts and
   the student's record only. No model; every bullet names its basis.
 - `POST /colleges/list-builder` draws candidates from the whole catalog
@@ -2001,7 +2058,7 @@ failed after it started, which may still be billed: the whole reservation stays)
   month; company-wide `AI_DAILY_CEILING_USD` $100 per UTC day. Weighted input counts each
   token at its price relative to the model's uncached input (cache reads at the model's
   read ratio, writes at 2x until the 5m/1h split is recorded). A system job reserves its
-  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000) and the company
+  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000, `catalog-proposals` 500) and the company
   line; `budget-subjects.test.ts` fails on a budget charged to a made-up account.
 - **Refusals:** a user cap answers 429 "You've hit today's AI limit. It resets in 5
   hours." (hours to 00:00 UTC, rounded up) or "Monthly AI usage limit reached."; the
