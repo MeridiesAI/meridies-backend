@@ -189,6 +189,11 @@ check("an unapproved counselor can't be booked", /not_your_counselor/.test(JSON.
 const zoomSlot = await serviceRpc("book_meeting_slot", args(at(7, 9), at(7, 10), { p_mode: "zoom" }));
 const backwardsSlot = await serviceRpc("book_meeting_slot", args(at(7, 10), at(7, 9)));
 check("a bad mode or a backwards slot is invalid_slot", /invalid_slot/.test(JSON.stringify(zoomSlot.body)) && /invalid_slot/.test(JSON.stringify(backwardsSlot.body)));
+const past = new Date(Date.now() - 60 * 60_000).toISOString();
+const pastSlot = await serviceRpc("book_meeting_slot", args(past, new Date(Date.now() - 30 * 60_000).toISOString()));
+const startedSlot = await serviceRpc("book_meeting_slot", args(new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() + 30 * 60_000).toISOString()));
+check("a slot in the past, or one already started, is invalid_slot", /invalid_slot/.test(JSON.stringify(pastSlot.body)) && /invalid_slot/.test(JSON.stringify(startedSlot.body)), `${JSON.stringify(pastSlot.body)} ${JSON.stringify(startedSlot.body)}`);
+check("…and nothing was booked in the past", (await sql(`select count(*) from meetings where counselor_id='${A.id}' and booked_by_student and starts_at < now()`)) === "0");
 
 const asStudent = await rest(sa.token, "POST", "/rest/v1/rpc/book_meeting_slot", args(at(8, 9), at(8, 10)));
 const asCounselor = await rest(A.token, "POST", "/rest/v1/rpc/book_meeting_slot", args(at(8, 9), at(8, 10)));

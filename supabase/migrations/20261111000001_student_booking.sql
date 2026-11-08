@@ -30,7 +30,7 @@
 --      slot_taken          23P01  another scheduled meeting is in the way
 --      booking_disabled    P0001  no settings row, or enabled is false
 --      not_your_counselor  P0001  not this counselor's active student, or the counselor isn't approved
---      invalid_slot        P0001  end not after start, over 180 minutes, an unknown mode or an empty title
+--      invalid_slot        P0001  a start not in the future, end not after start, over 180 minutes, an unknown mode or an empty title
 --    A meeting with no end counts as an hour, the same as the slot reader.
 --
 -- Deploy order: either. Additive only; the previous build never reads these
@@ -184,6 +184,7 @@ declare
   booked   public.meetings;
 begin
   if p_student is null or p_counselor is null or p_starts_at is null or p_ends_at is null
+     or p_starts_at <= now()
      or p_ends_at <= p_starts_at or p_ends_at - p_starts_at > interval '180 minutes'
      or p_mode is null or p_mode not in ('google-meet','teams','in-person','phone')
      or p_title is null or length(btrim(p_title)) not between 1 and 300
