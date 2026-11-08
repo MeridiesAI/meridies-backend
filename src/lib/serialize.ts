@@ -33,6 +33,8 @@ export type Profile = {
   grad_year: string | null;
   profile: Record<string, unknown> | null;
   counselor_approved_at: string | null;
+  /** Stamped at most hourly on a student's requests (lib/inactivityAlerts.ts). */
+  last_active_at?: string | null;
 };
 
 /** `request.profile`: the row `authenticate` loads, without the `profile` jsonb. */
@@ -184,6 +186,9 @@ export const toFamilyReport = (r: Row) => ({
   highlights: (r.highlights as string[]) ?? [],
   body: str(r.body),
   status: str(r.status),
+  /** The week a weekly digest covers (null for other kinds). */
+  periodStart: r.period_start ? str(r.period_start) : null,
+  periodEnd: r.period_end ? str(r.period_end) : null,
 });
 
 export const toSchoolReframing = (r: Row) => ({
