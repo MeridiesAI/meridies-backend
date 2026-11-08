@@ -594,20 +594,26 @@ forget it.
   `dueOffsetDays` (0-730 days after the apply date in the counselor's time zone) or `dueMonth`/`dueDay` (the next
   occurrence, today included; Feb 29 is Feb 28 in a year without one), never both. `task_sets` is owner-written
   (`task_sets_owner`, the email-templates model); `shared: true` stores the owner's current firm in `firm_id` and every
-  approved counselor of that firm reads it (and may apply it to their own students); only the owner changes or deletes
-  it. `POST /task-sets/:id/apply` `{ studentIds (1-100) | classYear "YYYY", notifyEmail? }` (20 an hour): a class year is
+  approved counselor of that firm reads it (and may apply it to their own students) while the owner is still in that firm;
+  only the owner changes or deletes it. Every item has a stable `key` (the server assigns a uuid; PATCH keeps a key the
+  client sends back, gives a keyless item a new one, refuses duplicates), and a task is marked with the item's KEY, never
+  its position, so reordering, inserting or removing items never makes a re-apply skip or repeat one.
+  `POST /task-sets/:id/apply` `{ studentIds (1-100) | classYear "YYYY", notifyEmail? }` (60 an hour): a class year is
   resolved on the server from the caller's ACTIVE roster (`profiles.grad_year`, archived left out, collaborators' students
   not included); every student goes through `resolveStudentId(..., "edit")` and a refusal is that student's `error`, never
   the batch's. Each item becomes one ordinary counselor task through the Create task button's own code
-  (`createTaskForStudent`, which `POST /tasks` also calls), marked `deliverables.task_set_id` / `task_set_item`; a UNIQUE
-  partial index on (student, set, item) makes a second apply a no-op (read first, a 23505 race also reads as
-  `already-assigned`); a CHECK keeps the marker on counselor tasks only; deleting a set keeps its tasks (marker cleared).
+  (`createTaskForStudent`, which `POST /tasks` also calls), marked `deliverables.task_set_id` / `task_set_item_key`; a
+  UNIQUE partial index (`deliverables_task_set_item_key_uidx`) on (student, set, key) makes a second apply a no-op (read
+  first; a 23505 on that index only also reads as `already-assigned`); a CHECK keeps the marker on counselor tasks only;
+  deleting a set keeps its tasks (task_set_id cleared). One apply makes at most 300 NEW tasks (what exists isn't
+  counted, so a retry after a timeout gets through): past it, 400 `apply_too_large` with `limit`, `perStudent`,
+  `maxStudents` and, for a class year, the resolved `studentIds`, so the app splits the batch.
   The answer is `{ created, alreadyAssigned, failed, refused, emailThrottled, results: { [studentId]: StudentResult +
   items[] } }`. Email: one assignment email per student per apply (the first task made; every task still gets its in-app
-  notice), and at most `TASK_SET_EMAIL_DAILY_CAP` (200) a day per counselor (`task-set-email:<id>`); past it the task is
+  notice and stores `notify_email` as asked, so "send again" works), and at most `TASK_SET_EMAIL_DAILY_CAP` (200) a day per counselor (`task-set-email:<id>`); past it the task is
   made and the email skipped. No texts. **Firm roster:** `GET /management/firm-roster` (owner/admin only, 403 otherwise)
   reads `firm_roster()` (SECURITY DEFINER, refuses anyone but an approved owner/admin of their current firm with 42501):
-  every active student of the firm's consultants as `{ id, name, gradYear, counselorId }`, plus `consultants` from
+  every active student of the firm's approved consultants as `{ id, name, gradYear, counselorId }`, plus `consultants` from
   `firm_consultants()` for the filter. Names only: it does not widen `can_view_student`. **Deploy order:** either; not in
   `REQUIRED_SCHEMA`. Without the file the set routes answer 503 `task_sets_unavailable` and the roster 503
   `firm_roster_unavailable`; `POST /tasks` never names the new columns. Tests: `test/unit/task-sets.test.ts`,
