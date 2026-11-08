@@ -105,6 +105,9 @@ check("the counselor routes are counselor-only and the student routes student-on
 const typesSa = await call(sa.token, "GET", "/me/booking/types");
 check("a student sees their counselor's active types, with the counselor's zone", typesSa.status === 200 && typesSa.body.available === true && typesSa.body.timeZone === "UTC" && typesSa.body.types.length === 1 && typesSa.body.types[0].id === hourType.body.id, JSON.stringify(typesSa.body));
 check("…and nothing that identifies the counselor's other settings", typesSa.body.weeklyHours === undefined && typesSa.body.types[0].counselorId === undefined);
+check("…but the two change rules, so the app can say why Reschedule/Cancel are off", typesSa.body.cutoffHours === 12 && typesSa.body.studentsCanChange === false, JSON.stringify(typesSa.body));
+const SAFE_KEYS = ["available", "reason", "timeZone", "types", "cutoffHours", "studentsCanChange"];
+check("…and no other key (no hours, notice, buffer, days ahead or calendar state)", Object.keys(typesSa.body).every((k) => SAFE_KEYS.includes(k)), Object.keys(typesSa.body).join(","));
 
 const slots = (token, typeId, n, extra = "") => call(token, "GET", `/me/booking/slots?typeId=${typeId}&from=${encodeURIComponent(dayStart(n).toISOString())}&to=${encodeURIComponent(dayStart(n + 1).toISOString())}${extra}`);
 const starts = (r) => (r.body?.slots ?? []).map((s) => s.startsAt);
@@ -148,6 +151,7 @@ const crossType = await slots(sa.token, bType.body.id, 3);
 check("a student can't ask for another counselor's type", crossType.status === 404 && crossType.body.code === "type_not_found", JSON.stringify(crossType.body));
 const typesSb = await call(sb.token, "GET", "/me/booking/types");
 check("B's student sees B's types, not A's", typesSb.body.types?.length === 1 && typesSb.body.types[0].id === bType.body.id, JSON.stringify(typesSb.body));
+check("…and B's change rules (the defaults), not A's", typesSb.body.cutoffHours === 24 && typesSb.body.studentsCanChange === true, JSON.stringify(typesSb.body));
 
 // ---- students who can't book ---------------------------------------------------------------------
 
@@ -155,17 +159,27 @@ await sql(`insert into booking_settings (counselor_id, enabled, time_zone, weekl
 await sql(`insert into booking_meeting_types (counselor_id, name, duration_minutes, mode) values ('${U.id}', 'Pending', 30, 'phone')`);
 const uType = await sql(`select id from booking_meeting_types where counselor_id='${U.id}'`);
 const typesSu = await call(su.token, "GET", "/me/booking/types");
-check("a student of an unapproved counselor gets nothing", typesSu.status === 200 && typesSu.body.available === false && typesSu.body.reason === "not_available" && typesSu.body.types.length === 0, JSON.stringify(typesSu.body));
+const noSettings = (b) => !("cutoffHours" in b) && !("studentsCanChange" in b) && b.timeZone === null;
+check("a student of an unapproved counselor gets nothing: counselor_unavailable, no settings fields", typesSu.status === 200 && typesSu.body.available === false && typesSu.body.reason === "counselor_unavailable" && typesSu.body.types.length === 0 && noSettings(typesSu.body), JSON.stringify(typesSu.body));
 const slotsSu = await slots(su.token, uType, 3);
 check("…and no slots", slotsSu.status === 404 && slotsSu.body.code === "booking_not_available", JSON.stringify(slotsSu.body));
 
 const typesSn = await call(sn.token, "GET", "/me/booking/types");
-check("a student with no counselor gets nothing", typesSn.status === 200 && typesSn.body.available === false && typesSn.body.reason === "no_counselor", JSON.stringify(typesSn.body));
+check("a student with no counselor gets nothing: counselor_unavailable, no settings fields", typesSn.status === 200 && typesSn.body.available === false && typesSn.body.reason === "counselor_unavailable" && noSettings(typesSn.body), JSON.stringify(typesSn.body));
+
+const N = await user("bk-n");                          // approved, never set booking up
+const sNn = await user("bk-snn", "student");
+await sql(`update profiles set counselor_id='${N.id}' where id='${sNn.id}'`);
+const typesNotSetUp = await call(sNn.token, "GET", "/me/booking/types");
+check("a counselor who never set booking up: not_set_up, no settings fields", typesNotSetUp.status === 200 && typesNotSetUp.body.available === false && typesNotSetUp.body.reason === "not_set_up" && noSettings(typesNotSetUp.body), JSON.stringify(typesNotSetUp.body));
+await call(N.token, "PUT", "/booking/settings", { enabled: true, timeZone: "UTC", weeklyHours: allWeek([{ start: "09:00", end: "12:00" }]), cancelCutoffHours: 8 });
+const typesNoTypes = await call(sNn.token, "GET", "/me/booking/types");
+check("booking on but no active type: no_types, with the change rules", typesNoTypes.body.available === false && typesNoTypes.body.reason === "no_types" && typesNoTypes.body.types.length === 0 && typesNoTypes.body.cutoffHours === 8 && typesNoTypes.body.studentsCanChange === true && typesNoTypes.body.timeZone === null, JSON.stringify(typesNoTypes.body));
 
 await call(B.token, "PUT", "/booking/settings", { enabled: false });
 const typesOff = await call(sb.token, "GET", "/me/booking/types");
 const slotsOff = await slots(sb.token, bType.body.id, 3);
-check("booking switched off reads like an unapproved counselor", typesOff.body.available === false && typesOff.body.reason === "not_available" && typesOff.body.types.length === 0 && slotsOff.status === 404 && slotsOff.body.code === "booking_not_available", `${JSON.stringify(typesOff.body)} ${JSON.stringify(slotsOff.body)}`);
+check("booking switched off: paused, the change rules (a cancel still works), no types, no slots", typesOff.body.available === false && typesOff.body.reason === "paused" && typesOff.body.types.length === 0 && typesOff.body.cutoffHours === 24 && typesOff.body.studentsCanChange === true && typesOff.body.timeZone === null && slotsOff.status === 404 && slotsOff.body.code === "booking_not_available", `${JSON.stringify(typesOff.body)} ${JSON.stringify(slotsOff.body)}`);
 
 // ---- book_meeting_slot ------------------------------------------------------------------------------
 

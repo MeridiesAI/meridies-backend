@@ -3,10 +3,13 @@
  * 20261111000012), under /me/booking. Student only; "me" is the JWT and the
  * counselor is the student's own `profiles.counselor_id` (lib/booking.ts
  * studentBookingContext), never a client id. That counselor must be approved
- * and have booking on; otherwise the answer is calm and empty, the same for
- * both, so it says nothing about the counselor's account.
+ * and have booking on; otherwise /types answers calmly why (`reason`: no
+ * counselor and an unapproved one read the same, `counselor_unavailable`,
+ * with nothing about the account; then `not_set_up`, `paused`, `no_types`)
+ * and the other routes 404 `booking_not_available`.
  *
- *   GET    /me/booking/types                         the counselor's active meeting types
+ *   GET    /me/booking/types                         the counselor's active meeting types, or why not
+ *                                                     (lib/booking.ts bookingTypesAnswer), and their two change rules
  *   GET    /me/booking/slots?typeId&from&to[&tz]     free start times for one type
  *   POST   /me/booking         { typeId, startsAt }  book one of those starts
  *   PATCH  /me/booking/:id     { startsAt }          move one of my meetings
@@ -38,7 +41,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { activeTypes, bookingUnavailable, slotsFor, studentBookingContext, type StudentBookingContext } from "../lib/booking.js";
+import { activeTypes, bookingUnavailable, slotsFor, studentBookingContext, studentBookingTypes, type StudentBookingContext } from "../lib/booking.js";
 import {
   counselorCalendarConnected,
   createBookingProviderEvent,
@@ -310,11 +313,7 @@ export default async function studentBookingRoutes(app: FastifyInstance) {
   app.get(
     "/types",
     { preHandler: [...student, limit("me:booking:types", 60, 60)] },
-    async (request) => {
-      const ctx = await studentBookingContext(request);
-      if (!ctx.ok) return { available: false, reason: ctx.reason, timeZone: null, types: [] };
-      return { available: true, reason: null, timeZone: ctx.settings.timeZone, types: await activeTypes(ctx.svc, ctx.counselorId) };
-    }
+    async (request) => studentBookingTypes(request)
   );
 
   app.get(

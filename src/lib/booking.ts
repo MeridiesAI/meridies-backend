@@ -182,6 +182,64 @@ export async function studentBookingContext(
   return { ok: true, svc, counselorId, settings: gate.settings };
 }
 
+export type BookingUnavailableReason = "counselor_unavailable" | "not_set_up" | "paused" | "no_types";
+
+/**
+ * GET /me/booking/types. Besides the types, why booking isn't available and
+ * the counselor's two rules about student changes (`cutoffHours`,
+ * `studentsCanChange`), so the app can say why Reschedule / Cancel are off
+ * before a try. Those two come only from a settings row of an approved
+ * counselor, paused or not; nothing else about the counselor is said (no
+ * hours, notice, buffer, days ahead or calendar state), and the zone only
+ * when booking is available.
+ *
+ *   counselor_unavailable  no counselor, or not approved: nothing more (the account's state isn't told)
+ *   not_set_up             approved, never saved booking settings
+ *   paused                 settings saved, `enabled` off (a cancel still works: routes/studentBooking.ts)
+ *   no_types               on, but no active meeting type
+ */
+export type BookingTypesAnswer = {
+  available: boolean;
+  reason: BookingUnavailableReason | null;
+  timeZone: string | null;
+  types: MeetingTypeDto[];
+  cutoffHours?: number;
+  studentsCanChange?: boolean;
+};
+
+export function bookingTypesAnswer(i: {
+  hasCounselor: boolean;
+  approved: boolean;
+  settingsRow: Row | null;
+  types: MeetingTypeDto[];
+}): BookingTypesAnswer {
+  const none = (reason: BookingUnavailableReason) => ({ available: false, reason, timeZone: null, types: [] as MeetingTypeDto[] });
+  if (!i.hasCounselor || !i.approved) return none("counselor_unavailable");
+  if (!i.settingsRow) return none("not_set_up");
+  const settings = toSettings(i.settingsRow);
+  const rules = { cutoffHours: settings.cancelCutoffHours, studentsCanChange: settings.studentsCanReschedule };
+  if (!settings.enabled) return { ...none("paused"), ...rules };
+  if (i.types.length === 0) return { ...none("no_types"), ...rules };
+  return { available: true, reason: null, timeZone: settings.timeZone, types: i.types, ...rules };
+}
+
+/** Reads what bookingTypesAnswer decides on, for the signed-in student (their own counselor only). */
+export async function studentBookingTypes(request: FastifyRequest): Promise<BookingTypesAnswer> {
+  const svc = serviceClient();
+  if (!svc) throw bookingUnavailable();
+  await requireBookingReady(svc);
+  const counselorId = request.profile.counselor_id;
+  if (!counselorId) return bookingTypesAnswer({ hasCounselor: false, approved: false, settingsRow: null, types: [] });
+  if (!(await isCounselorApproved(svc, counselorId))) {
+    return bookingTypesAnswer({ hasCounselor: true, approved: false, settingsRow: null, types: [] });
+  }
+  const { data, error } = await svc.from("booking_settings").select(SETTINGS_COLUMNS).eq("counselor_id", counselorId).maybeSingle();
+  if (error) throw fromPostgrest(error);
+  const settingsRow = (data as Row | null) ?? null;
+  const types = settingsRow?.enabled === true ? await activeTypes(svc, counselorId) : [];
+  return bookingTypesAnswer({ hasCounselor: true, approved: true, settingsRow, types });
+}
+
 /** The counselor's active meeting types, in their order. */
 export async function activeTypes(svc: SupabaseClient, counselorId: string): Promise<MeetingTypeDto[]> {
   const { data, error } = await svc
