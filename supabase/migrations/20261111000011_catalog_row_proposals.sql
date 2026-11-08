@@ -19,7 +19,8 @@
 --
 -- review_catalog_proposal(id, decision, note): the review, in ONE transaction.
 -- Only a catalog editor (auth.uid() in catalog_editors) may call it. It locks
--- the row, refuses one already reviewed, re-checks the value or payload, and on
+-- the row (and, for a supplement, takes a per-school-and-cycle advisory lock so
+-- concurrent supplement approvals run their checks one after another), refuses one already reviewed, re-checks the value or payload, and on
 -- approve writes the curated row: college_supplements (its slot, with
 -- source_url and source_verified_at = now(); refused when the slot holds a
 -- different prompt or the prompt is on file at another slot, so an approval
@@ -115,6 +116,10 @@ begin
 
   if p_decision = 'approve' then
     if r.field = 'supplement' then
+      -- One supplement approval at a time per school and cycle: a second one waits here, then runs its slot and
+      -- duplicate checks against what the first committed, so two approvals can't both pass them and overwrite
+      -- or double-file a prompt. Released at the end of the transaction.
+      perform pg_advisory_xact_lock(hashtext('catalog-supp:' || r.college_id::text || ':' || coalesce(r.admission_cycle, '')));
       v_p := r.payload;
       if v_p is null or jsonb_typeof(v_p) <> 'object'
          or v_p ->> 'cycle' is distinct from r.admission_cycle
@@ -132,6 +137,10 @@ begin
       if v_sort <> trunc(v_sort) or v_sort not between 0 and 50
          or length(v_title) not between 1 and 120 or length(v_prompt) not between 1 and 2000
          or (v_limit is not null and (v_limit <> trunc(v_limit) or v_limit not between 1 and 5000)) then
+        raise exception 'That proposal''s supplement isn''t valid' using errcode = '22023';
+      end if;
+      -- The slot the open-proposal index keys on is the slot written.
+      if r.proposed_value is distinct from r.admission_cycle || '#' || v_sort::integer::text then
         raise exception 'That proposal''s supplement isn''t valid' using errcode = '22023';
       end if;
       -- Never overwrite a different prompt (students' essays point at these rows), and never file the same

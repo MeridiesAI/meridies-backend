@@ -203,6 +203,51 @@ try {
   check("...and writes no second copy", (await sql(`select count(*) from public.college_supplements where college_id = '${college}'`)) === "1");
   await sql(`delete from public.catalog_change_proposals where id in ('${clashId}', '${dupId}', '${badId}')`);
 
+  const mismatchId = await returning(
+    `insert into public.catalog_change_proposals (college_id, field, proposed_value, source_url, evidence, admission_cycle, fact_key, payload)
+     values ('${college}', 'supplement', '${cycle}#40', 'https://apply.t16b-fixture.edu/essays', 'a quote that is long enough', '${cycle}', repeat('e', 64),
+             '{"cycle":"${cycle}","sortOrder":0,"title":"Sneaky","prompt":"A prompt aimed at another slot than its key.","wordLimit":100}') returning id`
+  );
+  const mismatch = await call(editor.token, "POST", `/colleges/proposals/${mismatchId}/review`, { decision: "approve" });
+  check("a supplement whose payload slot isn't the slot in its proposed value is refused", mismatch.status === 400 && (await slotRow()) === before, JSON.stringify(mismatch.body));
+  await sql(`delete from public.catalog_change_proposals where id = '${mismatchId}'`);
+
+  // ---- Two approvals racing for one prompt: one wins, the other is refused cleanly ----------------------
+  // Two different prompts can't both be pending for one slot (catalog_change_proposals_open_key), so the race
+  // that can happen is one prompt pending at two slots (two word limits, so two fact keys), approved at the same
+  // moment: without the per-school lock both pass "already on file at another slot" and the prompt is filed twice.
+  const raceRounds = [];
+  for (let i = 0; i < 6; i++) {
+    const make = (slot, limit) =>
+      returning(
+        `insert into public.catalog_change_proposals (college_id, field, proposed_value, source_url, evidence, admission_cycle, fact_key, payload)
+         values ('${college}', 'supplement', '${cycle}#${slot}', 'https://apply.t16b-fixture.edu/essays', 'a quote that is long enough', '${cycle}',
+                 encode(sha256(convert_to('race-${i}-${slot}', 'UTF8')), 'hex'),
+                 '{"cycle":"${cycle}","sortOrder":${slot},"title":"Race","prompt":"Race prompt for round ${i}.","wordLimit":${limit}}') returning id`
+      );
+    const a = await make(20 + 2 * i, 100);
+    const b = await make(21 + 2 * i, 101);
+    const [ra, rb] = await Promise.all([
+      call(editor.token, "POST", `/colleges/proposals/${a}/review`, { decision: "approve" }),
+      call(editor.token, "POST", `/colleges/proposals/${b}/review`, { decision: "approve" }),
+    ]);
+    const filed = await sql(`select concat_ws('|', count(*), max(prompt)) from public.college_supplements where college_id = '${college}' and admission_cycle = '${cycle}' and prompt = 'Race prompt for round ${i}.'`);
+    const statuses = await sql(`select string_agg(status, ',' order by status) from public.catalog_change_proposals where id in ('${a}', '${b}')`);
+    raceRounds.push({ codes: [ra.status, rb.status].sort().join(","), filed, statuses, loser: [ra, rb].find((r) => r.status !== 200)?.body });
+  }
+  check(
+    "two concurrent approvals of one prompt: exactly one succeeds and the other is refused cleanly (every round)",
+    raceRounds.every((r) => r.codes === "200,400" && r.statuses === "approved,pending" && /already on file/i.test(r.loser?.error ?? "")),
+    JSON.stringify(raceRounds)
+  );
+  check(
+    "...and the prompt is filed exactly once, intact",
+    raceRounds.every((r, i) => r.filed === `1|Race prompt for round ${i}.`),
+    JSON.stringify(raceRounds.map((r) => r.filed))
+  );
+  await sql(`delete from public.college_supplements where college_id = '${college}' and sort_order between 20 and 31`);
+  await sql(`delete from public.catalog_change_proposals where college_id = '${college}' and payload->>'prompt' like 'Race prompt%'`);
+
   // ---- After approval, the same fact isn't proposed again -----------------------------------------
   const third = await cron({ collegeId: college });
   check(
