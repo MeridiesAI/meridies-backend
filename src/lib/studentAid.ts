@@ -391,6 +391,11 @@ export type ScholarshipDto = {
   source: "catalog" | "counselor";
   /** True only once an editor stamped source_verified_at. A counselor's row starts unverified. */
   verified: boolean;
+  /**
+   * A separate place to apply, when the catalog has one (`apply_url`). Null when it doesn't: `url` is then the
+   * sponsor's page, which is also the best link there is, so a screen shows one link, never two copies of it.
+   */
+  applyUrl: string | null;
 };
 
 export type ScholarshipMatch = ScholarshipDto & {
@@ -414,7 +419,7 @@ export type ScholarshipScan = {
   missing: string[];
 };
 
-function toScholarship(r: Row): ScholarshipDto {
+export function toScholarship(r: Row): ScholarshipDto {
   const tags = Array.isArray(r.tags) ? (r.tags as unknown[]).map(String) : [];
   const basis = tags.find((t) => t === "merit" || t === "need" || t === "both") as ScholarshipDto["basis"] | undefined;
   const scope = tags.find((t) => ["national", "state", "regional"].includes(t)) ?? null;
@@ -436,6 +441,7 @@ function toScholarship(r: Row): ScholarshipDto {
     collegeId: s(r.college_id),
     source: r.source === "counselor" ? "counselor" : "catalog",
     verified: s(r.source_verified_at) !== null,
+    applyUrl: s(r.apply_url),
   };
 }
 

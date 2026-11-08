@@ -174,4 +174,42 @@ const CRITERIA = { majors: [], sizes: [], settings: [], testOptional: null, mile
   check("off again: the list is as it was", (await listRows(s.id)).length === 2);
 }
 
+// ---- S2: scholarships (Track, More info, Apply now; the Ask box is the only AI part) ----
+{
+  const c = await user("sat-sch-c");
+  const s = await studentOf(c, "sat-sch-s");
+  const other = await studentOf(c, "sat-sch-o");
+  const trackedStatus = (id) => sql(`select status from public.scholarship_matches where student_id = '${s.id}' and scholarship_id = '${id}'`);
+
+  // Off (the default): the scan and Track are the student's own and need no AI; the Ask box does.
+  let r = await call(s.token, "GET", `/student-aid/${s.id}/scholarships/scan`);
+  const scan = r.body;
+  const all = [...(scan?.matches ?? []), ...(scan?.held ?? [])];
+  check("off: a student's scholarship scan works", r.status === 200 && Array.isArray(scan?.matches), `${r.status}`);
+  check("every scholarship in the scan carries an applyUrl (a link, or null when the catalog has no separate one)", all.length > 0 && all.every((m) => "applyUrl" in m && (m.applyUrl === null || /^https?:\/\//.test(m.applyUrl))), `${all.length} scholarships`);
+  check("…and still its url and sourceUrl, as before", all.every((m) => "url" in m && "sourceUrl" in m));
+
+  const pick = (scan?.matches ?? [])[0] ?? (scan?.held ?? [])[0];
+  r = await call(s.token, "PUT", `/student-aid/${s.id}/scholarships/${pick?.id}/recommend`, { recommended: true });
+  check("off: Track (the recommend call) works for a student with the switch off", r.status === 200 && r.body?.recommended === true, `${r.status} ${JSON.stringify(r.body).slice(0, 100)}`);
+  check("…and lands on their tracker as To apply (saved)", (await trackedStatus(pick?.id)) === "saved");
+  r = await call(c.token, "GET", `/aid/scholarships?studentId=${s.id}`);
+  check("the counselor sees the tracked scholarship", r.status === 200 && JSON.stringify(r.body).includes(pick?.name ?? "\u0000"), `${r.status}`);
+
+  const ask = (who, id) => call(who.token, "POST", `/student-aid/${id}/scholarships/ask`, { question: "anything for engineering students" });
+  r = await ask(s, s.id);
+  check("off: the Ask box is closed (403: the practice hasn't turned on AI tools)", r.status === 403 && /turned on AI tools/.test(JSON.stringify(r.body)), `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: true });
+  r = await ask(s, s.id);
+  check("on: the Ask box passes the gates (it stops at the model, which this stack doesn't have)", r.status !== 403 && r.status !== 401, `${r.status}`);
+  r = await ask(s, other.id);
+  check("on: asking about another student is refused", r.status === 403, `${r.status}`);
+
+  // Un-track: still the student's own call.
+  r = await call(s.token, "PUT", `/student-aid/${s.id}/scholarships/${pick?.id}/recommend`, { recommended: false });
+  check("on: un-tracking works and keeps the row as dismissed", r.status === 200 && (await trackedStatus(pick?.id)) === "dismissed", `${r.status}`);
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: false });
+}
+
 console.log(process.exitCode ? "student-ai-tools: FAILED" : "student-ai-tools: ok");
