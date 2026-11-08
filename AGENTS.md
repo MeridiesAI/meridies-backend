@@ -109,6 +109,7 @@ src/
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
+│   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
@@ -172,6 +173,7 @@ src/
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
 │   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
@@ -204,6 +206,10 @@ other practices grow (the speed test below caught the calendar feed and
 (`lib/guards.ts`) returns exactly what `private.can_view_student` allows (the
 roster, archived included, the students shared with them, and the caller), or
 null past 250 ids, when the query runs unscoped as before. RLS still applies on top.
+The calendar feed does not take that fallback: `buildCalendarFeed({ db, ownerId, role, caseload }, q)` needs the
+whole caseload for a counselor's whole calendar (`fullCaseloadStudentIds(db, counselorId)`, read page by page, never
+null), throws without it, and reads in batches of `FEED_ID_CHUNK` (200) ids, because it also runs on the service
+client for the subscribed feed, where no RLS would hold it to the counselor's students.
 
 ### Schema
 
@@ -1092,6 +1098,43 @@ while the school is not decided, skipping one the counselor entered by hand as a
 and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) now searches the whole eligible,
 open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
 against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
+
+### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
+
+**More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
+`custom_deadline` ("Your deadline", the counselor's internal date) is its own `deadline` item `college-custom:<row>`,
+titled "<School>: your deadline", detail "The school's deadline is Jan 5, 2027" when the dates differ; same status
+filter and hand-entered dedupe as the school's, and the same `ref` (the row id), so a type reassignment moves both. A
+student's `student_academics.planned_test_date` is a `milestone` `test:<student>` of pseudo-type `test` (like
+`personal`: not a `FeedKind`, since `calendar_event_type_assignments.event_kind` is check-constrained), titled
+"Planned test date", detail the status (Scheduled, Prepping, Retaking), skipped when `test_status` is `taken` or
+`test-optional`. Both show on the counselor's calendar (whole or one student) and the student's own. Pure parts:
+`collegeFeedItems`, `testFeedItems`. Tests: `test/unit/calendar-feed.test.ts`, `test/integration/calendar-feed.test.mjs`.
+
+**Subscribing** (`routes/calendarIcal.ts`, `lib/calendarIcal.ts`, `buildFeedIcs` / `feedIcsEvents` in `lib/ics.ts`).
+`POST /calendar/ical` (counselor, 10 an hour) makes the feed URL, or replaces it (the old one stops at once), and
+returns `{ url, webcalUrl, rotated, exists, createdAt, rotatedAt, lastFetchedAt }`: the URL is
+`<PUBLIC_API_URL>/calendar/ical/<token>.ics`, shown **only in that answer**. The token is 32 random bytes (base64url);
+`calendar_feed_tokens` (one row per counselor, service role only, approval gate) keeps its sha256. `GET /calendar/ical`
+answers `{ exists, createdAt, rotatedAt, lastFetchedAt }` and never the URL; `DELETE` revokes. **The public
+`GET /calendar/ical/:token.ics`** (absolute path, like `/pay/:token`) finds the row by hash on the service client, asks
+`approvedCounselorIds`, builds the counselor's whole calendar from 30 days back to a year ahead in their time zone
+(done items in, cancelled meetings out) with their full caseload, and answers `text/calendar` (`METHOD:PUBLISH`,
+`X-WR-CALNAME:Meridies`, `REFRESH-INTERVAL` and `X-PUBLISHED-TTL` one hour; all-day items as `VALUE=DATE`, timed ones in
+UTC; UID `feed-<id prefix>-<ref>@meridiesai.com`, e.g. `feed-college-custom-<row>`), with `Cache-Control: private,
+max-age=300`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`. A malformed, unknown, rotated or revoked token
+and an unapproved counselor are the same 404 with the same body. Limits: 60 an hour per token, 600 an hour per address
+(`enforceRateLimit`), plus 60 a minute in process. `last_fetched_at` is written at most once a minute. The path is
+dropped from request logs (`lib/requestLog.ts`). **What the file may say** (`feedIcsEvents`; the URL can be forwarded):
+a student only as first name and last initial ("Ana P.: Common App essay"), a meeting only as "Meeting with Ana P., Ben
+O." and its times (never its title, agenda, location or link), no item's detail or notes, no scores, never a student's
+own events (`student_calendar_events`) or a cancelled meeting, and only names of students on the counselor's
+caseload. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the three authenticated routes
+answer 503 `calendar_feed_unavailable` (also without the service key or `PUBLIC_API_URL`) and the feed URL 404s.
+Unverified: how often Google refreshes a subscribed feed (believed about daily; Apple and Outlook honour the hour
+more closely). Tests: `test/unit/calendar-feed-ics.test.ts` (folding, escaping, all-day, injection through a title,
+UIDs, privacy, the log), `test/integration/calendar-ical.test.mjs` (URL shown once, hash only, rotate, revoke, unknown
+and unapproved 404, cross-practice leakage with a 260-student practice, privacy, headers, the rate limit).
 
 ### CSV import extras (`20261029000003`)
 
