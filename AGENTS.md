@@ -876,8 +876,15 @@ the database (`20261010*`):
   exam's option reads on the IB scale), advanced courses (not the grade
   level: `courses.grade` is the mark), activities (the type mapped onto
   `ACTIVITY_TYPES`, anything else "Other Club/Activity"; text cut to the
-  sheet's limits), honors (keyed on name and year), first-gen and intended
-  majors. Rules: **fill only what is empty**; a re-saved questionnaire may
+  sheet's limits), honors (keyed on name and year), first-gen, intended
+  majors and the **optional date of birth** (`20261111000007`:
+  `intakeAnswers.birthday`, `YYYY-MM-DD`, into
+  `student_personal_details.birthday`; `private.intake_birthday` keeps only a
+  real calendar date, not in the future, of a student aged 10 to 25 that day,
+  anything else is skipped as `invalid` and changes nothing; it is a minor's,
+  so it is the only date of birth copied, never logged or named by value in a
+  report, and `birthday` is not on the AI allowlist, so no model reads it;
+  the info card marks it `fromQuestionnaire: "birthday"`; no backfill). Rules: **fill only what is empty**; a re-saved questionnaire may
   change a value (or take back a row, or a field whose answer is gone) only
   while it is still exactly what the questionnaire wrote, compared by hash
   in `intake_fills` the way import provenance compares; anything the

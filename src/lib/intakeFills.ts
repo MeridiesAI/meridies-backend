@@ -30,7 +30,8 @@ export type QuestionnaireField =
   | "sat"
   | "act"
   | "firstGen"
-  | "intendedMajors";
+  | "intendedMajors"
+  | "birthday";
 
 /** `table.field` in intake_fills -> the info card value it shows as. */
 export const INFO_KEY_OF: Readonly<Record<string, QuestionnaireField>> = {
@@ -43,6 +44,9 @@ export const INFO_KEY_OF: Readonly<Record<string, QuestionnaireField>> = {
   "student_academics.act_composite": "act",
   "student_personal_details.first_gen": "firstGen",
   "student_personal_details.intended_majors": "intendedMajors",
+  // Optional, a minor's date of birth (20261111000007). Marked like any other
+  // filled value; not on the AI allowlist, so no model ever reads it.
+  "student_personal_details.birthday": "birthday",
 };
 
 const fillSchema = z.array(
