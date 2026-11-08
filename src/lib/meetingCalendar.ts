@@ -14,6 +14,11 @@
  * code doesn't depend on it: a row forged before that migration, or on a
  * database without it, still can't make the API call another counselor's
  * calendar.
+ *
+ * One deliberate exception, kept apart in lib/bookingCalendar.ts: a student's
+ * own booking, move or cancel (/me/booking) acts on their counselor's
+ * calendar with the counselor's token, only for a meeting of that counselor
+ * with that student, the counselor taken from the student's profile.
  */
 
 import type { SuiteProvider } from "./oauth.js";
