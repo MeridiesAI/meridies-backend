@@ -94,6 +94,10 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // lib/driveExport.ts: only the DRIVE_EXPORT_FAKE test double (refused at boot outside development/test) reads the
+  // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
+  // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
+  "lib/driveExport.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",

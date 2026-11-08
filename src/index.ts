@@ -3,6 +3,7 @@ import { env } from "./env.js";
 import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
 import { researchFakeRefusal } from "./lib/research/bootGuard.js";
 import { translateFakeRefusal } from "./lib/translate.js";
+import { driveFakeRefusal } from "./lib/driveExport.js";
 
 const app = buildApp();
 
@@ -22,6 +23,14 @@ if (translateRefusal) {
   process.exit(1);
 }
 if (env.TRANSLATE_FAKE) app.log.warn("TRANSLATE_FAKE is on: translations are canned, not a model's");
+
+// And for the Drive export double: it would answer a counselor with a Sheet link that doesn't exist.
+const driveRefusal = driveFakeRefusal({ DRIVE_EXPORT_FAKE: env.DRIVE_EXPORT_FAKE, NODE_ENV: process.env.NODE_ENV });
+if (driveRefusal) {
+  app.log.error(driveRefusal);
+  process.exit(1);
+}
+if (env.DRIVE_EXPORT_FAKE) app.log.warn("DRIVE_EXPORT_FAKE is on: Sheets exports are not sent to Google");
 
 await verifyImportWorkerAtBoot(app.log);
 
