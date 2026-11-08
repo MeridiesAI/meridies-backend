@@ -29,13 +29,23 @@ import {
   runStructured,
 } from "../lib/anthropic.js";
 import { alignActivities } from "../lib/activityAlignment.js";
-import { buildStudentContext } from "../lib/context/index.js";
+import { buildStudentContext, type StudentContext } from "../lib/context/index.js";
 import { columns } from "../lib/context/ai-allowlist.js";
 import { buildCoherenceMaterial, usableEssay } from "../lib/context/coherenceMaterial.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { essayBodyReadable } from "../lib/context/sections.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
+import { requireStudentAiTools } from "../lib/practiceSettings.js";
+import {
+  coherenceAskSystem,
+  coherenceNext,
+  coherenceSystem,
+  isStudentSafe,
+  rewriteRefusal,
+  studentSafeBullets,
+  type Audience,
+} from "../lib/studentToolPrompts.js";
 import { limit } from "../lib/limits.js";
 import {
   toCoherenceReport,
@@ -182,6 +192,27 @@ const coherenceBody = z
 const coherenceBase = (request: FastifyRequest, studentId: string) =>
   buildStudentContext(request, studentId, "narrative-coherence", { only: ["profile", "personal"] });
 
+/**
+ * A student's own run reads their identity and majors from their own record, on their own client. The context
+ * layer (buildStudentContext) stays the counselor's: a student's session never builds one (spec section 4), and
+ * Coherence only ever asked it for the profile and personal sections, so this is the same two facts, short.
+ */
+async function studentCoherenceBase(
+  request: FastifyRequest,
+  studentId: string
+): Promise<Pick<StudentContext, "text" | "used" | "omitted">> {
+  const { data, error } = await request.db.from("profiles").select("full_name, grad_year, high_school").eq("id", studentId).maybeSingle();
+  if (error) throw fromPostgrest(error);
+  const majors = await intendedMajors(request, studentId, {});
+  const lines = [
+    `Student: ${clip(data?.full_name, 120) || "the student"}`,
+    data?.grad_year ? `Class of ${clip(data.grad_year, 8)}` : null,
+    data?.high_school ? `High school: ${clip(data.high_school, 160)}` : null,
+    majors.length ? `Intended majors: ${majors.slice(0, 6).map((m) => clip(m, 80)).join(", ")}` : null,
+  ].filter((l): l is string => l !== null);
+  return { text: wrapUntrusted("student-record", lines.join("\n"), false), used: [], omitted: [] };
+}
+
 const REWRITE = /\b(rewrite|re-write|write|draft|reword|rephrase|paragraph|fix the essay|polish|edit (it|this|the essay))\b/i;
 
 export default async function applicationAiRoutes(app: FastifyInstance) {
@@ -306,20 +337,18 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.get(
     "/coherence",
-    { preHandler: [app.authenticate, limit("application:coherence", 120, 60)] },
+    // A counselor, or a student whose practice has the AI tools on (resolveStudentId pins them to themselves).
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:coherence", 120, 60)] },
     async (request) => {
       const q = studentQuery.parse(request.query);
-      if (isStudent(request)) throw forbidden("Coherence is your counselor's tool");
       const studentId = await resolveStudentId(request, q.studentId, "view");
       const { docs } = await coherenceDocs(request, studentId);
 
-      const { data: report } = await request.db
-        .from("coherence_reports")
-        .select("*")
-        .eq("student_id", studentId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // The newest report: a counselor's Last report is the newest of either; a student's is the newest THEY ran
+      // (the database says the same, so a counselor's report about them is never read here).
+      let latest = request.db.from("coherence_reports").select("*").eq("student_id", studentId);
+      if (isStudent(request)) latest = latest.eq("created_by", request.auth.userId);
+      const { data: report } = await latest.order("created_at", { ascending: false }).limit(1).maybeSingle();
       let flags: Row[] = [];
       if (report) {
         const { data } = await request.db
@@ -350,8 +379,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         request.db.from("awards").select("name").eq("student_id", studentId).order("sort_order").limit(50),
         request.db.from("student_personal_details").select("intended_majors").eq("student_id", studentId).maybeSingle(),
       ]);
+      // The alignment notes are written to the counselor, so a student's page carries none.
       const alignment =
-        acts.error || honors.error
+        isStudent(request) || acts.error || honors.error
           ? null
           : alignActivities({
               activities: (acts.data ?? []) as Row[],
@@ -370,10 +400,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.post(
     "/coherence",
-    { preHandler: [app.authenticate, aiLimit("narrative-coherence")] },
+    { preHandler: [app.authenticate, requireStudentAiTools, aiLimit("narrative-coherence")] },
     async (request, reply) => {
       const b = coherenceBody.parse(request.body);
-      if (isStudent(request)) throw forbidden("Coherence is your counselor's tool");
+      const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
       const { docs, essays } = await coherenceDocs(request, studentId);
 
@@ -416,7 +446,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       if (sent.activities) read.push("Activities list");
       if (sent.awards) read.push("Awards");
       if (read.length === 0) throw badRequest("No documents are ticked. Pick at least one under Documents.");
-      const base = await coherenceBase(request, studentId);
+      const base = audience === "student" ? await studentCoherenceBase(request, studentId) : await coherenceBase(request, studentId);
       const contextUsed = { used: base.used, omitted: base.omitted };
 
       type Out = {
@@ -429,17 +459,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "narrative-coherence",
         studentId,
         model: DEEP_MODEL,
-        system: [
-          NO_PROSE_SYSTEM,
-          "",
-          "You read the parts of one college application side by side, for the student's counselor.",
-          "Storyline: three short bullets labelled Origin, Through-line, Landing: where the story starts, what carries it, where it should end.",
-          "Flags: contradictions and gaps between the documents (dates, roles, hours, claims that disagree), most serious first. Name both places each one sits.",
-          "Fix: what the student should settle or decide, never the words to write.",
-          "Next: up to three bullets on what the counselor does next.",
-          "Address the counselor; the student's name is in the student record below.",
-          UNTRUSTED_DATA_RULE,
-        ].join("\n"),
+        system: coherenceSystem(audience),
         contextUsage: contextUsed,
         prompt: `${base.text ? `${base.text}\n\n` : ""}Read only these documents:\n${material}`,
         toolName: "coherence_report",
@@ -479,15 +499,15 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         },
       });
 
-      // The guardrail, in code: anything that reads like drafted prose is dropped.
+      // The guardrail, in code: anything that reads like drafted prose is dropped. A student's report is held to one
+      // more rule: nothing in the student's own voice (their report speaks TO them; see isStudentSafe).
+      const keep = audience === "student" ? isStudentSafe : isAdviceNotProse;
       const storyline = (result.storyline ?? [])
-        .filter((s) => ["Origin", "Through-line", "Landing"].includes(s.label) && isAdviceNotProse(s.text))
+        .filter((s) => ["Origin", "Through-line", "Landing"].includes(s.label) && keep(s.text))
         .map((s) => `${s.label}: ${s.text.trim()}`);
-      const flags = (result.flags ?? []).filter(
-        (f) => isAdviceNotProse(f.what) && isAdviceNotProse(f.fix) && isAdviceNotProse(clip(f.where, 200))
-      );
-      const next = enforceNoProse(result.next ?? []).slice(0, 2);
-      next.push(`Bring the report to ${first}'s next meeting and assign each fix as a task with a word budget.`);
+      const flags = (result.flags ?? []).filter((f) => keep(f.what) && keep(f.fix) && keep(clip(f.where, 200)));
+      const next = (audience === "student" ? studentSafeBullets(result.next ?? []) : enforceNoProse(result.next ?? [])).slice(0, 2);
+      next.push(coherenceNext(audience, first));
 
       const { data: report, error } = await request.db
         .from("coherence_reports")
@@ -534,13 +554,13 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
   /** The popup's chat: questions about the report, answered in bullets. */
   app.post(
     "/coherence/ask",
-    { preHandler: [app.authenticate, aiLimit("coherence-ask")] },
+    { preHandler: [app.authenticate, requireStudentAiTools, aiLimit("coherence-ask")] },
     async (request) => {
       const b = z
         .object({ studentId: uuid, reportId: uuid, question: z.string().trim().min(1).max(500) })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden("Coherence is your counselor's tool");
+      const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
       const { data: report } = await request.db
         .from("coherence_reports")
@@ -553,17 +573,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const first = firstName(String(profile?.full_name ?? ""));
 
       // A request for wording gets the questions to ask instead, without a model call.
-      if (REWRITE.test(b.question)) {
-        return {
-          bullets: [
-            "I won't write wording for the essays; the words have to be the student's.",
-            `Ask ${first}: which moment in the statement is the true start of this interest?`,
-            `Ask ${first}: what does the supplement add that the statement doesn't already say?`,
-          ],
-        };
-      }
+      if (REWRITE.test(b.question)) return { bullets: rewriteRefusal(audience, first) };
 
-      const base = await coherenceBase(request, studentId);
+      const base = audience === "student" ? await studentCoherenceBase(request, studentId) : await coherenceBase(request, studentId);
       const contextUsed = { used: base.used, omitted: base.omitted };
       const [{ data: flags }, { data: programs }] = await Promise.all([
         request.db.from("narrative_flags").select("*").eq("report_id", report.id),
@@ -582,13 +594,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "narrative-coherence",
         studentId,
         model: FAST_MODEL,
-        system: [
-          NO_PROSE_SYSTEM,
-          "",
-          "Answer the counselor's question about this Narrative Coherence report only, in at most four bullets.",
-          "If the report doesn't say, answer that it doesn't.",
-          UNTRUSTED_DATA_RULE,
-        ].join("\n"),
+        system: coherenceAskSystem(audience),
         contextUsage: contextUsed,
         prompt: `${base.text ? `${base.text}\n\n` : ""}Report:\n${wrapUntrusted("coherence-report", context.slice(0, 20_000))}\n\nQuestion: ${b.question}`,
         toolName: "coherence_answer",
@@ -599,7 +605,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           required: ["bullets"],
         },
       });
-      const bullets = enforceNoProse(result.bullets ?? []);
+      const bullets = audience === "student" ? studentSafeBullets(result.bullets ?? []) : enforceNoProse(result.bullets ?? []);
       return {
         bullets:
           bullets.length > 0 ? bullets : ["Ask about the storyline, a flag, or activities to add."],
@@ -611,7 +617,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
   /** Mark a flag resolved / dismissed, or record the task it was assigned as. */
   app.patch(
     "/coherence/flags/:id",
-    { preHandler: [app.authenticate, limit("application:flag-update", 120, 60)] },
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:flag-update", 120, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = z
@@ -621,7 +627,6 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden();
       const { data: flag } = await request.db.from("narrative_flags").select("*").eq("id", id).maybeSingle();
       if (!flag) throw notFound();
       await resolveStudentId(request, String(flag.student_id), "edit");

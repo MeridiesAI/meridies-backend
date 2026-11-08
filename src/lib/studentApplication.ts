@@ -325,6 +325,8 @@ export function toCoherenceReport(r: Row, flags: Row[]) {
     next: arr(r.next_steps),
     flags: flags.map(toFlag),
     createdAt: str(r.created_at),
+    /** Who ran it: the student themself, or their counselor. Derived from who created it, never sent by a client. */
+    ranBy: (r.created_by != null && r.created_by === r.student_id ? "student" : "counselor") as "student" | "counselor",
   };
 }
 

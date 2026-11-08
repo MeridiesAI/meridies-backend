@@ -212,4 +212,119 @@ const CRITERIA = { majors: [], sizes: [], settings: [], testOptional: null, mile
   await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: false });
 }
 
+// ---- S3: Narrative Coherence ----
+// The model-dependent checks need an API whose model is a local stand-in (FAKE_ANTHROPIC_URL: scratch/fake-anthropic.mjs,
+// which also answers /_last?tool=X with the last request it saw); without one they are skipped, the gates and RLS still run.
+const FAKE = process.env.FAKE_ANTHROPIC_URL;
+const lastPrompt = async (tool) => (await fetch(`${FAKE}/_last?tool=${tool}`)).json();
+const modelCalls = async () => (await (await fetch(`${FAKE}/_count`)).json()).calls;
+if (!FAKE) console.log("SKIP  Coherence model checks (set FAKE_ANTHROPIC_URL to a stand-in model)");
+
+{
+  const c = await user("sat-coh-c");
+  const s = await studentOf(c, "sat-coh-s");
+  const other = await studentOf(c, "sat-coh-o");
+  await sql(`insert into public.activities (student_id, name, organization, position, category, hours_per_week, weeks_per_year, description)
+             values ('${s.id}', 'Robotics', 'Lincoln High Robotics', 'Captain', 'Academic', 6, 36, 'Led the build team for two seasons.'),
+                    ('${s.id}', 'Tutoring', 'Public Library', 'Tutor', 'Community Service', 2, 30, 'Tutored middle schoolers.')`);
+  const body = (id) => ({ studentId: id, statement: false, activities: true, awards: false, supplementEssayIds: [] });
+  const reports = (id) => sql(`select count(*) from public.coherence_reports where student_id = '${id}'`);
+  const ask = (who, studentId, reportId, question) => call(who.token, "POST", "/application/coherence/ask", { studentId, reportId, question });
+  const rid = "00000000-0000-4000-8000-000000000000";
+
+  // Off: nothing of Coherence is open to the student, and nothing is written.
+  let r = await call(s.token, "GET", `/application/coherence?studentId=${s.id}`);
+  check("off: Coherence is closed to a student (403: the practice hasn't turned on AI tools)", r.status === 403 && /turned on AI tools/.test(JSON.stringify(r.body)), `${r.status} ${JSON.stringify(r.body).slice(0, 100)}`);
+  r = await call(s.token, "POST", "/application/coherence", body(s.id));
+  check("off: running it is refused before anything is written", r.status === 403 && (await reports(s.id)) === "0", `${r.status}`);
+  r = await ask(s, s.id, rid, "what first?");
+  check("off: the follow-up chat is refused", r.status === 403, `${r.status}`);
+  r = await call(s.token, "PATCH", `/application/coherence/flags/${rid}`, { status: "resolved" });
+  check("off: changing a flag is refused", r.status === 403, `${r.status}`);
+
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: true });
+
+  r = await call(s.token, "GET", `/application/coherence?studentId=${s.id}`);
+  check("on: the student's Coherence page loads, with no report yet", r.status === 200 && r.body?.report === null && r.body?.docs?.activities === 2, `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+  check("on: no counselor-addressed activity notes for a student", r.body?.alignment === null);
+  r = await call(s.token, "GET", `/application/coherence?studentId=${other.id}`);
+  check("on: another student's Coherence is refused", r.status === 403, `${r.status}`);
+  r = await call(s.token, "POST", "/application/coherence", body(other.id));
+  check("on: running it for another student is refused", r.status === 403 && (await reports(other.id)) === "0", `${r.status}`);
+
+  if (FAKE) {
+    // The student runs it.
+    r = await call(s.token, "POST", "/application/coherence", body(s.id));
+    const mine = r.body;
+    check("on: the student runs Coherence (201)", r.status === 201 && mine?.ranBy === "student", `${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+    check("on: three storyline bullets, the report read the Activities list", mine?.storyline?.length === 3 && mine?.read?.[0] === "Activities list");
+    check("on: a flag in the student's own voice is dropped (one of two stays)", mine?.flags?.length === 1 && /robotics team for three years/.test(mine.flags[0].what), JSON.stringify(mine?.flags));
+    check("on: the last next step goes to their meeting, not a task assignment", mine?.next?.at(-1) === "Take this report to your next meeting with your counselor.", JSON.stringify(mine?.next));
+    const sys = (await lastPrompt("coherence_report"))?.system ?? "";
+    check("on: the model was told to speak to the student and never as them", /Address the student directly/.test(sys) && !/counselor/i.test(sys) && /You NEVER write essay prose/.test(sys), sys.slice(0, 120));
+    check("on: stored as the student's own report", (await sql(`select count(*) from public.coherence_reports where id = '${mine?.id}' and created_by = student_id`)) === "1");
+
+    r = await call(s.token, "GET", `/application/coherence?studentId=${s.id}`);
+    check("on: reopening shows their report", r.status === 200 && r.body?.report?.id === mine?.id && r.body.report.ranBy === "student" && r.body.report.flags.length === 1, `${r.status}`);
+    r = await call(other.token, "GET", `/application/coherence?studentId=${other.id}`);
+    check("another student sees no report of theirs", r.status === 200 && r.body?.report === null, `${r.status}`);
+    r = await call(c.token, "GET", `/application/coherence?studentId=${s.id}`);
+    check("the counselor sees the student's report, marked as the student's", r.status === 200 && r.body?.report?.id === mine?.id && r.body.report.ranBy === "student" && r.body.report.flags.length === 1, `${r.status} ${JSON.stringify(r.body?.report).slice(0, 100)}`);
+
+    // The follow-up chat: answered from the report; a request for wording gets questions and no model call.
+    const before = await modelCalls();
+    r = await ask(s, s.id, mine?.id, "what should I settle first?");
+    check("on: the follow-up chat answers from the report", r.status === 200 && r.body?.bullets?.length === 2, `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+    const askSys = (await lastPrompt("coherence_answer"))?.system ?? "";
+    check("on: …told to answer the student, not a counselor", /Answer the student's question/.test(askSys) && !/counselor/i.test(askSys));
+    const mid = await modelCalls();
+    r = await ask(s, s.id, mine?.id, "please rewrite my first paragraph");
+    check("on: a request for wording gets questions about themself and makes no model call", r.status === 200 && r.body?.bullets?.length === 3 && !/counselor/i.test(r.body.bullets.join(" ")) && (await modelCalls()) === mid && mid === before + 1, `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+    r = await ask(s, s.id, rid, "anything?");
+    check("on: a report that isn't theirs is not on file (404)", r.status === 404, `${r.status}`);
+
+    // A flag: resolve it, but only their own report's, and only status and task.
+    const flagId = mine?.flags?.[0]?.id;
+    r = await call(s.token, "PATCH", `/application/coherence/flags/${flagId}`, { status: "resolved" });
+    check("on: the student resolves a flag on their own report", r.status === 200 && r.body?.status === "resolved" && (await sql(`select resolved_by = '${s.id}' from public.narrative_flags where id = '${flagId}'`)) === "t", `${r.status}`);
+    r = await call(s.token, "PATCH", `/application/coherence/flags/${flagId}`, { assignedTaskId: rid });
+    check("on: a task that isn't theirs can't be linked (400)", r.status === 400, `${r.status}`);
+
+    // The database holds the line even for a hand-made request.
+    r = await rest(s.token, "PATCH", `/rest/v1/narrative_flags?id=eq.${flagId}`, { title: "Changed by hand", shared_with_student: true }, { Prefer: "return=representation" });
+    check("db: a student can't change a flag's words or share it", (await sql(`select title <> 'Changed by hand' and not shared_with_student from public.narrative_flags where id = '${flagId}'`)) === "t", `${r.status}`);
+    r = await rest(s.token, "POST", "/rest/v1/coherence_reports", { student_id: other.id, created_by: s.id, criteria: {}, read_labels: [], storyline: [], next_steps: [] });
+    check("db: a student can't write a report onto another student", r.status >= 400 && (await reports(other.id)) === "0", `${r.status}`);
+
+    // The counselor runs it too, exactly as before; the student never sees that one.
+    r = await call(c.token, "POST", "/application/coherence", body(s.id));
+    const theirs = r.body;
+    check("the counselor still runs Coherence (201, marked the counselor's)", r.status === 201 && theirs?.ranBy === "counselor", `${r.status}`);
+    check("the counselor's report keeps both flags and the task-assigning next step", theirs?.flags?.length === 2 && /assign each fix as a task/.test(theirs.next.at(-1)), JSON.stringify(theirs?.flags?.length));
+    const csys = (await lastPrompt("coherence_report"))?.system ?? "";
+    check("the counselor's prompt is still addressed to the counselor", /Address the counselor/.test(csys));
+    r = await call(s.token, "GET", `/application/coherence?studentId=${s.id}`);
+    check("the student still sees only their own report", r.status === 200 && r.body?.report?.id === mine?.id, `${r.status}`);
+    r = await rest(s.token, "GET", `/rest/v1/coherence_reports?student_id=eq.${s.id}&select=id,created_by`);
+    check("db: a student reads only the reports they ran", r.status === 200 && r.body?.length === 1 && r.body[0].id === mine?.id, JSON.stringify(r.body));
+    r = await rest(s.token, "GET", `/rest/v1/narrative_flags?report_id=eq.${theirs?.id}&select=id`);
+    check("db: a student reads no flag of the counselor's report", r.status === 200 && r.body?.length === 0, JSON.stringify(r.body));
+    r = await call(c.token, "GET", `/application/coherence?studentId=${s.id}`);
+    check("the counselor's Last report is the newest of either", r.body?.report?.id === theirs?.id && r.body.report.ranBy === "counselor");
+
+    // The student can delete the report they ran, and only that one.
+    r = await rest(s.token, "DELETE", `/rest/v1/coherence_reports?id=eq.${theirs?.id}`, undefined, { Prefer: "return=representation" });
+    check("db: a student can't delete the counselor's report", (await sql(`select count(*) from public.coherence_reports where id = '${theirs?.id}'`)) === "1", `${r.status}`);
+    r = await rest(s.token, "DELETE", `/rest/v1/coherence_reports?id=eq.${mine?.id}`, undefined, { Prefer: "return=representation" });
+    check("db: a student can delete their own report", (await sql(`select count(*) from public.coherence_reports where id = '${mine?.id}'`)) === "0", `${r.status}`);
+  }
+
+  // Off again: closed to the student; the counselor still reads what is there.
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: false });
+  r = await call(s.token, "GET", `/application/coherence?studentId=${s.id}`);
+  check("off again: closed to the student", r.status === 403, `${r.status}`);
+  r = await call(c.token, "GET", `/application/coherence?studentId=${s.id}`);
+  check("off again: the counselor's Coherence is unchanged", r.status === 200, `${r.status}`);
+}
+
 console.log(process.exitCode ? "student-ai-tools: FAILED" : "student-ai-tools: ok");
