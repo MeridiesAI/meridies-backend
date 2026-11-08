@@ -48,8 +48,11 @@ const brandingBody = z
     // Shown as a link and as image sources to the whole practice: http(s) only
     // (zod's .url() accepts javascript: and data:).
     website: z.string().trim().url().max(500).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").nullable().optional(),
-    logoUrl: z.string().trim().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").nullable().optional(),
-    bannerUrl: z.string().trim().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) address").nullable().optional(),
+    // https only (a plain http image is mixed content and readable in transit). Narrowing these to the
+    // branding bucket's own paths (lib/branding.ts ownBrandingPath) follows once the app uploads through
+    // /branding; until then existing firm rows and AxIS's practice.update keep working.
+    logoUrl: z.string().trim().url().max(2000).refine((u) => /^https:\/\//i.test(u), "Use an https address").nullable().optional(),
+    bannerUrl: z.string().trim().url().max(2000).refine((u) => /^https:\/\//i.test(u), "Use an https address").nullable().optional(),
     // Validated here as well as by the CHECK constraint: this value is
     // interpolated into styles by the client, so a named colour or a css
     // function must never get through.

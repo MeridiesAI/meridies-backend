@@ -1118,11 +1118,20 @@ as a string, so look-alike hosts, ports, credentials, queries, dot segments and 
 over the kind's size or bytes that aren't the image the extension says (`sniffImageType`) are removed and refused. A
 replaced or cleared image is removed, best effort and only from the caller's own folder. `counselor_branding`'s CHECKs
 hold each URL column to its kind in the counselor's own folder; the host is the API's check (the migration can't know
-the project URL). `PATCH /firms/mine` is unchanged: any http(s) URL, data URLs refused. **Deploy order:** either; not
+the project URL). **The folder cleans itself and is capped** (no cron): before minting, `POST /branding/upload-url`
+lists the scope's folder with the service role, removes objects of the API's naming scheme older than two hours
+(`BRANDING_STALE_MS`: a signed upload URL lives two hours, so nothing that old can still be on its way to a save) that
+are not the saved logo or banner (`brandingCleanup`; anything else in the folder is never touched and still counts),
+then answers 429 `branding_folder_full` when 10 objects remain (`BRANDING_FOLDER_MAX`), so unsaved uploads can't
+become free public hosting. A removed object can stay visible for up to an hour through Storage's CDN cache. A
+counselor who joins a firm keeps their unused `counselor_branding` row and its objects, and gets them back if they
+leave. `PATCH /firms/mine` takes https logo and banner URLs only (plain http and data URLs refused); narrowing it to
+the branding bucket's own paths follows with the app slice, so existing firm rows and AxIS's `practice.update` keep
+working until then. **Deploy order:** either; not
 in `REQUIRED_SCHEMA`. Without the file a solo counselor's GET/PUT and every upload answer 503 `branding_unavailable`,
 and firm branding reads and saves as before. **Not verified:** real Supabase Storage on production (signed uploads to a
 bucket with no policy were tested on the local stack only). Known limits: an upload that is never saved stays in the
-bucket (no sweep); old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
+bucket until the next upload URL for that folder cleans it; old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
 `test/unit/branding.test.ts`, `test/integration/branding.test.mjs`.
 
 ### CSV import extras (`20261029000003`)

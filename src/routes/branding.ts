@@ -22,7 +22,9 @@ import {
   BRANDING_BUCKET,
   BRANDING_MAX_BYTES,
   BRANDING_TYPES,
+  BRANDING_FOLDER_MAX,
   BRANDING_UPLOAD_EXPIRES_IN,
+  brandingCleanup,
   assertFirmBrandingEditor,
   brandingColumns,
   brandingObjectPath,
@@ -40,7 +42,7 @@ import {
   type BrandingKind,
   type BrandingScope,
 } from "../lib/branding.js";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { HttpError, badRequest, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -80,7 +82,12 @@ async function assertUploaded(path: string, kind: BrandingKind) {
   const svc = serviceClient();
   if (!svc) throw brandingUnavailable();
   const { data, error } = await svc.storage.from(BRANDING_BUCKET).download(path);
-  if (error || !data) throw badRequest("That image hasn't finished uploading");
+  if (error || !data) {
+    // Not there yet is the client's to fix; a missing bucket or a Storage fault is ours.
+    const status = Number((error as { status?: number; statusCode?: string } | null)?.status ?? (error as { statusCode?: string } | null)?.statusCode);
+    if (/bucket not found/i.test(error?.message ?? "") || !(status >= 400 && status < 500)) throw brandingUnavailable();
+    throw badRequest("That image hasn't finished uploading");
+  }
   const bytes = new Uint8Array(await data.arrayBuffer());
   const real = sniffImageType(bytes.subarray(0, 16));
   if (bytes.length > BRANDING_MAX_BYTES[kind] || !real || real !== typeOfPath(path)) {
@@ -107,6 +114,10 @@ export default async function brandingRoutes(app: FastifyInstance) {
     const b = brandingPutBody.parse(request.body);
     const scope = brandingScope(request.profile);
     await assertCanEdit(request, scope);
+    // The row and Storage first, so a missing table, bucket or key is a 503, not "hasn't finished uploading".
+    const before = await readRow(request, scope);
+    const svc = serviceClient();
+    if (!svc && (b.logoUrl || b.bannerUrl)) throw brandingUnavailable();
 
     // A URL is accepted only as this project's public URL of an upload in the
     // caller's own folder, of the field's own kind; never anything else.
@@ -121,7 +132,6 @@ export default async function brandingRoutes(app: FastifyInstance) {
       await assertUploaded(path, kind);
     }
 
-    const before = await readRow(request, scope);
     let saved: Row | null;
     if (scope.scope === "firm") {
       const { data, error } = await request.db
@@ -149,7 +159,6 @@ export default async function brandingRoutes(app: FastifyInstance) {
     // A replaced or cleared image goes, best effort, and only from the caller's
     // own folder: a row the API didn't write (or an old firm URL elsewhere) is
     // never followed out of it.
-    const svc = serviceClient();
     if (svc) {
       const gone: string[] = [];
       for (const [kind, column] of [["logo", "logo_url"], ["banner", "banner_url"]] as const) {
@@ -168,11 +177,43 @@ export default async function brandingRoutes(app: FastifyInstance) {
     const b = brandingUploadBody.parse(request.body);
     const scope = brandingScope(request.profile);
     await assertCanEdit(request, scope);
-    // A solo counselor's save needs the table; refuse the upload up front rather than strand the file.
-    if (scope.scope === "solo") await readRow(request, scope);
-
+    // The saved images (kept by the cleanup); a solo counselor's save needs the table, so this also refuses
+    // the upload up front rather than strand the file.
+    const row = await readRow(request, scope);
     const svc = serviceClient();
     if (!svc) throw brandingUnavailable();
+
+    // The folder cleans itself and is capped, so unsaved uploads can't become free public hosting: abandoned
+    // uploads (our naming scheme, older than a signed URL lives, not the saved logo or banner) go first.
+    const { data: listed, error: listErr } = await svc.storage
+      .from(BRANDING_BUCKET)
+      .list(scope.id, { limit: 100, sortBy: { column: "created_at", order: "asc" } });
+    // Fail closed: a folder we can't count gets no new upload (a missing bucket lands here too).
+    if (listErr) {
+      request.log.warn({ err: listErr }, "branding folder list failed");
+      throw brandingUnavailable();
+    }
+    const keep = new Set(
+      (["logo", "banner"] as const)
+        .map((kind) => ownBrandingPath(row?.[`${kind}_url`], scope.id, kind))
+        .filter((p): p is string => p !== null)
+    );
+    const { remove, remaining } = brandingCleanup(listed ?? [], scope.id, keep);
+    let left = remaining;
+    if (remove.length) {
+      const { error: rmErr } = await svc.storage.from(BRANDING_BUCKET).remove(remove);
+      if (rmErr) {
+        request.log.warn({ err: rmErr }, "branding folder cleanup failed");
+        left += remove.length;
+      }
+    }
+    if (left >= BRANDING_FOLDER_MAX) {
+      throw new HttpError(
+        429,
+        "Too many unsaved images. Save one, or try again in a couple of hours.",
+        "branding_folder_full"
+      );
+    }
     const path = brandingObjectPath(scope.id, b.kind, b.contentType);
     const { data, error } = await svc.storage.from(BRANDING_BUCKET).createSignedUploadUrl(path);
     if (error || !data) {

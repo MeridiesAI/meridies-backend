@@ -154,3 +154,30 @@ test("sniffImageType reads the bytes, not the label", () => {
   assert.equal(sniffImageType(new TextEncoder().encode("<html><script>alert(1)</script>")), null);
   assert.equal(sniffImageType(new Uint8Array()), null);
 });
+
+test("folder cleanup: only stale, unsaved objects of our own naming scheme go", async () => {
+  const { brandingCleanup, BRANDING_FOLDER_MAX, BRANDING_STALE_MS } = await import("../../src/lib/branding.js");
+  assert.equal(BRANDING_FOLDER_MAX, 10);
+  assert.equal(BRANDING_STALE_MS, 2 * 3600 * 1000);
+  const now = Date.parse("2026-11-08T12:00:00Z");
+  const old = "2026-11-08T09:00:00Z"; // 3 h ago
+  const fresh = "2026-11-08T11:30:00Z"; // 30 min ago
+  const objects = [
+    { name: "logo-0000000000000001.png", created_at: old }, // stale, unsaved: goes
+    { name: "banner-0000000000000002.webp", created_at: old }, // stale, unsaved: goes
+    { name: "logo-0000000000000003.png", created_at: old }, // the current logo: kept
+    { name: "banner-0000000000000004.jpg", created_at: old }, // the current banner: kept
+    { name: "logo-0000000000000005.png", created_at: fresh }, // may still be on its way to a save: kept
+    { name: "notes.txt", created_at: old }, // not ours: never touched
+    { name: "logo-0000000000000006.svg", created_at: old }, // not the scheme: never touched
+    { name: "logo-000000000000000G.png", created_at: old },
+    { name: "logo-0000000000000007.png", created_at: null }, // no time: kept
+    { name: "logo-0000000000000008.png", created_at: "garbage" },
+  ];
+  const keep = new Set([`${ME}/logo-0000000000000003.png`, `${ME}/banner-0000000000000004.jpg`]);
+  const r = brandingCleanup(objects, ME, keep, now);
+  assert.deepEqual(r.remove, [`${ME}/logo-0000000000000001.png`, `${ME}/banner-0000000000000002.webp`]);
+  assert.equal(r.remaining, objects.length - 2);
+  assert.ok(r.remove.every((p) => p.startsWith(`${ME}/`)), "only inside the caller's folder");
+  assert.deepEqual(brandingCleanup([], ME, new Set(), now), { remove: [], remaining: 0 });
+});

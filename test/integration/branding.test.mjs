@@ -85,6 +85,15 @@ const solo = await user("brand-solo");
   const lied = await call(solo.token, "PUT", "/branding", { logoUrl: lie.publicUrl });
   check("an upload whose bytes aren't the image it claimed is refused", lied.status === 400, `${lied.status} ${JSON.stringify(lied.body)}`);
   check("and that object is removed", (await fetchStatus(lie.publicUrl)) >= 400);
+  // The 2 MB logo limit holds at save, whatever the ticket declared (the bucket itself allows 4 MB).
+  const bigPng = new Uint8Array(3 * 1024 * 1024);
+  bigPng.set(PNG);
+  const smallTicket = await call(solo.token, "POST", "/branding/upload-url", { kind: "logo", contentType: "image/png", sizeBytes: 100 });
+  const bigPut = await putSigned(solo.token, smallTicket.body.path, smallTicket.body.token, bigPng, "image/png");
+  check("a 3 MB PNG goes up on a ticket declared small (the bucket allows 4 MB)", bigPut.status === 200, `${bigPut.status} ${bigPut.body}`);
+  const bigSave = await call(solo.token, "PUT", "/branding", { logoUrl: smallTicket.body.publicUrl });
+  check("but saving it as the logo is refused", bigSave.status === 400, `${bigSave.status} ${JSON.stringify(bigSave.body)}`);
+  check("and the object is removed", (await fetchStatus(smallTicket.body.publicUrl)) >= 400);
   const bad = await call(solo.token, "PUT", "/branding", { accentColor: "red" });
   check("a colour that isn't #RRGGBB is refused", bad.status === 400, `${bad.status}`);
 }
@@ -161,10 +170,32 @@ await sql(`update public.firm_members set seat_role = 'admin' where firm_id = '$
   // PATCH /firms/mine is unchanged: data URLs refused, members refused.
   const d = await call(owner.token, "PATCH", "/firms/mine", { logoUrl: "data:image/png;base64,AAAA" });
   check("PATCH /firms/mine still refuses a data URL", d.status === 400, `${d.status}`);
+  const plain = await call(owner.token, "PATCH", "/firms/mine", { logoUrl: "http://example.com/logo.png" });
+  check("PATCH /firms/mine now refuses a plain http logo", plain.status === 400, `${plain.status}`);
+  const plainBanner = await call(owner.token, "PATCH", "/firms/mine", { bannerUrl: "http://example.com/banner.png" });
+  check("and a plain http banner", plainBanner.status === 400, `${plainBanner.status}`);
   const pmember = await call(member.token, "PATCH", "/firms/mine", { accentColor: "#123456" });
   check("and a member", pmember.status === 403, `${pmember.status}`);
   const powner = await call(owner.token, "PATCH", "/firms/mine", { accentColor: "#abcdef" });
   check("and still saves an owner's colour as manual", powner.status === 200 && powner.body.accentColor === "#abcdef" && powner.body.accentColorSource === "manual", JSON.stringify(powner.body));
+}
+
+// ---- The folder cleans itself and is capped ----
+{
+  const capped = await user("brand-cap");
+  const tickets = [];
+  for (let i = 0; i < 10; i++) tickets.push(await upload(capped, "logo"));
+  const full = await call(capped.token, "POST", "/branding/upload-url", { kind: "logo", contentType: "image/png", sizeBytes: 100 });
+  check("ten unsaved uploads fill the folder: the 11th is refused", full.status === 429 && full.body?.code === "branding_folder_full", `${full.status} ${JSON.stringify(full.body)}`);
+  const [current, stale] = tickets;
+  check("the current logo saves", (await call(capped.token, "PUT", "/branding", { logoUrl: current.publicUrl })).status === 200);
+  await sql(`update storage.objects set created_at = now() - interval '3 hours' where bucket_id = 'branding' and name in ('${current.path}', '${stale.path}')`);
+  const again = await call(capped.token, "POST", "/branding/upload-url", { kind: "logo", contentType: "image/png", sizeBytes: 100 });
+  check("an old unsaved upload is cleaned, so a new one can start", again.status === 200, `${again.status} ${JSON.stringify(again.body)}`);
+  check("the old unsaved object is gone", (await fetchStatus(stale.publicUrl)) >= 400);
+  check("the saved logo is kept, however old", (await fetchStatus(current.publicUrl)) === 200);
+  const left = await sql(`select count(*) from storage.objects where bucket_id = 'branding' and name like '${capped.id}/%'`);
+  check("nine objects left", left === "9", left);
 }
 
 // ---- Who may call ----

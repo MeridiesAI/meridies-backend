@@ -212,6 +212,37 @@ export function sniffImageType(bytes: Uint8Array): BrandingType | null {
   return null;
 }
 
+/** At most this many objects in a scope's folder before another upload URL is minted. */
+export const BRANDING_FOLDER_MAX = 10;
+/** An unsaved upload older than this is abandoned: a signed upload URL lives two hours. */
+export const BRANDING_STALE_MS = 2 * 3600 * 1000;
+
+const OBJECT_NAME = /^(logo|banner)-[0-9a-f]{16}\.(png|jpg|webp)$/;
+
+/**
+ * Which objects in a scope's folder to remove before minting another upload
+ * URL, and how many stay. Removed: our own naming scheme only, older than
+ * BRANDING_STALE_MS by a readable time, and not the saved logo or banner
+ * (`keep`, full paths). Anything else is left alone and still counts.
+ */
+export function brandingCleanup(
+  objects: { name: string; created_at?: string | null }[],
+  scopeId: string,
+  keep: Set<string>,
+  now: number = Date.now()
+): { remove: string[]; remaining: number } {
+  const remove: string[] = [];
+  for (const o of objects) {
+    if (!OBJECT_NAME.test(o.name)) continue;
+    const path = `${scopeId}/${o.name}`;
+    if (keep.has(path)) continue;
+    const at = typeof o.created_at === "string" ? Date.parse(o.created_at) : NaN;
+    if (!Number.isFinite(at) || now - at <= BRANDING_STALE_MS) continue;
+    remove.push(path);
+  }
+  return { remove, remaining: objects.length - remove.length };
+}
+
 export const brandingUnavailable = () =>
   new HttpError(503, "Saving branding isn't switched on yet", "branding_unavailable");
 
