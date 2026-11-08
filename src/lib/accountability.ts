@@ -30,6 +30,21 @@ export type AccountabilitySettings = {
   quiet_hours_start: number | null;
   quiet_hours_end: number | null;
   timezone: string;
+  /**
+   * The alert settings (20261111000003). Optional because a database without that migration has no
+   * such columns: `loadSettings` fills them from ALERT_DEFAULTS, and DEFAULT_SETTINGS (which also seeds a
+   * first PUT) leaves them out so a first save never names a column that isn't there.
+   */
+  inactive_alert_days?: number | null;
+  notify_on_essay?: boolean;
+  weekly_digest?: "off" | "draft";
+};
+
+/** Every alert setting is off until the counselor turns it on. */
+export const ALERT_DEFAULTS = {
+  inactive_alert_days: null as number | null,
+  notify_on_essay: false,
+  weekly_digest: "off" as "off" | "draft",
 };
 
 export const DEFAULT_SETTINGS: AccountabilitySettings = {
@@ -65,7 +80,7 @@ export async function loadSettings(
   const forCounselor = rows.find((r) => r.student_id === null);
   const chosen = forStudent ?? forCounselor;
 
-  return chosen ? { ...DEFAULT_SETTINGS, ...(chosen as object) } : DEFAULT_SETTINGS;
+  return { ...DEFAULT_SETTINGS, ...ALERT_DEFAULTS, ...((chosen ?? {}) as object) };
 }
 
 /** True when we're inside the counselor's configured quiet hours. */

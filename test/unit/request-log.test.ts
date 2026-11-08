@@ -76,3 +76,10 @@ test("logHost keeps the host only", async () => {
   assert.equal(logHost("https://docs.google.com/document/d/secret?usp=sharing"), "docs.google.com");
   assert.equal(logHost("not a url"), null);
 });
+
+test("a request's log line carries no body: a pasted transcript never reaches the logs", async () => {
+  const { serializeReq } = await import("../../src/lib/requestLog.js");
+  const line = serializeReq({ method: "POST", url: "/ai/meeting-summary?x=1", hostname: "api", ip: "10.0.0.1", body: { rawNotes: "Maya: my SAT was 1400" } } as never);
+  assert.deepEqual(line, { method: "POST", url: "/ai/meeting-summary?x=…", hostname: "api", remoteAddress: "10.0.0.1" });
+  assert.ok(!JSON.stringify(line).includes("SAT"));
+});

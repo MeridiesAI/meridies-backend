@@ -100,6 +100,7 @@ src/
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
+│   ├── branding.ts        # logo/banner/accent: scope, the branding bucket's URL and path rules, image sniffing
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
@@ -107,15 +108,18 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
+│   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
+│   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
+│   ├── catalogProposals.ts # cited proposals from a school's own pages: page picking, quote grounding, fact keys (+ Run, Fake)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
 │   ├── intakeFills.ts     # what the onboarding questionnaire filled, for the info card and sheet marks
@@ -126,7 +130,8 @@ src/
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
-│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items)
+│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items), transcript map-reduce
+│   ├── transcript.ts      # meeting transcripts: VTT/SRT/pasted text to speaker turns, neutral speaker labels, parts for the map-reduce
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
 │   │   └── ops/           # what AxIS can change: the operation catalog, run through this API as the counselor
@@ -138,6 +143,7 @@ src/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
+│   ├── branding.ts        # /branding     logo, banner, accent colour (firm or solo); signed image uploads
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
 │   ├── opportunities.ts, ai.ts, chat.ts
@@ -151,6 +157,7 @@ src/
 │   ├── applicationAi.ts   # /application  their AxIS calls (lists, coherence, activities)
 │   ├── studentPage.ts     # /student-page info card, polygon, private note
 │   ├── studentAid.ts      # /student-aid  Financial aid page, scholarship matching
+│   ├── schoolScholarships.ts # /scholarships/internal, /colleges/:id/scholarships   a school's own awards (counselor)
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
 │   ├── messaging.ts       # /messaging    a consultant's own texting number: find, buy
 │   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
@@ -165,22 +172,25 @@ src/
 │   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out
 │   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)
 │   ├── pay.ts             # /pay/:token   public: an invoice's pay link, opens Stripe Checkout
+│   ├── agreements.ts      # /agreements (counselor) + /agree/:token (public): typed-name acceptance, OFF unless AGREEMENTS_ENABLED=true
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
+│   ├── taskSets.ts        # /task-sets   saved task sets: CRUD, apply to students or a class year
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
-│   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── account.ts         # /account      data export (self, a student, batches of 25, a roster Sheet), account deletion
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
 │   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
-│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports)
+│   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports, catalog proposals)
 └── supabase/migrations/   # the schema — this repo owns it
 ```
 
@@ -210,6 +220,10 @@ other practices grow (the speed test below caught the calendar feed and
 (`lib/guards.ts`) returns exactly what `private.can_view_student` allows (the
 roster, archived included, the students shared with them, and the caller), or
 null past 250 ids, when the query runs unscoped as before. RLS still applies on top.
+The calendar feed does not take that fallback: `buildCalendarFeed({ db, ownerId, role, caseload }, q)` needs the
+whole caseload for a counselor's whole calendar (`fullCaseloadStudentIds(db, counselorId)`, read page by page, never
+null), throws without it, and reads in batches of `FEED_ID_CHUNK` (200) ids (at most `FEED_BATCH_CONCURRENCY`, 4, in flight per build), because it also runs on the service
+client for the subscribed feed, where no RLS would hold it to the counselor's students.
 
 ### Schema
 
@@ -523,6 +537,43 @@ forget it.
   `stripeReady`); otherwise status says `configured: false`, the other routes
   and the pay page answer 503, and the tracker is what it was. Not in
   `REQUIRED_SCHEMA`.
+- **Agreements: typed-name acceptance, NOT a certified e-signature, switched OFF** (`20261111000010`;
+  `routes/agreements.ts`, `lib/agreements.ts`, `lib/agreementConsent.ts`). A counselor who may bill a Contact Pipeline
+  contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;
+  `GET /agreements?contactId=`, `GET /agreements/:id` with its acceptance, `POST /agreements/:id/void` for draft|sent).
+  `POST /agreements/:id/send` mints a link on the caller's own client (`issue_agreement_link`, SECURITY DEFINER, checks
+  `crm_can_bill` for auth.uid(); 32 random bytes, sha256 in `agreement_tokens`, service role only, 30 days; a resend
+  expires every earlier link, so a superseded email stops working) and emails
+  the card's parent (else student) address, 400 `contact_no_email` without one; the delivery record keeps no link.
+  `GET /agree/:token` (public; CSP with no script, no-store, noindex, no-referrer) shows the text and a name field and a
+  consent box, and **changes nothing**; `POST` takes exactly `signerName` + `consent=yes` and `accept_agreement`
+  (service role only) records it in one transaction: one `agreement_acceptances` row (unique per agreement; typed name,
+  UTC time, IP, user agent, the body's sha256, the consent version, and a plain-text certificate ending "Typed-name
+  acceptance; not a certified electronic signature."), the agreement `accepted`, an `audit_log` row, and the contact
+  moved to its workspace's "Contract signed" stage when that stage is ahead of it (open contacts only). A second submit
+  shows "already accepted" (409), never a second row; expired and void links 410, unknown 404. Both parties get a copy
+  (certificate + text). Once accepted, the public page (and the 409 page) shows only the name, the UTC time, the
+  document SHA-256 and the "not a certified electronic signature" line: the IP and user agent stay in the stored
+  certificate, the emails and the counselor's `GET /agreements/:id`. The consent version recorded is the server's
+  (`AGREEMENT_CONSENT_VERSION`, passed only by `accept_agreement`'s service-role caller), never a client's. Limits: 30 a minute per address, 60 views and 10 accept tries an hour per link. **Immutable:**
+  the body hash is computed by a trigger, title and body are fixed once sent, nothing changes once accepted or void, and
+  an acceptance has no update/delete grant for anyone (service_role included) plus a trigger refusing update, delete and
+  truncate even as postgres; an accepted agreement RESTRICTs deleting its contact. The guard trigger is SECURITY
+  DEFINER, so it tells a client session apart by `current_setting('role')` (PostgREST's SET ROLE), never
+  `current_user` (always the owner inside it): a client can only void a draft or sent agreement, never accept one.
+  `DELETE /pipeline/contacts/:id` answers 409 `agreement_on_file` for a contact with a signed agreement, and
+  `DELETE /account` 409 `signed_agreements_kept` when the account wrote one or created its contact ("ask Meridies to
+  close the account"); a draft, sent or void agreement goes with its contact. **AxIS trash:** `agreements` and
+  `agreement_tokens` are captured (rule `parent`), so an AxIS-deleted contact's unsigned agreements and their links
+  come back on Restore exactly as they were (the guard keeps a restored row's status and times, recomputes the hash and
+  refuses an accepted one); `agreement_acceptances` is not captured because its RESTRICT means it never reaches the
+  trash. Text only (no PDF; `storage_path`
+  stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
+  unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
+  'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open
+  decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
+  the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
+  `test/integration/agreements.test.mjs` (CI runs the API with the switch on).
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a
@@ -593,6 +644,35 @@ forget it.
   real fault) mean that without the file the template list reads the older columns and every picker works, the stage
   routes answer 503 `stage_templates_unavailable`, a `templateId` is accepted and not remembered, and the DTO's new
   fields read null. Tests: `test/unit/stage-templates.test.ts`, `test/integration/stage-templates.test.mjs`.
+- **Saved task sets** (`20261111000005`; `lib/taskSets.ts`, `routes/taskSets.ts`, `createTaskForStudent` in `routes/tasks.ts`).
+  A set is a counselor's named list of 1-30 items (title, kind, instructions, target words, stages), each due RELATIVELY:
+  `dueOffsetDays` (0-730 days after the apply date in the counselor's time zone) or `dueMonth`/`dueDay` (the next
+  occurrence, today included; Feb 29 is Feb 28 in a year without one), never both. `task_sets` is owner-written
+  (`task_sets_owner`, the email-templates model); `shared: true` stores the owner's current firm in `firm_id` and every
+  approved counselor of that firm reads it (and may apply it to their own students) while the owner is still in that firm;
+  only the owner changes or deletes it. Every item has a stable `key` (the server assigns a uuid; PATCH keeps a key the
+  client sends back, gives a keyless item a new one, refuses duplicates), and a task is marked with the item's KEY, never
+  its position, so reordering, inserting or removing items never makes a re-apply skip or repeat one.
+  `POST /task-sets/:id/apply` `{ studentIds (1-100) | classYear "YYYY", notifyEmail? }` (60 an hour): a class year is
+  resolved on the server from the caller's ACTIVE roster (`profiles.grad_year`, archived left out, collaborators' students
+  not included); every student goes through `resolveStudentId(..., "edit")` and a refusal is that student's `error`, never
+  the batch's. Each item becomes one ordinary counselor task through the Create task button's own code
+  (`createTaskForStudent`, which `POST /tasks` also calls), marked `deliverables.task_set_id` / `task_set_item_key`; a
+  UNIQUE partial index (`deliverables_task_set_item_key_uidx`) on (student, set, key) makes a second apply a no-op (read
+  first; a 23505 on that index only also reads as `already-assigned`); a CHECK keeps the marker on counselor tasks only;
+  deleting a set keeps its tasks (task_set_id cleared). One apply makes at most 300 NEW tasks (what exists isn't
+  counted, so a retry after a timeout gets through): past it, 400 `apply_too_large` with `limit`, `perStudent`,
+  `maxStudents` and, for a class year, the resolved `studentIds`, so the app splits the batch.
+  The answer is `{ created, alreadyAssigned, failed, refused, emailThrottled, results: { [studentId]: StudentResult +
+  items[] } }`. Email: one assignment email per student per apply (the first task made; every task still gets its in-app
+  notice and stores `notify_email` as asked, so "send again" works), and at most `TASK_SET_EMAIL_DAILY_CAP` (200) a day per counselor (`task-set-email:<id>`); past it the task is
+  made and the email skipped. No texts. **Firm roster:** `GET /management/firm-roster` (owner/admin only, 403 otherwise)
+  reads `firm_roster()` (SECURITY DEFINER, refuses anyone but an approved owner/admin of their current firm with 42501):
+  every active student of the firm's approved consultants as `{ id, name, gradYear, counselorId }`, plus `consultants` from
+  `firm_consultants()` for the filter. Names only: it does not widen `can_view_student`. **Deploy order:** either; not in
+  `REQUIRED_SCHEMA`. Without the file the set routes answer 503 `task_sets_unavailable` and the roster 503
+  `firm_roster_unavailable`; `POST /tasks` never names the new columns. Tests: `test/unit/task-sets.test.ts`,
+  `test/integration/task-sets.test.mjs`.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
@@ -896,7 +976,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`, `catalog-proposals`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -968,8 +1048,24 @@ the database (`20261010*`):
   exam's option reads on the IB scale), advanced courses (not the grade
   level: `courses.grade` is the mark), activities (the type mapped onto
   `ACTIVITY_TYPES`, anything else "Other Club/Activity"; text cut to the
-  sheet's limits), honors (keyed on name and year), first-gen and intended
-  majors. Rules: **fill only what is empty**; a re-saved questionnaire may
+  sheet's limits), honors (keyed on name and year), first-gen, intended
+  majors and the **optional date of birth** (`20261111000007`:
+  `intakeAnswers.birthday`, `YYYY-MM-DD`, into
+  `student_personal_details.birthday`). `private.intake_birthday` keeps only
+  a real calendar date, not in the future, of a student aged 10 to 25 that
+  day. A non-empty string that fails it is skipped as `invalid` and changes
+  nothing; an empty or non-string answer counts as no answer, so it takes
+  back a birthday the questionnaire wrote that is still unchanged. It is a
+  minor's, so it is the only date of birth copied, never logged or named by
+  value in a report, and `birthday` is not on the AI allowlist, so no model
+  reads it. "Cleared" is not "gone": the raw answer stays in
+  `profiles.profile.intakeAnswers.birthday` and `intake_fills` keeps an
+  unsalted hash of it; a true removal would need an explicit delete path
+  (not built). Once copied it takes part in roster-import matching
+  (`lib/imports/match.ts`: name plus birthday, and a different birthday is a
+  contradiction), the same as one a counselor entered. The info card marks it
+  `fromQuestionnaire: "birthday"`; no backfill.
+  Rules: **fill only what is empty**; a re-saved questionnaire may
   change a value (or take back a row, or a field whose answer is gone) only
   while it is still exactly what the questionnaire wrote, compared by hash
   in `intake_fills` the way import provenance compares; anything the
@@ -1185,6 +1281,83 @@ and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) no
 open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
 against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
 
+### Practice branding (`20261111000008`; `lib/branding.ts`, `routes/branding.ts`)
+
+A logo, a banner and an accent colour, persisted (the app kept them in localStorage as data URLs). **Two scopes,
+one shape:** a counselor in a firm reads the firm's (`firms.logo_url`, `banner_url`, `accent_color`,
+`accent_color_source`, which already existed) and only an owner or admin changes it; a solo counselor has their own
+`counselor_branding` row (owner-only RLS both ways, approval gate). `GET /branding` answers `{ scope: "firm" | "solo",
+canEdit, logoUrl, bannerUrl, accentColor, accentColorSource }`; `PUT /branding` takes `{ accentColor?: "#RRGGBB" | null,
+accentColorSource?: "default" | "logo" | "banner" | "manual", logoUrl?: string | null, bannerUrl?: string | null }`
+(strict) and answers the same shape; a colour without a source is `manual`, null is `default` (the rule
+`PATCH /firms/mine` always had: both now call `brandingColumns` / `firmBrandingUpdate` and `assertFirmBrandingEditor`).
+`POST /branding/upload-url` `{ kind: "logo" | "banner", contentType: "image/png" | "image/jpeg" | "image/webp",
+sizeBytes }` (20 an hour) answers `{ bucket, path, token, uploadUrl, publicUrl, expiresIn, maxBytes, contentType }`;
+the client PUTs the bytes to `uploadUrl` (or `uploadToSignedUrl(path, token, file)`), then saves `publicUrl` with PUT.
+**The bucket** `branding` is public-read, PNG/JPEG/WebP only, **never SVG** (a browser runs its script), 4 MB per object
+(a logo is held to 2 MB by the API), and has **no storage.objects policy**: no client writes or lists it. Objects
+are `<firm id | counselor id>/<kind>-<16 hex>.<png|jpg|webp>`, named by the API, and only a signed upload URL the API
+minted with the service role (after the owner/admin check) writes one. **A saved URL** must be exactly this project's
+public URL of such a path in the caller's own folder, of the field's own kind (`ownBrandingPath`: rebuilt and compared
+as a string, so look-alike hosts, ports, credentials, queries, dot segments and encodings fail; plain http only when
+`SUPABASE_URL` is a loopback). Before saving, the object is read back: missing is 400 "hasn't finished uploading",
+over the kind's size or bytes that aren't the image the extension says (`sniffImageType`) are removed and refused. A
+replaced or cleared image is removed, best effort and only from the caller's own folder. `counselor_branding`'s CHECKs
+hold each URL column to its kind in the counselor's own folder; the host is the API's check (the migration can't know
+the project URL). **The folder cleans itself and is capped** (no cron): before minting, `POST /branding/upload-url`
+lists the scope's folder with the service role, removes objects of the API's naming scheme older than two hours
+(`BRANDING_STALE_MS`: a signed upload URL lives two hours, so nothing that old can still be on its way to a save) that
+are not the saved logo or banner (`brandingCleanup`; anything else in the folder is never touched and still counts),
+then answers 429 `branding_folder_full` when 10 objects remain (`BRANDING_FOLDER_MAX`), so unsaved uploads can't
+become free public hosting. A removed object can stay visible for up to an hour through Storage's CDN cache. A
+counselor who joins a firm keeps their unused `counselor_branding` row and its objects, and gets them back if they
+leave. `PATCH /firms/mine` takes https logo and banner URLs only (plain http and data URLs refused); narrowing it to
+the branding bucket's own paths follows with the app slice, so existing firm rows and AxIS's `practice.update` keep
+working until then. **Deploy order:** either; not
+in `REQUIRED_SCHEMA`. Without the file a solo counselor's GET/PUT and every upload answer 503 `branding_unavailable`,
+and firm branding reads and saves as before. **Not verified:** real Supabase Storage on production (signed uploads to a
+bucket with no policy were tested on the local stack only). Known limits: an upload that is never saved stays in the
+bucket until the next upload URL for that folder cleans it; old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
+`test/unit/branding.test.ts`, `test/integration/branding.test.mjs`.
+### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
+
+**More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
+`custom_deadline` ("Your deadline", the counselor's internal date) is its own `deadline` item `college-custom:<row>`,
+titled "<School>: your deadline", detail "The school's deadline is Jan 5, 2027" when the dates differ; same status
+filter and hand-entered dedupe as the school's, and the same `ref` (the row id), so a type reassignment moves both. A
+student's `student_academics.planned_test_date` is a `milestone` `test:<student>` of pseudo-type `test` (like
+`personal`: not a `FeedKind`, since `calendar_event_type_assignments.event_kind` is check-constrained), titled
+"Planned test date", detail the status (Scheduled, Prepping, Retaking), skipped when `test_status` is `taken` or
+`test-optional`. Both show on the counselor's calendar (whole or one student) and the student's own. Pure parts:
+`collegeFeedItems`, `testFeedItems`. Tests: `test/unit/calendar-feed.test.ts`, `test/integration/calendar-feed.test.mjs`.
+
+**Subscribing** (`routes/calendarIcal.ts`, `lib/calendarIcal.ts`, `buildFeedIcs` / `feedIcsEvents` in `lib/ics.ts`).
+`POST /calendar/ical` (counselor, 10 an hour) makes the feed URL, or replaces it (the old one stops at once), and
+returns `{ url, webcalUrl, rotated, exists, createdAt, rotatedAt, lastFetchedAt }`: the URL is
+`<PUBLIC_API_URL>/calendar/ical/<token>.ics`, shown **only in that answer**. The token is 32 random bytes (base64url);
+`calendar_feed_tokens` (one row per counselor, service role only, approval gate) keeps its sha256. `GET /calendar/ical`
+answers `{ exists, createdAt, rotatedAt, lastFetchedAt }` and never the URL; `DELETE` revokes. **The public
+`GET /calendar/ical/:token.ics`** (absolute path, like `/pay/:token`) finds the row by hash on the service client, asks
+`approvedCounselorIds`, builds the counselor's whole calendar from 30 days back to a year ahead in their time zone
+(done items in, cancelled meetings out) with their full caseload, and answers `text/calendar` (`METHOD:PUBLISH`,
+`X-WR-CALNAME:Meridies`, `REFRESH-INTERVAL` and `X-PUBLISHED-TTL` one hour; all-day items as `VALUE=DATE`, timed ones in
+UTC; UID `feed-<id prefix>-<ref>@meridiesai.com`, e.g. `feed-college-custom-<row>`), with `Cache-Control: private,
+max-age=300`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`. A malformed, unknown, rotated or revoked token
+and an unapproved counselor are the same 404 with the same body. Limits: 60 an hour per token, 600 an hour per address
+(`enforceRateLimit`), plus 60 a minute in process. Making or rotating the URL is 10 an hour; revoking has its own bucket (120 an hour), so a
+counselor who rotated a leaked URL several times can always still revoke it. `last_fetched_at` is written at most once a minute. The path is
+dropped from request logs (`lib/requestLog.ts`). **What the file may say** (`feedIcsEvents`; the URL can be forwarded):
+a student only as first name and last initial ("Ana P.: Common App essay"), a meeting only as "Meeting with Ana P., Ben
+O." and its times (never its title, agenda, location or link), no item's detail or notes, no scores, never a student's
+own events (`student_calendar_events`) or a cancelled meeting, and only names of students on the counselor's
+caseload. Task, deadline, college and practice-event **titles appear in the file as written** (only meeting titles are
+left out), so anything a counselor typed into a title travels with the URL; the Settings card should say so. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the three authenticated routes
+answer 503 `calendar_feed_unavailable` (also without the service key or `PUBLIC_API_URL`) and the feed URL 404s.
+Unverified: how often Google refreshes a subscribed feed (believed about daily; Apple and Outlook honour the hour
+more closely). Tests: `test/unit/calendar-feed-ics.test.ts` (folding, escaping, all-day, injection through a title,
+UIDs, privacy, the log), `test/integration/calendar-ical.test.mjs` (URL shown once, hash only, rotate, revoke, unknown
+and unapproved 404, cross-practice leakage with a 260-student practice, privacy, headers, the rate limit).
+
 ### CSV import extras (`20261029000003`)
 
 `POST /invites/bulk` recipients take optional `extras` (label -> value; at most 30 entries, labels to 80 characters,
@@ -1262,6 +1435,37 @@ and `requirements` (`[{ id, label, done }]`). "Applying to N" is `student_person
 (`collegesPlanned` on the info routes). `GET /overview/student-summaries` adds `gradYear`, `collegesPlanned`,
 `applying`, `results` and `scholarships` per student. `lib/resultsAvailability.ts` turns a missing column into
 `503 college_results_unavailable`; the summaries read the new columns separately so they degrade, never fail.
+
+### School-specific scholarships (`20261111000006`)
+
+A school's own awards (a university's merit scholarships and their deadlines), kept on `public.scholarships` beside
+the national/state catalog: `college_id`, `owner_counselor_id`, `firm_id`, `source` (`catalog` | `counselor`) and
+`eligibility_text`. **Meridies never curates these**: a row exists only because a counselor typed it in (later also
+the cited-proposals pipeline), and it reads `verified: false` until an editor (service role) sets
+`source_verified_at`; the owner's own edit clears that stamp again. Routes (`routes/schoolScholarships.ts`, counselor
+only, `request.db`): `POST /scholarships/internal` (name, `collegeId` required, amount, dates, an https `url`,
+`eligibility`, `notes`, `basis`, `essayRequired`; 201), `PATCH /scholarships/internal/:id` (own rows only;
+`sourceVerifiedAt` is refused), `DELETE /scholarships/internal/:id` (soft: `is_active = false`, so a row a student
+is tracking keeps its link; one way), `GET /colleges/:id/scholarships` (`{ collegeId,
+scholarships }`, each with `source`, `ownedBy: "you" | "firm" | "meridies"`, `verified`, `canEdit`). Writes are 60 an
+hour per counselor and 200 active rows each (409 `scholarship_cap`; the database holds the same line, errcode 54000).
+**Who sees a counselor's row** (RLS, `private.can_see_school_scholarship`): its owner; their firm while the owner is
+still a member; a student whose counselor owns it or whose counselor's workspace firm is the row's firm. Never another
+practice or its students. Writes: owner only, `source = 'counselor'` with a school (CHECK); column grants keep source,
+owner, firm and the stamp out of client writes, and `private.scholarships_guard_client` pins the firm. Catalog rows
+stay service-role only. **The scan** (`scanScholarships`, `classifyScholarships`) shows a school row only when that
+school is on the student's `student_colleges` and, for a counselor's row, only when it is the student's practice's
+(`scholarship_practice(p_student)`, answered only to someone who can view the student; unknown means no counselor
+rows), with `matchedOn: "school"`; closed rows are `held` as usual. Scan DTOs gain `collegeId`, `source`, `verified`.
+The scan reads the catalog (`owner_counselor_id is null`) and the school rows for the student's listed colleges as
+two queries, so counselor rows never crowd the catalog out of the read. Deleting a counselor's account deletes their
+rows, but a student's tracked match survives: `scholarship_matches.scholarship_id` is `on delete set null` (the match
+keeps its own name, link, amount and deadline). `PUT /student-aid/:id/scholarships/:scholarshipId/recommend` lets a
+counselor recommend their own (or their firm's) school row even when the student hasn't listed that school; it reaches
+no other practice.
+**Deploy order:** migration first (either order is safe: without it the routes answer 503
+`school_scholarships_unavailable` and the scan shows the catalog only). Not in `REQUIRED_SCHEMA`. Tests:
+`test/unit/scholarship-scan.test.ts`, `test/integration/school-scholarships.test.mjs`.
 
 ### Aid generosity is three ratings, not one
 
@@ -1419,13 +1623,67 @@ HEAD, body never read) and flags it `ok` / `broken` (404/410 twice, or gone
 from DNS) / `blocked` (the site refuses robots); nothing is deleted.
 
 Curated facts live on the school, each with a source: `college_policies`
-(superscore, self-reported scores, CSS Profile, STARS, FairTest),
+(superscore, self-reported scores, CSS Profile, STARS, FairTest, whether the
+personal statement is read, how scores are reported),
 `college_application_requirements` (per cycle) and `college_major_admit_rates`
 (UC/CSU by major, SJSU's eligibility index). They are loaded from CSVs the team
 compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
-<policies|requirements|major-admit-rates> --file <csv> [--dry-run]`. A file with
-one bad row loads nothing. Checked-in files and their sources are listed in
+<policies|requirements|major-admit-rates|supplements> --file <csv> [--dry-run]`. A file with
+one bad row loads nothing. `supplements` upserts `college_supplements` prompts on
+(school, cycle, sort_order) and requires an https `source_url` and a `checked_on` date on every row. Checked-in files and their sources are listed in
 `scripts/ingest/data/README.md`.
+
+**Cited proposals from a school's own pages** (`lib/catalogProposals.ts`, `20261111000011`) are how the curated
+facts scale past the hand-compiled schools, without the model ever writing the catalog. For ONE college,
+`POST /internal/catalog/propose { collegeId | unitid, dryRun? }` (CRON_SECRET, 200 with counts) or
+`npx tsx scripts/ingest/propose-catalog.ts --unitid <id> [--dry-run]` (local stack only: `assertLocalStack`) reads its
+home page and up to four admissions/essay/testing pages it links to, on its own domain and subdomains only
+(`onSchoolDomain`; a redirect off it ends the run), through `fetchSitePage`. One Haiku call
+(`runSystemStructured`, module `catalog-proposals`, the `system:catalog-proposals` budget of 500 calls a month, no
+practice switches because it acts for nobody) proposes `personal_statement_read`, `test_reporting` and this cycle's
+supplement prompts (the cycle turns over August 1). `groundCandidates` keeps a candidate only when it cites a page
+that was read and its quote (12+ characters) is on THAT page after folding; a prompt must be on the page and its
+word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support and a
+prompt for another stated cycle are dropped; everything dropped is counted. A flag's value must be what its quote
+says (`statementFits` / `reportingFits`; a safety net under the editor's review, so strictly conservative: when in
+doubt the candidate is dropped and counted). A quote with scoped wording (`SCOPED`: merit, scholarship(s),
+honors/honours, program(s)/programme(s), housing, aid, home-school, early decision/action, applicants or students
+from/applying, applying to/for/through, unless, except, outside the, international, non-US, transfer, "but we
+do/will", however, only for/if/when, before, after a month, deadline) is dropped for every value of both flags. The
+personal statement flag needs the statement named and a read-type verb (read, consider, review, evaluate, use,
+factor, weigh); `false` needs every such verb negated (a negator up to three words before it in its clause, "is not
+read", "isn't read", or "reviewed without the personal statement"), so "not required" or "optional" alone, or any
+un-negated read clause ("but we read it if you submit one"), drops it; `true` needs no verb negated and none an
+instruction to the applicant (first in its clause, or after please/to/sure/should/must/can/could: "Read our tips",
+"Please use"), no negation anywhere (a bare "no" included) and no hedge (rarely, seldom, little or limited weight,
+optional, only if, if you choose/submit/send, may/might be read). Test reporting: a quote about TOEFL, IELTS,
+Duolingo, "english proficiency" or PTE that names neither the SAT nor the ACT is dropped; `self-report` needs a
+self-report mention and no negation anywhere; `official-only` is dropped when required only later (upon enrollment,
+once admitted, after admission, if admitted, before enrolling, ...), and otherwise needs either a self-report
+mention refused in its own clause (a negation up to three words before it, or a negated verb right after it:
+"self-reported scores are not accepted") with nothing saying official scores aren't required (not
+required/mandatory/needed, need not, optional), or, with no self-report mention, official scores or reports
+required (or "directly from the testing agency") and no negation anywhere; `score-send` needs sending wording, no
+self-report mention and no negation anywhere; `not-applicable` needs "test-blind"/"test-free" not negated or
+contrasted (not, n't, no longer, never, neither, unlike).
+**Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
+already on file in any slot (matched by its folded words) is unchanged, one already pending is a duplicate, and each
+new prompt takes the next free `sort_order` after every curated row and pending proposal, in the page's order; its
+`fact_key` is the prompt and word limit, not the slot. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;
+`admission_cycle`, a supplement's `payload {cycle, sortOrder, title, prompt, wordLimit}`, `fact_key`); a unique index
+keeps one pending or approved row per fact, and a fact already on file with a source isn't proposed. A rejected fact
+may be proposed again by a later run. **Review** is `review_catalog_proposal(id, decision, note)` (SECURITY DEFINER,
+callable by a catalog editor only, from `POST /colleges/proposals/:id/review` on the editor's own client): one
+transaction that locks the row, refuses one already reviewed (400), re-checks the value or payload, writes the curated
+row (a `college_supplements` row on its slot with `source_url` and `source_verified_at = now()`, refused (400) when the
+slot holds a different prompt or the prompt is on file at another slot, so an approval never overwrites a row
+students' essays point to; or only that
+`college_policies` column plus `sources.<field> = {url, checkedAt, verifiedAt, verifiedBy}`; or `colleges.test_policy`)
+and stamps the reviewer. Reject changes only the proposal. `GET /colleges/proposals` carries `admissionCycle` and
+`payload`. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the review falls back to its
+older path for the six research fields and a proposer run answers 503 having written nothing. `RESEARCH_FAKE=fixture`
+swaps the pages and the answer for `lib/catalogProposalsFake.ts`. Tests: `test/unit/catalog-proposals.test.ts`,
+`test/integration/catalog-proposals.test.mjs`.
 
 **Events Hub listings** come the same way: `npx tsx --env-file=.env
 scripts/ingest/events-csv.ts --file <csv> [--dry-run]` (columns in
@@ -1879,7 +2137,9 @@ The model never writes a result list and never changes the catalog.
 - Where a cited source disagrees with the catalog, a `catalog_change_proposals`
   row is written (allowed fields and values only, source URL must be one the
   answer cited). Only a `catalog_editors` member (Meridies staff, added with
-  service_role) can approve, and approval is what changes the catalog.
+  service_role) can approve, and approval is what changes the catalog. The same
+  table holds the cited proposals from a school's own pages (see "Resource
+  library and curated datasets").
 - `GET /colleges/:id/student-summary`: counselor bullets from catalog facts and
   the student's record only. No model; every bullet names its basis.
 - `POST /colleges/list-builder` draws candidates from the whole catalog
@@ -1925,7 +2185,7 @@ failed after it started, which may still be billed: the whole reservation stays)
   month; company-wide `AI_DAILY_CEILING_USD` $100 per UTC day. Weighted input counts each
   token at its price relative to the model's uncached input (cache reads at the model's
   read ratio, writes at 2x until the 5m/1h split is recorded). A system job reserves its
-  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000) and the company
+  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000, `catalog-proposals` 500) and the company
   line; `budget-subjects.test.ts` fails on a budget charged to a made-up account.
 - **Refusals:** a user cap answers 429 "You've hit today's AI limit. It resets in 5
   hours." (hours to 00:00 UTC, rounded up) or "Monthly AI usage limit reached."; the
@@ -2256,7 +2516,47 @@ turns action items into tasks through `POST /tasks`, so RLS, limits and notifica
 practice's "AI summaries" switch gates it (`"meeting-summary"` is in `SUMMARY_MODULES`). The essay
 shape test is deliberately not applied: a counselor's meeting record is first person ("I told Maya").
 **Deploy order:** either. `20261028000007` adds the `ai_runs` label; before it, only the audit row is skipped.
-Tests: `test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
+**Transcripts** (`kind: "transcript"`, optional: absent means notes, so old clients are unchanged). The counselor
+pastes a transcript in `rawNotes` or sends the exported file as `file: { name, type?, data }` (base64, at most 2 MB;
+`.vtt`, `.srt`, `.txt`/`.md` or `.docx` through `readTranscriptFile` in `lib/documentText.ts`; the essay readers still
+refuse `.vtt`/`.srt`), never both. This route alone takes a 3 MB body. `lib/transcript.ts` (pure) strips the WebVTT/SRT
+structure (header, NOTE/STYLE/REGION blocks, cue ids, timings with their settings, `<v>`/`<c>`/`<i>` and timestamp
+tags, `{\an8}`, entities, BOM, CRLF), drops caption lines the previous cue already showed, merges a speaker's
+consecutive lines (a repeat is dropped only when the same speaker said it in this cue or the one before). **Who is a
+speaker (heuristic):** a `<v ...>` voice tag (up to 200 characters) always. In a VTT/SRT cue, a leading "label:" of
+up to 80 characters (any letters, CJK included, digits, spaces and `, . ' - ( ) [ ] & / @ _ + | – — ·`) is a speaker
+on its **first** cue when it is short (five words or fewer, separators like "-", "&", "|" not counted: "maya chen",
+"Maya's iPad", "iPhone 12", "Mom and Dad", "Jamal - Lincoln HS", "[Mom]", "李明"), name-shaped (every word outside
+nested parentheses and brackets capitalised, a particle such as de/van/bin, "and", or a number, at most six words:
+"Chen, Maya", "Maya Chen (Lincoln High School student)") or an email; a longer label that isn't name-shaped only when
+it starts two or more cues. Never a whole-label prose heading (Note(s), Agenda, Summary, Remember, Reminder, Total, Key
+Points, Follow Up, Open Questions, Action Items, Next Steps, Deadline(s), Time, Yes, No, Wait, Step/Option/Part/Q/A N,
+day and month names... "Total Recall Productions" is still a name), nor one ending in "!"/"?". The hard rule (a display
+name never reaches the model) outranks prose: a short "The plan: apply early" line is read as a speaker. **It is still
+a heuristic**: a label that fails every rule and starts only one cue reaches the model as text, and names spoken inside
+the talk pass as they do in pasted notes. In pasted text (no timings) it stays conservative: leading timestamps are
+stripped and "label:" is a speaker only when the same label starts two or more lines and is either a short label or
+"Last, First" (one or two capitalised words each side); Otter's "Name  0:03" headers too. **Speaker labels never reach the model**: they are
+display names the meeting tool wrote, not words the counselor typed, so each becomes "Speaker 1", "Speaker 2"... in
+order of first appearance, and only the answer maps them back (`restoreSpeakers`; the legend is returned as
+`transcript.speakers`). Names said inside the talk pass as in notes. Limits: 600,000 characters before cleaning,
+200,000 after (413 `transcript_too_long`), fewer than 20 spoken characters is 400 `transcript_empty`, a wrong file 400
+`transcript_file_type` / `transcript_unreadable`. **Map-reduce** (`summarizeTranscript`): whole sentences packed into
+parts of at most 15,000 characters (a new part prefers a speaker turn past 14,000; a run with no punctuation is cut
+at a space; a part starting mid-turn repeats its label), at most 15 parts; one `runStructured` call per part (three at
+a time, the same tool schema, "part i of n") and one merge call, so at most 16 calls, each through the AI switch, the
+budget gate and its own `ai_runs` row (the 16-call bound, 15 parts + 1 merge, was reviewed and accepted
+2026-11-08). The first failure stops the run (no new part starts, nothing merged, nothing
+stored; the usual 503/429/403). Every answer, each part's and the merge's, goes through `cleanSummary` against the
+**whole** transcript's spoken words (`speakerLabels: true` lets "Speaker 2" through without letting its digit count
+as a stated figure); names put back into the answer are cut to the 4,000-character cap at a sentence end or a space,
+never mid-word. The practice switch is checked before any call, and transcripts are also capped at 20 an hour
+per counselor. The answer adds `transcript: { characters, parts, modelCalls, speakers }`. Transcript text is never
+logged (`serializeReq` in `lib/requestLog.ts` logs no body). **Test double:** `MEETING_SUMMARY_FAKE=fixture`
+(refused outside `NODE_ENV` development and test, like `RESEARCH_FAKE`; CI sets it on the persona API) answers a
+part with its first line and the merge with the parts joined, still through `cleanSummary`, for notes too. The
+notetaker integration stays off; no migration. Tests: `test/unit/transcript-clean.test.ts`,
+`test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
 
 ### The essay restriction is a hard product constraint
 
@@ -2310,9 +2610,39 @@ produce **drafts**. The first two are written with `status: 'draft'` /
 `'counselor-review'`; `/ai/parent-alert` persists nothing at all and returns
 text the counselor edits before sending through
 `/accountability/parent-alerts`, which is where quiet hours, the anti-spam
-throttle and `student_alert_prefs` are enforced. Nothing in this API sends any
-of them. `/reports/family/:id/sent` records a send that already happened — it
-does not perform one.
+throttle and `student_alert_prefs` are enforced. Nothing sends any of them on
+its own. A family report goes out only through the counselor's explicit
+`POST /reports/family/:id/approve-send` `{ confirm: true }` (the student's own
+counselor, approved): it re-decides the recipients on the server
+(`lib/familyReportSend.ts`: `copy_parents` failing closed, then guardians with
+`alerts_enabled` and `receives_reports`, on their `preferred_channel` where an
+address is on file), claims the draft `draft -> sent` once (a second call is a
+409, never a second send), and writes one scheduled `student_messages` row per
+channel (audience parent, `family_report_id` set, `20261111000013`), so
+`dispatchDueMessages` sends it with its usual re-checks (roster, approval,
+alerts, same address, quiet hours, daily cap) and, for a row carrying a report,
+each guardian's `receives_reports` too (switched off since approval: dropped,
+or the row cancelled with the reason; a read error holds it). Without that
+migration approve-send answers 503 `family_report_send_unavailable`.
+`GET /reports/family/:id/recipients` shows who would receive it, the exact text
+each would read, and who is skipped and why; `POST /reports/family/:id/dismiss`
+discards a draft, and so does `DELETE` on a weekly one (archived, not deleted,
+so the job doesn't draft that week again). `/reports/family/:id/sent` still only records a send that
+happened elsewhere. **The weekly digest** (`lib/weeklyDigest.ts`, rules in
+`lib/weeklyDigestContent.ts`) rides `POST /communication/internal/dispatch` under
+the `weekly-digest` lease (kept an hour after a clean run): for approved
+counselors' active students whose effective `weekly_digest` is `draft` it writes
+one `family_reports` draft (kind `weekly`, the last completed Monday-Sunday in
+`profiles.timezone`, else America/New_York; the unique index makes re-runs a
+no-op) plus a `report` work item. One student's failure is counted
+(`failedStudents`) and the rest of the roster carries on; only a counselor-level
+read failure releases the lease early. Deterministic, no model: tasks finished
+(visible to the student; "finished in the week" is a complete task updated in
+it), tasks overdue or due in the next two weeks, college deadlines in those two
+weeks, and essay word-count movement from `progress_events`, first name only,
+an essay named by kind and school, never its title, prompt or text. A week with
+nothing to report gets no draft. The job never sends. Tests:
+`test/unit/weekly-digest.test.ts`, `test/integration/weekly-digest.test.mjs`.
 
 `/ai/file-filing` suggests a folder and never moves a file. It verifies the
 model's `folderId` against the list it was offered and drops to low confidence
@@ -3429,6 +3759,45 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
+  **Bulk export** (`lib/studentExport.ts`, `lib/csv.ts`, `lib/driveExport.ts`; no migration):
+  `POST /account/export/students` `{ studentIds }` (1-25 uuids, counselor, approved only like the
+  per-student export) returns, per id on the caller's caseload (`caseloadStudentIds`, past 250 the same
+  rule asked about these ids), the per-student export's JSON, a CSV per table with rows plus `profile`
+  (`toCsv`: RFC 4180, CRLF; any string cell starting with `= + - @`, tab or CR, after leading white space
+  or as a full-width look-alike, gets a leading `'`; typed numbers are left alone) and `documents` (name,
+  kind, path, link). Any other id, another practice's student or a random uuid, is exactly
+  `{ id, status: "not_found" }` and is never read. File bytes are never included (`filesIncluded: false`,
+  `filesNote`). Cost-based limit: one unit per distinct id from 1,000 an hour (40 batches of 25, so a roster of up to 1,000
+  exports in one sitting; the app (11c) can loop the whole roster) (`account:export-batch:<id>`,
+  `consumeUnits`, spent before reading, also when refused: 429 `export_rate_limited` with
+  `retryAfterSeconds` and `Retry-After`, an hour, the window's longest wait); it never touches
+  the per-student export's 60 an hour. **Every export table read is paged** (`lib/pagedRead.ts`:
+  1,000 rows a page in primary-key order, `ORDER_KEYS` for the tables keyed by student, until a short
+  page or 5,000 rows a table), because PostgREST's `max_rows` (1,000) silently cut each read before; at
+  the cap a one-row probe decides, and only a table really cut is listed in `truncated` (in the student's
+  JSON, on the batch entry, and `truncated: [{ id, tables }]` on the batch; the self export lists
+  `roster` / `practice.*`). This applies to all three exports. **Size**: a batch answer is at most
+  20,000 rows and 10 MB of JSON plus CSV. A student over that alone (their read stops early,
+  `pageGuard`) is `{ id, status: "too_large" }` and the batch goes on: **the app (11c) then fetches that
+  student with `GET /account/students/:id/export`**, which has no batch cap (its 60 an hour applies).
+  Students that each fit but not together make the batch 413 `export_too_large`: retry with fewer.
+  Paging stops only on an empty page (never a short one, so a lower `max_rows` can't cut a table), but
+  offset paging is not snapshot-consistent: a row inserted or deleted between pages can be duplicated or
+  missed at a page boundary. **For 11c:** the `GET /account/students/:id/export` fallback and the self
+  export have no size guard (up to 5,000 rows for each of the ~60 tables).
+  `POST /account/export/drive` `{ studentIds }` or `{ scope: "roster-summary" }` (whole caseload, at most
+  250, else 413 `roster_too_large`; 10 an hour) creates ONE Google Sheet "Meridies export <date>" in the caller's Drive under the
+  existing `drive.file` scope (multipart CSV upload converted to Sheets): name, email, grad year,
+  status, counts of colleges, tasks, documents, essays and meetings. `{ webViewLink, title, rows, skipped }`
+  (`skipped`: students whose profile row the caller can't read, left off the Sheet);
+  409 `drive_not_granted` (not connected, reconnect needed, or no drive.file), 502 `drive_failed`, 503
+  `drive_unavailable` (no Google settings). Only the HTTP status is ever logged, never the CSV or a
+  token; no path segment carries a token, so `lib/requestLog.ts` needs nothing. `DRIVE_EXPORT_FAKE=fixture`
+  (development/test only, refused at boot otherwise) stands in for Google from the caller's
+  `integration_tokens` row (`account_email` starting `drive-fail` answers 502). A shared (collaborator)
+  student's profile row is not readable through profiles RLS, so their export has `profile: null` and
+  the Sheet leaves them out (counted in `skipped`). Tests: `test/unit/csv.test.ts`, `export-paging.test.ts`, `student-export-batch.test.ts`,
+  `drive-export.test.ts`, `test/integration/account-export.test.mjs` (API with `DRIVE_EXPORT_FAKE=fixture`).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
   user; a counselor with an active roster or an owned firm is refused, and a
   firm member with any student, archived included, is told to ask an owner or
@@ -3600,6 +3969,7 @@ npm run dev               # http://localhost:4000
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
 | `IMPORTS_ROLLOUT` / `IMPORTS_PILOT` | The Import page: `off`, `pilot` (default; only the practices in `IMPORTS_PILOT`, firm or solo counselor ids, comma-separated) or `all`. Ready to apply is never gated |
 | `IMPORTS_AI` | `on` (default) or `off`: the AI column mapping's kill switch |
+| `AGREEMENTS_ENABLED` | `true` turns on agreements (`/agreements`, `/agree/:token`); default off, every route 404 `agreements_off`. Keep off in production until the consent wording in `lib/agreementConsent.ts` is reviewed |
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |
