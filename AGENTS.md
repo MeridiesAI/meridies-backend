@@ -103,6 +103,7 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
+│   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
@@ -164,6 +165,7 @@ src/
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
+│   ├── taskSets.ts        # /task-sets   saved task sets: CRUD, apply to students or a class year
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
@@ -587,6 +589,29 @@ forget it.
   real fault) mean that without the file the template list reads the older columns and every picker works, the stage
   routes answer 503 `stage_templates_unavailable`, a `templateId` is accepted and not remembered, and the DTO's new
   fields read null. Tests: `test/unit/stage-templates.test.ts`, `test/integration/stage-templates.test.mjs`.
+- **Saved task sets** (`20261111000005`; `lib/taskSets.ts`, `routes/taskSets.ts`, `createTaskForStudent` in `routes/tasks.ts`).
+  A set is a counselor's named list of 1-30 items (title, kind, instructions, target words, stages), each due RELATIVELY:
+  `dueOffsetDays` (0-730 days after the apply date in the counselor's time zone) or `dueMonth`/`dueDay` (the next
+  occurrence, today included; Feb 29 is Feb 28 in a year without one), never both. `task_sets` is owner-written
+  (`task_sets_owner`, the email-templates model); `shared: true` stores the owner's current firm in `firm_id` and every
+  approved counselor of that firm reads it (and may apply it to their own students); only the owner changes or deletes
+  it. `POST /task-sets/:id/apply` `{ studentIds (1-100) | classYear "YYYY", notifyEmail? }` (20 an hour): a class year is
+  resolved on the server from the caller's ACTIVE roster (`profiles.grad_year`, archived left out, collaborators' students
+  not included); every student goes through `resolveStudentId(..., "edit")` and a refusal is that student's `error`, never
+  the batch's. Each item becomes one ordinary counselor task through the Create task button's own code
+  (`createTaskForStudent`, which `POST /tasks` also calls), marked `deliverables.task_set_id` / `task_set_item`; a UNIQUE
+  partial index on (student, set, item) makes a second apply a no-op (read first, a 23505 race also reads as
+  `already-assigned`); a CHECK keeps the marker on counselor tasks only; deleting a set keeps its tasks (marker cleared).
+  The answer is `{ created, alreadyAssigned, failed, refused, emailThrottled, results: { [studentId]: StudentResult +
+  items[] } }`. Email: one assignment email per student per apply (the first task made; every task still gets its in-app
+  notice), and at most `TASK_SET_EMAIL_DAILY_CAP` (200) a day per counselor (`task-set-email:<id>`); past it the task is
+  made and the email skipped. No texts. **Firm roster:** `GET /management/firm-roster` (owner/admin only, 403 otherwise)
+  reads `firm_roster()` (SECURITY DEFINER, refuses anyone but an approved owner/admin of their current firm with 42501):
+  every active student of the firm's consultants as `{ id, name, gradYear, counselorId }`, plus `consultants` from
+  `firm_consultants()` for the filter. Names only: it does not widen `can_view_student`. **Deploy order:** either; not in
+  `REQUIRED_SCHEMA`. Without the file the set routes answer 503 `task_sets_unavailable` and the roster 503
+  `firm_roster_unavailable`; `POST /tasks` never names the new columns. Tests: `test/unit/task-sets.test.ts`,
+  `test/integration/task-sets.test.mjs`.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
