@@ -2226,18 +2226,25 @@ counselor, approved): it re-decides the recipients on the server
 `alerts_enabled` and `receives_reports`, on their `preferred_channel` where an
 address is on file), claims the draft `draft -> sent` once (a second call is a
 409, never a second send), and writes one scheduled `student_messages` row per
-channel (audience parent), so `dispatchDueMessages` sends it with its usual
-re-checks (roster, approval, alerts, same address, quiet hours, daily cap).
+channel (audience parent, `family_report_id` set, `20261111000013`), so
+`dispatchDueMessages` sends it with its usual re-checks (roster, approval,
+alerts, same address, quiet hours, daily cap) and, for a row carrying a report,
+each guardian's `receives_reports` too (switched off since approval: dropped,
+or the row cancelled with the reason; a read error holds it). Without that
+migration approve-send answers 503 `family_report_send_unavailable`.
 `GET /reports/family/:id/recipients` shows who would receive it, the exact text
 each would read, and who is skipped and why; `POST /reports/family/:id/dismiss`
-discards a draft. `/reports/family/:id/sent` still only records a send that
+discards a draft, and so does `DELETE` on a weekly one (archived, not deleted,
+so the job doesn't draft that week again). `/reports/family/:id/sent` still only records a send that
 happened elsewhere. **The weekly digest** (`lib/weeklyDigest.ts`, rules in
 `lib/weeklyDigestContent.ts`) rides `POST /communication/internal/dispatch` under
 the `weekly-digest` lease (kept an hour after a clean run): for approved
 counselors' active students whose effective `weekly_digest` is `draft` it writes
 one `family_reports` draft (kind `weekly`, the last completed Monday-Sunday in
 `profiles.timezone`, else America/New_York; the unique index makes re-runs a
-no-op) plus a `report` work item. Deterministic, no model: tasks finished
+no-op) plus a `report` work item. One student's failure is counted
+(`failedStudents`) and the rest of the roster carries on; only a counselor-level
+read failure releases the lease early. Deterministic, no model: tasks finished
 (visible to the student; "finished in the week" is a complete task updated in
 it), tasks overdue or due in the next two weeks, college deadlines in those two
 weeks, and essay word-count movement from `progress_events`, first name only,

@@ -38,6 +38,7 @@ import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
 import { loadPracticeSettings } from "../lib/practiceSettings.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { toFamilyReport, toNarrativeFlag } from "../lib/serialize.js";
 
 type Row = Record<string, unknown>;
@@ -316,6 +317,8 @@ export default async function reportRoutes(app: FastifyInstance) {
           status: "scheduled",
           scheduled_for: sentAt,
           hold_reason: "Approved family report: it goes out with the next scheduled send",
+          // Dispatch re-checks each guardian's receives_reports for a row that carries a report.
+          family_report_id: id,
         }));
       const { data: written, error: insertError } = await request.db.from("student_messages").insert(rows).select("id, channel, scheduled_for");
       if (insertError) {
@@ -327,6 +330,10 @@ export default async function reportRoutes(app: FastifyInstance) {
           .eq("status", "sent");
         if (undoError) request.log.error({ code: undoError.code }, "approve-send: draft restore failed");
         if (insertError.code === "54000") throw tooManyRequests("You've sent a lot of family messages today.");
+        // Without 20261111000013 the send couldn't re-check receives_reports at dispatch: refuse rather than send.
+        if (isResultsNotApplied(insertError)) {
+          throw new HttpError(503, "Sending family reports isn't switched on yet", "family_report_send_unavailable");
+        }
         throw fromPostgrest(insertError);
       }
 
@@ -340,7 +347,7 @@ export default async function reportRoutes(app: FastifyInstance) {
           action: "family_report.approve_send",
           entity_type: "family_report",
           entity_id: id,
-          metadata: { messages: (written ?? []).length, recipients: plan.recipients.length },
+          metadata: { messageIds: ((written ?? []) as Row[]).map((m) => String(m.id)), recipients: plan.recipients.length },
         });
         if (auditError) request.log.warn({ code: auditError.code }, "approve-send: audit insert failed");
       }
@@ -387,6 +394,16 @@ export default async function reportRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
       await resolveStudentId(request, owner, "edit");
+
+      // A weekly digest is archived, not deleted: its row is what stops the hourly job drafting that week again.
+      const { data: kindRow, error: kindError } = await request.db.from("family_reports").select("kind").eq("id", id).maybeSingle();
+      if (kindError) throw fromPostgrest(kindError);
+      if (kindRow?.kind === "weekly") {
+        const { error: archiveError } = await request.db.from("family_reports").update({ status: "archived" }).eq("id", id);
+        if (archiveError) throw fromPostgrest(archiveError);
+        await closeWorkItems(request, id);
+        return { deleted: true, archived: true };
+      }
 
       const { error } = await request.db.from("family_reports").delete().eq("id", id);
       if (error) throw fromPostgrest(error);

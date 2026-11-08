@@ -295,3 +295,17 @@ test("a report's text is its summary, or its body, kept to one text's length", (
   assert.ok(long.endsWith("…"));
   assert.equal(smsTextOf({ title: "Title only", summary: "  ", body: null }), "Title only");
 });
+
+// ---- Dispatch: a family report's message re-checks receives_reports ------------------------------------------------
+
+import { reportRecipientsStillOn } from "../../src/lib/studentMessages.js";
+
+test("a family report's message keeps only guardians who still receive reports", () => {
+  const r = (id: string) => ({ kind: "guardian" as const, id, name: id, email: `${id}@x.test`, phone: null });
+  const kept = reportRecipientsStillOn([r("g1"), r("g2"), r("g3")], [
+    { id: "g1", receives_reports: true },
+    { id: "g2", receives_reports: false },
+  ]);
+  assert.deepEqual(kept.map((x) => x.id), ["g1"]);
+  assert.deepEqual(reportRecipientsStillOn([r("g1")], [{ id: "g1", receives_reports: null }]), []);
+});

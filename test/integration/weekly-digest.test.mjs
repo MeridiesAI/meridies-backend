@@ -47,7 +47,7 @@ const task = (s, title, { status = "not-started", due = null, visible = true, up
        values ('${s.id}', 'custom', '${q(title)}', '${status}', ${due ? `'${due}'::date` : "null"}, ${visible}, 'counselor'${updatedAt ? `, ${updatedAt}` : ""})`);
 const doneInWeek = (s, title, visible = true) => task(s, title, { status: "complete", visible, updatedAt: inWeek });
 const reports = (s) => count(`select count(*) from public.family_reports where student_id = '${s.id}' and kind = 'weekly' and period_start = '${W0}'`);
-const reportOf = async (s) => JSON.parse(await sql(`select row_to_json(r) from public.family_reports r where student_id = '${s.id}' and kind = 'weekly' and period_start = '${W0}'`));
+const reportOf = async (s) => JSON.parse((await sql(`select row_to_json(r) from public.family_reports r where student_id = '${s.id}' and kind = 'weekly' and period_start = '${W0}'`)) || "null");
 const messages = (s) => count(`select count(*) from public.student_messages where student_id = '${s.id}'`);
 
 // ---- Fixtures -------------------------------------------------------------------------------------------------
@@ -103,6 +103,11 @@ const pia = await student(P, "pia", "Pia Pending");
 await doneInWeek(pia, "Done, counselor unapproved");
 
 const O = await counselor("other", "draft");
+const delMe = await student(A, "delete", "Del Deleted");
+await doneInWeek(delMe, "Done, report to be deleted");
+const late = await student(A, "late", "Lee Late");
+await doneInWeek(late, "Done, parent opts out after approval");
+await sql(`insert into public.guardians (student_id, full_name, email, preferred_channel) values ('${late.id}', 'Late Parent', '${TAG}-late@test.local', 'email')`);
 
 // ---- The job ------------------------------------------------------------------------------------------------------
 {
@@ -206,6 +211,10 @@ const rep = await reportOf(ana);
   check("the report is marked sent, with when", after.status === "sent" && after.sent_at);
   check("the work item is done", (await count(`select count(*) from public.counselor_work_items where family_report_id = '${rep.id}' and done and done_at is not null`)) === 1);
   check("who approved it is recorded", (await count(`select count(*) from public.audit_log where action = 'family_report.approve_send' and entity_id = '${rep.id}' and actor_id = '${A.id}'`)) === 1);
+  const ids = rows.map((m) => m.id).sort();
+  const audited = JSON.parse(await sql(`select coalesce(metadata->'messageIds', 'null'::jsonb) from public.audit_log where action = 'family_report.approve_send' and entity_id = '${rep.id}'`));
+  check("...with the message ids it created", JSON.stringify([...(audited ?? [])].sort()) === JSON.stringify(ids), JSON.stringify(audited));
+  check("every message row names its family report", rows.every((m) => m.family_report_id === rep.id));
 
   const again = await call(A.token, "POST", `/reports/family/${rep.id}/approve-send`, { confirm: true });
   check("a second approve is a 409", again.status === 409, `status ${again.status}`);
@@ -221,6 +230,64 @@ const rep = await reportOf(ana);
   const sentRows = JSON.parse(await sql(`select coalesce(json_agg(json_build_object('channel', channel, 'status', status)), '[]') from public.student_messages where student_id = '${ana.id}'`));
   check("the dispatcher picked both rows up", sentRows.every((m) => m.status !== "scheduled"), JSON.stringify(sentRows));
   check("...the email went to the email guardian only", (await count(`select count(*) from public.message_deliveries where student_id = '${ana.id}' and channel = 'email'`)) === 1);
+}
+
+// ---- Two approvals at once, and a parent who opts out of reports after approval ---------------------------------------
+{
+  const lr = await reportOf(late);
+  const [a1, a2] = await Promise.all([
+    call(A.token, "POST", `/reports/family/${lr.id}/approve-send`, { confirm: true }),
+    call(A.token, "POST", `/reports/family/${lr.id}/approve-send`, { confirm: true }),
+  ]);
+  check("two approvals at once: exactly one 200 and one 409", [a1.status, a2.status].sort().join(",") === "200,409", `${a1.status} ${a2.status}`);
+  check("...and exactly one message row", (await messages(late)) === 1);
+  await sql(`update public.guardians set receives_reports = false where student_id = '${late.id}'`);
+  await dispatch();
+  const m = JSON.parse((await sql(`select row_to_json(m) from public.student_messages m where student_id = '${late.id}'`)) || "{}");
+  check("a parent who turned reports off after approval: the message is cancelled, with the reason", m.status === "cancelled" && /reports/i.test(m.hold_reason ?? ""), JSON.stringify([m.status, m.hold_reason]));
+  check("...and nothing was delivered", (await count(`select count(*) from public.message_deliveries where student_id = '${late.id}'`)) === 0);
+}
+
+// ---- Deleting a weekly draft archives it ----------------------------------------------------------------------------------
+{
+  const d = await reportOf(delMe);
+  const r = await call(A.token, "DELETE", `/reports/family/${d.id}`);
+  check("deleting a weekly draft answers ok", r.status === 200, `status ${r.status} ${JSON.stringify(r.body)}`);
+  check("...and keeps it, archived", (await count(`select count(*) from public.family_reports where id = '${d.id}' and status = 'archived'`)) === 1);
+  check("...its work item is done", (await count(`select count(*) from public.counselor_work_items where family_report_id = '${d.id}' and done`)) === 1);
+  await dispatch();
+  check("the next run doesn't draft that week again", (await reports(delMe)) === 1 && (await reportOf(delMe))?.id === d.id && (await reportOf(delMe))?.status === "archived");
+  const adhoc = await sql(`with r as (insert into public.family_reports (student_id, counselor_id, title, kind, body, status) values ('${delMe.id}', '${A.id}', 'Ad hoc', 'ad-hoc', 'Body', 'draft') returning id) select id from r`);
+  const r2 = await call(A.token, "DELETE", `/reports/family/${adhoc}`);
+  check("another kind of report is still deleted", r2.status === 200 && (await count(`select count(*) from public.family_reports where id = '${adhoc}'`)) === 0);
+}
+
+// ---- One student's failure doesn't stop the rest of the roster -------------------------------------------------------------
+{
+  const F = await counselor("fail", "draft");
+  const fs = [];
+  for (const n of ["one", "two", "three", "four"]) {
+    const s = await student(F, `fail-${n}`, `Fay ${n}`);
+    await doneInWeek(s, `Done ${n}`);
+    fs.push(s);
+  }
+  const broken = fs[1];
+  const fn = `${TAG.replace(/[^a-z0-9]/g, "")}_fail_${Date.now()}`;
+  await sql(`create function public.${fn}() returns trigger language plpgsql as $$ begin raise exception 'digest test failure'; end $$`);
+  await sql(`create trigger ${fn} before insert on public.family_reports for each row when (new.student_id = '${broken.id}') execute function public.${fn}()`);
+  let r;
+  try {
+    r = await dispatch();
+  } finally {
+    await sql(`drop trigger if exists ${fn} on public.family_reports`);
+    await sql(`drop function if exists public.${fn}()`);
+  }
+  check("one student failing is counted alone", r.body.weeklyDigest?.failedStudents === 1 && r.body.weeklyDigest?.failedCounselors === 0, JSON.stringify(r.body.weeklyDigest));
+  const others = fs.filter((s) => s !== broken);
+  const drafted = await Promise.all(others.map(reports));
+  check("...the rest of that counselor's roster still gets drafts", drafted.every((n) => n === 1), JSON.stringify(drafted));
+  check("...the failing student has none", (await reports(broken)) === 0);
+  check("...and the hourly lease stays held", (await count(`select count(*) from private.job_leases where name = 'weekly-digest' and expires_at > now() + interval '50 minutes'`)) === 1);
 }
 
 // ---- Dismiss ---------------------------------------------------------------------------------------------------------
