@@ -94,6 +94,15 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // lib/inactivityAlerts.ts: runInactivityPass rides on the scheduled sweep (acts for no request); it asks
+  // approvedCounselorIds before anything, reads each approved counselor's own roster by profiles.counselor_id, and
+  // writes only student_inactivity_alerts and that counselor's own notification and email (a first name and a number
+  // of days). touchLastActive stamps the caller's own profiles.last_active_at, keyed by the row authenticate loaded.
+  "lib/inactivityAlerts.ts",
+  // lib/essayNotice.ts: inside a student's own request, after their RLS client saved the essay: tells only the
+  // caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request value) after
+  // asking isCounselorApproved; writes one notification (no essay text) and reads that counselor's settings and email.
+  "lib/essayNotice.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
