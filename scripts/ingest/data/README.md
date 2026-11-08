@@ -41,19 +41,39 @@ event's name, dates and place):
   is past); MOACAC (the 2027 conference page says "stay tuned", no dates); OACAC
   (its own page still shows March 2026; the 2027 conference is the joint one
   with Kentucky above). Michigan's MACAC site refused an automated read (403),
-  so it has no row. IECA's members-only calendar needs a login.
+  so it has no row. IECA's members-only calendar needs a login (reported by the
+  compiler, not independently verified).
 - **Left out on purpose:** past events (NACAC's Oct. 8-10, 2026 conference in
   Minneapolis), college fairs, and training institutes and half-day forums
   (HECA's January 2027 PDI, the affiliates' summer and winter institutes,
   Minnesota's January 2027 Winter Forum, International ACAC's Europe Regional
   Institute). Add them as their own kinds if the hub should list them.
-- **Notes on a few rows:** the NACAC 2027 conference page's URL says
-  `nacac-conference-2026` but the page is the 2027 event. IECA's European
-  symposium page is members-only, so its row points at IECA's public symposia
-  page, which lists the dates. The state or city on a few rows is the named
-  venue's, not spelled out on the page (Punahou School in Honolulu; Cleveland
-  for HECA); the Kentucky-Ohio row keeps the page's "Cincinnati Marriott at
-  RiverCenter".
+- **What a row says:** `place` and `description` say only what the row's own
+  `url` page states. Where a page names a venue or a city without a state, the row
+  has just that (Punahou School; Keuka College; St. Paul College; Boise State
+  University; Hershey Lodge & Convention Center; Hilton Cleveland Downtown,
+  Cleveland), and the Kentucky-Ohio row spells its venue as that page does
+  ("Cincinnati Marriot at RiverCenter"). A state code (FL, IL, IA, RI) only
+  abbreviates a state the page spells out. `time_zone` is the zone of the stated
+  place; the loader would otherwise default it to America/New_York, and these
+  all-day rows show no clock time.
+- **Dates that rest on a looser page:** TACAC's page says presenters must be
+  available "either February 21 or February 22, 2027" and puts a regional college
+  fair on Tuesday evening, February 23, "after the conference", so the row runs
+  Feb. 21-22 (the page prints no single date range). The GPACAC row leaves out
+  the conference's theme because the cited schedule page does not state it.
+- **URLs:** the NACAC 2027 conference page's URL says `nacac-conference-2026` but
+  the page is the 2027 event. IECA's European symposium event page is members-only,
+  so its row points at IECA's public symposia page, which lists the dates. Dakota
+  ACAC's row points at its landing page, where the 2027 save-the-date sits.
+- **Not independently re-verified (bot-blocked for a second reader):** a second
+  reader got a Cloudflare 403 on iecaonline.com (5 rows: "IECA Regional Symposium:
+  Beyond the Traditional Path", "IECA Professional Member Retreat", "IECA Winter
+  Forum", "IECA European Regional Symposium", "IECA 2027 Annual Conference"),
+  nacacnet.org (2: "NACAC Asia Summit", "NACAC Conference 2027") and
+  wacac.org/events (1: "WACAC (Western) 2027 Annual Conference"), and an Apache 406
+  on rmacac.org (1: "RMACAC 2027 Annual Conference"). The compiler read all nine
+  on 2026-11-07, but re-read them in a browser before a production load.
 
 Refresh yearly: conference seasons are announced a year or so ahead, so each fall
 re-read the same organizers' pages and add next season's file (e.g.
