@@ -2171,8 +2171,15 @@ pastes a transcript in `rawNotes` or sends the exported file as `file: { name, t
 refuse `.vtt`/`.srt`), never both. This route alone takes a 3 MB body. `lib/transcript.ts` (pure) strips the WebVTT/SRT
 structure (header, NOTE/STYLE/REGION blocks, cue ids, timings with their settings, `<v>`/`<c>`/`<i>` and timestamp
 tags, `{\an8}`, entities, BOM, CRLF), drops caption lines the previous cue already showed, merges a speaker's
-consecutive lines, and in pasted text strips leading timestamps and reads "Name:" as a speaker only when the same
-label starts two or more lines (Otter's "Name  0:03" headers too). **Speaker labels never reach the model**: they are
+consecutive lines (a repeat is dropped only when the same speaker said it in this cue or the one before). **Who is a
+speaker:** a `<v ...>` voice tag (up to 200 characters, any text) always; in a VTT/SRT cue, a leading "label:" of up to
+80 characters (letters, digits, spaces and `, . ' - ( ) & / @ _ +`) that reads as a name: every word outside
+parentheses capitalised, a particle (de, van, bin...) or a number, at most six words ("Chen, Maya", "Maya Chen
+(Lincoln High School student)"), or an email, or a short label (five words, no comma) that starts two or more cues;
+never a stoplisted word ("Note", "Agenda", "Next steps"...) or one ending in "!"/"?". So "Here is the plan for
+October: retake the SAT" stays text. In pasted text (no timings) it stays conservative: leading timestamps are
+stripped and "label:" is a speaker only when the same label starts two or more lines and is either a short label or
+"Last, First" (one or two capitalised words each side); Otter's "Name  0:03" headers too. **Speaker labels never reach the model**: they are
 display names the meeting tool wrote, not words the counselor typed, so each becomes "Speaker 1", "Speaker 2"... in
 order of first appearance, and only the answer maps them back (`restoreSpeakers`; the legend is returned as
 `transcript.speakers`). Names said inside the talk pass as in notes. Limits: 600,000 characters before cleaning,
@@ -2181,10 +2188,12 @@ order of first appearance, and only the answer maps them back (`restoreSpeakers`
 parts of at most 15,000 characters (a new part prefers a speaker turn past 14,000; a run with no punctuation is cut
 at a space; a part starting mid-turn repeats its label), at most 15 parts; one `runStructured` call per part (three at
 a time, the same tool schema, "part i of n") and one merge call, so at most 16 calls, each through the AI switch, the
-budget gate and its own `ai_runs` row. The first failure stops the run (no new part starts, nothing merged, nothing
+budget gate and its own `ai_runs` row (the 16-call bound, 15 parts + 1 merge, was reviewed and accepted
+2026-11-08). The first failure stops the run (no new part starts, nothing merged, nothing
 stored; the usual 503/429/403). Every answer, each part's and the merge's, goes through `cleanSummary` against the
 **whole** transcript's spoken words (`speakerLabels: true` lets "Speaker 2" through without letting its digit count
-as a stated figure). The practice switch is checked before any call, and transcripts are also capped at 20 an hour
+as a stated figure); names put back into the answer are cut to the 4,000-character cap at a sentence end or a space,
+never mid-word. The practice switch is checked before any call, and transcripts are also capped at 20 an hour
 per counselor. The answer adds `transcript: { characters, parts, modelCalls, speakers }`. Transcript text is never
 logged (`serializeReq` in `lib/requestLog.ts` logs no body). **Test double:** `MEETING_SUMMARY_FAKE=fixture`
 (refused outside `NODE_ENV` development and test, like `RESEARCH_FAKE`; CI sets it on the persona API) answers a

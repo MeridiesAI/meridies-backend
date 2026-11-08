@@ -228,3 +228,19 @@ test("the fake model echoes the transcript and passes the checks; it refuses pro
   assert.match(meetingSummaryFakeRefusal({ MEETING_SUMMARY_FAKE: "fixture", NODE_ENV: "staging" }) ?? "", /refusing/);
   assert.equal(meetingSummaryFakeRefusal({ MEETING_SUMMARY_FAKE: "fixture", NODE_ENV: "test" }), null);
 });
+
+test("the fake refuses an unset NODE_ENV too", () => {
+  assert.match(meetingSummaryFakeRefusal({ MEETING_SUMMARY_FAKE: "fixture", NODE_ENV: undefined }) ?? "", /refusing to start.*NODE_ENV=development or NODE_ENV=test/);
+});
+
+test("names put back never leave the summary cut mid-word or over the cap", async () => {
+  const p = prepareTranscript("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<v Maximiliana Concepcion Featherstonehaugh-Worthington>We will finish the essay plan.</v>\n");
+  const long = "Speaker 1 will finish the essay plan. ".repeat(105);
+  const out = await summarizeTranscript(p, { call: async (step) => step.validate({ summary: long, actionItems: [] }) });
+  assert.ok(out.draft.summary.length <= MAX_SUMMARY, `length ${out.draft.summary.length}`);
+  assert.ok(/[.!?]$/.test(out.draft.summary) || / [A-Za-z]+$/.test(out.draft.summary));
+  assert.ok(!out.draft.summary.includes("Speaker 1"));
+  const words = out.draft.summary.split(" ");
+  const last = words.at(-1)!.replace(/[.!?]$/, "");
+  assert.ok(["plan", "essay", "the", "finish", "will", "Maximiliana", "Concepcion", "Featherstonehaugh-Worthington"].includes(last), `ends with "${last}"`);
+});

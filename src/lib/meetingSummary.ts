@@ -247,11 +247,21 @@ export type SummaryCall = (step: SummaryStep) => Promise<MeetingSummaryDraft>;
 const PART_MAX_TOKENS = 1200;
 const MERGE_MAX_TOKENS = 1500;
 
+/** At most `max` characters, cut at a sentence end if one is near, else at a space: never mid-word. */
+function clampWords(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max + 1);
+  const sentence = Math.max(head.lastIndexOf(". "), head.lastIndexOf("! "), head.lastIndexOf("? "));
+  if (sentence >= max * 0.8) return head.slice(0, sentence + 1);
+  const space = head.lastIndexOf(" ");
+  return (space > 0 ? head.slice(0, space) : text.slice(0, max)).trim();
+}
+
 function restoreDraft(draft: MeetingSummaryDraft, speakers: SpeakerLegend): MeetingSummaryDraft {
   return {
-    summary: restoreSpeakers(draft.summary, speakers).slice(0, MAX_SUMMARY).trim(),
+    summary: clampWords(restoreSpeakers(draft.summary, speakers).trim(), MAX_SUMMARY),
     actionItems: draft.actionItems.map((a) => {
-      const title = restoreSpeakers(a.title, speakers).slice(0, MAX_ACTION_TITLE);
+      const title = clampWords(restoreSpeakers(a.title, speakers), MAX_ACTION_TITLE);
       return a.dueHint ? { title, dueHint: a.dueHint } : { title };
     }),
   };

@@ -56,8 +56,13 @@ export const transcriptTooLong = (chars?: number) =>
 const TIMING = /^\s*(?:\d+:)?\d{1,2}:\d{2}[.,]\d{1,3}\s*-->/;
 const LEADING_TIME = /^[[(]?(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d+)?[\])]?\s+/;
 const OTTER_HEADER = /^(.{1,40}?)(?:\s{2,}|\t+)(?:\d{1,2}:)?\d{1,2}:\d{2}$/;
-const LABEL_PREFIX = /^([^:]{1,40}?):\s+(.+)$/;
+const LABEL_PREFIX = /^([^:]{1,80}?):\s+(.+)$/;
 const LABEL_CHARS = /^[\p{L}\p{M}\d .'’\-()&/@_]+$/u;
+/** What a caption tool may write in a display name: commas, parentheses, emails with "+", periods, digits. */
+const WIDE_LABEL_CHARS = /^[\p{L}\p{M}\d .,'’\-()&/@_+]+$/u;
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Lower-case words a capitalised name may hold (de la Cruz, van der Berg, bin Salman). */
+const PARTICLES = new Set(["de", "da", "del", "della", "di", "du", "dos", "das", "van", "von", "der", "den", "la", "le", "bin", "binti", "al", "el", "y", "e"]);
 const NOT_SPEAKERS = new Set([
   "note", "notes", "nb", "ps", "re", "subject", "date", "time", "when", "where", "agenda", "summary", "action",
   "actions", "action items", "todo", "to do", "update", "question", "answer", "q", "a", "fyi", "important",
@@ -73,6 +78,40 @@ function isLabel(raw: string): boolean {
   if (!/^\p{L}/u.test(s) || !LABEL_CHARS.test(s)) return false;
   if (s.split(/\s+/).length > 5) return false;
   return !NOT_SPEAKERS.has(keyOf(s));
+}
+
+/** "Last, First" (each part one or two capitalised words): the shape a roster export writes. */
+function isCommaName(s: string): boolean {
+  return /^\p{Lu}[\p{L}\p{M}'’-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*)?, \p{Lu}[\p{L}\p{M}'’.-]*(?: \p{Lu}[\p{L}\p{M}'’.-]*){0,2}$/u.test(s.trim());
+}
+
+/** Every word, outside parentheses and around commas, is capitalised, a name particle, or a number: a name, not a sentence. */
+function isNameShaped(s: string): boolean {
+  const core = s.replace(/\([^)]{0,80}\)/g, " ").replace(/,/g, " ");
+  const words = core.split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 6) return false;
+  return words.every((w) => /^\p{Lu}/u.test(w) || PARTICLES.has(w.toLowerCase()) || /^\d+$/.test(w));
+}
+
+/**
+ * A caption cue's leading "label:" (VTT/SRT only). Meeting tools write a
+ * participant's display name there, which can be "Chen, Maya", "Maya Chen
+ * (Lincoln High School student)" or an email, so the bound is 80 characters
+ * of a wider set, with no word cap. A name must still read as one: name-shaped
+ * (above), an email, or the old short label repeated on two or more cues
+ * (`repeated`), so "Here is the plan for October: retake the SAT" stays text.
+ * Never a stoplisted word ("Note"), never ending in "!" or "?", and a final "."
+ * only on a short abbreviation ("Jr.", "M.").
+ */
+function isTimedLabel(raw: string, repeated: boolean): boolean {
+  const s = raw.trim();
+  if (s.length < 1 || s.length > 80) return false;
+  if (!/^\p{L}/u.test(s) || !WIDE_LABEL_CHARS.test(s)) return false;
+  if (NOT_SPEAKERS.has(keyOf(s))) return false;
+  if (/[!?]$/.test(s)) return false;
+  if (s.endsWith(".") && (s.split(/\s+/).at(-1)?.length ?? 0) > 4) return false;
+  if (EMAIL.test(s) || isNameShaped(s)) return true;
+  return repeated && isLabel(s);
 }
 
 /**
@@ -104,7 +143,7 @@ const squash = (s: string) => s.replace(/\s+/g, " ").trim();
 
 /** One line of caption or pasted text: the voice tag's speaker, and the text with markup and entities gone. */
 function cleanLine(line: string): { voice: string | null; text: string } {
-  const v = /<v(?:\.[^\s>]{0,40})?\s+([^>]{1,80})>/.exec(line);
+  const v = /<v(?:\.[^\s>]{0,40})?\s+([^>]{1,200})>/.exec(line);
   let text = line.replace(/\{\\[^}]{0,40}\}/g, "");
   text = stripTags(text);
   text = text.replace(/&nbsp;/gi, " ").replace(/&lrm;|&rlm;/gi, "");
@@ -113,9 +152,10 @@ function cleanLine(line: string): { voice: string | null; text: string } {
   return { voice: v ? squash(decodeEntities(v[1]!)) || null : null, text };
 }
 
-function labelOf(text: string): { label: string; rest: string } | null {
+/** The text's leading "label: rest", when `accept` says the label is a speaker. */
+function labelOf(text: string, accept: (label: string) => boolean): { label: string; rest: string } | null {
   const m = LABEL_PREFIX.exec(text);
-  if (!m || !isLabel(m[1]!)) return null;
+  if (!m || !accept(m[1]!.trim())) return null;
   return { label: m[1]!.trim(), rest: m[2]!.trim() };
 }
 
@@ -135,7 +175,7 @@ class TurnBuilder {
     }
     const last = this.lines.at(-1);
     if (last !== undefined) {
-      if (text === last || last.endsWith(" " + text)) return;
+      if (text === last) return;
       // A rolling caption that extends the line before it keeps only the longer line.
       if (text.startsWith(last + " ")) {
         this.lines[this.lines.length - 1] = text;
@@ -168,30 +208,49 @@ function parseTimed(lines: string[]): Turn[] {
   }
   if (cur.length) blocks.push(cur);
 
+  const cues = blocks
+    .filter((block) => {
+      const first = block[0]!.trim();
+      return !/^WEBVTT/.test(first) && !/^(NOTE|STYLE|REGION)(\s|$)/.test(first);
+    })
+    .map((block) => {
+      const at = block.findIndex((l) => l.includes("-->"));
+      const textLines = at >= 0 ? block.slice(at + 1) : block.filter((l) => !/^\s*\d+\s*$/.test(l));
+      return textLines.map((raw) => cleanLine(raw));
+    });
+
+  // How often each candidate label starts a line: a short label repeated across cues is a speaker.
+  const counts = new Map<string, number>();
+  for (const lines of cues) {
+    for (const { voice, text } of lines) {
+      const m = voice ? null : LABEL_PREFIX.exec(text);
+      if (m) counts.set(keyOf(m[1]!), (counts.get(keyOf(m[1]!)) ?? 0) + 1);
+    }
+  }
+  const accept = (label: string) => isTimedLabel(label, (counts.get(keyOf(label)) ?? 0) >= 2);
+
   const b = new TurnBuilder();
   let speaker: string | null = null;
   let prevCue = new Set<string>();
-  for (const block of blocks) {
-    const first = block[0]!.trim();
-    if (/^WEBVTT/.test(first) || /^(NOTE|STYLE|REGION)(\s|$)/.test(first)) continue;
-    const at = block.findIndex((l) => l.includes("-->"));
-    const textLines = at >= 0 ? block.slice(at + 1) : block.filter((l) => !/^\s*\d+\s*$/.test(l));
+  // A line is a repeat only when the same speaker said it in this cue or the one before.
+  const said = (who: string | null, line: string) => `${who === null ? "" : keyOf(who)}\u0000${line}`;
+  for (const lines of cues) {
     const thisCue = new Set<string>();
-    for (const raw of textLines) {
-      const { voice, text } = cleanLine(raw);
+    for (const { voice, text } of lines) {
       let line = text;
       if (voice) speaker = voice;
       else {
-        const lab = labelOf(line);
+        const lab = labelOf(line, accept);
         if (lab) {
           speaker = lab.label;
           line = lab.rest;
         }
       }
       if (!line) continue;
-      const seen = prevCue.has(line) || thisCue.has(line);
-      thisCue.add(line);
-      // Auto-captions repeat the previous cue's lines; a line already shown is dropped.
+      const key = said(speaker, line);
+      const seen = prevCue.has(key) || thisCue.has(key);
+      thisCue.add(key);
+      // Auto-captions repeat the previous cue's lines; a line the same speaker already showed is dropped.
       if (seen) continue;
       b.add(speaker, line, true);
     }
@@ -208,10 +267,12 @@ function parsePlain(lines: string[]): Turn[] {
     return h && isLabel(h[1]!) ? h[1]!.trim() : null;
   });
   const stripped = lines.map((l, i) => (headers[i] ? "" : cleanLine(l).text.replace(LEADING_TIME, "")));
-  // In free text a "Word:" is a speaker only when the same label starts two or more lines.
+  // In free text a "Word:" is a speaker only when the same label starts two or more lines, and it is either the
+  // short label shape (five words, no comma) or "Last, First". Anything else with a colon stays prose.
+  const plainLabel = (label: string) => isLabel(label) || (isCommaName(label) && !NOT_SPEAKERS.has(keyOf(label)));
   const counts = new Map<string, number>();
   for (const l of stripped) {
-    const lab = labelOf(l);
+    const lab = labelOf(l, plainLabel);
     if (lab) counts.set(keyOf(lab.label), (counts.get(keyOf(lab.label)) ?? 0) + 1);
   }
   const b = new TurnBuilder();
@@ -228,7 +289,7 @@ function parsePlain(lines: string[]): Turn[] {
       speaker = null;
       continue;
     }
-    const lab = labelOf(l);
+    const lab = labelOf(l, plainLabel);
     if (lab && (counts.get(keyOf(lab.label)) ?? 0) >= 2) {
       speaker = lab.label;
       b.add(speaker, lab.rest, false);
