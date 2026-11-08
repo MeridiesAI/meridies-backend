@@ -8,14 +8,18 @@
  *   else's student from a random uuid.
  * - Cost: one unit per distinct id asked for, from its own hourly bucket
  *   (`account:export-batch`), never the per-student export's 60 an hour.
- * - Size: the batch stops at `MAX_BATCH_ROWS` rows or `MAX_BATCH_BYTES` of
- *   JSON and the route answers 413 `export_too_large`, so one huge record
- *   can't take the API down; the app retries with a smaller batch.
+ * - Size: a batch answer is at most `MAX_BATCH_ROWS` rows and
+ *   `MAX_BATCH_BYTES` of JSON plus CSV. One student over that on their own is
+ *   `{ id, status: "too_large" }` (their read stops early, `pageGuard`) and the
+ *   batch goes on; the app fetches them with GET /account/students/:id/export,
+ *   which has no batch cap. Students that each fit but together don't make the
+ *   route answer 413 `export_too_large`; the app retries with a smaller batch.
  * - Files: uploaded files' bytes are never in an export. Each student's
  *   `documents` rows are listed by name so the app can say what to download.
  */
 
 import { csvCell, toCsv } from "./csv.js";
+import { ReadStopped } from "./pagedRead.js";
 
 type Row = Record<string, unknown>;
 
@@ -23,16 +27,16 @@ type Row = Record<string, unknown>;
 export const EXPORT_BATCH_MAX = 25;
 /** Units (students) a counselor may export in batches per hour: a 120-student roster is 5 batches. */
 export const BATCH_EXPORT_UNITS_PER_HOUR = 200;
-/** One batch's ceiling, across all its students: rows (each profile counts one) and JSON bytes. */
+/** One batch's ceiling, across all its students: rows (each profile counts one) and bytes of JSON plus CSV. */
 export const MAX_BATCH_ROWS = 20_000;
-export const MAX_BATCH_BYTES = 20 * 1024 * 1024;
+export const MAX_BATCH_BYTES = 10 * 1024 * 1024;
 /** The most students one roster-summary Sheet covers (caseloadStudentIds' own cap). */
 export const MAX_SUMMARY_STUDENTS = 250;
 
 export const FILES_NOT_INCLUDED_NOTE =
   "Uploaded files are not included in this export. Each student's documents are listed by name; download them from the student's Files.";
 
-export type StudentRecordExport = { profile: unknown; records: Record<string, Row[]>; notIncluded: string[] };
+export type StudentRecordExport = { profile: unknown; records: Record<string, Row[]>; notIncluded: string[]; truncated?: string[] };
 
 export type ExportedDocument = {
   id: string | null;
@@ -53,8 +57,10 @@ export type BatchStudent =
       documents: ExportedDocument[];
       rows: number;
       bytes: number;
+      truncated?: string[];
     }
-  | { id: string; status: "not_found" };
+  | { id: string; status: "not_found" }
+  | { id: string; status: "too_large" };
 
 const norm = (id: string) => id.toLowerCase();
 
@@ -122,6 +128,8 @@ export function assembleStudent(id: string, exported: StudentRecordExport, expor
     rows += tableRows.length;
   }
   const json = { exportedAt, kind: "student" as const, ...exported };
+  let bytes = Buffer.byteLength(JSON.stringify(json));
+  for (const text of Object.values(csv)) bytes += Buffer.byteLength(text);
   return {
     id,
     status: "ok",
@@ -129,7 +137,28 @@ export function assembleStudent(id: string, exported: StudentRecordExport, expor
     csv,
     documents: documentsOf(exported.records),
     rows,
-    bytes: Buffer.byteLength(JSON.stringify(json)),
+    bytes,
+    ...(exported.truncated?.length ? { truncated: exported.truncated } : {}),
+  };
+}
+
+/**
+ * A per-student read guard for `readPaged`'s `onPage`: throws ReadStopped once the student's rows pass
+ * `maxRows` or their JSON, doubled to stand for the CSV written from it, passes `maxBytes`. Shared by all
+ * of a student's table reads, so the first table over the line stops the rest at their next page.
+ */
+export function pageGuard(maxRows = MAX_BATCH_ROWS, maxBytes = MAX_BATCH_BYTES): (rows: Row[]) => void {
+  let rows = 0;
+  let bytes = 0;
+  let stopped = false;
+  return (page) => {
+    if (stopped) throw new ReadStopped();
+    rows += page.length;
+    if (page.length) bytes += 2 * Buffer.byteLength(JSON.stringify(page));
+    if (rows > maxRows || bytes > maxBytes) {
+      stopped = true;
+      throw new ReadStopped();
+    }
   };
 }
 

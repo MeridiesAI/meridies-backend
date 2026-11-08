@@ -25,15 +25,19 @@ import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards
 import { forgetAxisTrash } from "../lib/axisTrash.js";
 import { consumeUnits, limit } from "../lib/limits.js";
 import { sheetClient, sheetTitle } from "../lib/driveExport.js";
+import { ReadStopped, orderKeysFor, readPaged } from "../lib/pagedRead.js";
 import {
   BATCH_EXPORT_UNITS_PER_HOUR,
   EXPORT_BATCH_MAX,
   ExportBudget,
   FILES_NOT_INCLUDED_NOTE,
+  MAX_BATCH_BYTES,
+  MAX_BATCH_ROWS,
   MAX_SUMMARY_STUDENTS,
   SUMMARY_COUNTS,
   assembleStudent,
   exportCost,
+  pageGuard,
   rosterSummaryCsv,
   splitByCaseload,
   type BatchStudent,
@@ -60,23 +64,49 @@ export const STUDENT_RECORD_TABLES = [
   "student_private_notes", "student_status_overrides", "supplement_docs", "test_scores",
 ] as const;
 
-const MAX_ROWS_PER_TABLE = 5000;
+/**
+ * One table's rows where `column` = `value`, read in pages in a stable order (PostgREST's max_rows would
+ * otherwise cut it at 1,000) up to TABLE_ROW_CAP; `truncated` only when rows were really left out.
+ */
+function readTable(
+  request: FastifyRequest,
+  table: string,
+  column: string,
+  value: string,
+  onPage?: (rows: Row[]) => void,
+  columns = "*"
+) {
+  return readPaged(
+    (from, to) => {
+      let q = request.db.from(table).select(columns).eq(column, value);
+      for (const key of orderKeysFor(table)) q = q.order(key);
+      return q.range(from, to);
+    },
+    { onPage }
+  );
+}
 
-async function exportStudent(request: FastifyRequest, studentId: string) {
+/**
+ * A student's record as the caller sees it. `onPage` (the batch's `pageGuard`) sees every page and may stop
+ * the read by throwing ReadStopped. `truncated` lists tables past the per-table cap, only when there are any.
+ */
+async function exportStudent(request: FastifyRequest, studentId: string, onPage?: (rows: Row[]) => void) {
   const [profile, ...tables] = await Promise.all([
     request.db.from("profiles").select("*").eq("id", studentId).maybeSingle(),
-    ...STUDENT_RECORD_TABLES.map((t) => request.db.from(t).select("*").eq("student_id", studentId).limit(MAX_ROWS_PER_TABLE)),
+    ...STUDENT_RECORD_TABLES.map((t) => readTable(request, t, "student_id", studentId, onPage)),
   ]);
   if (profile.error) throw fromPostgrest(profile.error);
   const records: Record<string, Row[]> = {};
   const skipped: string[] = [];
+  const truncated: string[] = [];
   tables.forEach((r, i) => {
     const name = STUDENT_RECORD_TABLES[i]!;
     // A table this caller can't read at all (RLS/grants) is left out, not an error.
     if (r.error) skipped.push(name);
-    else if (r.data?.length) records[name] = r.data as Row[];
+    else if (r.rows.length) records[name] = r.rows;
+    if (!r.error && r.truncated) truncated.push(name);
   });
-  return { profile: profile.data, records, notIncluded: skipped };
+  return { profile: profile.data, records, notIncluded: skipped, ...(truncated.length ? { truncated } : {}) };
 }
 
 /**
@@ -120,6 +150,13 @@ const driveBody = z.union([
   z.object({ scope: z.literal("roster-summary") }).strict(),
 ]);
 
+const rosterTooLarge = () =>
+  new HttpError(
+    413,
+    `A roster summary covers up to ${MAX_SUMMARY_STUDENTS} students. Choose the students to include instead.`,
+    "roster_too_large"
+  );
+
 const tooLarge = () =>
   new HttpError(413, "That batch is too large to export at once. Export fewer students at a time.", "export_too_large");
 
@@ -130,30 +167,35 @@ export default async function accountRoutes(app: FastifyInstance) {
     if (request.profile.role === "student") {
       return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, me)) };
     }
-    const own = async (table: string, column = "counselor_id") => {
-      const { data, error } = await request.db.from(table).select("*").eq(column, me).limit(MAX_ROWS_PER_TABLE);
-      return error ? null : (data as Row[]);
+    // Each list is paged (PostgREST's max_rows would cut it at 1,000) up to the per-table cap.
+    const truncated: string[] = [];
+    const own = async (table: string, label: string) => {
+      const r = await readTable(request, table, "counselor_id", me);
+      if (r.error) return null;
+      if (r.truncated) truncated.push(label);
+      return r.rows;
     };
     const [profile, roster, workItems, contacts, activities, followups, templates, resources, invitations] = await Promise.all([
       request.db.from("profiles").select("*").eq("id", me).maybeSingle(),
-      request.db.from("profiles").select("id, full_name, email, profile, archived_at, created_at").eq("counselor_id", me).limit(MAX_ROWS_PER_TABLE),
-      own("counselor_work_items"),
-      own("pipeline_contacts"),
+      readTable(request, "profiles", "counselor_id", me, undefined, "id, full_name, email, profile, archived_at, created_at"),
+      own("counselor_work_items", "practice.workItems"),
+      own("pipeline_contacts", "practice.contacts"),
       // The contacts' timeline and follow-ups (null before the history migration; RLS leaves out
       // billing entries the caller may not see).
-      own("pipeline_activities"),
-      own("pipeline_followups"),
-      own("email_templates"),
-      own("library_resources"),
-      own("invitations"),
+      own("pipeline_activities", "practice.contactActivities"),
+      own("pipeline_followups", "practice.contactFollowups"),
+      own("email_templates", "practice.emailTemplates"),
+      own("library_resources", "practice.resources"),
+      own("invitations", "practice.invitations"),
     ]);
     if (profile.error) throw fromPostgrest(profile.error);
-    if (roster.error) throw fromPostgrest(roster.error);
+    if (roster.error) throw fromPostgrest(roster.error as { code?: string });
+    if (roster.truncated) truncated.unshift("roster");
     return {
       exportedAt: new Date().toISOString(),
       kind: "counselor",
       profile: profile.data,
-      roster: roster.data,
+      roster: roster.rows,
       practice: {
         workItems,
         contacts,
@@ -163,6 +205,7 @@ export default async function accountRoutes(app: FastifyInstance) {
         resources,
         invitations,
       },
+      ...(truncated.length ? { truncated } : {}),
       // A student's full record is its own export: GET /account/students/:id/export.
     };
   });
@@ -186,36 +229,57 @@ export default async function accountRoutes(app: FastifyInstance) {
    * distinct id from 200 an hour (`account:export-batch`), charged before anything is read and never from the
    * per-student export's bucket. Not open to a pending counselor (the per-student export isn't either).
    */
-  app.post("/export/students", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request) => {
+  app.post("/export/students", { preHandler: [app.authenticate, requireRole("counselor")] }, async (request, reply) => {
     const { studentIds } = batchBody.parse(request.body);
     const me = request.auth.userId;
     const within = await consumeUnits(`account:export-batch:${me}`, exportCost(studentIds), BATCH_EXPORT_UNITS_PER_HOUR, 3600, request.log);
     if (!within) {
-      throw new HttpError(429, `You can export up to ${BATCH_EXPORT_UNITS_PER_HOUR} students an hour. Try again later.`, "export_rate_limited");
+      // A fixed one-hour window whose start isn't returned: an hour is the most it can take.
+      return reply.code(429).header("Retry-After", "3600").send({
+        error: `You can export up to ${BATCH_EXPORT_UNITS_PER_HOUR} students an hour. Try again within the hour.`,
+        code: "export_rate_limited",
+        retryAfterSeconds: 3600,
+      });
     }
     const { allowed, notFound } = splitByCaseload(studentIds, await visibleAmong(request, studentIds), me);
     const exportedAt = new Date().toISOString();
     const budget = new ExportBudget();
     const done = new Map<string, BatchStudent>();
-    // One student at a time, so a batch never holds more than the cap plus one record.
+    // One student at a time, so a batch never holds more than the cap plus one record. A student over the
+    // cap on their own stops reading early and is `too_large` (the app falls back to GET
+    // /account/students/:id/export); students that fit alone but not together make the batch a 413.
     for (const id of allowed) {
       // Like the per-student export, a shared student's profile row may be null (profiles RLS lets only the
       // primary counselor read it); their records still come through the caller's RLS.
-      const exported = await exportStudent(request, id);
+      let exported;
+      try {
+        exported = await exportStudent(request, id, pageGuard(MAX_BATCH_ROWS, MAX_BATCH_BYTES));
+      } catch (err) {
+        if (!(err instanceof ReadStopped)) throw err;
+        done.set(id, { id, status: "too_large" });
+        continue;
+      }
       const student = assembleStudent(id, exported as Parameters<typeof assembleStudent>[1], exportedAt);
+      if (student.rows > MAX_BATCH_ROWS || student.bytes > MAX_BATCH_BYTES) {
+        done.set(id, { id, status: "too_large" });
+        continue;
+      }
       if (!budget.take(student.rows, student.bytes)) throw tooLarge();
       done.set(id, student);
     }
     const asked = new Set([...allowed, ...notFound]); // every id, lowercased, once
+    const students = studentIds
+      .map((raw) => raw.toLowerCase())
+      .filter((id) => asked.delete(id))
+      .map((id): BatchStudent => done.get(id) ?? { id, status: "not_found" });
+    const truncated = students.flatMap((s) => (s.status === "ok" && s.truncated ? [{ id: s.id, tables: s.truncated }] : []));
     return {
       exportedAt,
       kind: "student-batch",
       filesIncluded: false,
       filesNote: FILES_NOT_INCLUDED_NOTE,
-      students: studentIds
-        .map((raw) => raw.toLowerCase())
-        .filter((id) => asked.delete(id))
-        .map((id): BatchStudent => done.get(id) ?? { id, status: "not_found" }),
+      students,
+      ...(truncated.length ? { truncated } : {}),
     };
   });
 
@@ -236,10 +300,9 @@ export default async function accountRoutes(app: FastifyInstance) {
         ids = splitByCaseload(body.studentIds, await visibleAmong(request, body.studentIds), me).allowed;
       } else {
         const caseload = await caseloadStudentIds(request);
-        if (!caseload) throw tooLarge();
-        ids = caseload.filter((id) => id !== me);
+        ids = caseload ? caseload.filter((id) => id !== me) : [];
+        if (!caseload || ids.length > MAX_SUMMARY_STUDENTS) throw rosterTooLarge();
       }
-      if (ids.length > MAX_SUMMARY_STUDENTS) throw tooLarge();
 
       let rows: SummaryRow[] = [];
       if (ids.length) {
@@ -272,7 +335,9 @@ export default async function accountRoutes(app: FastifyInstance) {
 
       const title = sheetTitle();
       const { webViewLink } = await sheetClient().createSheet(me, { title, csv: rosterSummaryCsv(rows) }, request.log);
-      return { webViewLink, title, rows: rows.length };
+      // A student whose profile row the caller can't read (a shared student: profiles RLS is the primary
+      // counselor's) isn't on the Sheet; say how many, so the app can tell the counselor.
+      return { webViewLink, title, rows: rows.length, skipped: ids.length - rows.length };
     }
   );
 

@@ -10,6 +10,7 @@ import { firmWith, studentOf } from "./imports-helpers.mjs";
 const DRIVE_FILE = "https://www.googleapis.com/auth/drive.file";
 const TOKEN_MARKER = `ya29.never-log-me-${Date.now()}`;
 const NAME_MARKER = `Zyx${Date.now()}`;
+const EVIL_HOST = `evil-${Date.now()}.example`;
 
 const c = await user("exp-counselor");
 const s1 = await studentOf(c, "exp-s1");
@@ -19,7 +20,7 @@ const other = await user("exp-other");
 const foreign = await studentOf(other, "exp-foreign");
 
 // A formula a family member might type, and an uploaded file.
-await sql(`insert into guardians (student_id, full_name, email) values ('${s1.id}', '=HYPERLINK("http://evil.example","x")', 'g@example.com')`);
+await sql(`insert into guardians (student_id, full_name, email) values ('${s1.id}', '=HYPERLINK("http://${EVIL_HOST}","x")', 'g@example.com')`);
 await sql(`insert into activities (student_id, name, hours_per_week) values ('${s1.id}', 'Robotics, varsity', 4)`);
 await sql(`insert into documents (student_id, owner_id, storage_path, filename, title, kind) values ('${s1.id}', '${c.id}', '${s1.id}/doc-transcript.pdf', 'transcript.pdf', 'Transcript', 'transcript')`);
 
@@ -43,7 +44,7 @@ check(
 check("nothing of the foreign student leaks anywhere in the answer", !JSON.stringify(r.body).includes(foreign.email));
 const gcsv = byId[s1.id]?.csv?.guardians ?? "";
 check("each table with rows has a CSV with a header", gcsv.startsWith("id,") && gcsv.includes("full_name") && typeof byId[s1.id]?.csv?.profile === "string", gcsv.slice(0, 200));
-check("a formula in a cell is neutralised", gcsv.includes(`"'=HYPERLINK(""http://evil.example"",""x"")"`), gcsv);
+check("a formula in a cell is neutralised", gcsv.includes(`"'=HYPERLINK(""http://${EVIL_HOST}"",""x"")"`), gcsv);
 check("a comma is quoted", (byId[s1.id]?.csv?.activities ?? "").includes('"Robotics, varsity"'));
 check("a table without rows has no CSV", byId[s2.id]?.csv?.guardians === undefined);
 check("file bytes are not included, and the answer says so", r.body.filesIncluded === false && /not included/i.test(r.body.filesNote ?? ""));
@@ -86,7 +87,8 @@ await sql(`insert into private.rate_limit_buckets (key, window_start, count) val
 const ten = await call(rl.token, "POST", "/account/export/students", { studentIds: [rlStudent.id, ...Array.from({ length: 9 }, () => randomUUID())] });
 check("190 spent + 10 asked fits the 200 an hour", ten.status === 200, `status ${ten.status}`);
 const one = await call(rl.token, "POST", "/account/export/students", { studentIds: [rlStudent.id] });
-check("one more is a 429", one.status === 429, `status ${one.status}`);
+check("one more is a 429", one.status === 429 && one.body?.code === "export_rate_limited", `status ${one.status}`);
+check("…with an hour-based retry hint", Number.isInteger(one.body?.retryAfterSeconds) && one.body.retryAfterSeconds > 0 && one.body.retryAfterSeconds <= 3600, JSON.stringify(one.body));
 const single = await call(rl.token, "GET", `/account/students/${rlStudent.id}/export`);
 check("the per-student export still works when the batch bucket is spent", single.status === 200, `status ${single.status}`);
 const loop = await user("exp-loop");
@@ -101,15 +103,50 @@ for (let i = 0; i < 10; i++) {
 }
 check("a loop of 25-student batches stops after 8 (200 units)", okBatches === 8 && firstRefused === 429, `ok ${okBatches}, refused ${firstRefused}`);
 
-// ---- Size cap ------------------------------------------------------------------------------------
-const big = await user("exp-big");
-// PostgREST answers at most 1,000 rows a query (config.toml max_rows), so a table gives at most 1,000 per
-// student: 21 students with 1,000 activities each is over the batch's 20,000 rows.
-const bigIds = [];
-for (let i = 0; i < 21; i++) bigIds.push((await studentOf(big, `exp-big-${i}`)).id);
-await sql(`insert into activities (student_id, name) select s.id, 'a' || g from unnest(array[${bigIds.map((id) => `'${id}'::uuid`).join(",")}]) s(id), generate_series(1, 1000) g`);
-const tooBig = await call(big.token, "POST", "/account/export/students", { studentIds: bigIds });
-check("a batch over the row cap is a 413 export_too_large", tooBig.status === 413 && tooBig.body?.code === "export_too_large", `status ${tooBig.status} ${JSON.stringify(tooBig.body).slice(0, 200)}`);
+// ---- Paging past PostgREST's 1,000 rows, the per-table cap, and size ------------------------------
+const pager = await user("exp-pager");
+const p1200 = await studentOf(pager, "exp-p1200");
+await sql(`insert into activities (student_id, name) select '${p1200.id}', 'a' || g from generate_series(1, 1200) g`);
+const pCap = await studentOf(pager, "exp-pcap");
+await sql(`insert into courses (student_id, name) select '${pCap.id}', 'c' || g from generate_series(1, 5001) g`);
+const paged = await call(pager.token, "POST", "/account/export/students", { studentIds: [p1200.id, pCap.id] });
+const pById = Object.fromEntries((paged.body.students ?? []).map((s) => [s.id, s]));
+const acts = pById[p1200.id]?.json?.records?.activities ?? [];
+check("a table over 1,000 rows comes back whole (1,200)", paged.status === 200 && acts.length === 1200 && new Set(acts.map((a) => a.id)).size === 1200, `status ${paged.status} rows ${acts.length}`);
+check("…its CSV has all 1,200 rows", (pById[p1200.id]?.csv?.activities ?? "").split("\r\n").filter(Boolean).length === 1201);
+check("…and nothing is marked truncated", pById[p1200.id]?.truncated === undefined && pById[p1200.id]?.json?.truncated === undefined);
+check("a table past the 5,000 cap gives 5,000 rows", (pById[pCap.id]?.json?.records?.courses ?? []).length === 5000);
+check("…and says it was truncated, in the JSON and on the student", JSON.stringify(pById[pCap.id]?.json?.truncated) === '["courses"]' && JSON.stringify(pById[pCap.id]?.truncated) === '["courses"]', JSON.stringify(pById[pCap.id]?.truncated));
+check("…and at the batch level", JSON.stringify(paged.body.truncated) === JSON.stringify([{ id: pCap.id, tables: ["courses"] }]), JSON.stringify(paged.body.truncated));
+const single1200 = await call(pager.token, "GET", `/account/students/${p1200.id}/export`);
+check("the per-student export pages too (1,200 rows, no truncated)", single1200.status === 200 && single1200.body.records?.activities?.length === 1200 && single1200.body.truncated === undefined, `rows ${single1200.body.records?.activities?.length}`);
+const singleCap = await call(pager.token, "GET", `/account/students/${pCap.id}/export`);
+check("…and reports a cap hit", JSON.stringify(singleCap.body.truncated) === '["courses"]', JSON.stringify(singleCap.body.truncated));
+const selfEx = await call(pager.token, "GET", "/account/export");
+check("the counselor's own export still works", selfEx.status === 200 && selfEx.body.kind === "counselor" && selfEx.body.roster?.length === 2, `status ${selfEx.status}`);
+
+// One student too big for any batch: about 6 MB of JSON (under the old 20 MB JSON-only cap) and twice that with
+// its CSV, over the 10 MB batch answer. They come back too_large and the rest of the batch goes on.
+const heavy = await user("exp-heavy");
+const huge = await studentOf(heavy, "exp-huge");
+const light = await studentOf(heavy, "exp-light");
+const longText = (ch) => `repeat('${ch}', 2000)`;
+await sql(`insert into activities (student_id, name, description, uc_description, uc_org_description) select '${huge.id}', 'h' || g, ${longText("d")}, ${longText("u")}, ${longText("o")} from generate_series(1, 1000) g`);
+const mixed = await call(heavy.token, "POST", "/account/export/students", { studentIds: [huge.id, light.id] });
+const mById = Object.fromEntries((mixed.body.students ?? []).map((s) => [s.id, s]));
+check("a student over the size cap alone is too_large and the batch goes on", mixed.status === 200 && JSON.stringify(mById[huge.id]) === JSON.stringify({ id: huge.id, status: "too_large" }) && mById[light.id]?.status === "ok", `status ${mixed.status} ${JSON.stringify(mById[huge.id]).slice(0, 120)}`);
+const hugeSingle = await call(heavy.token, "GET", `/account/students/${huge.id}/export`);
+check("…and the per-student export (no batch cap) still has them", hugeSingle.status === 200 && hugeSingle.body.records?.activities?.length === 1000);
+
+// Students that each fit but together pass 10 MB: 413, asking for a smaller batch.
+const crowd = await user("exp-crowd");
+const crowdIds = [];
+for (let i = 0; i < 3; i++) crowdIds.push((await studentOf(crowd, `exp-crowd-${i}`)).id);
+await sql(`insert into activities (student_id, name, description) select s.id, 'c' || g, ${longText("x")} from unnest(array[${crowdIds.map((id) => `'${id}'::uuid`).join(",")}]) s(id), generate_series(1, 1000) g`);
+const oneCrowd = await call(crowd.token, "POST", "/account/export/students", { studentIds: [crowdIds[0]] });
+check("each of them fits a batch alone", oneCrowd.status === 200 && oneCrowd.body.students?.[0]?.status === "ok", `status ${oneCrowd.status}`);
+const allCrowd = await call(crowd.token, "POST", "/account/export/students", { studentIds: crowdIds });
+check("three together (JSON + CSV over 10 MB) are a 413 export_too_large", allCrowd.status === 413 && allCrowd.body?.code === "export_too_large", `status ${allCrowd.status} ${JSON.stringify(allCrowd.body).slice(0, 200)}`);
 
 // ---- Google Sheets (fake client) -----------------------------------------------------------------
 const noGoogle = await call(c.token, "POST", "/account/export/drive", { studentIds: [s1.id] });
@@ -134,7 +171,21 @@ for (const resp of [noGoogle, noScope, sheet, roster, fail]) {
   if (JSON.stringify(resp.body).includes(TOKEN_MARKER) || JSON.stringify(resp.body).includes(NAME_MARKER)) check("no token or CSV text in a Drive answer", false, JSON.stringify(resp.body));
 }
 
+// A shared student's profile row isn't readable to the collaborator, so the Sheet leaves them out and says how many.
+await sql(`insert into integration_tokens (owner_id, provider, account_email, access_token_enc, scopes) values ('${member.id}', 'google', 'm@example.com', '${TOKEN_MARKER}', array['${DRIVE_FILE}'])`);
+const mSheet = await call(member.token, "POST", "/account/export/drive", { studentIds: [ownerStudent.id, memberStudent.id] });
+check("the Sheet counts students it had to skip", mSheet.status === 200 && mSheet.body?.rows === 1 && mSheet.body?.skipped === 1, JSON.stringify(mSheet.body));
+check("…and a full Sheet skips none", sheet.body?.skipped === 0, JSON.stringify(sheet.body));
+
+// A caseload over 250 can't be one roster summary: its own calm code.
+const busy = await user("exp-busy");
+const tag = `bulk-${Date.now()}`;
+await sql(`insert into auth.users (id, instance_id, aud, role, email, raw_user_meta_data, created_at, updated_at) select gen_random_uuid(), '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', '${tag}-' || g || '@test.local', '{"full_name":"Bulk","role":"student"}'::jsonb, now(), now() from generate_series(1, 251) g`);
+await sql(`update profiles set counselor_id = '${busy.id}' where email like '${tag}-%'`);
+const busyRoster = await call(busy.token, "POST", "/account/export/drive", { scope: "roster-summary" });
+check("a roster summary over 250 students is 413 roster_too_large", busyRoster.status === 413 && busyRoster.body?.code === "roster_too_large" && !/fewer students/i.test(busyRoster.body?.error ?? ""), JSON.stringify(busyRoster.body));
+
 if (process.env.API_LOG) {
   const log = readFileSync(process.env.API_LOG, "utf8");
-  check("the API log has no token and no exported text", !log.includes(TOKEN_MARKER) && !log.includes(NAME_MARKER) && !log.includes("evil.example"));
+  check("the API log has no token and no exported text", !log.includes(TOKEN_MARKER) && !log.includes(NAME_MARKER) && !log.includes(EVIL_HOST));
 }

@@ -7,6 +7,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   BATCH_EXPORT_UNITS_PER_HOUR,
+  MAX_BATCH_BYTES,
+  MAX_BATCH_ROWS,
+  pageGuard,
   EXPORT_BATCH_MAX,
   ExportBudget,
   assembleStudent,
@@ -15,6 +18,7 @@ import {
   splitByCaseload,
 } from "../../src/lib/studentExport.js";
 import { consumeUnits } from "../../src/lib/limits.js";
+import { ReadStopped } from "../../src/lib/pagedRead.js";
 
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
@@ -126,4 +130,33 @@ test("consumeUnits spends one unit per student and refuses past the limit", asyn
 
 test("consumeUnits: a zero cost is refused as a programming error", async () => {
   await assert.rejects(() => consumeUnits("test:zero", 0, 5, 3600));
+});
+
+test("a batch answer is at most 10 MB (JSON and CSV together) and 20,000 rows", () => {
+  assert.equal(MAX_BATCH_BYTES, 10 * 1024 * 1024);
+  assert.equal(MAX_BATCH_ROWS, 20_000);
+});
+
+test("assembleStudent: bytes count the JSON and every CSV", () => {
+  const s = assembleStudent(A, exported, "2026-11-07T00:00:00.000Z");
+  const csvBytes = Object.values(s.csv).reduce((n, c) => n + Buffer.byteLength(c), 0);
+  assert.equal(s.bytes, Buffer.byteLength(JSON.stringify(s.json)) + csvBytes);
+  assert.ok(csvBytes > 0);
+});
+
+test("assembleStudent: a truncated table list stays in the JSON", () => {
+  const s = assembleStudent(A, { ...exported, truncated: ["courses"] }, "2026-11-07T00:00:00.000Z");
+  assert.deepEqual(s.json.truncated, ["courses"]);
+  assert.deepEqual(s.truncated, ["courses"]);
+  assert.equal(assembleStudent(A, exported, "x").truncated, undefined);
+});
+
+test("pageGuard stops a student's read once rows or (JSON x2, for the CSV) bytes pass the cap", () => {
+  const rows = (n: number, size = 10) => Array.from({ length: n }, () => ({ t: "x".repeat(size) }));
+  const g = pageGuard(5, 1_000_000);
+  g(rows(3));
+  assert.throws(() => g(rows(3)), ReadStopped);
+  const b = pageGuard(1000, 100);
+  b(rows(1, 10)); // ~20 bytes of JSON, x2
+  assert.throws(() => b(rows(1, 60)), ReadStopped);
 });

@@ -3336,21 +3336,30 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   kind, path, link). Any other id, another practice's student or a random uuid, is exactly
   `{ id, status: "not_found" }` and is never read. File bytes are never included (`filesIncluded: false`,
   `filesNote`). Cost-based limit: one unit per distinct id from 200 an hour (`account:export-batch:<id>`,
-  `consumeUnits`, spent before reading, also when refused: 429 `export_rate_limited`); it never touches
-  the per-student export's 60 an hour. A batch over 20,000 rows or 20 MB of JSON is 413
-  `export_too_large` (students are read one at a time, so at most the cap plus one record is held).
-  PostgREST's `max_rows` (1,000) also caps every table read, here and in the per-student export.
+  `consumeUnits`, spent before reading, also when refused: 429 `export_rate_limited` with
+  `retryAfterSeconds` and `Retry-After`, an hour, the window's longest wait); it never touches
+  the per-student export's 60 an hour. **Every export table read is paged** (`lib/pagedRead.ts`:
+  1,000 rows a page in primary-key order, `ORDER_KEYS` for the tables keyed by student, until a short
+  page or 5,000 rows a table), because PostgREST's `max_rows` (1,000) silently cut each read before; at
+  the cap a one-row probe decides, and only a table really cut is listed in `truncated` (in the student's
+  JSON, on the batch entry, and `truncated: [{ id, tables }]` on the batch; the self export lists
+  `roster` / `practice.*`). This applies to all three exports. **Size**: a batch answer is at most
+  20,000 rows and 10 MB of JSON plus CSV. A student over that alone (their read stops early,
+  `pageGuard`) is `{ id, status: "too_large" }` and the batch goes on: **the app (11c) then fetches that
+  student with `GET /account/students/:id/export`**, which has no batch cap (its 60 an hour applies).
+  Students that each fit but not together make the batch 413 `export_too_large`: retry with fewer.
   `POST /account/export/drive` `{ studentIds }` or `{ scope: "roster-summary" }` (whole caseload, at most
-  250, 10 an hour) creates ONE Google Sheet "Meridies export <date>" in the caller's Drive under the
+  250, else 413 `roster_too_large`; 10 an hour) creates ONE Google Sheet "Meridies export <date>" in the caller's Drive under the
   existing `drive.file` scope (multipart CSV upload converted to Sheets): name, email, grad year,
-  status, counts of colleges, tasks, documents, essays and meetings. `{ webViewLink, title, rows }`;
+  status, counts of colleges, tasks, documents, essays and meetings. `{ webViewLink, title, rows, skipped }`
+  (`skipped`: students whose profile row the caller can't read, left off the Sheet);
   409 `drive_not_granted` (not connected, reconnect needed, or no drive.file), 502 `drive_failed`, 503
   `drive_unavailable` (no Google settings). Only the HTTP status is ever logged, never the CSV or a
   token; no path segment carries a token, so `lib/requestLog.ts` needs nothing. `DRIVE_EXPORT_FAKE=fixture`
   (development/test only, refused at boot otherwise) stands in for Google from the caller's
   `integration_tokens` row (`account_email` starting `drive-fail` answers 502). A shared (collaborator)
   student's profile row is not readable through profiles RLS, so their export has `profile: null` and
-  the Sheet leaves them out. Tests: `test/unit/csv.test.ts`, `student-export-batch.test.ts`,
+  the Sheet leaves them out (counted in `skipped`). Tests: `test/unit/csv.test.ts`, `export-paging.test.ts`, `student-export-batch.test.ts`,
   `drive-export.test.ts`, `test/integration/account-export.test.mjs` (API with `DRIVE_EXPORT_FAKE=fixture`).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
   user; a counselor with an active roster or an owned firm is refused, and a
