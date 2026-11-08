@@ -98,6 +98,11 @@ const REVIEWED = [
   // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
   // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
   "lib/driveExport.ts",
+  // lib/accountDeletion.ts: deleteAccount runs inside the account's own request (DELETE /account) or for the
+  // closure purge (lib/accountClosure.ts, handed the client by routes/internal.ts behind CRON_SECRET and
+  // ACCOUNT_PURGE_ENABLED); it removes only that account's own trash, AI counters and auth user. Approval isn't asked:
+  // a pending or revoked counselor may still leave.
+  "lib/accountDeletion.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",

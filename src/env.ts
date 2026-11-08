@@ -38,6 +38,10 @@ const envSchema = z.object({
   // Time saved: activity heartbeats are recorded only when "true". Stays off in
   // production until the privacy policy line about time tracking is live.
   KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Leave Meridies: the purge that deletes closed accounts after their 30-day grace period
+  // (POST /internal/account-closures/purge). OFF unless exactly "true" (lib/accountClosure.ts purgeFlag); any
+  // other value is off, never a boot error. Not switched on without the owner's explicit OK.
+  ACCOUNT_PURGE_ENABLED: blankIsUnset(z.string().max(20).optional()),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any
