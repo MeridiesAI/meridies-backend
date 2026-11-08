@@ -15,7 +15,8 @@
  *   POST /messages/:messageId/cancel   cancel a scheduled message
  *   POST /:id/file-as-report     file the draft as a family report to approve
  *   POST /internal/dispatch      CRON_SECRET: deliver scheduled messages that are due,
- *                                then the students' own due-tomorrow task reminders
+ *                                then the students' own due-tomorrow task reminders, then
+ *                                draft (never send) the weekly family digests
  *
  * Counselor-only throughout: the composer is the counselor's, and so is
  * everything it wrote. Family contacts are added and removed through the
@@ -61,6 +62,7 @@ import {
   type MessageRow,
 } from "../lib/studentMessages.js";
 import { sendStudentReminders } from "../lib/studentReminders.js";
+import { runWeeklyDigest } from "../lib/weeklyDigest.js";
 import { serviceClient } from "../lib/supabase.js";
 
 type Row = Record<string, unknown>;
@@ -729,7 +731,12 @@ export default async function communicationRoutes(app: FastifyInstance) {
           request.log.error({ err }, "reply translation retry failed");
           return { tried: 0, done: 0 };
         });
-        return { ran: true, ...tally, reminders, translations };
+        // The weekly family digest: drafts for the counselor to approve, never a send. Never fails the dispatch.
+        const weeklyDigest = await runWeeklyDigest(svc, request.log).catch((err: unknown) => {
+          request.log.error({ err }, "weekly digest failed");
+          return { ran: false, reason: "error" };
+        });
+        return { ran: true, ...tally, reminders, translations, weeklyDigest };
       } catch (err) {
         await beat("message-dispatch", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;

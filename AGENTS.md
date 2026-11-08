@@ -107,12 +107,14 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
+│   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
+│   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
@@ -169,6 +171,7 @@ src/
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
+│   ├── taskSets.ts        # /task-sets   saved task sets: CRUD, apply to students or a class year
 │   ├── search.ts          # /search       top-bar search: students, invited students, colleges, work items
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
@@ -177,6 +180,7 @@ src/
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
 │   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
@@ -211,6 +215,10 @@ other practices grow (the speed test below caught the calendar feed and
 (`lib/guards.ts`) returns exactly what `private.can_view_student` allows (the
 roster, archived included, the students shared with them, and the caller), or
 null past 250 ids, when the query runs unscoped as before. RLS still applies on top.
+The calendar feed does not take that fallback: `buildCalendarFeed({ db, ownerId, role, caseload }, q)` needs the
+whole caseload for a counselor's whole calendar (`fullCaseloadStudentIds(db, counselorId)`, read page by page, never
+null), throws without it, and reads in batches of `FEED_ID_CHUNK` (200) ids (at most `FEED_BATCH_CONCURRENCY`, 4, in flight per build), because it also runs on the service
+client for the subscribed feed, where no RLS would hold it to the counselor's students.
 
 ### Schema
 
@@ -594,6 +602,35 @@ forget it.
   real fault) mean that without the file the template list reads the older columns and every picker works, the stage
   routes answer 503 `stage_templates_unavailable`, a `templateId` is accepted and not remembered, and the DTO's new
   fields read null. Tests: `test/unit/stage-templates.test.ts`, `test/integration/stage-templates.test.mjs`.
+- **Saved task sets** (`20261111000005`; `lib/taskSets.ts`, `routes/taskSets.ts`, `createTaskForStudent` in `routes/tasks.ts`).
+  A set is a counselor's named list of 1-30 items (title, kind, instructions, target words, stages), each due RELATIVELY:
+  `dueOffsetDays` (0-730 days after the apply date in the counselor's time zone) or `dueMonth`/`dueDay` (the next
+  occurrence, today included; Feb 29 is Feb 28 in a year without one), never both. `task_sets` is owner-written
+  (`task_sets_owner`, the email-templates model); `shared: true` stores the owner's current firm in `firm_id` and every
+  approved counselor of that firm reads it (and may apply it to their own students) while the owner is still in that firm;
+  only the owner changes or deletes it. Every item has a stable `key` (the server assigns a uuid; PATCH keeps a key the
+  client sends back, gives a keyless item a new one, refuses duplicates), and a task is marked with the item's KEY, never
+  its position, so reordering, inserting or removing items never makes a re-apply skip or repeat one.
+  `POST /task-sets/:id/apply` `{ studentIds (1-100) | classYear "YYYY", notifyEmail? }` (60 an hour): a class year is
+  resolved on the server from the caller's ACTIVE roster (`profiles.grad_year`, archived left out, collaborators' students
+  not included); every student goes through `resolveStudentId(..., "edit")` and a refusal is that student's `error`, never
+  the batch's. Each item becomes one ordinary counselor task through the Create task button's own code
+  (`createTaskForStudent`, which `POST /tasks` also calls), marked `deliverables.task_set_id` / `task_set_item_key`; a
+  UNIQUE partial index (`deliverables_task_set_item_key_uidx`) on (student, set, key) makes a second apply a no-op (read
+  first; a 23505 on that index only also reads as `already-assigned`); a CHECK keeps the marker on counselor tasks only;
+  deleting a set keeps its tasks (task_set_id cleared). One apply makes at most 300 NEW tasks (what exists isn't
+  counted, so a retry after a timeout gets through): past it, 400 `apply_too_large` with `limit`, `perStudent`,
+  `maxStudents` and, for a class year, the resolved `studentIds`, so the app splits the batch.
+  The answer is `{ created, alreadyAssigned, failed, refused, emailThrottled, results: { [studentId]: StudentResult +
+  items[] } }`. Email: one assignment email per student per apply (the first task made; every task still gets its in-app
+  notice and stores `notify_email` as asked, so "send again" works), and at most `TASK_SET_EMAIL_DAILY_CAP` (200) a day per counselor (`task-set-email:<id>`); past it the task is
+  made and the email skipped. No texts. **Firm roster:** `GET /management/firm-roster` (owner/admin only, 403 otherwise)
+  reads `firm_roster()` (SECURITY DEFINER, refuses anyone but an approved owner/admin of their current firm with 42501):
+  every active student of the firm's approved consultants as `{ id, name, gradYear, counselorId }`, plus `consultants` from
+  `firm_consultants()` for the filter. Names only: it does not widen `can_view_student`. **Deploy order:** either; not in
+  `REQUIRED_SCHEMA`. Without the file the set routes answer 503 `task_sets_unavailable` and the roster 503
+  `firm_roster_unavailable`; `POST /tasks` never names the new columns. Tests: `test/unit/task-sets.test.ts`,
+  `test/integration/task-sets.test.mjs`.
 - **The Contact Pipeline's timeline is written by the database, never tidied**
   (`20261028000003`, `routes/pipelineActivity.ts`, `lib/pipelineExtras.ts`).
   `pipeline_activities` has no UPDATE or DELETE. A counselor adds only
@@ -1185,6 +1222,45 @@ while the school is not decided, skipping one the counselor entered by hand as a
 and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) now searches the whole eligible,
 open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
 against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
+
+### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
+
+**More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
+`custom_deadline` ("Your deadline", the counselor's internal date) is its own `deadline` item `college-custom:<row>`,
+titled "<School>: your deadline", detail "The school's deadline is Jan 5, 2027" when the dates differ; same status
+filter and hand-entered dedupe as the school's, and the same `ref` (the row id), so a type reassignment moves both. A
+student's `student_academics.planned_test_date` is a `milestone` `test:<student>` of pseudo-type `test` (like
+`personal`: not a `FeedKind`, since `calendar_event_type_assignments.event_kind` is check-constrained), titled
+"Planned test date", detail the status (Scheduled, Prepping, Retaking), skipped when `test_status` is `taken` or
+`test-optional`. Both show on the counselor's calendar (whole or one student) and the student's own. Pure parts:
+`collegeFeedItems`, `testFeedItems`. Tests: `test/unit/calendar-feed.test.ts`, `test/integration/calendar-feed.test.mjs`.
+
+**Subscribing** (`routes/calendarIcal.ts`, `lib/calendarIcal.ts`, `buildFeedIcs` / `feedIcsEvents` in `lib/ics.ts`).
+`POST /calendar/ical` (counselor, 10 an hour) makes the feed URL, or replaces it (the old one stops at once), and
+returns `{ url, webcalUrl, rotated, exists, createdAt, rotatedAt, lastFetchedAt }`: the URL is
+`<PUBLIC_API_URL>/calendar/ical/<token>.ics`, shown **only in that answer**. The token is 32 random bytes (base64url);
+`calendar_feed_tokens` (one row per counselor, service role only, approval gate) keeps its sha256. `GET /calendar/ical`
+answers `{ exists, createdAt, rotatedAt, lastFetchedAt }` and never the URL; `DELETE` revokes. **The public
+`GET /calendar/ical/:token.ics`** (absolute path, like `/pay/:token`) finds the row by hash on the service client, asks
+`approvedCounselorIds`, builds the counselor's whole calendar from 30 days back to a year ahead in their time zone
+(done items in, cancelled meetings out) with their full caseload, and answers `text/calendar` (`METHOD:PUBLISH`,
+`X-WR-CALNAME:Meridies`, `REFRESH-INTERVAL` and `X-PUBLISHED-TTL` one hour; all-day items as `VALUE=DATE`, timed ones in
+UTC; UID `feed-<id prefix>-<ref>@meridiesai.com`, e.g. `feed-college-custom-<row>`), with `Cache-Control: private,
+max-age=300`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`. A malformed, unknown, rotated or revoked token
+and an unapproved counselor are the same 404 with the same body. Limits: 60 an hour per token, 600 an hour per address
+(`enforceRateLimit`), plus 60 a minute in process. Making or rotating the URL is 10 an hour; revoking has its own bucket (120 an hour), so a
+counselor who rotated a leaked URL several times can always still revoke it. `last_fetched_at` is written at most once a minute. The path is
+dropped from request logs (`lib/requestLog.ts`). **What the file may say** (`feedIcsEvents`; the URL can be forwarded):
+a student only as first name and last initial ("Ana P.: Common App essay"), a meeting only as "Meeting with Ana P., Ben
+O." and its times (never its title, agenda, location or link), no item's detail or notes, no scores, never a student's
+own events (`student_calendar_events`) or a cancelled meeting, and only names of students on the counselor's
+caseload. Task, deadline, college and practice-event **titles appear in the file as written** (only meeting titles are
+left out), so anything a counselor typed into a title travels with the URL; the Settings card should say so. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the three authenticated routes
+answer 503 `calendar_feed_unavailable` (also without the service key or `PUBLIC_API_URL`) and the feed URL 404s.
+Unverified: how often Google refreshes a subscribed feed (believed about daily; Apple and Outlook honour the hour
+more closely). Tests: `test/unit/calendar-feed-ics.test.ts` (folding, escaping, all-day, injection through a title,
+UIDs, privacy, the log), `test/integration/calendar-ical.test.mjs` (URL shown once, hash only, rotate, revoke, unknown
+and unapproved 404, cross-practice leakage with a 260-student practice, privacy, headers, the rate limit).
 
 ### CSV import extras (`20261029000003`)
 
@@ -2367,9 +2443,39 @@ produce **drafts**. The first two are written with `status: 'draft'` /
 `'counselor-review'`; `/ai/parent-alert` persists nothing at all and returns
 text the counselor edits before sending through
 `/accountability/parent-alerts`, which is where quiet hours, the anti-spam
-throttle and `student_alert_prefs` are enforced. Nothing in this API sends any
-of them. `/reports/family/:id/sent` records a send that already happened — it
-does not perform one.
+throttle and `student_alert_prefs` are enforced. Nothing sends any of them on
+its own. A family report goes out only through the counselor's explicit
+`POST /reports/family/:id/approve-send` `{ confirm: true }` (the student's own
+counselor, approved): it re-decides the recipients on the server
+(`lib/familyReportSend.ts`: `copy_parents` failing closed, then guardians with
+`alerts_enabled` and `receives_reports`, on their `preferred_channel` where an
+address is on file), claims the draft `draft -> sent` once (a second call is a
+409, never a second send), and writes one scheduled `student_messages` row per
+channel (audience parent, `family_report_id` set, `20261111000013`), so
+`dispatchDueMessages` sends it with its usual re-checks (roster, approval,
+alerts, same address, quiet hours, daily cap) and, for a row carrying a report,
+each guardian's `receives_reports` too (switched off since approval: dropped,
+or the row cancelled with the reason; a read error holds it). Without that
+migration approve-send answers 503 `family_report_send_unavailable`.
+`GET /reports/family/:id/recipients` shows who would receive it, the exact text
+each would read, and who is skipped and why; `POST /reports/family/:id/dismiss`
+discards a draft, and so does `DELETE` on a weekly one (archived, not deleted,
+so the job doesn't draft that week again). `/reports/family/:id/sent` still only records a send that
+happened elsewhere. **The weekly digest** (`lib/weeklyDigest.ts`, rules in
+`lib/weeklyDigestContent.ts`) rides `POST /communication/internal/dispatch` under
+the `weekly-digest` lease (kept an hour after a clean run): for approved
+counselors' active students whose effective `weekly_digest` is `draft` it writes
+one `family_reports` draft (kind `weekly`, the last completed Monday-Sunday in
+`profiles.timezone`, else America/New_York; the unique index makes re-runs a
+no-op) plus a `report` work item. One student's failure is counted
+(`failedStudents`) and the rest of the roster carries on; only a counselor-level
+read failure releases the lease early. Deterministic, no model: tasks finished
+(visible to the student; "finished in the week" is a complete task updated in
+it), tasks overdue or due in the next two weeks, college deadlines in those two
+weeks, and essay word-count movement from `progress_events`, first name only,
+an essay named by kind and school, never its title, prompt or text. A week with
+nothing to report gets no draft. The job never sends. Tests:
+`test/unit/weekly-digest.test.ts`, `test/integration/weekly-digest.test.mjs`.
 
 `/ai/file-filing` suggests a folder and never moves a file. It verifies the
 model's `folderId` against the list it was offered and drops to low confidence
