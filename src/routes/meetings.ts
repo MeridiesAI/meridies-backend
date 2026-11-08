@@ -21,8 +21,13 @@
  * (`invites`). `notifyAttendees: false` on a PATCH keeps one change to
  * Meridies; switching `sendInvites` itself always tells invitees.
  *
- * The counselor owns the calendar: a student sees their own meetings and cannot
- * move them.
+ * These routes are the counselor's: a student reads their own meetings here
+ * and never writes through them. Since student booking part 2 a student moves
+ * or cancels a meeting only through /me/booking (routes/studentBooking.ts,
+ * lib/bookingWrite.ts): one where they are the primary student, with their own
+ * counselor and nobody else on it, outside the counselor's cancel cutoff and
+ * while the counselor lets students reschedule. An invited (non-primary)
+ * student still can't move anything.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
