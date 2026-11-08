@@ -658,6 +658,8 @@ export type InviteRoundSummary =
 
 export const INVITES_UNAVAILABLE: InviteRoundSummary = { status: "unavailable", reason: "Calendar invites aren't switched on yet" };
 export const INVITE_ROUNDS_PER_HOUR = 60;
+/** Rounds a counselor's students start themselves (student booking), per counselor per hour, in their own bucket. */
+export const BOOKING_INVITE_ROUNDS_PER_HOUR = 60;
 const NO_ADDRESS = "No one invited has an email address on file";
 const THROTTLED = "Too many calendar invites this hour, so invites and updates weren't emailed";
 
@@ -670,7 +672,15 @@ type Prepared = { summary: InviteRoundSummary; round: ResolvedRound | null };
 export async function prepareInviteRound(
   request: Pick<FastifyRequest, "db" | "log">,
   input: Omit<PlanInput, "now">,
-  deps: { consume: typeof consumeRateLimit; now: Date } = { consume: consumeRateLimit, now: new Date() }
+  deps: {
+    consume: typeof consumeRateLimit;
+    now: Date;
+    /**
+     * Whose allowance the round spends: the counselor's own (`meeting-invites:<owner>`), or for a round a
+     * student started (/me/booking) `meeting-invites:booking:<owner>`, so students can't use up the counselor's.
+     */
+    bucket?: "counselor" | "booking";
+  } = { consume: consumeRateLimit, now: new Date() }
 ): Promise<Prepared> {
   try {
     const plan = planInviteRound({ ...input, now: deps.now });
@@ -689,9 +699,10 @@ export async function prepareInviteRound(
     const notes: string[] = [];
     // Only a round that adds or updates an invite is counted: cancellations always go.
     if (plan.messages.some((m) => m.method !== "CANCEL")) {
-      const allowed = await deps.consume(`meeting-invites:${plan.describe.counselorId}`, INVITE_ROUNDS_PER_HOUR, 3600, {
-        warn: (msg) => request.log.warn(msg),
-      });
+      const owner = plan.describe.counselorId;
+      const allowed = await (deps.bucket === "booking"
+        ? deps.consume(`meeting-invites:booking:${owner}`, BOOKING_INVITE_ROUNDS_PER_HOUR, 3600, { warn: (msg) => request.log.warn(msg) })
+        : deps.consume(`meeting-invites:${owner}`, INVITE_ROUNDS_PER_HOUR, 3600, { warn: (msg) => request.log.warn(msg) }));
       if (!allowed) {
         const cancels = plan.messages.filter((m) => m.method === "CANCEL");
         if (!cancels.some((m) => m.audience !== "counselor")) return { summary: { status: "skipped", reason: THROTTLED }, round: null };
