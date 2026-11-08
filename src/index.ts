@@ -1,5 +1,6 @@
 import { buildApp } from "./app.js";
 import { env } from "./env.js";
+import { bookingBusyFixtureRefusal } from "./lib/booking.js";
 import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
 import { researchFakeRefusal } from "./lib/research/bootGuard.js";
 import { translateFakeRefusal } from "./lib/translate.js";
@@ -31,6 +32,13 @@ if (driveRefusal) {
   process.exit(1);
 }
 if (env.DRIVE_EXPORT_FAKE) app.log.warn("DRIVE_EXPORT_FAKE is on: Sheets exports are not sent to Google");
+// And for the booking busy-time stand-in: it would offer students slots over a counselor's real calendar.
+const busyRefusal = bookingBusyFixtureRefusal({ BOOKING_BUSY_FIXTURE: env.BOOKING_BUSY_FIXTURE, NODE_ENV: process.env.NODE_ENV });
+if (busyRefusal) {
+  app.log.error(busyRefusal);
+  process.exit(1);
+}
+if (env.BOOKING_BUSY_FIXTURE) app.log.warn("BOOKING_BUSY_FIXTURE is on: calendar busy time is read from a file, not Google or Microsoft");
 
 await verifyImportWorkerAtBoot(app.log);
 
