@@ -149,7 +149,7 @@ export function dueDateFor(due: RelativeDue, today: string): string | null {
 
 // ---- class year ---------------------------------------------------------------------------------
 
-type RosterRow = { id: unknown; grad_year?: unknown; archived_at?: unknown; role?: unknown };
+type RosterRow = { id?: unknown; grad_year?: unknown; archived_at?: unknown; role?: unknown };
 
 /** The active (not archived) students of a roster whose class year is `year`, the blast filter's match. */
 export function studentsInClass(roster: RosterRow[], year: string): string[] {
