@@ -1327,12 +1327,14 @@ HEAD, body never read) and flags it `ok` / `broken` (404/410 twice, or gone
 from DNS) / `blocked` (the site refuses robots); nothing is deleted.
 
 Curated facts live on the school, each with a source: `college_policies`
-(superscore, self-reported scores, CSS Profile, STARS, FairTest),
+(superscore, self-reported scores, CSS Profile, STARS, FairTest, whether the
+personal statement is read, how scores are reported),
 `college_application_requirements` (per cycle) and `college_major_admit_rates`
 (UC/CSU by major, SJSU's eligibility index). They are loaded from CSVs the team
 compiles, never invented: `npx tsx scripts/ingest/curated-csv.ts --dataset
-<policies|requirements|major-admit-rates> --file <csv> [--dry-run]`. A file with
-one bad row loads nothing. Checked-in files and their sources are listed in
+<policies|requirements|major-admit-rates|supplements> --file <csv> [--dry-run]`. A file with
+one bad row loads nothing. `supplements` upserts `college_supplements` prompts on
+(school, cycle, sort_order) and requires an https `source_url` and a `checked_on` date on every row. Checked-in files and their sources are listed in
 `scripts/ingest/data/README.md`.
 
 **Events Hub listings** come the same way: `npx tsx --env-file=.env
