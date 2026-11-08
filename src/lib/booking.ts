@@ -17,11 +17,11 @@ import { readFileSync } from "node:fs";
 import type { FastifyRequest } from "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isCounselorApproved } from "./access.js";
-import { clampWindow, computeSlots, type BusyInterval, type HoursRange } from "./bookingSlots.js";
-import { bookingBusyFixture } from "../env.js";
+import { busyWindow, clampWindow, computeSlots, type BusyInterval, type HoursRange } from "./bookingSlots.js";
+import { env } from "../env.js";
 import { HttpError, fromPostgrest } from "./errors.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
-import { listBusy } from "./suiteApi.js";
+import { busyReconnectNeeded, busyUnavailable, listBusy } from "./suiteApi.js";
 import { serviceClient } from "./supabase.js";
 import { SUITE_PROVIDERS, type SuiteProvider } from "./oauth.js";
 
@@ -196,6 +196,32 @@ export async function meetingBusy(svc: SupabaseClient, counselorId: string, from
   });
 }
 
+export type BusyFixtureEnv = { BOOKING_BUSY_FIXTURE?: string | undefined; NODE_ENV?: string | undefined };
+const FIXTURE_ALLOWED_ENVS: readonly string[] = ["development", "test"];
+
+/**
+ * A message for index.ts to refuse to start with, or null. The busy-time stand-in
+ * would offer students slots over the counselor's real calendar, so it runs only
+ * when the RAW NODE_ENV is development or test (env.NODE_ENV defaults to
+ * development when unset): production is refused, and so is anything else.
+ */
+export function bookingBusyFixtureRefusal(e: BusyFixtureEnv): string | null {
+  if (!e.BOOKING_BUSY_FIXTURE) return null;
+  if (e.NODE_ENV === "production") {
+    return "refusing to start: BOOKING_BUSY_FIXTURE is for tests only and must not be set when NODE_ENV=production";
+  }
+  if (e.NODE_ENV === undefined || !FIXTURE_ALLOWED_ENVS.includes(e.NODE_ENV)) {
+    return "refusing to start: BOOKING_BUSY_FIXTURE is for tests only and needs NODE_ENV=development or NODE_ENV=test";
+  }
+  return null;
+}
+
+/** The stand-in's path when it is set and allowed, else null. */
+function busyFixturePath(): string | null {
+  const e = { BOOKING_BUSY_FIXTURE: env.BOOKING_BUSY_FIXTURE, NODE_ENV: process.env.NODE_ENV };
+  return e.BOOKING_BUSY_FIXTURE && bookingBusyFixtureRefusal(e) === null ? e.BOOKING_BUSY_FIXTURE : null;
+}
+
 function fixtureBusy(path: string, counselorId: string): BusyInterval[] {
   const all = JSON.parse(readFileSync(path, "utf8")) as Record<string, BusyInterval[]>;
   return Array.isArray(all[counselorId]) ? all[counselorId] : [];
@@ -203,9 +229,11 @@ function fixtureBusy(path: string, counselorId: string): BusyInterval[] {
 
 /**
  * The counselor's busy time on the calendars they connected. A counselor with
- * no calendar connected has none (their Meridies meetings still count). A
- * calendar we couldn't read is a 503: slots are never offered over busy time
- * nobody checked.
+ * no calendar connected (no grant, or a grant without Calendar) has none: their
+ * Meridies meetings still count. A connected calendar we couldn't read stops
+ * the answer, so slots are never offered over busy time nobody checked: a grant
+ * that no longer works is 409 `calendar_reconnect_needed`, an outage 503
+ * `calendar_busy_unavailable`. Our own per-counselor limit passes through as 429.
  */
 export async function calendarBusy(
   svc: SupabaseClient,
@@ -215,10 +243,11 @@ export async function calendarBusy(
   timeZone: string,
   log: FastifyRequest["log"]
 ): Promise<BusyInterval[]> {
-  if (bookingBusyFixture) return fixtureBusy(bookingBusyFixture, counselorId);
+  const fixture = busyFixturePath();
+  if (fixture) return fixtureBusy(fixture, counselorId);
 
   const { data, error } = await svc.from("integration_tokens").select("provider").eq("owner_id", counselorId).limit(10);
-  if (error) throw new HttpError(503, "Your counselor's calendar couldn't be checked right now. Try again shortly.", "calendar_busy_unavailable");
+  if (error) throw busyUnavailable();
   const providers = new Set(((data ?? []) as Row[]).map((r) => str(r.provider)));
   const out: BusyInterval[] = [];
   for (const provider of SUITE_PROVIDERS as readonly SuiteProvider[]) {
@@ -226,9 +255,12 @@ export async function calendarBusy(
     try {
       out.push(...(await listBusy(counselorId, provider, from, to, timeZone, log)));
     } catch (e) {
+      // A provider's own 429 is already a 503 here (listBusy); a 429 that reaches this is our limiter's.
       if (e instanceof HttpError && e.statusCode === 429) throw e;
       log.warn({ provider, status: e instanceof HttpError ? e.statusCode : null, code: e instanceof HttpError ? e.code : null }, "booking busy read failed");
-      throw new HttpError(503, "Your counselor's calendar couldn't be checked right now. Try again shortly.", "calendar_busy_unavailable");
+      // 409 is a grant problem (the refresh refused, or the provider refused the token): it won't fix itself.
+      if (e instanceof HttpError && e.statusCode === 409) throw busyReconnectNeeded();
+      throw busyUnavailable();
     }
   }
   return out;
@@ -255,18 +287,13 @@ export async function slotsFor(
   const base = { timeZone: s.timeZone, typeId: type.id, durationMinutes: type.durationMinutes };
   const clamped = clampWindow({ from: window.from, to: window.to, now, maxDaysAhead: s.maxDaysAhead });
   if (!clamped) return { ...base, from: null, to: null, slots: [] };
+  const calWindow = busyWindow(clamped.from, clamped.to, s.bufferMinutes, s.timeZone);
 
   const [meetings, calendar] = await Promise.all([
     meetingBusy(ctx.svc, ctx.counselorId, clamped.from, clamped.to, s.bufferMinutes),
-    // Widened by the buffer, so an event just outside the window still keeps its gap.
-    calendarBusy(
-      ctx.svc,
-      ctx.counselorId,
-      new Date(Date.parse(clamped.from) - s.bufferMinutes * 60_000).toISOString(),
-      new Date(Date.parse(clamped.to) + s.bufferMinutes * 60_000).toISOString(),
-      s.timeZone,
-      request.log
-    ),
+    // Asked for whole local days (widened by the buffer first), so requests seconds apart share listBusy's
+    // 60 s cache and its rate-limit charge; computeSlots still filters by the exact window and `now`.
+    calendarBusy(ctx.svc, ctx.counselorId, calWindow.from, calWindow.to, s.timeZone, request.log),
   ]);
   const starts = computeSlots({
     timeZone: s.timeZone,

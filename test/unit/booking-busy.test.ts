@@ -146,3 +146,10 @@ test("busy reads are rate limited per counselor", async () => {
   }
   assert.ok(refused instanceof HttpError && refused.statusCode === 429, String(refused));
 });
+
+test("more pages than the cap is unknown busy time: 503, never a partial list", async () => {
+  stub(Array.from({ length: 10 }, (_, i) => json({ items: [], nextPageToken: `p${i + 2}` })));
+  await assert.rejects(listBusy(nextOwner(), "google", FROM, TO, NY, log), (e: unknown) => e instanceof HttpError && e.statusCode === 503 && e.code === "calendar_busy_unavailable");
+  stub(Array.from({ length: 10 }, () => json({ value: [], "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/calendarView?$skip=1" })));
+  await assert.rejects(listBusy(nextOwner(), "microsoft", FROM, TO, NY, log), (e: unknown) => e instanceof HttpError && e.statusCode === 503 && e.code === "calendar_busy_unavailable");
+});

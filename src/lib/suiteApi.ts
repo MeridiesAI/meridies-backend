@@ -741,8 +741,12 @@ export async function deleteCalendarEvent(
  * busy for that whole day in the counselor's booking zone.
  *
  * A counselor with no grant for `provider`, or a grant without Calendar, has no
- * busy time there ([]). Any other failure throws (a 503 or the refresh's 409),
- * so slots are never offered over busy time we couldn't read. Answers are
+ * busy time there ([]). Any other failure throws, so slots are never offered
+ * over busy time we couldn't read: a refused grant (401/403 after the refresh)
+ * is 409 `calendar_reconnect_needed`, an outage or a list longer than
+ * BUSY_MAX_PAGES pages is 503 `calendar_busy_unavailable`, and the token
+ * refresh's own errors pass through (lib/booking.ts calendarBusy sorts them
+ * into those two codes). Answers are
  * cached for 60 s per counselor, provider, window and zone; a miss is rate
  * limited per counselor (`busy:<counselorId>`).
  */
@@ -763,12 +767,42 @@ export const __busy = {
   request: async (ownerId: string, provider: SuiteProvider, url: string, init: RequestInit, scope: BusyScope): Promise<Response> =>
     (await call(ownerId, provider, url, init, scope)).res,
   now: () => Date.now(),
+  rateLimit: (ownerId: string): Promise<void> =>
+    enforceRateLimit(
+      `busy:${ownerId}`,
+      BUSY_RATE_LIMIT.max,
+      BUSY_RATE_LIMIT.windowSeconds,
+      "Too many availability checks for this counselor. Try again in a minute."
+    ),
   reset() {
     busyCache.clear();
     __busy.request = async (ownerId, provider, url, init, scope) => (await call(ownerId, provider, url, init, scope)).res;
     __busy.now = () => Date.now();
+    __busy.rateLimit = (ownerId) =>
+      enforceRateLimit(
+        `busy:${ownerId}`,
+        BUSY_RATE_LIMIT.max,
+        BUSY_RATE_LIMIT.windowSeconds,
+        "Too many availability checks for this counselor. Try again in a minute."
+      );
   },
 };
+
+/** A calendar we couldn't read in full: transient, try again. Slots are never offered over it. */
+export function busyUnavailable(): HttpError {
+  return new HttpError(503, "Your counselor's calendar couldn't be checked right now. Try again shortly.", "calendar_busy_unavailable");
+}
+
+/** A calendar grant that no longer works (expired, revoked, refused): the counselor has to reconnect it. */
+export function busyReconnectNeeded(): HttpError {
+  return new HttpError(409, "Your counselor's calendar needs reconnecting before times can be offered.", "calendar_reconnect_needed");
+}
+
+/** A provider answer that isn't ok: a refused grant (401/403) needs reconnecting; anything else is transient. */
+function busyFailure(provider: SuiteProvider, res: Response, log: Log): HttpError {
+  log.warn({ provider, status: res.status, what: "calendar busy time" }, "provider request failed");
+  return res.status === 401 || res.status === 403 ? busyReconnectNeeded() : busyUnavailable();
+}
 
 function notConnected(e: unknown, provider: SuiteProvider): boolean {
   return (
@@ -826,7 +860,7 @@ async function googleBusy(ownerId: string, from: string, to: string, timeZone: s
       {},
       BUSY_GOOGLE
     );
-    if (!res.ok) throw providerFailure("google", res, log, "calendar");
+    if (!res.ok) throw busyFailure("google", res, log);
     const body = (await res.json()) as { items?: GoogleBusyEvent[]; nextPageToken?: string };
     for (const ev of body.items ?? []) {
       if (ev.status === "cancelled" || ev.transparency === "transparent") continue;
@@ -840,9 +874,11 @@ async function googleBusy(ownerId: string, from: string, to: string, timeZone: s
       if (start && end && end > start) out.push({ start, end });
     }
     pageToken = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : null;
-    if (!pageToken) break;
+    if (!pageToken) return out;
   }
-  return out;
+  // Still more pages after the cap: the list is partial, so the busy time is unknown.
+  log.warn({ provider: "google", pages: BUSY_MAX_PAGES }, "calendar busy time has more pages than the cap");
+  throw busyUnavailable();
 }
 
 async function microsoftBusy(ownerId: string, from: string, to: string, timeZone: string, log: Log): Promise<BusyInterval[]> {
@@ -856,7 +892,7 @@ async function microsoftBusy(ownerId: string, from: string, to: string, timeZone
   let url: string | null = `https://graph.microsoft.com/v1.0/me/calendarView?${params.toString()}`;
   for (let page = 0; page < BUSY_MAX_PAGES && url; page++) {
     const res = await __busy.request(ownerId, "microsoft", url, { headers: { Prefer: 'outlook.timezone="UTC"' } }, BUSY_MICROSOFT);
-    if (!res.ok) throw providerFailure("microsoft", res, log, "calendar");
+    if (!res.ok) throw busyFailure("microsoft", res, log);
     const body = (await res.json()) as { value?: GraphBusyEvent[]; "@odata.nextLink"?: string };
     for (const ev of body.value ?? []) {
       if (ev.isCancelled || ev.showAs === "free") continue;
@@ -872,6 +908,11 @@ async function microsoftBusy(ownerId: string, from: string, to: string, timeZone
     const next = body["@odata.nextLink"];
     // Only ever back to Graph itself: the token goes wherever this points.
     url = typeof next === "string" && next.startsWith("https://graph.microsoft.com/") ? next : null;
+  }
+  if (url) {
+    // Still more pages after the cap: the list is partial, so the busy time is unknown.
+    log.warn({ provider: "microsoft", pages: BUSY_MAX_PAGES }, "calendar busy time has more pages than the cap");
+    throw busyUnavailable();
   }
   return out;
 }
@@ -889,12 +930,7 @@ export async function listBusy(
   const hit = busyCache.get(key);
   if (hit && now - hit.at < BUSY_TTL_MS) return hit.value;
 
-  await enforceRateLimit(
-    `busy:${ownerId}`,
-    BUSY_RATE_LIMIT.max,
-    BUSY_RATE_LIMIT.windowSeconds,
-    "Too many availability checks for this counselor. Try again in a minute."
-  );
+  await __busy.rateLimit(ownerId);
 
   let value: BusyInterval[];
   try {

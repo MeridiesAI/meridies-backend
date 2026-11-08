@@ -9,9 +9,10 @@
  * spring-forward night is two hours, on a fall-back night four. Slots step by
  * the meeting type's duration from the start of each range, in real minutes.
  *
- * A wall time inside the spring-forward gap (02:30 that never happens) means
- * the instant just after the gap; an ambiguous one (01:30 on a fall-back
- * night) means its first occurrence. "24:00" is allowed as the end of a range
+ * A wall time inside the spring-forward gap is read with the offset in force
+ * before the change, so it moves forward by the gap's length (02:30 on a
+ * US spring-forward night, which never happens, becomes 03:30 local); an
+ * ambiguous one (01:30 on a fall-back night) means its first occurrence. "24:00" is allowed as the end of a range
  * (midnight at the end of that day); no slot ever runs past its range, so
  * nothing straddles midnight into the next day's hours.
  *
@@ -52,18 +53,39 @@ function minutesOf(hhmm: string): number | null {
   return m[3] ? 24 * 60 : Number(m[1]) * 60 + Number(m[2]);
 }
 
+/** One formatter per zone: building an Intl.DateTimeFormat is the expensive part of an offset read. */
+const OFFSET_FORMATS = new Map<string, Intl.DateTimeFormat>();
+const DATE_FORMATS = new Map<string, Intl.DateTimeFormat>();
+const FORMAT_CACHE_MAX = 200;
+
+function cached(map: Map<string, Intl.DateTimeFormat>, tz: string, make: () => Intl.DateTimeFormat): Intl.DateTimeFormat {
+  let f = map.get(tz);
+  if (!f) {
+    if (map.size >= FORMAT_CACHE_MAX) map.clear();
+    f = make();
+    map.set(tz, f);
+  }
+  return f;
+}
+
 /** Offset of `tz` from UTC at an instant, in minutes (east positive). */
 function offsetMinutes(instantMs: number, tz: string): number {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    hourCycle: "h23",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).formatToParts(new Date(instantMs));
+  const format = cached(
+    OFFSET_FORMATS,
+    tz,
+    () =>
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+  );
+  const parts = format.formatToParts(new Date(instantMs));
   const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
   const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour") % 24, get("minute"), get("second"));
   return Math.round((asUtc - Math.floor(instantMs / 1000) * 1000) / MINUTE);
@@ -71,8 +93,9 @@ function offsetMinutes(instantMs: number, tz: string): number {
 
 /**
  * A wall-clock date ("YYYY-MM-DD") and time ("HH:MM", or "24:00") in `tz`, as
- * epoch milliseconds. Gap times move forward past the gap; ambiguous times
- * take their first occurrence.
+ * epoch milliseconds. A gap time moves forward by the gap's length (02:30 in
+ * a one-hour spring-forward gap is 03:30 local); an ambiguous time takes its
+ * first occurrence.
  */
 export function wallTimeToInstant(date: string, time: string, tz: string): number {
   const [y, mo, d] = date.split("-").map(Number);
@@ -87,13 +110,13 @@ export function wallTimeToInstant(date: string, time: string, tz: string): numbe
     if (offsetMinutes(candidate, tz) === o) matches.push(candidate);
   }
   if (matches.length) return Math.min(...matches);
-  // In the gap: read the wall time with the offset before the change, which lands after the gap.
+  // In the gap: read the wall time with the offset before the change, which moves it forward by the gap's length.
   return naive - offsetMinutes(naive - DAY, tz) * MINUTE;
 }
 
 /** The calendar date (YYYY-MM-DD) an instant falls on in `tz`. */
 function localDate(instantMs: number, tz: string): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(
+  return cached(DATE_FORMATS, tz, () => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" })).format(
     new Date(instantMs)
   );
 }
@@ -191,4 +214,21 @@ export function clampWindow(input: { from: string; to: string; now: string | Dat
   const to = Math.min(new Date(input.to).getTime(), from + MAX_SLOT_WINDOW_DAYS * DAY, now + Math.max(0, input.maxDaysAhead) * DAY);
   if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
   return { from: new Date(from).toISOString(), to: new Date(to).toISOString() };
+}
+
+/**
+ * The window to ask a calendar about for slots in [from, to): widened by the
+ * buffer, then out to whole local days in `tz` (from the start of the first
+ * day to the next local midnight after the last), DST-safe. Requests a few
+ * seconds apart then ask the same question, so listBusy's 60 s cache answers
+ * them and the per-counselor limit is charged once; computeSlots still filters
+ * by the exact window and `now`, so the slots don't change.
+ */
+export function busyWindow(from: string, to: string, bufferMinutes: number, tz: string): { from: string; to: string } {
+  const pad = Math.max(0, bufferMinutes) * MINUTE;
+  const lo = new Date(from).getTime() - pad;
+  const hi = new Date(to).getTime() + pad;
+  const start = wallTimeToInstant(localDate(lo, tz), "00:00", tz);
+  const end = wallTimeToInstant(addDays(localDate(hi - 1, tz), 1), "00:00", tz);
+  return { from: new Date(start).toISOString(), to: new Date(end).toISOString() };
 }

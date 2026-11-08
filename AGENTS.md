@@ -807,17 +807,22 @@ forget it.
   = an hour) and their connected calendar's busy time, each widened by the buffer; at most 14 days a request, clamped to
   max days ahead; only free times are returned. **Busy time** uses only scopes already granted: Google `events.list` on
   `primary` (skips transparent and cancelled; all-day = the counselor's whole local day), Graph `GET /me/calendarView`
-  (`Prefer: outlook.timezone="UTC"`, skips free and cancelled); never `freebusy.query` or `getSchedule`. 60 s cache,
-  `busy:<counselor>` 30 a minute; no calendar connected is no busy time, an unreadable calendar is 503
-  `calendar_busy_unavailable` (never offer slots over unknown busy time). Tests stub it with `__busy` (unit) or
-  `BOOKING_BUSY_FIXTURE` (a JSON file, ignored in production). **`public.book_meeting_slot(p_student, p_counselor,
+  (`Prefer: outlook.timezone="UTC"`, skips free and cancelled); never `freebusy.query` or `getSchedule`. The calendar
+  is asked about whole local days (`busyWindow`), so requests seconds apart hit its 60 s cache and charge
+  `busy:<counselor>` (30 a minute) once. No calendar connected (no grant, or a grant without Calendar) is no busy time;
+  a connected calendar that can't be read stops the slots (never offer them over unknown busy time): a grant that no
+  longer works (the refresh refused, or a 401/403) is 409 `calendar_reconnect_needed`, an outage, a provider 429 or
+  more than 5 pages is 503 `calendar_busy_unavailable`. Tests stub it with `__busy` (unit) or `BOOKING_BUSY_FIXTURE`
+  (a JSON file the API reads instead; index.ts refuses to start with it unless the raw NODE_ENV is development or
+  test, the `RESEARCH_FAKE` rule). **`public.book_meeting_slot(p_student, p_counselor,
   p_starts_at, p_ends_at, p_mode, p_title, p_agenda)`** (SECURITY DEFINER, EXECUTE to service_role only) books under
   `pg_advisory_xact_lock(hashtext('booking:' || counselor))` after re-checking the relationship, approval, `enabled`
-  and overlap with the buffer; errors `slot_taken` (23P01), `booking_disabled`, `not_your_counselor`, `invalid_slot`.
+  and overlap with the buffer; errors `slot_taken` (23P01), `booking_disabled`, `not_your_counselor`, `invalid_slot`
+  (also a start not in the future).
   `meetings.booked_by_student` is set only there (a guard trigger refuses a user session's write). **Deploy order:**
   either; not in `REQUIRED_SCHEMA`; without it the routes answer 503 `booking_unavailable` (`bookingReady`). Part 2
   (book, reschedule, cancel, invites) is not built yet. Tests: `test/unit/booking-slots.test.ts`,
-  `booking-busy.test.ts`, `test/integration/booking-settings.test.mjs`.
+  `booking-busy.test.ts`, `booking-service.test.ts`, `test/integration/booking-settings.test.mjs`.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the

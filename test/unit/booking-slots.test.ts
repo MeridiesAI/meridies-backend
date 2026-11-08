@@ -36,7 +36,7 @@ test("no weekly hours means no slots", () => {
   assert.deepEqual(computeSlots(input({ weeklyHours: { 1: [] } })), []);
 });
 
-test("a 30-minute type steps by 30 minutes and never runs past the end of the hours", () => {
+test("a 45-minute type steps by 45 minutes and never runs past the end of the hours", () => {
   const slots = computeSlots(input({ durationMinutes: 45, weeklyHours: { 1: [{ start: "09:00", end: "10:30" }] } }));
   // 09:00-09:45 and 09:45-10:30 fit; 10:30 would run past.
   assert.deepEqual(slots, [iso("2027-01-04T14:00Z"), iso("2027-01-04T14:45Z")]);
@@ -77,7 +77,7 @@ test("fall back: a 00:00-03:00 window is four real hours, and 09:00 is EST again
   ]);
 });
 
-test("a wall time inside the spring-forward gap moves to just after it; an ambiguous one takes the first", () => {
+test("a wall time inside the spring-forward gap moves forward by the gap (02:30 -> 03:30 EDT); an ambiguous one takes the first", () => {
   assert.equal(new Date(wallTimeToInstant("2026-03-08", "02:30", NY)).toISOString(), iso("2026-03-08T07:30Z"));
   assert.equal(new Date(wallTimeToInstant("2026-11-01", "01:30", NY)).toISOString(), iso("2026-11-01T05:30Z"));
   assert.equal(new Date(wallTimeToInstant("2026-07-01", "09:00", NY)).toISOString(), iso("2026-07-01T13:00Z"));
