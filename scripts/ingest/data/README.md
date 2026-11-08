@@ -116,7 +116,10 @@ sourced fact below.
 Boston College, Tufts, Johns Hopkins, Rochester, Swarthmore. Each page names the
 cycle (2026-27, or "Class of 2031"). Conventions: prompt text is copied by
 program from the page line (runs of spaces collapsed, an "A."/"1."/"Question 1:"
-label dropped, word-count parentheticals kept as the school printed them);
+label dropped, word-count parentheticals kept as the school printed them; any
+non-breaking or other unusual space, such as the narrow no-break space (U+202F)
+in Penn's VIPER prompt, became one plain ASCII space and zero-width characters
+were removed, so the file holds none of them);
 `word_limit` is the stated maximum ("50-200 words" stores 200); pick-one prompts
 are stored as separate non-required rows (one row per option, `required` false,
 with "(choose 1 of N)" in the title: Yale's essay, Dartmouth's second and third
@@ -154,6 +157,21 @@ keeps its `personal_statement_read` row (its own sentence: the personal
 statement "is your opportunity to communicate directly with the Admissions
 Committee"); Ohio State's row only supported `test_reporting` and was dropped,
 so Ohio State has no row.
+
+**Not independently re-verified.** A second person re-fetched the pages on
+2026-11-07 and found no mismatch, but these rows could not be re-fetched (the
+sites refused a script) and rest on the compiler's own two fetches. A person
+should check them in a browser before loading: Columbia's 6 supplement rows and
+its 2 policy rows (403 to curl), the Johns Hopkins supplement row and policy row
+and the Northeastern policy row (bot-blocked), and the Pitt policy row (bot
+defense page).
+
+**Two caveats on rows that are in the file.** Yale's three short takes and its
+essay choice apply to Common App and Coalition applicants only (QuestBridge
+applicants don't answer them), yet the short takes are marked `required` true.
+Carnegie Mellon's testing page still says "fall 2026" (so no `test_reporting`
+is recorded); the line the policy row rests on, that it considers the Common
+Application essay, is not tied to a cycle.
 
 **Not confirmed (left out, not guessed):**
 
