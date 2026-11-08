@@ -14,8 +14,14 @@
 --                               (a later last_activity_at) starts a new one. Service role writes; the
 --                               student's counselor reads.
 --
---   student_last_progress(uuid[])   the newest progress_events time per student, for the sweep (one
---                               grouped read on progress_events_student_idx). EXECUTE to service_role only.
+--   student_last_progress(uuid[])   the newest progress_events time per student that the student made
+--                               (actor_id = the student, or null for legacy and system rows), for the
+--                               sweep: a counselor's edit or tick is not the student's activity.
+--                               EXECUTE to service_role only.
+--
+--   profiles.last_active_at   no longer client-writable: the API stamps it on the service client. With the
+--                               client grant a student could set a far-future time and switch their own
+--                               alert off (the API also ignores a future time).
 --
 --   family_reports.kind   gains 'weekly'; one weekly report per student per period_start.
 --
@@ -86,7 +92,9 @@ stable
 set search_path = ''
 as $$
   select s.id, (
-    select max(e.created_at) from public.progress_events e where e.student_id = s.id
+    select max(e.created_at) from public.progress_events e
+     where e.student_id = s.id
+       and (e.actor_id = s.id or e.actor_id is null)
   )
   from unnest(p_students) as s(id)
 $$;
@@ -95,7 +103,15 @@ revoke all on function public.student_last_progress(uuid[]) from public, anon, a
 grant execute on function public.student_last_progress(uuid[]) to service_role;
 
 -- ---------------------------------------------------------------------------
--- 4. family_reports: the weekly digest's kind, one per student per week
+-- 4. profiles.last_active_at: the API's to write, not the client's
+-- ---------------------------------------------------------------------------
+
+-- profiles has column-level UPDATE grants (20260828000014/16), so this takes away exactly this column.
+-- Nothing in the app or the API writes it as the signed-in user.
+revoke update (last_active_at) on public.profiles from authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 5. family_reports: the weekly digest's kind, one per student per week
 -- ---------------------------------------------------------------------------
 
 alter table public.family_reports drop constraint if exists family_reports_kind_check;
