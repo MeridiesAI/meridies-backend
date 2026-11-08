@@ -164,3 +164,33 @@ test("essay notice throttles: one an essay per six hours, twenty a student a day
   assert.equal(ESSAY_NOTICE_PER_ESSAY_SECONDS, 6 * 3600);
   assert.equal(ESSAY_NOTICES_PER_STUDENT_DAY, 20);
 });
+
+test("a last-active time or event in the future is ignored, so nobody can switch their own alert off", () => {
+  const inAYear = new Date(NOW.getTime() + 365 * 86_400_000).toISOString();
+  // A forged far-future mark falls back to the real signals.
+  assert.equal(lastActivityAt(inAYear, daysAgo(12), daysAgo(90), NOW), daysAgo(12));
+  assert.equal(lastActivityAt(inAYear, null, daysAgo(90), NOW), daysAgo(90));
+  // A future event is ignored the same way.
+  assert.equal(lastActivityAt(daysAgo(9), inAYear, daysAgo(90), NOW), daysAgo(9));
+  // A few minutes of clock skew is still taken.
+  const skew = new Date(NOW.getTime() + 2 * 60_000).toISOString();
+  assert.equal(lastActivityAt(skew, null, daysAgo(90), NOW), skew);
+  // The normal case is unchanged.
+  assert.equal(lastActivityAt(daysAgo(3), daysAgo(5), daysAgo(90), NOW), daysAgo(3));
+});
+
+test("a student with a forged future mark is still selected when inactive", () => {
+  const inAYear = new Date(NOW.getTime() + 365 * 86_400_000).toISOString();
+  const out = selectInactive({
+    students: [student("a", { last_active_at: inAYear })],
+    lastEvents: new Map([["a", daysAgo(10)]]),
+    settingsRows: [base({ inactive_alert_days: 7 })],
+    now: NOW,
+  });
+  assert.deepEqual(out.map((o) => [o.studentId, o.days]), [["a", 10]]);
+});
+
+test("a future last-active mark is rewritten on the next request", () => {
+  assert.equal(shouldTouchLastActive(new Date(NOW.getTime() + 86_400_000).toISOString(), NOW), true);
+  assert.equal(shouldTouchLastActive(new Date(NOW.getTime() + 60_000).toISOString(), NOW), false);
+});

@@ -24,6 +24,11 @@ export const LAST_ACTIVE_WRITE_EVERY_MS = 3_600_000;
 /** One essay notice per essay in this window, and this many per student per day. */
 export const ESSAY_NOTICE_PER_ESSAY_SECONDS = 6 * 3600;
 export const ESSAY_NOTICES_PER_STUDENT_DAY = 20;
+/**
+ * Clock skew allowed on an activity time. Anything later than now plus this is ignored: a student can write
+ * a progress event's time, and a forged far-future mark must not switch their own inactivity alert off.
+ */
+export const FUTURE_SKEW_MS = 5 * 60_000;
 
 export type FullSettings = AccountabilitySettings & typeof ALERT_DEFAULTS;
 export type SettingsRow = FullSettings & { counselor_id: string; student_id: string | null };
@@ -50,9 +55,13 @@ function ms(value: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
-/** The later of the two activity signals, else when the student joined; always a normalised ISO instant. */
-export function lastActivityAt(lastActiveAt: string | null, lastEventAt: string | null, createdAt: string): string {
-  const candidates = [ms(lastActiveAt), ms(lastEventAt)].filter((t): t is number => t !== null);
+/**
+ * The later of the two activity signals, else when the student joined; always a normalised ISO instant.
+ * A signal in the future (beyond FUTURE_SKEW_MS) is ignored.
+ */
+export function lastActivityAt(lastActiveAt: string | null, lastEventAt: string | null, createdAt: string, now = new Date()): string {
+  const latest = now.getTime() + FUTURE_SKEW_MS;
+  const candidates = [ms(lastActiveAt), ms(lastEventAt)].filter((t): t is number => t !== null && t <= latest);
   const t = candidates.length ? Math.max(...candidates) : (ms(createdAt) ?? 0);
   return new Date(t).toISOString();
 }
@@ -83,7 +92,7 @@ export function selectInactive(input: {
     if (inQuietHours(settings, now)) continue;
     const joined = ms(s.created_at);
     if (joined === null || now.getTime() - joined < threshold * DAY_MS) continue;
-    const last = lastActivityAt(s.last_active_at, input.lastEvents.get(s.id) ?? null, s.created_at);
+    const last = lastActivityAt(s.last_active_at, input.lastEvents.get(s.id) ?? null, s.created_at, now);
     const days = inactiveDays(last, now);
     if (days < threshold) continue;
     out.push({ studentId: s.id, fullName: s.full_name, lastActivityAt: last, days, threshold });
@@ -93,7 +102,8 @@ export function selectInactive(input: {
 
 export function shouldTouchLastActive(lastActiveAt: string | null | undefined, now: Date): boolean {
   const t = ms(lastActiveAt);
-  return t === null || now.getTime() - t >= LAST_ACTIVE_WRITE_EVERY_MS;
+  // A mark in the future (forged before the column's grant was revoked) is rewritten too.
+  return t === null || now.getTime() - t >= LAST_ACTIVE_WRITE_EVERY_MS || t > now.getTime() + FUTURE_SKEW_MS;
 }
 
 export function essayBodyChanged(before: string | null | undefined, after: string | null | undefined): boolean {
