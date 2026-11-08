@@ -21,7 +21,7 @@ import { isIP } from "node:net";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { env } from "../env.js";
-import { AGREEMENT_CONSENT_SENTENCE, AGREEMENT_CONSENT_VERSION } from "./agreementConsent.js";
+import { AGREEMENT_CONSENT_SENTENCE } from "./agreementConsent.js";
 import { brandedEmail, brandedText, escapeHtml } from "./email.js";
 
 type Row = Record<string, unknown>;
@@ -61,7 +61,9 @@ function dbError(what: string, error: { code?: string; message?: string }): Erro
  * Mint a fresh link and mark the agreement sent, on the caller's own client.
  * `issue_agreement_link` refuses anyone who may not bill the contact
  * (`private.crm_can_bill(contact, auth.uid())`) and an agreement already
- * accepted or voided. The plaintext token exists only in the returned url.
+ * accepted or voided, and expires the agreement's earlier links (a resend supersedes the
+ * old email). The consent version is the server's, recorded at acceptance. The plaintext
+ * token exists only in the returned url.
  */
 export async function mintAgreementLink(
   db: SupabaseClient,
@@ -75,7 +77,6 @@ export async function mintAgreementLink(
     p_agreement: agreementId,
     p_token_hash: hashAgreementToken(token),
     p_expires_at: expiresAt.toISOString(),
-    p_consent_version: AGREEMENT_CONSENT_VERSION,
   });
   if (error) throw dbError("issue agreement link", error);
   return { url: agreementUrl(opts.publicApiUrl, token), expiresAt };
@@ -114,6 +115,48 @@ export async function agreementForToken(svc: SupabaseClient, token: string, now 
     default:
       return { state: "invalid" };
   }
+}
+
+// ---- Signed agreements are kept ---------------------------------------------------------
+
+type PgErr = { code?: string; message?: string } | null;
+const NOT_APPLIED = new Set(["PGRST200", "PGRST202", "PGRST204", "PGRST205", "42P01", "42703", "42883"]);
+
+export const SIGNED_AGREEMENT_CONTACT_MESSAGE =
+  "This family has a signed agreement on file, which has to be kept. Void or archive the contact instead.";
+export const SIGNED_AGREEMENT_ACCOUNT_MESSAGE = "Signed agreements have to be kept: ask Meridies to close the account.";
+
+/** The database refusing a delete because an acceptance (ON DELETE RESTRICT) still points at it. */
+export const isSignedAgreementRestrict = (error: PgErr) =>
+  error?.code === "23503" && /agreement_acceptances/.test(error.message ?? "");
+
+/** Whether the contact has an accepted agreement, as the caller's client sees it. False without the migration. */
+export async function contactHasSignedAgreement(db: SupabaseClient, contactId: string): Promise<boolean> {
+  const { data, error } = await db.from("agreements").select("id").eq("contact_id", contactId).eq("status", "accepted").limit(1);
+  if (error) {
+    if (error.code && NOT_APPLIED.has(error.code)) return false;
+    throw dbError("read agreements", error);
+  }
+  return (data ?? []).length > 0;
+}
+
+/**
+ * Whether deleting this profile would have to take an accepted agreement with it: one it wrote, or one on a
+ * contact it created (both cascade from the profile, and the acceptance refuses). Service client; false
+ * without the migration; any other error throws, so the caller refuses rather than guesses.
+ */
+export async function profileKeepsSignedAgreements(svc: SupabaseClient, profileId: string): Promise<boolean> {
+  const [own, viaContact] = await Promise.all([
+    svc.from("agreements").select("id").eq("counselor_id", profileId).eq("status", "accepted").limit(1),
+    svc.from("agreements").select("id, pipeline_contacts!inner(counselor_id)").eq("status", "accepted").eq("pipeline_contacts.counselor_id", profileId).limit(1),
+  ]);
+  for (const r of [own, viaContact]) {
+    if (r.error) {
+      if (r.error.code && NOT_APPLIED.has(r.error.code)) return false;
+      throw dbError("read agreements", r.error);
+    }
+  }
+  return (own.data ?? []).length > 0 || (viaContact.data ?? []).length > 0;
 }
 
 // ---- What the family submits ------------------------------------------------------
@@ -187,19 +230,24 @@ export function buildCertificate(c: CertificateInput): string {
 
 const PRE = "white-space:pre-wrap;word-wrap:break-word;font-family:inherit;font-size:15px;line-height:1.6;background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px";
 
-/** The page body (inside <body>): every value escaped; a form only while it can be accepted. */
+/**
+ * The page body (inside <body>): every value escaped; a form only while it can be accepted.
+ * Once accepted, anyone holding the link sees only the name, the time, the document's
+ * fingerprint and what kind of record it is: never the signer's IP or browser, which stay
+ * in the stored certificate, the two emails and the counselor's view.
+ */
 export function agreementPageBody(p: {
   title: string;
   bodyText: string;
   error: string | null;
-  accepted?: { signerName: string; acceptedAt: string; certificate: string } | null;
+  accepted?: { signerName: string; acceptedAt: string; bodySha256: string } | null;
 }): string {
   const head = `<h1>${escapeHtml(p.title)}</h1>
 <pre style="${PRE}">${escapeHtml(p.bodyText)}</pre>`;
   if (p.accepted) {
     return `${head}
 <p><strong>Accepted by ${escapeHtml(p.accepted.signerName)}</strong> on ${escapeHtml(p.accepted.acceptedAt)} (UTC).</p>
-<pre style="${PRE};font-size:13px">${escapeHtml(p.accepted.certificate)}</pre>`;
+<p style="color:#6b7280;font-size:13px">Document SHA-256: ${escapeHtml(p.accepted.bodySha256)}<br>${escapeHtml(NOT_CERTIFIED_LINE)}</p>`;
   }
   const error = p.error ? `<p style="color:#b91c1c" role="alert">${escapeHtml(p.error)}</p>` : "";
   return `${head}

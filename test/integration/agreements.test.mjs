@@ -54,12 +54,12 @@ const mailsTo = async (email) => {
 };
 const fullMail = async (m) => (await fetch(`${MAILPIT}/api/v1/message/${m.ID}`)).json();
 /** The newest agreement link mailed to `email` for `title`. */
-async function linkFor(email, title) {
+async function linkFor(email, title, exclude = null) {
   for (let i = 0; i < 20; i++) {
     for (const m of await mailsTo(email)) {
       if (!m.Subject.includes(title)) continue;
       const tok = /\/agree\/([A-Za-z0-9_-]{43})/.exec((await fullMail(m)).Text)?.[1];
-      if (tok) return tok;
+      if (tok && tok !== exclude) return tok;
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -104,7 +104,14 @@ check("PostgREST can't set the hash (no grant on body_sha256)", forged.status >=
 const forged2 = await rest(S.token, "POST", "/rest/v1/agreements?select=status,body_sha256", { counselor_id: S.id, contact_id: contact.id, title: "F2", body_text: "F2", consent_version: "v" }, { Prefer: "return=representation" });
 check("a client insert is a draft with the database's hash", forged2.status === 201 && forged2.body[0]?.status === "draft" && forged2.body[0]?.body_sha256 === sha("F2"), JSON.stringify(forged2.body));
 const forgedAccept = await rest(S.token, "PATCH", `/rest/v1/agreements?title=eq.F2&contact_id=eq.${contact.id}`, { status: "accepted" });
-check("a client can't mark an agreement accepted", forgedAccept.status >= 400, JSON.stringify(forgedAccept.body));
+check("a client can't mark a draft accepted", forgedAccept.status >= 400, JSON.stringify(forgedAccept.body));
+for (const bad of ["Bad\u0000title", "Bell\u0007title"]) {
+  const r = await call(S.token, "POST", "/agreements", { contactId: contact.id, title: bad, bodyText: "x" });
+  check(`a title with a control character is a clean 400 (${JSON.stringify(bad)})`, r.status === 400, JSON.stringify(r.body));
+}
+const D = (await call(S.token, "POST", "/agreements", { contactId: contact.id, title: `Draft to void ${tag}`, bodyText: "d" })).body.id;
+const dv = await call(S.token, "POST", `/agreements/${D}/void`);
+check("a draft can be voided", dv.status === 200 && dv.body.status === "void" && dv.body.voidedAt, JSON.stringify(dv.body));
 
 // ---- Who may ---------------------------------------------------------------------------------
 const X = await user("ag-outsider");
@@ -139,6 +146,19 @@ check("the email carries a private link", !!token);
 const delivery = await sql(`select body from public.message_deliveries where to_email='${parentEmail}' and template='agreement-sent' order by created_at desc limit 1`);
 check("the delivery record keeps no link", delivery.length > 0 && !delivery.includes(token) && !delivery.includes("/agree/"));
 check("only the token's hash is stored", await sql(`select count(*) from public.agreement_tokens where agreement_id='${A}' and token_hash='${sha(token)}'`) === "1");
+
+// ---- A sent agreement: the client can't accept it or touch what was sent ------------------------
+const asClient = (stmt) => `begin; set local role authenticated; select set_config('request.jwt.claims', '{"sub":"${S.id}","role":"authenticated"}', true); ${stmt}; commit;`;
+const sentAccept = await rest(S.token, "PATCH", `/rest/v1/agreements?id=eq.${A}`, { status: "accepted" });
+check("the owning counselor can't mark a SENT agreement accepted (PostgREST)", sentAccept.status >= 400 && (await sql(`select status from public.agreements where id='${A}'`)) === "sent", JSON.stringify(sentAccept.body));
+check("nor as an authenticated SQL session", await sqlFails(asClient(`update public.agreements set status='accepted' where id='${A}'`)));
+check("still sent, no accepted_at", (await sql(`select status || ':' || coalesce(accepted_at::text, 'null') from public.agreements where id='${A}'`)) === "sent:null");
+const before = await sql(`select row_to_json(a)::text from (select sent_at, accepted_at, body_text, body_sha256, consent_version from public.agreements where id='${A}') a`);
+for (const [col, val] of [["sent_at", "2020-01-01T00:00:00Z"], ["accepted_at", "2020-01-01T00:00:00Z"], ["body_text", "Changed"], ["body_sha256", "0".repeat(64)], ["consent_version", "v9"]]) {
+  const r = await rest(S.token, "PATCH", `/rest/v1/agreements?id=eq.${A}`, { [col]: val });
+  check(`the client can't change ${col} after send`, r.status >= 400, JSON.stringify(r.body));
+}
+check("those columns are as sent", (await sql(`select row_to_json(a)::text from (select sent_at, accepted_at, body_text, body_sha256, consent_version from public.agreements where id='${A}') a`)) === before);
 
 // ---- Body immutable after send ----------------------------------------------------------------
 const edit = await rest(S.token, "PATCH", `/rest/v1/agreements?id=eq.${A}`, { body_text: "Something else" });
@@ -188,6 +208,13 @@ check("a second submit says already accepted", again.status === 409 && /Already 
 check("and adds nothing", await sql(`select count(*) from public.agreement_acceptances where agreement_id='${A}'`) === "1" && await sql(`select signer_name from public.agreement_acceptances where agreement_id='${A}'`) === "<b>Pat</b> Agree");
 const after = await pub("GET", `/agree/${token}`);
 check("the link now shows it read-only", after.status === 200 && !/<form/.test(after.text) && /Accepted by/.test(after.text));
+for (const [label, page] of [["the accepted page", after], ["the 409 page", again], ["the thank-you page", accept]]) {
+  check(`${label} shows no IP or user agent`, !page.text.includes(MY_IP) && !page.text.includes(UA) && !page.text.includes("AgreementTest"));
+  check(`${label} shows the name, the hash and what it is`, page.text.includes(sha(bodyText)) && /not a certified electronic signature/i.test(page.text) && page.text.includes("&lt;b&gt;Pat&lt;/b&gt; Agree"));
+}
+check("the counselor's record keeps the IP and user agent", (row?.certificate_text ?? "").includes(MY_IP) && (row?.certificate_text ?? "").includes(UA));
+const voidAccepted = await rest(S.token, "PATCH", `/rest/v1/agreements?id=eq.${A}`, { status: "void" });
+check("an accepted agreement can't be voided through PostgREST", voidAccepted.status >= 400 && (await sql(`select status from public.agreements where id='${A}'`)) === "accepted", JSON.stringify(voidAccepted.body));
 
 const mine = await call(S.token, "GET", `/agreements/${A}`);
 check("the counselor sees the acceptance", mine.status === 200 && mine.body.acceptance?.signerName === "<b>Pat</b> Agree" && mine.body.acceptance?.certificateText === row?.certificate_text, JSON.stringify(mine.body.acceptance));
@@ -203,6 +230,7 @@ const certLine = `Document SHA-256: ${sha(bodyText)}`;
 const parentCopy = (await mailsTo(parentEmail)).find((m) => m.Subject.startsWith("You accepted"));
 const counselorCopy = (await mailsTo(S.email)).find((m) => m.Subject.includes("accepted:"));
 check("the family's copy carries the certificate", !!parentCopy && (await fullMail(parentCopy)).Text.includes(certLine));
+check("with the IP and user agent", !!parentCopy && (await fullMail(parentCopy)).Text.includes(`IP address: ${MY_IP}`) && (await fullMail(parentCopy)).Text.includes(UA));
 check("the counselor's copy carries the certificate", !!counselorCopy && (await fullMail(counselorCopy)).Text.includes(certLine));
 check("and the escaped name in the HTML", !!counselorCopy && !(await fullMail(counselorCopy)).HTML.includes("<b>Pat</b>"));
 
@@ -226,7 +254,12 @@ check("the row is as recorded", await sql(`select signer_name from public.agreem
 const voidTitle = `Void me ${tag}`;
 const V = (await call(S.token, "POST", "/agreements", { contactId: contact.id, title: voidTitle, bodyText: "v" })).body.id;
 await call(S.token, "POST", `/agreements/${V}/send`);
-const voidToken = await linkFor(parentEmail, voidTitle);
+const firstVoidToken = await linkFor(parentEmail, voidTitle);
+await call(S.token, "POST", `/agreements/${V}/send`);
+const voidToken = await linkFor(parentEmail, voidTitle, firstVoidToken);
+check("sending again mints a different link", !!voidToken && voidToken !== firstVoidToken);
+check("and the superseded link stops working", (await pub("GET", `/agree/${firstVoidToken}`)).status === 410 && (await pub("POST", `/agree/${firstVoidToken}`, { body: "signerName=Pat+Agree&consent=yes" })).status === 410);
+check("the agreement is still open on the new link", (await pub("GET", `/agree/${voidToken}`)).status === 200);
 const voided = await call(S.token, "POST", `/agreements/${V}/void`);
 check("a sent agreement can be voided", voided.status === 200 && voided.body.status === "void" && voided.body.voidedAt, JSON.stringify(voided.body));
 check("its link says withdrawn", (await pub("GET", `/agree/${voidToken}`)).status === 410);
@@ -244,6 +277,25 @@ const ep = await pub("POST", `/agree/${expToken}`, { body: "signerName=Pat+Agree
 check("and can't be accepted", ep.status === 410 && await sql(`select count(*) from public.agreement_acceptances where agreement_id='${E}'`) === "0" && await sql(`select status from public.agreements where id='${E}'`) === "sent");
 const resent = await call(S.token, "POST", `/agreements/${E}/send`);
 check("sending again mints a fresh link", resent.status === 200 && await sql(`select count(*) from public.agreement_tokens where agreement_id='${E}' and expires_at > now()`) === "1");
+
+// ---- Deleting what holds a signed agreement ------------------------------------------------------------
+const delContact = await call(S.token, "DELETE", `/pipeline/contacts/${contact.id}`);
+check("a contact with a signed agreement can't be deleted, and says why", delContact.status === 409 && delContact.body.code === "agreement_on_file" && /signed agreement/.test(delContact.body.error), JSON.stringify(delContact.body));
+const delBare = await call(S.token, "DELETE", `/pipeline/contacts/${bare.id}`);
+check("a contact with only a draft agreement still deletes", delBare.status === 204, JSON.stringify(delBare.body));
+const C2 = await user("ag-leaver");
+const c2Stage = (await call(C2.token, "GET", "/pipeline")).body.stages[0];
+const c2Email = `ag-leaver-parent-${tag}@families.test`;
+const c2Contact = (await call(C2.token, "POST", "/pipeline/contacts", { stageId: c2Stage.id, studentName: `Leaver Family ${tag}`, parentEmail: c2Email })).body;
+const c2Title = `Leaver agreement ${tag}`;
+const c2A = (await call(C2.token, "POST", "/agreements", { contactId: c2Contact.id, title: c2Title, bodyText: "kept" })).body.id;
+await call(C2.token, "POST", `/agreements/${c2A}/send`);
+const c2Token = await linkFor(c2Email, c2Title);
+const c2Accept = await pub("POST", `/agree/${c2Token}`, { body: "signerName=Lee+Leaver&consent=yes", from: ip() });
+check("(the leaver's family accepted)", c2Accept.status === 200, `status ${c2Accept.status}`);
+const delAccount = await call(C2.token, "DELETE", "/account", { confirm: "delete my account" });
+check("an account with signed agreements can't be deleted, and says why", delAccount.status === 409 && delAccount.body.code === "signed_agreements_kept" && /ask Meridies/i.test(delAccount.body.error), JSON.stringify(delAccount.body));
+check("and the account is still there", (await sql(`select count(*) from public.profiles where id='${C2.id}'`)) === "1");
 
 // ---- Limits ------------------------------------------------------------------------------------------
 const anyToken = Buffer.from(`${tag}-limit-token-padding-padding`).toString("base64url").slice(0, 43).padEnd(43, "x");

@@ -140,7 +140,13 @@ const idParam = z.object({ id: uuid }).strict();
 const createBody = z
   .object({
     contactId: uuid,
-    title: z.string().trim().min(1).max(TITLE_MAX),
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(TITLE_MAX)
+      // eslint-disable-next-line no-control-regex
+      .refine((s) => !/[\u0000-\u001f\u007f]/.test(s), "The title can't contain control characters"),
     bodyText: z
       .string()
       .min(1)
@@ -327,14 +333,14 @@ export default async function agreementRoutes(app: FastifyInstance) {
   }
 
   async function acceptedPage(svc: NonNullable<ReturnType<typeof serviceClient>>, agreement: Row): Promise<string> {
-    const acc = await svc.from("agreement_acceptances").select("signer_name, accepted_at, certificate_text").eq("agreement_id", String(agreement.id)).maybeSingle();
+    const acc = await svc.from("agreement_acceptances").select("signer_name, accepted_at, body_sha256").eq("agreement_id", String(agreement.id)).maybeSingle();
     if (acc.error || !acc.data) throw new Error(`read acceptance: ${acc.error?.code ?? "missing"}`);
     const a = acc.data as Row;
     return agreementPageBody({
       title: String(agreement.title),
       bodyText: String(agreement.body_text),
       error: null,
-      accepted: { signerName: String(a.signer_name), acceptedAt: String(a.accepted_at), certificate: String(a.certificate_text) },
+      accepted: { signerName: String(a.signer_name), acceptedAt: new Date(String(a.accepted_at)).toISOString(), bodySha256: String(a.body_sha256) },
     });
   }
 
@@ -467,7 +473,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
         title: String(agreement.title),
         bodyText: String(agreement.body_text),
         error: null,
-        accepted: { signerName: form.signerName, acceptedAt: acceptedAt.toISOString(), certificate },
+        accepted: { signerName: form.signerName, acceptedAt: acceptedAt.toISOString(), bodySha256: String(agreement.body_sha256) },
       });
       return page(reply, 200, thanks + recorded);
     } catch (err) {

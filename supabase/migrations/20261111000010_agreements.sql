@@ -15,7 +15,8 @@
 --   * `agreement_tokens`  the capability in a link, stored as a sha256 only. No
 --     client grant or policy: `issue_agreement_link` (SECURITY DEFINER, called
 --     on the CALLER's client, checking `crm_can_bill` for auth.uid()) mints one
---     and marks the agreement sent; the public page reads them with the service role.
+--     and marks the agreement sent, expiring any earlier unexpired link (a resend
+--     supersedes the old email); the public page reads them with the service role.
 --   * `agreement_acceptances`  one per agreement (unique), immutable: no update
 --     or delete grant for anyone, the service role included, and a trigger that
 --     refuses an update, a delete or a truncate even as postgres. Written only by
@@ -61,6 +62,11 @@ create index if not exists agreements_contact_idx on public.agreements (contact_
 
 -- The hash is the database's; a client never chooses it, the workspace or the
 -- timestamps. Status moves only forward, and a sent agreement's text is fixed.
+-- A client session is told apart by the `role` setting (PostgREST's SET ROLE),
+-- not current_user: this function is SECURITY DEFINER, so current_user is always
+-- its owner here. SET ROLE survives a definer call, so a client calling
+-- issue_agreement_link is still a client (it only needs draft -> sent), while
+-- accept_agreement runs for the service role and may move sent -> accepted.
 create or replace function private.agreements_guard()
 returns trigger
 language plpgsql
@@ -68,7 +74,7 @@ security definer
 set search_path to 'private', 'public'
 as $$
 declare
-  v_client boolean := current_user in ('authenticated', 'anon');
+  v_client boolean := coalesce(current_setting('role', true), 'none') in ('authenticated', 'anon');
 begin
   if tg_op = 'INSERT' then
     new.status := 'draft';
@@ -226,8 +232,13 @@ select private.attach_approval_gate('public.agreement_acceptances');
 -- Sending: mint a link on the caller's own client
 -- ---------------------------------------------------------------------------
 
+-- An earlier draft of this file took the consent version from the caller.
+drop function if exists public.issue_agreement_link(uuid, text, timestamptz, text);
+
+-- Mint a link and mark the agreement sent. Every earlier link to the agreement
+-- that hasn't expired expires now, so a superseded email can't be used.
 create or replace function public.issue_agreement_link(
-  p_agreement uuid, p_token_hash text, p_expires_at timestamptz, p_consent_version text
+  p_agreement uuid, p_token_hash text, p_expires_at timestamptz
 ) returns void
 language plpgsql
 security definer
@@ -250,16 +261,16 @@ begin
   if p_expires_at <= now() or p_expires_at > now() + interval '90 days' then
     raise exception 'A link lasts between now and 90 days' using errcode = '22023';
   end if;
+  update public.agreement_tokens set expires_at = now()
+   where agreement_id = p_agreement and expires_at > now();
   insert into public.agreement_tokens (token_hash, agreement_id, expires_at, created_by)
   values (p_token_hash, p_agreement, p_expires_at, v_uid);
-  update public.agreements
-     set status = 'sent', sent_at = now(), consent_version = p_consent_version
-   where id = p_agreement;
+  update public.agreements set status = 'sent' where id = p_agreement;
 end;
 $$;
 
-revoke all on function public.issue_agreement_link(uuid, text, timestamptz, text) from public, anon;
-grant execute on function public.issue_agreement_link(uuid, text, timestamptz, text) to authenticated;
+revoke all on function public.issue_agreement_link(uuid, text, timestamptz) from public, anon;
+grant execute on function public.issue_agreement_link(uuid, text, timestamptz) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Accepting: one transaction, service role only (the public page)
@@ -311,7 +322,8 @@ begin
     return jsonb_build_object('result', 'already', 'agreement_id', a.id);
   end if;
 
-  update public.agreements set status = 'accepted', accepted_at = p_accepted_at where id = a.id;
+  -- The consent version is the one the family was shown (the server's), recorded on the agreement too.
+  update public.agreements set status = 'accepted', accepted_at = p_accepted_at, consent_version = p_consent_version where id = a.id;
 
   insert into public.audit_log (actor_id, action, entity_type, entity_id, metadata, ip, user_agent)
   values (null, 'agreement.accepted', 'agreement', a.id,

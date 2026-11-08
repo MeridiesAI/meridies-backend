@@ -136,7 +136,8 @@ test("tokens: 32 random bytes, stored as their sha256, minted on the caller's cl
   assert.equal(calls[0]!.args.p_token_hash, hashAgreementToken(token));
   assert.equal(calls[0]!.args.p_token_hash, sha(token));
   assert.ok(!JSON.stringify(calls[0]!.args).includes(token), "the plaintext never goes to the database");
-  assert.equal(calls[0]!.args.p_consent_version, AGREEMENT_CONSENT_VERSION);
+  assert.ok(!("p_consent_version" in calls[0]!.args), "the consent version is the server's, never the caller's");
+  assert.deepEqual(Object.keys(calls[0]!.args).sort(), ["p_agreement", "p_expires_at", "p_token_hash"]);
   assert.equal(AGREEMENT_LINK_DAYS, 30);
   assert.equal(out.expiresAt.toISOString(), "2026-12-07T00:00:00.000Z");
   const again = await mintAgreementLink(db, "a1", { publicApiUrl: "https://api.test", now });
@@ -212,9 +213,11 @@ test("a signer name with HTML is escaped on the page and in both emails, and the
     consentVersion: "v0-PLACEHOLDER",
     practiceName: "P",
   });
-  const page = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, accepted: { signerName: evil, acceptedAt: "2026-11-07T00:00:00.000Z", certificate } });
+  const page = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, accepted: { signerName: evil, acceptedAt: "2026-11-07T00:00:00.000Z", bodySha256: sha("Body") } });
   assert.ok(!page.includes("<img"), "page");
   assert.ok(!/<form/.test(page), "an accepted agreement is read-only");
+  assert.ok(page.includes(sha("Body")) && page.includes(NOT_CERTIFIED_LINE) && page.includes("2026-11-07T00:00:00.000Z"));
+  assert.ok(!/IP address|User agent/.test(page), "the public page never shows the signer's IP or browser");
   const mails = acceptanceEmails({ title: "Plan", bodyText: "Body <script>x</script>", certificate, signerName: evil, senderName: "Coach" });
   for (const m of [mails.signer, mails.counselor]) {
     assert.ok(!m.html.includes("<img"), "html escaped");

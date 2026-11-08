@@ -523,7 +523,8 @@ forget it.
   contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;
   `GET /agreements?contactId=`, `GET /agreements/:id` with its acceptance, `POST /agreements/:id/void` for draft|sent).
   `POST /agreements/:id/send` mints a link on the caller's own client (`issue_agreement_link`, SECURITY DEFINER, checks
-  `crm_can_bill` for auth.uid(); 32 random bytes, sha256 in `agreement_tokens`, service role only, 30 days) and emails
+  `crm_can_bill` for auth.uid(); 32 random bytes, sha256 in `agreement_tokens`, service role only, 30 days; a resend
+  expires every earlier link, so a superseded email stops working) and emails
   the card's parent (else student) address, 400 `contact_no_email` without one; the delivery record keeps no link.
   `GET /agree/:token` (public; CSP with no script, no-store, noindex, no-referrer) shows the text and a name field and a
   consent box, and **changes nothing**; `POST` takes exactly `signerName` + `consent=yes` and `accept_agreement`
@@ -532,10 +533,18 @@ forget it.
   acceptance; not a certified electronic signature."), the agreement `accepted`, an `audit_log` row, and the contact
   moved to its workspace's "Contract signed" stage when that stage is ahead of it (open contacts only). A second submit
   shows "already accepted" (409), never a second row; expired and void links 410, unknown 404. Both parties get a copy
-  (certificate + text). Limits: 30 a minute per address, 60 views and 10 accept tries an hour per link. **Immutable:**
+  (certificate + text). Once accepted, the public page (and the 409 page) shows only the name, the UTC time, the
+  document SHA-256 and the "not a certified electronic signature" line: the IP and user agent stay in the stored
+  certificate, the emails and the counselor's `GET /agreements/:id`. The consent version recorded is the server's
+  (`AGREEMENT_CONSENT_VERSION`, passed only by `accept_agreement`'s service-role caller), never a client's. Limits: 30 a minute per address, 60 views and 10 accept tries an hour per link. **Immutable:**
   the body hash is computed by a trigger, title and body are fixed once sent, nothing changes once accepted or void, and
   an acceptance has no update/delete grant for anyone (service_role included) plus a trigger refusing update, delete and
-  truncate even as postgres; an accepted agreement RESTRICTs deleting its contact. Text only (no PDF; `storage_path`
+  truncate even as postgres; an accepted agreement RESTRICTs deleting its contact. The guard trigger is SECURITY
+  DEFINER, so it tells a client session apart by `current_setting('role')` (PostgREST's SET ROLE), never
+  `current_user` (always the owner inside it): a client can only void a draft or sent agreement, never accept one.
+  `DELETE /pipeline/contacts/:id` answers 409 `agreement_on_file` for a contact with a signed agreement, and
+  `DELETE /account` 409 `signed_agreements_kept` when the account wrote one or created its contact ("ask Meridies to
+  close the account"); a draft, sent or void agreement goes with its contact. Text only (no PDF; `storage_path`
   stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
   unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
   'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open
