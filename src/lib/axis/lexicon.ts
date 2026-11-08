@@ -29,6 +29,9 @@ export const INTENT_FEATURES: Record<Intent, readonly Feature[]> = {
     [/\b(give me|give her|give him|give them|write|produce|generate|draft|create|come up with)\b(?: (?!(?:email|emails|message|messages|note|notes|text|texts|reminder|summary|update|reply|what|whats|which|how|is|the limit)\b)\w+){0,4} (\d{2,4}|a few hundred|few hundred|several hundred) (first person |personal |narrative )?words\b(?! (max|maximum|min|minimum|limit|or less|or fewer|at most|at least|long)\b)/, 8],
     [/\b(write|draft|compose|answer|respond to|generate|produce|fill in)\b(?: (?!(?:email|emails|message|messages|note|notes|text|texts|reminder|task|tasks|which|what|whats|when|whether|who|how|where|why|if)\b)\w+){0,6} (prompt|prompts|piq|piqs|personal insight questions?|why (this|our) (college|school|major))\b(?! (deadlines?|due|dates?|limit|word limit|count|status|she|he|they|picked|chose)\b)/, 8],
     [/\b(in (the )?first person|as if (she|he|they) (wrote|were writing|was writing))\b/, 6],
+    // An activity's description (or a blurb for one) written by AxIS: "write a description for it", "rewrite the activity
+    // description". Copying one the counselor or the resume already has ("add the description from her resume") is a change.
+    [/\b(write|draft|rewrite|redo|compose|come up with|generate|polish|improve|reword|rephrase)\b(?: \w+){0,5} (description|descriptions|blurb|blurbs)\b/, 8],
     // "In her voice" / "from her perspective" only as a way of writing something, not "understand
     // things from her perspective".
     [/\b(write|draft|compose|rewrite|redo|tell|narrate|answer|respond)\b(?: \w+){0,8} (in (her|his|their) (own )?voice|from (her|his|their) (perspective|point of view))\b/, 6],
