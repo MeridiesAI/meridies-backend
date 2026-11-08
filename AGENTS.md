@@ -830,7 +830,10 @@ forget it.
   `lib/bookingCalendar.ts`, `routes/studentBooking.ts`). **This reverses "the counselor owns the calendar: a student
   cannot move their meetings"** (routes/meetings.ts's header now says so): a student may move or cancel their own
   meetings, through `/me/booking` only; `/meetings` stays counselor-write. Same gate as the reads (own counselor,
-  approved, booking on; else 404 `booking_not_available`). `POST /me/booking { typeId, startsAt }` (strict, an
+  approved, booking set up and on; else 404 `booking_not_available`), **except a cancel**, which needs the counselor
+  approved and booking set up (a settings row) but not `enabled`: pausing booking never strands a student with a
+  meeting they can't call off (`bookingGate`, `requireEnabled: false`); the cutoff and `students_can_reschedule`
+  still apply to it. A counselor who never saved booking settings keeps the old rule (students change nothing). `POST /me/booking { typeId, startsAt }` (strict, an
   offset required): the start must be exactly one of the starts `GET /me/booking/slots` offers for that active type
   right now (`slotOpen`: the same `slotsFor`, calendar busy time included, over a one-minute window; duration and
   mode come from the type, never the client), else 409 `slot_unavailable`; 404 `type_not_found`. Reserved with
@@ -848,7 +851,8 @@ forget it.
   calls (`sendUpdates=none`, no attendees). **Invites** are the counselor routes' round (`prepareInviteRound` /
   `startInviteDelivery`, SEQUENCE through `private.meetings_ics_sequence`) run on the service client with the
   booked student as the only attendee, so it reaches the student and the counselor's own copy and nobody else;
-  they spend the counselor's `meeting-invites:<owner>` 60/h. **The counselor is told** (`kind 'system'`
+  they spend their own bucket, `meeting-invites:booking:<owner>` 60/h (`prepareInviteRound`'s `bucket: "booking"`),
+  never the counselor's own `meeting-invites:<owner>` allowance. **The counselor is told** (`kind 'system'`
   notification + `student-booking-counselor` email, 20 a day per student, `booking-notice:<student>`): "Ana booked
   Check-in on Wed, Nov 11, 9:00 AM EST" in the counselor's booking zone, "moved a meeting to", "cancelled the
   meeting on", and a body saying who set the meeting up; never more than the first name, type and time.
@@ -864,11 +868,14 @@ forget it.
   `book_meeting_slot` plus `meeting_not_found`), then the event moved (a failure puts the old times back, 503
   `calendar_write_failed`), `meeting-update` round, notice. A cancel is a conditional `scheduled -> cancelled`
   (pointer cleared, the counselor routes' cancel), so a second is 409 `already_cancelled` and emails nobody; the
-  event delete is best effort (`calendarRemoved: false` when it failed, true when nothing is left), then the
-  `meeting-cancel` round and the notice. **Caps:** 20 book/move/cancel calls an hour per student
+  event delete is best effort (`calendarRemoved: false` when it failed, true when nothing is left; the failure is
+  logged with the meeting, provider and event ids only, and the counselor's notice adds "It is still on your
+  Google|Outlook calendar; delete it there."), then the `meeting-cancel` round and the notice. **Caps:** 20 book/move/cancel calls an hour per student
   (`booking-actions:<student>`, 429) and at most 10 upcoming scheduled self-booked meetings (409
   `too_many_bookings`). No new path carries a token (`lib/requestLog.ts` unchanged). **Deploy order:** after
-  `20261111000001`, either order with the code; without it only PATCH answers 503 `booking_unavailable`. Not in
+  `20261111000001`, either order with the code; without it only PATCH answers 503 `booking_unavailable`. **POST has
+  no idempotency key**: after a lost response a retry gets 409 `slot_unavailable` (the student's own new meeting
+  blocks the slot), so the app refetches the student's meetings before reporting a failure. Not in
   `REQUIRED_SCHEMA`. Tests: `test/unit/booking-write.test.ts`, `test/integration/booking-write.test.mjs` (needs the
   API and the run started with `BOOKING_BUSY_FIXTURE`; a counselor's grant row with no Google client configured is
   the failing provider).
