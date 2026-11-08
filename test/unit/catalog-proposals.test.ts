@@ -611,3 +611,59 @@ test("English-proficiency scores alone are not SAT/ACT reporting", () => {
   assert.equal(flag("testReporting", "self-report", "Applicants may self-report TOEFL or IELTS scores."), "invalid");
   assert.equal(flag("testReporting", "score-send", "Send your Duolingo English Test scores directly."), "invalid");
 });
+
+// ---- Fix round 4: scope on every value, imperative read verbs ----------------------------------------------
+
+const ROUND4_DROP: [Parameters<typeof flag>[0], unknown, string][] = [
+  // A: a statement flag scoped to scholarships, honors, transfers, a condition.
+  ["personalStatementRead", false, "We do not consider the personal statement for scholarship decisions."],
+  ["personalStatementRead", false, "We do not read the personal statement unless the application is borderline."],
+  ["personalStatementRead", false, "The personal statement is not read by the scholarship committee."],
+  ["personalStatementRead", true, "If you are applying to the honors program, we read your personal statement."],
+  ["personalStatementRead", true, "Transfer applicants: we review your personal statement."],
+  ["personalStatementRead", true, "The personal statement is read by the scholarship committee."],
+  ["personalStatementRead", true, "We use your personal statement to decide scholarship awards."],
+  // B: a read verb used as an instruction is not the school reading it.
+  ["personalStatementRead", true, "Please use the Common App to submit your personal statement."],
+  ["personalStatementRead", true, "Be sure to read the personal statement instructions carefully."],
+  ["personalStatementRead", true, "Please consider writing a personal statement."],
+  ["personalStatementRead", true, "Read our tips for writing a strong personal statement."],
+  // C: test reporting scoped to some applicants, a program or a plan.
+  ["testReporting", "official-only", "We do not accept self-reported scores from homeschooled applicants."],
+  ["testReporting", "official-only", "Applicants from China may not self-report scores."],
+  ["testReporting", "official-only", "We do not accept self-reported scores for Early Decision applicants."],
+  ["testReporting", "official-only", "Official SAT or ACT scores must be sent directly from the testing agency for students applying to engineering."],
+  ["testReporting", "self-report", "We accept self-reported scores for scholarship consideration."],
+  ["testReporting", "self-report", "We accept self-reported SAT scores from international applicants only."],
+  ["testReporting", "score-send", "Scholarship applicants should send ACT scores to our office by December 1."],
+  ["testReporting", "not-applicable", "The Honors College is test-blind."],
+  ["testReporting", "not-applicable", "We are neither test-blind nor test-free."],
+  ["testReporting", "not-applicable", "Unlike test-blind schools, we consider SAT scores."],
+];
+for (const [field, value, q] of ROUND4_DROP) {
+  test(`round 4 drops (${field}=${String(value)}): ${q}`, () => assert.equal(flag(field, value, q), "invalid"));
+}
+
+test("round 4: every earlier keep case, and the fake's two quotes, are still kept", () => {
+  const keeps: [Parameters<typeof flag>[0], unknown, string][] = [
+    ...ROUND3_KEEP,
+    ["personalStatementRead", false, "The personal statement isn't read by our committee."],
+    ["personalStatementRead", false, "We no longer review the Common App essay."],
+    ["personalStatementRead", true, "Every reader reviews your personal statement closely."],
+    ["personalStatementRead", true, "We read the Common App personal statement carefully."],
+    ["personalStatementRead", true, "Our readers review every applicant's Common App personal statement in full."],
+    ["testReporting", "self-report", "Applicants may self-report their scores on the application."],
+    ["testReporting", "self-report", "Self reported scores are accepted for review."],
+    ["testReporting", "self-report", "Applicants may self-report their test scores"],
+    ["testReporting", "self-report", "Applicants may self-report their SAT or ACT scores; official"],
+    ["testReporting", "official-only", "We do not accept self-reported test scores."],
+    ["testReporting", "official-only", "Scores must be sent directly from the testing agency."],
+    ["testReporting", "official-only", "Official score reports are required for every applicant."],
+    ["testReporting", "score-send", "Send your official scores through the College Board."],
+    ["testReporting", "score-send", "Test scores must be sent by the testing agency."],
+    ["testReporting", "not-applicable", "Our admissions process is test-blind for all applicants."],
+    ["testReporting", "not-applicable", "We are a test free institution for first-year applicants."],
+  ];
+  const lost = keeps.filter(([f, v, q]) => flag(f, v, q) !== "kept").map(([, , q]) => q);
+  assert.deepEqual(lost, []);
+});

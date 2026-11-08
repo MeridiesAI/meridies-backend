@@ -206,40 +206,45 @@ const OFFICIAL_NOT_REQUIRED =
 /** Official scores required only later, not at application. */
 const OFFICIAL_LATER =
   /only upon|upon enroll|after (?:you are |you're |being )?admi|once admitted|after admission|if admitted|before enroll|until (?:you )?enroll|at enrollment|when you enroll|after (?:you )?enroll/;
-/** A refusal (or requirement) scoped to some applicants, programs or dates, or hedged: not the school's general rule. */
+/**
+ * A statement scoped to some applicants, programs, plans or dates, or hedged: not the school's general rule. Applied
+ * to every test-reporting value and to both values of the personal statement flag.
+ */
 const SCOPED =
-  /for (?:the )?(?:merit|scholarships?|honors|honours|programs?|programmes?|housing|aid)(?![a-z])|unless|except|outside the|international|non-?u\.?s(?![a-z])|transfer|but we (?:do|will)|however|only (?:for|if|when)|before|after (?:january|february|march|april|may|june|july|august|september|october|november|december)|deadline/;
+  /(?<![a-z])(?:merit|scholarships?|honou?rs|programs?|programmes?|housing|aid)(?![a-z])|home-?school|early (?:decision|action)|(?:applicants|students) (?:from|applying)|applying (?:to|for|through)|unless|except|outside the|international|non-?u\.?s(?![a-z])|transfer|but we (?:do|will)|however|only (?:for|if|when)|before|after (?:january|february|march|april|may|june|july|august|september|october|november|december)|deadline/;
 /** English-proficiency tests, which aren't the SAT/ACT reporting this flag is about. */
 const ENGLISH_TEST = /toefl|ielts|duolingo|english proficiency|(?<![a-z])pte(?![a-z])/;
 const SAT_ACT = /(?<![a-z])(?:sat|act)(?![a-z])/;
 const TEST_FREE = /test[- ](?:blind|free)/;
-const TEST_FREE_NEGATED = /(?:not|n't|no longer|never)(?: [a-z]+)? test[- ](?:blind|free)/;
+const TEST_FREE_NEGATED = /(?:not|n't|no longer|never|neither|unlike)(?: [a-z]+)? test[- ](?:blind|free)/;
 
 /**
  * Whether a quote says what the test-reporting value claims (exported for tests). A safety net under the editor's
  * review, strictly conservative: when in doubt the candidate is dropped and counted. A quote about English-
- * proficiency tests (TOEFL, IELTS, Duolingo) that doesn't name the SAT or ACT is dropped for every value.
+ * proficiency tests (TOEFL, IELTS, Duolingo, "english proficiency", PTE) that doesn't name the SAT or ACT, or any
+ * SCOPED quote (merit, scholarships, honors, a program, aid, home-school, early decision/action, applicants from or
+ * applying to/for, unless, except, international, transfer, before, a deadline, ...), is dropped for every value.
  *   self-report     a self-report mention and no negation anywhere in the quote.
- *   official-only   never when the requirement is scoped or conditional (SCOPED: for merit/honors/a program,
- *                   unless, except, international, transfer, before, a deadline, ...) or only later
+ *   official-only   never when the requirement applies only later
  *                   (OFFICIAL_LATER: upon enrollment, once admitted, ...); then either a self-report mention
  *                   refused in its own clause (SELF_REFUSED) with nothing saying official scores aren't required
  *                   (OFFICIAL_NOT_REQUIRED: not required/mandatory/needed, need not, optional), or, with no
  *                   self-report mention, official scores or reports required (or "directly from the testing
  *                   agency") and no negation anywhere in the quote.
  *   score-send      sending wording, no self-report mention and no negation anywhere in the quote.
- *   not-applicable  "test-blind"/"test-free", not itself negated.
+ *   not-applicable  "test-blind"/"test-free", not negated or contrasted (not, never, neither, unlike ...).
  */
 export function reportingFits(value: TestReporting, quote: string): boolean {
   const q = normalizeForQuote(quote);
   if (ENGLISH_TEST.test(q) && !SAT_ACT.test(q)) return false;
+  if (SCOPED.test(q)) return false;
   const neg = NEGATION.test(q);
   const self = SELF_REPORT.test(q);
   switch (value) {
     case "self-report":
       return self && !neg;
     case "official-only":
-      if (SCOPED.test(q) || OFFICIAL_LATER.test(q)) return false;
+      if (OFFICIAL_LATER.test(q)) return false;
       return self ? SELF_REFUSED.test(q) && !OFFICIAL_NOT_REQUIRED.test(q) : OFFICIAL_REQUIRED.test(q) && !neg;
     case "score-send":
       return SCORE_SEND.test(q) && !self && !neg;
@@ -258,34 +263,44 @@ const READ_HEDGE = /rarely|seldom|little weight|limited weight|optional|only if|
 /**
  * Each read-type verb in the quote, and whether it is negated: a negator at most three words before it in the same
  * clause ("we do not read", "we neither require nor read", "is not read", "isn't read"), or "without" right after
- * it ("reviewed without the personal statement").
+ * it ("reviewed without the personal statement"); and whether it is an instruction to the applicant: first in its
+ * clause, or right after please/to/sure/should/must/can/could ("Read our tips", "Be sure to read").
  */
-function readVerbs(q: string): { negated: boolean }[] {
-  const out: { negated: boolean }[] = [];
+const IMPERATIVE_CUE = new Set(["please", "to", "sure", "should", "must", "can", "could"]);
+
+function readVerbs(q: string): { negated: boolean; imperative: boolean }[] {
+  const out: { negated: boolean; imperative: boolean }[] = [];
   for (const m of q.matchAll(READ_VERB)) {
     const clause = (q.slice(0, m.index).split(/[.;,:]/).pop() ?? "").trim();
-    const before = clause.split(/\s+/).slice(-4).join(" ");
+    const words = clause ? clause.split(/\s+/) : [];
+    const before = words.slice(-4).join(" ");
     const after = q.slice(m.index + m[0].length);
-    out.push({ negated: VERB_NEGATOR.test(before) || /^(?: [a-z-]+){0,2} without(?![a-z])/.test(after) });
+    out.push({
+      negated: VERB_NEGATOR.test(before) || /^(?: [a-z-]+){0,2} without(?![a-z])/.test(after),
+      // An instruction to the applicant ("Read our tips", "Please use", "Be sure to read"), not the school reading.
+      imperative: words.length === 0 || IMPERATIVE_CUE.has(words[words.length - 1]!),
+    });
   }
   return out;
 }
 
 /**
- * The personal statement flag (exported for tests), strictly conservative. Both values need the statement named.
+ * The personal statement flag (exported for tests), strictly conservative. Both values need the statement named
+ * and no SCOPED wording (scholarships, honors, transfer, unless, ...).
  *   false  at least one read-type verb, and every one of them negated ("We do not read the personal statement");
  *          "not required" or "optional" alone, or any un-negated read clause ("but we read it if you submit one"),
  *          drops it.
- *   true   at least one read-type verb, none negated, no negation anywhere (a bare "no" included) and no hedge
+ *   true   at least one read-type verb, none negated and none an instruction to the applicant (at the start of
+ *          its clause, or after please/to/sure/should/must/can/could), no negation anywhere (a bare "no" included) and no hedge
  *          (rarely, seldom, little/limited weight, optional, only if, if you choose/submit/send, may/might be read).
  */
 export function statementFits(value: boolean, quote: string): boolean {
   const q = normalizeForQuote(quote);
-  if (!STATEMENT.test(q)) return false;
+  if (!STATEMENT.test(q) || SCOPED.test(q)) return false;
   const verbs = readVerbs(q);
   if (!verbs.length) return false;
   if (!value) return verbs.every((v) => v.negated);
-  return verbs.every((v) => !v.negated) && !NEGATION_OR_NO.test(q) && !READ_HEDGE.test(q);
+  return verbs.every((v) => !v.negated && !v.imperative) && !NEGATION_OR_NO.test(q) && !READ_HEDGE.test(q);
 }
 
 /**
