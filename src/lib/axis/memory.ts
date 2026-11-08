@@ -26,6 +26,7 @@ import { mergeRuns, quotedRuns, redactQuotes, validRuns } from "./quotes.js";
 import { stripCitations } from "./ledger.js";
 import { structured } from "./llm.js";
 import type { DialogueState } from "./nlu.js";
+import { draftHeaderSchema } from "./drafts/state.js";
 
 /** Verbatim messages sent with each request. */
 export const RECENT_MESSAGES = 12;
@@ -74,6 +75,7 @@ const stateSchema = z.object({
   at: z.string(),
   outside: z.boolean().optional(),
   short: z.boolean().optional(),
+  draft: draftHeaderSchema.optional(),
 });
 
 export async function loadHistory(request: FastifyRequest, conversationId: string): Promise<History> {
