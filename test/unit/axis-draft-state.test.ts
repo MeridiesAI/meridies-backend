@@ -273,3 +273,27 @@ test("the route's after-done state write never lands on a conversation another t
   await saveState(w.request, CONV, { ...dialogue, at: "2026-11-08T12:30:00.000Z" }, "v2");
   assert.equal((w.tables.ai_conversations![0]!.state as Row).at, "2026-11-08T12:30:00.000Z", "a write on the version it read lands");
 });
+
+test("a Confirm still running (claimed, no result yet) is left for the next turn, never read as saved (final #1)", async () => {
+  const w = world({
+    draft: header(),
+    rows: [row("r1", "Code Club", { status: "card", card_id: "k1" })],
+    actions: [{ id: "k1", status: "confirmed", result: null }],
+  });
+  const d = await loadDraft(w.request, CONV);
+  await syncCards(w.request, d);
+  assert.equal(d.rows[0]!.status, "card");
+  assert.deepEqual(d.notes, []);
+});
+
+test("long labels and phrases are clipped on the way in, so a row never fails its own schema on the next load (final #3)", async () => {
+  const w = world();
+  const d = await loadDraft(w.request, CONV);
+  openDraft(d, header());
+  const r = newRow(d, "add");
+  setValue(d, r, "organization", "Code Club", { label: `${"Very long file name ".repeat(8)}.pdf`, outside: true }, "x".repeat(250));
+  r.label = "L".repeat(300);
+  assert.equal(await saveDraft(w.request, CONV, dialogue, d, w.db), true);
+  const again = await loadDraft(w.request, CONV);
+  assert.equal(again.rows.length, 1, "the row survives its next load");
+});

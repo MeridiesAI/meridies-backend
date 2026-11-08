@@ -132,6 +132,8 @@ src/
 │   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items)
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
+│   │   ├── drafts/        # activity drafts: normalizers, provenance, the draft's state (draft_rows), sorter, write path, status lines
+│   │   ├── clock.ts       # AxIS's "now"; AXIS_EVAL_CLOCK moves it forward for the evals (local stack only)
 │   │   └── ops/           # what AxIS can change: the operation catalog, run through this API as the counselor
 │   └── errors.ts, chat.ts
 ├── routes/
@@ -2263,6 +2265,12 @@ anyone copying it.
   (`application.delete_activities` with `only_unedited`) keeps rows edited since
   they were saved and names them. A card whose values came from a chat file or a
   student document carries `reason: "outside-content"`, so Confirm all skips it.
+- **Routes and logs.** `POST /application/activities/batch { studentId, rows ≤10 }` answers each row
+  (`{ results: [{ ok, id } | { ok: false, message }] }`); `DELETE /application/activities?studentId&ids&onlyUnedited`
+  answers `{ deleted, skipped }`. The draft lives in `ai_conversations.state.draft` (header) and `draft_rows`
+  (`20261112000001`, written only by the server's client with a compare-and-set on `updated_at`). Every AxIS turn
+  logs one `axis turn` line: `path`, `intent`, `draft`, outcome codes (field names only), `calls`, `maxCalls`,
+  `conversationId`. Never text, values, names or student ids.
 - **The one description exception.** An activity's `description` may be filed
   only as an exact copy of the counselor's own message, or of the student's
   `resume` / `activity-list` document that `documentAiDecision` allows. This is
@@ -3160,6 +3168,10 @@ column and tables.
   student, and a task the student can already see can't be hidden again (409). A
   red flag can't be raised on a hidden task (409), and an intake request task
   from New student can't be hidden (400).
+- **`AXIS_EVAL_CLOCK=on`** is for the real-model evals (`evals/axis/`). It registers `POST /axis/eval/clock
+  { minutes }` (behind `CRON_SECRET`), which moves AxIS's clock forward (`lib/axis/clock.ts`) so the activity draft's
+  30-minute expiry can be tested. `src/index.ts` refuses to boot with it when `NODE_ENV=production` or when
+  `SUPABASE_URL` isn't a local stack (localhost, 127.0.0.1, host.docker.internal). Never set it on Railway.
 - **`RESEARCH_FAKE=fixture`** is for tests. It works only when `NODE_ENV` is
   `development` or `test`: `seamFor` returns the fixtures only then, and
   `src/index.ts` exits at boot with a message naming `RESEARCH_FAKE` if it is

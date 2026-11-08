@@ -31,7 +31,7 @@ plan. Where this plan differs, it is because main changed after the design (list
   Console workspace steps are dropped. The runner has no click steps, clock or per-suite pass rule yet. Task 9 adds
   them; the design's AI grader is not built (every scored check is computed in code; **my call**, YAGNI).
 - **Migration date:** the newest migration on main is `20261110000007_axis_trash_blast_source` (not 000003). This plan uses
-  `20261111000001_axis_activity_drafts.sql`. Re-check the newest number right before merge and rename if needed.
+  `20261112000001_axis_activity_drafts.sql`. Re-check the newest number right before merge and rename if needed.
 - **Flag gap, still open:** main still sets `outside-content` only when an instant change is turned into a card
   (`ops/run.ts` ~line 412). This plan sets it for activity cards only. The general fix stays with security (spec §4.11).
 - **Chat files:** chat files are read once after their turn (A1). A file attached in the same message has no stored text yet,
@@ -422,7 +422,7 @@ test("the batch op never sends draft_row, key, sources or read_as to the route",
 ### Task 5: Draft state, the clock, and the migration
 
 **Files:**
-- Create: `supabase/migrations/20261111000001_axis_activity_drafts.sql`
+- Create: `supabase/migrations/20261112000001_axis_activity_drafts.sql`
 - Create: `src/lib/axis/clock.ts`, `src/lib/axis/drafts/state.ts`
 - Modify: `src/lib/axis/nlu.ts` (`DialogueState.draft?: DraftHeader`), `src/lib/axis/memory.ts` (`stateSchema` gets
   `draft: draftHeaderSchema.optional()`)
@@ -862,7 +862,7 @@ test("the workflow reads only the eval key's secret, never ANTHROPIC_API_KEY's",
   Focus. Fix what it finds.
 - [ ] `npm test` and `npm run typecheck` pass. Run the integration suite locally and paste the commands and output
   into the PR.
-- [ ] Re-check the newest migration on `origin/main`. Rename `20261111000001` if anything newer landed.
+- [ ] Re-check the newest migration on `origin/main`. Rename `20261112000001` if anything newer landed.
 - [ ] Split the migration into its own small PR, so it reaches `main` (and production) before the code. Nothing reads
   the column until the main PR lands.
 - [ ] Give Elvin the eval key steps (Plan review item 7), checked against the Console docs on the day:
@@ -876,7 +876,7 @@ test("the workflow reads only the eval key's secret, never ANTHROPIC_API_KEY's",
 - [ ] Open the backend PR. Its description includes Elvin's steps:
   1. Merge the small migration PR.
   2. In plain Terminal, in meridies-backend on `main`, run `git pull`, then `supabase db push --linked --dry-run`.
-  3. You should see only `20261111000001_axis_activity_drafts.sql` listed. If anything else is listed, stop and paste
+  3. You should see only `20261112000001_axis_activity_drafts.sql` listed. If anything else is listed, stop and paste
      the output.
   4. Run `supabase db push --linked`, and answer `Y`.
   5. Merge the main PR.

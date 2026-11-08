@@ -137,7 +137,7 @@ function timingHits(text: string, field: boolean): Hit<Timing>[] {
 }
 
 const HOUR_UNIT = String.raw`(?:h|hr|hrs|hour|hours)\b`;
-const PER_DAY = String.raw`\s*(?:a|per|/|each)\s*day\b`;
+const PER_DAY = String.raw`(?:\s*(?:a|per|/|each)\s*day\b|\s*daily\b)`;
 
 function hourHits(text: string): Hit<number>[] {
   const t = text.toLowerCase();
@@ -258,7 +258,9 @@ export function mentionsIn(text: string, opts: { bare?: boolean } = {}): Mention
   };
   if (opts.bare) {
     // Claimed spans come from the original text; grade and unit spans are found on the lowercased text, same offsets.
-    for (const n of bareNumbers(text, [...g, ...h, ...w])) {
+    // A per-day amount ("2 hours a day") is claimed too: it is never lent to hours or weeks (it asks, spec 4.2).
+    const perDay = [...matches(lower, new RegExp(String.raw`${NUM}\s*(?:${HOUR_UNIT}|min|mins|minutes\b)${PER_DAY}`))].map(span);
+    for (const n of bareNumbers(text, [...g, ...h, ...w, ...perDay])) {
       if (Number.isInteger(n) && n >= 9 && n <= 12) out.grades = sortGrades([...out.grades, String(n) as Grade]);
       if (n >= 0 && n <= 168) out.hours = uniq([...out.hours, n]);
       if (Number.isInteger(n) && n >= 0 && n <= 52) out.weeks = uniq([...out.weeks, n]);

@@ -114,7 +114,7 @@ export function draftBlock(d: Draft): string {
       return `- ${r.key} (${what}, ${status}): ${parts.join("; ") || "nothing yet"}${missing.length && r.status === "collecting" ? `; missing: ${missing.map((f) => FIELD_WORDS[f]).join(", ")}` : ""}`;
     });
   const lines = [
-    `Activity draft for ${d.header.student_name}. What it holds so far (values and where each came from):`,
+    `Activity draft for ${d.header.student_name} (student_id ${d.header.student_id}). What it holds so far (values and where each came from):`,
     wrapUntrusted("draft", rows.join("\n") || "(no rows yet)", false),
     "How to fill it: call perform_action application.add_activity with draft_row (application.update_activity with activity_id for a saved row) whenever the counselor gives or corrects a value, even partial. Use the counselor's own words; never fill a field they didn't give.",
     "Don't say whether anything was saved, tried or needs Confirm, and don't describe earlier attempts: status lines written by the server follow your answer.",

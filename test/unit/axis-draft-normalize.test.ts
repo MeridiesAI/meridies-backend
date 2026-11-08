@@ -120,3 +120,10 @@ test("numbers without a unit are not activity values, unless bare is asked for",
   assert.deepEqual(mentionsIn("grade 10", { bare: true }).hours, [], "a number a unit claimed is never bare");
   assert.deepEqual(mentionsIn("11", { bare: true }).grades, ["11"]);
 });
+
+test("a per-day number is never lent to hours or weeks (final #2)", () => {
+  assert.deepEqual(mentionsIn("he codes 2 hours a day", { bare: true }).hours, []);
+  assert.deepEqual(mentionsIn("he codes 2 hours a day", { bare: true }).weeks, []);
+  assert.deepEqual(mentionsIn("30 minutes daily", { bare: true }).hours, []);
+  assert.deepEqual(mentionsIn("3 hrs per day", { bare: true }).hours, []);
+});

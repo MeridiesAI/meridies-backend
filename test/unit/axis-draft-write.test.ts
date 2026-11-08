@@ -284,6 +284,7 @@ test("the draft block lists descriptions by length and source, never their text"
   assert.ok(!block.includes(secret));
   assert.match(block, new RegExp(`description: ${secret.length} characters, from resume`));
   assert.match(block, /Activity draft for Avery Lee/);
+  assert.match(block, new RegExp(`student_id ${S1}`), "the model can add to the draft from another student's panel (final #4)");
   assert.match(block, /draft_row/);
   assert.match(block, /Don't say whether anything was saved, tried or needs Confirm/);
 });

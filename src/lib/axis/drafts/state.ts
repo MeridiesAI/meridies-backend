@@ -195,6 +195,7 @@ export async function saveDraft(
     }
     const write = async (d: Draft): Promise<string | null> => {
       if (!d.version) return null;
+      for (const r of d.rows) if (r.label && r.label.length > 120) r.label = r.label.slice(0, 120);
       const { data, error } = await db
         .from("ai_conversations")
         .update({ state: { ...plain, ...(d.header ? { draft: d.header } : {}) }, draft_rows: d.header && d.rows.length ? d.rows : null })
@@ -341,8 +342,9 @@ export const canAddRow = (d: Draft) => d.rows.length < MAX_DRAFT_ROWS;
 
 export function setValue(d: Draft, row: DraftRow, field: ActivityField, value: unknown, source: ValueSource, readAs?: string): void {
   row.fields[field] = value;
-  row.sources[field] = source;
-  if (readAs !== undefined) row.read_as[field] = readAs;
+  // Clipped to the row schema here, so a saved row always loads back (a long file name, a long phrase).
+  row.sources[field] = { label: source.label.slice(0, 120), outside: source.outside };
+  if (readAs !== undefined) row.read_as[field] = readAs.slice(0, 200);
   else delete row.read_as[field];
   rowTouch(d, row.key).fields.add(field);
 }
@@ -392,6 +394,8 @@ export async function syncCards(request: FastifyRequest, d: Draft): Promise<void
     if (row.status !== "card" || !row.card_id) continue;
     const a = byId.get(row.card_id);
     if (!a || a.status === "pending") continue;
+    // Claimed but still running (the Confirm route writes its result after the change): read it next turn.
+    if (a.status === "confirmed" && (a.result === null || a.result === undefined)) continue;
     const result = (a.result ?? {}) as { rows?: unknown; message?: unknown };
     const outcomes = Array.isArray(result.rows) ? (result.rows as { key?: unknown; ok?: unknown; id?: unknown; message?: unknown }[]) : null;
     const mine = outcomes?.find((o) => o.key === row.key);
