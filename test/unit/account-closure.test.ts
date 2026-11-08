@@ -63,15 +63,26 @@ test("a pending row reads with its dates, days left and the flag", () => {
   });
 });
 
-test("a failed row still reads as pending, with the reason it was held", () => {
+test("a failed row reads as on hold, with the reason and no date", () => {
   const v = closureView(
     { status: "failed", requested_at: "2026-10-01T00:00:00Z", purge_after: "2026-10-31T00:00:00Z", last_error: "You still have 2 students on your roster." },
     new Date("2026-11-08T00:00:00Z"),
     true
   );
+  assert.deepEqual(v, {
+    status: "on_hold",
+    requestedAt: "2026-10-01T00:00:00.000Z",
+    purgeAfter: null,
+    daysLeft: null,
+    purgeEnabled: true,
+    blockedReason: "You still have 2 students on your roster.",
+  });
+});
+
+test("a row being purged reads as pending with 0 days left", () => {
+  const v = closureView({ status: "purging", requested_at: "2026-10-01T00:00:00Z", purge_after: "2026-10-31T00:00:00Z", last_error: null }, new Date("2026-11-08T00:00:00Z"), true);
   assert.equal(v.status, "pending");
   assert.equal(v.daysLeft, 0);
-  assert.equal(v.blockedReason, "You still have 2 students on your roster.");
 });
 
 test("a missing table is told apart from other errors", () => {
@@ -91,6 +102,9 @@ test("the request email gives the date, how to cancel and to export first", () =
     assert.match(body, /export/i);
   }
   assert.match(m.text, /https:\/\/app\.example\/dashboard\/counselor\/settings/);
+  // Nothing is disconnected at request time: the connections go only when the account is purged.
+  assert.doesNotMatch(m.text, /disconnect/i);
+  assert.match(m.text, /connections included/);
 });
 
 test("the date is the counselor's local day, and an unknown zone falls back to UTC", () => {
@@ -142,6 +156,45 @@ function fakeSvc(answers: Record<string, Result | ((c: Call) => Result)>) {
 }
 
 const counselor = (firm: string | null = null) => ({ id: "c1", role: "counselor", firm_id: firm });
+
+test("a firm member with any student, archived included, is told to ask an owner or admin", async () => {
+  const { svc, calls } = fakeSvc({ profiles: { count: 2 } });
+  const b = await deletionBlocker(svc, counselor("f1"));
+  assert.equal(b?.code, "caseload_not_empty");
+  assert.match(b!.message, /You still have 2 students on your caseload\. Ask a firm owner or admin to transfer them/);
+  assert.ok(!calls[0]!.filters.some((f) => f.startsWith("is:archived_at")), "a firm counts archived students");
+});
+
+test("a solo counselor counts only active students", async () => {
+  const { svc, calls } = fakeSvc({ profiles: { count: 1 } });
+  const b = await deletionBlocker(svc, counselor());
+  assert.equal(b?.code, "caseload_not_empty");
+  assert.match(b!.message, /1 student on your roster\. Archive them/);
+  assert.ok(calls[0]!.filters.includes("is:archived_at,null"));
+});
+
+test("a firm owner is refused", async () => {
+  const { svc } = fakeSvc({ profiles: { count: 0 }, firms: { data: { id: "f1" } } });
+  assert.equal((await deletionBlocker(svc, counselor()))?.code, "owns_firm");
+});
+
+/** practice_stripe_accounts answers only rows the query's filters let through (charges_enabled is the one that matters). */
+const stripeRows = (rows: Array<{ practice_id: string; charges_enabled: boolean }>) => (c: Call) => ({
+  data: rows.filter((r) => !c.filters.includes("eq:charges_enabled,true") || r.charges_enabled),
+});
+
+test("a solo practice whose Stripe account takes charges is told to disconnect first", async () => {
+  const { svc, calls } = fakeSvc({ profiles: { count: 0 }, practice_stripe_accounts: stripeRows([{ practice_id: "c1", charges_enabled: true }]) });
+  const b = await deletionBlocker(svc, counselor());
+  assert.equal(b?.code, "stripe_connected");
+  assert.match(b!.message, /Disconnect Meridies in your Stripe dashboard first, then try again/);
+  assert.ok(calls.find((c) => c.table === "practice_stripe_accounts")!.filters.includes("eq:counselor_id,c1"));
+});
+
+test("a deauthorized or never-finished Stripe account (charges off) doesn't block", async () => {
+  const { svc } = fakeSvc({ profiles: { count: 0 }, practice_stripe_accounts: stripeRows([{ practice_id: "c1", charges_enabled: false }]) });
+  assert.equal(await deletionBlocker(svc, counselor()), null);
+});
 
 test("a firm member with any student, archived included, is told to ask an owner or admin", async () => {
   const { svc, calls } = fakeSvc({ profiles: { count: 2 } });

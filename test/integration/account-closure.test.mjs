@@ -19,6 +19,12 @@ const close = (u, confirm = "CLOSE") => call(u.token, "POST", "/account/closure"
 const status = (id) => sql(`select coalesce((select status from public.account_closures where counselor_id = '${id}'), 'none')`);
 const exists = async (id) => (await sql(`select count(*) from public.profiles where id = '${id}'`)) === "1";
 const authExists = async (id) => (await sql(`select count(*) from auth.users where id = '${id}'`)) === "1";
+// A stored Google connection that is not a real token: no provider is ever called with it (the stack has no
+// INTEGRATION_TOKEN_KEY, so revokeAndForget only forgets it).
+const seedConnection = (id) =>
+  sql(`insert into public.integration_tokens (owner_id, provider, access_token_enc, scopes) values ('${id}', 'google', 'not-a-real-token', '{}')
+       on conflict (owner_id, provider) do nothing`);
+const connections = (id) => sql(`select count(*) from public.integration_tokens where owner_id = '${id}'`);
 const pastDue = (id) => sql(`update public.account_closures set requested_at = now() - interval '31 days', purge_after = now() - interval '1 day' where counselor_id = '${id}'`);
 
 async function mailTo(address) {
@@ -52,6 +58,7 @@ const c = await user("closure-c");
   const extra = await call(c.token, "POST", "/account/closure", { confirm: "CLOSE", purgeAfter: "2026-11-09" });
   check("an unknown body field is 400 (strict)", extra.status === 400, String(extra.status));
 
+  await seedConnection(c.id);
   const first = await close(c);
   const purgeMs = Date.parse(first.body?.purgeAfter ?? "") - Date.now();
   check("asking opens a pending closure 30 days out (201)",
@@ -70,8 +77,10 @@ const c = await user("closure-c");
   const writes = await call(c.token, "PATCH", "/auth/me", { title: "Still here" });
   check("the account keeps working during the grace period (read and write)", works.status === 200 && writes.status === 200, `${works.status} ${writes.status}`);
 
+  check("asking keeps the account's connections (nothing is revoked until the purge)", (await connections(c.id)) === "1");
   const cancel = await call(c.token, "DELETE", "/account/closure");
   check("cancel closes it (none) and records cancelled", cancel.status === 200 && cancel.body?.status === "none" && (await status(c.id)) === "cancelled", `${cancel.status} ${JSON.stringify(cancel.body)}`);
+  check("a cancelled closure leaves the connection in place", (await connections(c.id)) === "1");
   const cancelAgain = await call(c.token, "DELETE", "/account/closure");
   check("cancelling with nothing open is 404 no_closure", cancelAgain.status === 404 && cancelAgain.body?.code === "no_closure", `${cancelAgain.status} ${JSON.stringify(cancelAgain.body)}`);
 
@@ -141,6 +150,40 @@ const c = await user("closure-c");
   check("a firm owner is refused (owns_firm)", o.status === 409 && o.body?.code === "owns_firm", `${o.status} ${JSON.stringify(o.body)}`);
 }
 
+// ---- A closure caught mid-purge: 409 while the run is live, cancellable once it has been stuck an hour ----
+{
+  const k = await user("closure-stuck");
+  await close(k);
+  // As a crashed run leaves it (the table's trigger would stamp updated_at, so it is held off for this one statement).
+  const stuck = (age) =>
+    sql(`set session_replication_role = replica; update public.account_closures set status = 'purging', updated_at = now() - interval '${age}' where counselor_id = '${k.id}'`);
+  await stuck("1 minute");
+  const live = await call(k.token, "DELETE", "/account/closure");
+  check("cancel is refused while a purge is working on it (409)", live.status === 409 && live.body?.code === "closure_in_progress", `${live.status} ${JSON.stringify(live.body)}`);
+  await stuck("2 hours");
+  const late = await call(k.token, "DELETE", "/account/closure");
+  check("a purge stuck for over an hour can be cancelled", late.status === 200 && (await status(k.id)) === "cancelled", `${late.status} ${JSON.stringify(late.body)}`);
+}
+
+// ---- Stripe: only a live account (charges enabled) blocks ----
+{
+  const sc = await user("closure-stripe");
+  const acct = `acct_test${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  await sql(`insert into public.practice_stripe_accounts (practice_id, counselor_id, stripe_account_id, charges_enabled, details_submitted)
+             values ('${sc.id}', '${sc.id}', '${acct}', true, true)`);
+  const live = await close(sc);
+  const del = await call(sc.token, "DELETE", "/account", { confirm: "delete my account" });
+  check("a solo practice taking card payments gets 409 stripe_connected (closure and DELETE /account)",
+    live.status === 409 && live.body?.code === "stripe_connected" && /Stripe dashboard first, then try again/.test(live.body?.error ?? "") &&
+      del.status === 409 && del.body?.code === "stripe_connected",
+    `${live.status} ${JSON.stringify(live.body)} ${del.status}`);
+  // What Stripe's deauthorize webhook (or an onboarding never finished) leaves: charges off.
+  await sql(`update public.practice_stripe_accounts set charges_enabled = false where practice_id = '${sc.id}'`);
+  const off = await close(sc);
+  check("a deauthorized or unfinished Stripe account doesn't block", off.status === 201, `${off.status} ${JSON.stringify(off.body)}`);
+  await call(sc.token, "DELETE", "/account/closure");
+}
+
 // ---- The purge: secret, and OFF by default ----
 {
   const no = await cron(API, null);
@@ -165,10 +208,15 @@ if (!PURGE_API) {
   await sql(`update public.profiles set archived_at = now() where id = '${kid.id}'`);
   const blocked = await user("closure-blocked");
   const waiting = await user("closure-waiting");
-  for (const u of [t, blocked, waiting]) {
+  await seedConnection(t.id);
+  const changed = await user("closure-changed-mind");
+  for (const u of [t, blocked, waiting, changed]) {
     const r = await close(u);
     if (r.status !== 201) throw new Error(`setup close ${r.status} ${JSON.stringify(r.body)}`);
   }
+  // `changed` cancels, and its old date passes: the purge must leave it alone.
+  await call(changed.token, "DELETE", "/account/closure");
+  await pastDue(changed.id);
   // `blocked` takes a student on after asking: the purge must refuse it.
   const late = await studentOf(blocked, "closure-blocked-s");
   await pastDue(t.id);
@@ -186,6 +234,9 @@ if (!PURGE_API) {
   check("the enabled purge ran: one purged, one blocked", r.status === 200 && r.body?.ran === true && r.body?.purged === 1 && r.body?.blocked === 1 && r.body?.failed === 0,
     `${r.status} ${JSON.stringify(r.body)}`);
   check("the throwaway account is gone (auth user and profile)", !(await authExists(t.id)) && !(await exists(t.id)));
+  const revokedMeta = await sql(`select metadata->>'connectionsRevoked' from public.audit_log where entity_id = '${t.id}' and action = 'account.closure.purged'`);
+  check("its connections were revoked at purge time (recorded) and are gone", /google/.test(revokedMeta) && (await connections(t.id)) === "0", revokedMeta);
+  check("a closure cancelled before its date passed is never purged", (await exists(changed.id)) && (await authExists(changed.id)) && (await status(changed.id)) === "cancelled");
   check("its closure row went with it", (await status(t.id)) === "none");
   const trail = await sql(`select string_agg(action, ',' order by created_at, action) from public.audit_log where entity_id = '${t.id}' and action in ('account.closure.purging', 'account.deleted', 'account.closure.purged')`);
   check("the outcome is recorded in audit_log (purging, deleted, purged)", ["account.closure.purging", "account.deleted", "account.closure.purged"].every((a) => (trail ?? "").includes(a)), trail);
@@ -197,12 +248,22 @@ if (!PURGE_API) {
 
   check("the blocked account stays, marked failed with the reason", (await exists(blocked.id)) && (await status(blocked.id)) === "failed");
   const why = await call(blocked.token, "GET", "/account/closure");
-  check("GET tells it why", why.body?.status === "pending" && /still have 1 student/.test(why.body?.blockedReason ?? ""), JSON.stringify(why.body));
+  check("GET shows it on hold with the reason, no date", why.body?.status === "on_hold" && why.body?.purgeAfter === null && why.body?.daysLeft === null &&
+    /still have 1 student/.test(why.body?.blockedReason ?? ""), JSON.stringify(why.body));
   check("its student is untouched", (await exists(late.id)) && (await sql(`select counselor_id from public.profiles where id = '${late.id}'`)) === blocked.id);
   check("a closure not yet due is untouched", (await exists(waiting.id)) && (await status(waiting.id)) === "pending");
 
   const again = await cron(PURGE_API);
   check("a second run finds nothing due", again.body?.ran === true && again.body?.due === 0, JSON.stringify(again.body));
+  // The counselor sorts it out and confirms again: a fresh 30 days, a fresh email.
+  await sql(`update public.profiles set archived_at = now() where id = '${late.id}'`);
+  const mailsBefore = (await mailTo(blocked.email)).length;
+  const again2 = await close(blocked);
+  await new Promise((r) => setTimeout(r, 1500));
+  const mailsAfter = (await mailTo(blocked.email)).length;
+  check("confirming an on-hold closure again starts a fresh 30 days (201) and emails again",
+    again2.status === 201 && again2.body?.status === "pending" && again2.body?.daysLeft === 30 && mailsAfter === mailsBefore + 1,
+    `${again2.status} ${JSON.stringify(again2.body)} mails ${mailsBefore}->${mailsAfter}`);
   await call(blocked.token, "DELETE", "/account/closure");
   await call(waiting.token, "DELETE", "/account/closure");
 }

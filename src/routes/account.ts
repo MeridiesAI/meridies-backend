@@ -10,9 +10,9 @@
  *                                           JSON and a CSV per table (no file bytes; documents listed)
  *   POST   /account/export/drive            a roster summary as one Google Sheet in the caller's Drive
  *   DELETE /account                         delete the caller's own account
- *   GET    /account/closure                 Leave Meridies: { status: none|pending, requestedAt, purgeAfter, daysLeft,
- *                                           purgeEnabled, blockedReason } (counselor)
- *   POST   /account/closure                 { confirm: "CLOSE" }: close after 30 days (201; 200 if already open)
+ *   GET    /account/closure                 Leave Meridies: { status: none|pending|on_hold, requestedAt, purgeAfter,
+ *                                           daysLeft, purgeEnabled, blockedReason } (counselor)
+ *   POST   /account/closure                 { confirm: "CLOSE" }: close after 30 days (201; 200 if already pending)
  *   DELETE /account/closure                 cancel it (the account stays open)
  *
  * Exports read through the caller's RLS-bound client, so each one contains
@@ -26,11 +26,10 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
 import { DeletionFailed, blockError, deleteAccount, deletionBlocker, type DeletionSubject } from "../lib/accountDeletion.js";
-import { closureEmail, closureView, isClosureTableMissing, purgeAfterFrom, purgeFlag, type ClosureRow } from "../lib/accountClosure.js";
+import { closureEmail, closureView, isClosureTableMissing, isStalePurging, purgeAfterFrom, purgeFlag, type ClosureRow } from "../lib/accountClosure.js";
 import { sendEmail } from "../lib/email.js";
 import { badRequest, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
-import { revokeAndForget, SUITE_PROVIDERS } from "../lib/oauth.js";
 import { consumeUnits, limit } from "../lib/limits.js";
 import { sheetClient, sheetTitle } from "../lib/driveExport.js";
 import { ReadStopped, orderKeysFor, readPaged } from "../lib/pagedRead.js";
@@ -379,10 +378,11 @@ export default async function accountRoutes(app: FastifyInstance) {
 
   // ---- Leave Meridies: closing with a 30-day grace period (lib/accountClosure.ts) ----
   //
-  // Counselors only, open to a pending account (it may leave too). Nothing is deleted here: the account keeps
-  // working, read and write, until the purge, which runs only with ACCOUNT_PURGE_ENABLED=true. The closure row is
-  // read and written with the service role keyed by the caller's verified id (clients have no write grant, and the
-  // approval gate hides the row from a pending counselor's own client).
+  // Counselors only, open to a pending account (it may leave too). Nothing is deleted or disconnected here: the
+  // account keeps working, read and write and with its Google/Microsoft connections, until the purge, which runs only
+  // with ACCOUNT_PURGE_ENABLED=true (and revokes the connections then). The closure row is read and written with the
+  // service role keyed by the caller's verified id (clients have no write grant, and the approval gate hides the row
+  // from a pending counselor's own client). GET's statuses: see ClosureView.
 
   const closureOpts = (bucket: string, max: number) => ({
     preHandler: [app.authenticate, requireRole("counselor"), limit(bucket, max, 3600)],
@@ -397,10 +397,9 @@ export default async function accountRoutes(app: FastifyInstance) {
 
   /**
    * Ask to close the account. Body `{ confirm: "CLOSE" }`. The DELETE /account preconditions first (409 with their
-   * code). A second request while one is open answers it again (200, no new email); a closure the purge held back
-   * (`failed`) is opened again on the same date once the blocker is gone. On a new request (201): the row, the
-   * Google/Microsoft tokens revoked and forgotten (best effort; the connections show as disconnected), a
-   * confirmation email to the counselor and an audit row.
+   * code). A second request while one is pending answers it again (200, no new email). Otherwise (none, cancelled,
+   * or on hold after the purge found a blocker) it starts a fresh 30 days (201): the row, a confirmation email to the
+   * counselor and an audit row.
    */
   app.post("/closure", closureOpts("account:closure", 10), async (request, reply) => {
     const { confirm } = z.object({ confirm: z.string().max(40) }).strict().parse(request.body);
@@ -418,23 +417,10 @@ export default async function accountRoutes(app: FastifyInstance) {
     const block = await checkedBlocker(svc, subjectOf(request), request);
     if (block) throw blockError(block);
 
-    if (existing?.status === "failed") {
-      const { data, error } = await svc
-        .from("account_closures")
-        .update({ status: "pending", last_error: null })
-        .eq("counselor_id", me)
-        .eq("status", "failed")
-        .select(CLOSURE_COLUMNS)
-        .maybeSingle();
-      if (error) throw closureDbError(error);
-      await audit(svc, me, "account.closure.reopened", {});
-      return reply.code(200).send(closureView((data as ClosureRow | null) ?? (await readClosure(svc, me)), now, enabled));
-    }
-
     const fresh = { requested_at: now.toISOString(), purge_after: purgeAfterFrom(now).toISOString(), status: "pending", cancelled_at: null, last_error: null };
     let row: ClosureRow | null;
     if (existing) {
-      // A cancelled (or finished) closure starts again: new dates. Conditional, so a racing request can't do it twice.
+      // Cancelled, on hold (failed) or finished: start again with new dates. Conditional, so a racing request can't do it twice.
       const { data, error } = await svc.from("account_closures").update(fresh).eq("counselor_id", me).eq("status", existing.status).select(CLOSURE_COLUMNS).maybeSingle();
       if (error) throw closureDbError(error);
       row = data as ClosureRow | null;
@@ -446,45 +432,42 @@ export default async function accountRoutes(app: FastifyInstance) {
     // Lost a race with a second request: answer the closure that one opened.
     if (!row) return reply.code(200).send(closureView(await readClosure(svc, me), now, enabled));
 
-    // The account's Google/Microsoft tokens go now (it is leaving; the connections can be made again during the
-    // grace period). Best effort: a provider that doesn't answer never stops the closure. Tokens are never logged.
-    for (const provider of SUITE_PROVIDERS) {
-      try {
-        await revokeAndForget(me, provider, request.log);
-        await svc.from("integrations").delete().eq("owner_id", me).eq("provider", provider);
-      } catch (err) {
-        request.log.warn({ provider, err: err instanceof Error ? err.message : String(err) }, "account closure: token revoke failed");
-      }
-    }
-    await audit(svc, me, "account.closure.requested", { purgeAfter: row.purge_after });
+    await audit(svc, me, existing?.status === "failed" ? "account.closure.reopened" : "account.closure.requested", { purgeAfter: row.purge_after });
     await sendClosureEmail("requested", request, row.purge_after);
     return reply.code(201).send(closureView(row, now, enabled));
   });
 
-  /** Cancel the closure: the account stays open. 404 `no_closure` when none is open, 409 while it is being deleted. */
+  /**
+   * Cancel the closure: the account stays open. 404 `no_closure` when none is open; 409 `closure_in_progress` while it
+   * is being deleted, unless that run has been stuck in `purging` for PURGE_RECLAIM_MS (a crash), which may be cancelled.
+   */
   app.delete("/closure", closureOpts("account:closure-cancel", 10), async (request) => {
     const svc = closureService();
     const me = request.auth.userId;
+    const now = new Date();
     const existing = await readClosure(svc, me);
     if (!existing || !["pending", "failed", "purging"].includes(existing.status)) {
       throw new HttpError(404, "There is no account closure to cancel.", "no_closure");
     }
-    if (existing.status === "purging") throw new HttpError(409, "Your account is being closed right now and can't be cancelled.", "closure_in_progress");
-    const { data, error } = await svc
+    const inProgress = () => new HttpError(409, "Your account is being closed right now and can't be cancelled.", "closure_in_progress");
+    if (existing.status === "purging" && !isStalePurging(existing, now)) throw inProgress();
+    // Conditional on the row as read (status and updated_at), so a purge that claims it in between wins.
+    let q = svc
       .from("account_closures")
-      .update({ status: "cancelled", cancelled_at: new Date().toISOString(), last_error: null })
+      .update({ status: "cancelled", cancelled_at: now.toISOString(), last_error: null })
       .eq("counselor_id", me)
-      .in("status", ["pending", "failed"])
-      .select("counselor_id");
+      .eq("status", existing.status);
+    if (existing.updated_at) q = q.eq("updated_at", existing.updated_at);
+    const { data, error } = await q.select("counselor_id");
     if (error) throw closureDbError(error);
-    if (!data?.length) throw new HttpError(409, "Your account is being closed right now and can't be cancelled.", "closure_in_progress");
+    if (!data?.length) throw inProgress();
     await audit(svc, me, "account.closure.cancelled", {});
     await sendClosureEmail("cancelled", request, existing.purge_after);
-    return closureView(null, new Date(), purgeFlag(env.ACCOUNT_PURGE_ENABLED));
+    return closureView(null, now, purgeFlag(env.ACCOUNT_PURGE_ENABLED));
   });
 }
 
-const CLOSURE_COLUMNS = "status, requested_at, purge_after, last_error";
+const CLOSURE_COLUMNS = "status, requested_at, purge_after, last_error, updated_at";
 
 const subjectOf = (request: FastifyRequest): DeletionSubject => ({
   id: request.auth.userId,

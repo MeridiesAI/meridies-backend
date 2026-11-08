@@ -1,10 +1,11 @@
 /**
  * Leave Meridies: closing a counselor's account after a 30-day grace period (Task 11b).
  *
- * Nothing is deleted when a counselor asks. `public.account_closures` (20261111000004) records the request; the
- * account keeps working, read and write, until `purge_after`, and the counselor can cancel any time from Settings.
- * The purge (`runClosurePurge`, POST /internal/account-closures/purge) is OFF unless ACCOUNT_PURGE_ENABLED is
- * exactly "true"; when on it re-runs the shared preconditions (lib/accountDeletion.ts) and deletes through the same
+ * Nothing is deleted or disconnected when a counselor asks. `public.account_closures` (20261111000004) records the
+ * request; the account keeps working, read and write and with its Google/Microsoft connections, until it is purged,
+ * and the counselor can cancel any time from Settings. The purge (`runClosurePurge`, POST
+ * /internal/account-closures/purge) is OFF unless ACCOUNT_PURGE_ENABLED is exactly "true"; when on it re-runs the
+ * shared preconditions (lib/accountDeletion.ts), revokes the account's OAuth tokens, and deletes through the same
  * path as DELETE /account. The closure row cascades with the profile, so the outcome lives in `audit_log`.
  */
 
@@ -13,11 +14,12 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { DeletionFailed, deleteAccount, deletionBlocker, type DeletionSubject } from "./accountDeletion.js";
 import { brandedEmail, brandedText } from "./email.js";
+import { revokeAndForget, SUITE_PROVIDERS, type SuiteProvider } from "./oauth.js";
 
 export const CLOSURE_GRACE_DAYS = 30;
 /** Accounts deleted per purge run, oldest due first. */
 export const PURGE_BATCH = 5;
-/** A row left `purging` this long (a crash mid-run) is taken again: every deletion step is safe to repeat. */
+/** A row left `purging` this long (a crash mid-run) is taken again, and may be cancelled: every step is safe to repeat. */
 export const PURGE_RECLAIM_MS = 60 * 60 * 1000;
 export const PURGE_LEASE = "account-closure-purge";
 const PURGE_LEASE_SECONDS = 15 * 60;
@@ -26,7 +28,7 @@ const DAY_MS = 86_400_000;
 type Log = { info: (obj: object, msg?: string) => void; warn: (obj: object, msg?: string) => void; error: (obj: object, msg?: string) => void };
 
 export type ClosureStatus = "pending" | "cancelled" | "purging" | "done" | "failed";
-export type ClosureRow = { status: ClosureStatus | string; requested_at: string; purge_after: string; last_error: string | null };
+export type ClosureRow = { status: ClosureStatus | string; requested_at: string; purge_after: string; last_error: string | null; updated_at?: string };
 
 /** The env flag: only the exact string "true" switches the purge on. */
 export const purgeFlag = (raw: string | undefined): boolean => raw === "true";
@@ -39,35 +41,45 @@ export function daysLeft(purgeAfter: string | Date, now = new Date()): number {
   return ms <= 0 ? 0 : Math.ceil(ms / DAY_MS);
 }
 
+/** A `purging` row nobody has touched for PURGE_RECLAIM_MS: its run crashed. */
+export const isStalePurging = (row: { status: string; updated_at?: string }, now: Date) =>
+  row.status === "purging" && Boolean(row.updated_at) && now.getTime() - Date.parse(row.updated_at!) >= PURGE_RECLAIM_MS;
+
 /** A database without the migration. */
 export const isClosureTableMissing = (e: { code?: string } | null | undefined) => e?.code === "42P01" || e?.code === "PGRST205";
 
+/**
+ * What GET /account/closure answers. `status`:
+ *   "none"     no closure open (never asked, or cancelled): every other field null.
+ *   "pending"  waiting for its date, or being deleted right now: requestedAt, purgeAfter, daysLeft (0 once due).
+ *   "on_hold"  the purge found a reason it can't close the account yet (`blockedReason`, e.g. a student still on
+ *              the roster); nothing will happen until the counselor fixes it and confirms again (POST, which starts
+ *              a fresh 30 days) or cancels. purgeAfter and daysLeft are null.
+ * `purgeEnabled` says whether the automatic deletion is switched on at all (ACCOUNT_PURGE_ENABLED).
+ */
 export type ClosureView = {
-  status: "none" | "pending";
+  status: "none" | "pending" | "on_hold";
   requestedAt: string | null;
   purgeAfter: string | null;
   daysLeft: number | null;
-  /** Whether the automatic deletion is switched on at all (ACCOUNT_PURGE_ENABLED), so the app can say so. */
   purgeEnabled: boolean;
-  /** Why the purge held the account back (a student still on the roster...), when it did; the closure stays open. */
   blockedReason: string | null;
 };
 
-/**
- * What GET /account/closure answers. A closure is open (`pending`) while it is waiting, being purged, or was held
- * back by a precondition (`failed`, with `blockedReason`); no row or a cancelled one is `none`.
- */
 export function closureView(row: ClosureRow | null, now: Date, purgeEnabled: boolean): ClosureView {
-  if (!row || !["pending", "purging", "failed"].includes(row.status)) {
-    return { status: "none", requestedAt: null, purgeAfter: null, daysLeft: null, purgeEnabled, blockedReason: null };
+  const none: ClosureView = { status: "none", requestedAt: null, purgeAfter: null, daysLeft: null, purgeEnabled, blockedReason: null };
+  if (!row) return none;
+  if (row.status === "failed") {
+    return { ...none, status: "on_hold", requestedAt: new Date(row.requested_at).toISOString(), blockedReason: row.last_error };
   }
+  if (row.status !== "pending" && row.status !== "purging") return none;
   return {
     status: "pending",
     requestedAt: new Date(row.requested_at).toISOString(),
     purgeAfter: new Date(row.purge_after).toISOString(),
     daysLeft: daysLeft(row.purge_after, now),
     purgeEnabled,
-    blockedReason: row.status === "failed" ? row.last_error : null,
+    blockedReason: null,
   };
 }
 
@@ -90,9 +102,8 @@ export function closureEmail(kind: "requested" | "cancelled", o: { purgeAfter: s
           heading: "Your Meridies account is set to close",
           paragraphs: [
             `You asked to close your Meridies account. It will be closed on or after ${date}.`,
-            "Until then your account keeps working as it does today. You can cancel any time before that date from Settings.",
+            "Until then your account keeps working as it does today, connections included. You can cancel any time before that date from Settings.",
             "We recommend exporting your data first (Settings › Export), so you keep a copy of your students' records and your practice's work.",
-            "Any Google or Microsoft connection on your account has been disconnected. Connect it again from Settings if you need it before you leave.",
             "If you didn't ask for this, cancel it from Settings and reply to this email.",
           ],
           cta: { label: "Open Settings", url: settings },
@@ -100,7 +111,7 @@ export function closureEmail(kind: "requested" | "cancelled", o: { purgeAfter: s
       : {
           heading: "Your Meridies account stays open",
           paragraphs: [
-            `You cancelled the closing of your Meridies account. It won't be closed on ${date}, and nothing has changed in it.`,
+            `You cancelled the closing of your Meridies account. It won't be closed on ${date}, and nothing in it has changed.`,
             "If you didn't cancel it, reply to this email.",
           ],
           cta: { label: "Open Settings", url: settings },
@@ -120,21 +131,58 @@ export type PurgeOutcome =
 type DueRow = { counselor_id: string; status: string; updated_at: string; requested_at: string; purge_after: string };
 
 /**
- * Delete the accounts whose grace period is over: at most PURGE_BATCH, oldest due first, under the
- * `account-closure-purge` lease. Disabled (the default): touches nothing. For each row: the shared preconditions
- * again (a block marks it `failed` with the reason, emails nobody, and the account stays), a conditional claim to
- * `purging`, an audit row, then `deleteAccount` (the DELETE /account path). The closure row goes with the profile,
- * so success is the `account.closure.purged` audit row; a deletion that fails marks the row `failed`.
- * `deps` lets a test stand in for the deletion.
+ * The rows this run takes: pending past its date, or `purging` left by a crashed run for PURGE_RECLAIM_MS (never
+ * sooner, so two runs can't work one account); oldest date first, at most PURGE_BATCH.
+ */
+export function pickDue(rows: DueRow[], now: Date): DueRow[] {
+  return rows
+    .filter((r) => Date.parse(r.purge_after) <= now.getTime() && (r.status === "pending" || isStalePurging(r, now)))
+    .sort((a, b) => Date.parse(a.purge_after) - Date.parse(b.purge_after))
+    .slice(0, PURGE_BATCH);
+}
+
+/**
+ * The account's Google/Microsoft tokens, revoked at the provider where it has a call (Google) and forgotten, with
+ * the visible `integrations` rows. Best effort per provider: a provider that fails is logged (never a token) and
+ * the purge goes on, since the deletion removes the stored tokens either way. Returns the providers it had.
+ */
+export async function revokeConnections(svc: SupabaseClient, id: string, log: Log): Promise<SuiteProvider[]> {
+  const { data } = await svc.from("integration_tokens").select("provider").eq("owner_id", id);
+  const had = ((data ?? []) as Array<{ provider: string }>).map((r) => r.provider).filter((p): p is SuiteProvider => (SUITE_PROVIDERS as readonly string[]).includes(p));
+  for (const provider of SUITE_PROVIDERS) {
+    try {
+      await revokeAndForget(id, provider, log);
+      await svc.from("integrations").delete().eq("owner_id", id).eq("provider", provider);
+    } catch (err) {
+      log.warn({ provider, err: err instanceof Error ? err.message : String(err) }, "account closure purge: token revoke failed");
+    }
+  }
+  return had;
+}
+
+/**
+ * Delete the accounts whose grace period is over, under the `account-closure-purge` lease. Disabled (the default):
+ * touches nothing. For each row (`pickDue`): a conditional claim to `purging` on the exact row read (a cancel in
+ * between wins); the profile must be a counselor; the shared preconditions again (a block marks the row `failed`
+ * with the reason and emails nobody: the account stays); the `account.closure.purging` audit row (if it can't be
+ * written the row is failed and nothing is deleted); the OAuth tokens revoked; then `deleteAccount` (the DELETE
+ * /account path). The closure row goes with the profile, so success is the `account.closure.purged` audit row; a
+ * deletion that fails marks the row `failed` (the account is intact). `remove`/`revoke` let a test stand in.
  */
 export async function runClosurePurge(
   svc: SupabaseClient,
   log: Log,
-  opts: { enabled: boolean; now?: Date; remove?: (who: DeletionSubject) => Promise<void> }
+  opts: {
+    enabled: boolean;
+    now?: Date;
+    remove?: (who: DeletionSubject) => Promise<void>;
+    revoke?: (id: string) => Promise<SuiteProvider[]>;
+  }
 ): Promise<PurgeOutcome> {
   if (!opts.enabled) return { ran: false, reason: "purge_disabled" };
   const now = opts.now ?? new Date();
   const remove = opts.remove ?? ((who: DeletionSubject) => deleteAccount(who, log, "closure"));
+  const revoke = opts.revoke ?? ((id: string) => revokeConnections(svc, id, log));
 
   const holder = `${hostname()}:${process.pid}:${randomUUID()}`;
   const lease = await svc.rpc("acquire_job_lease", { p_name: PURGE_LEASE, p_holder: holder, p_ttl_seconds: PURGE_LEASE_SECONDS });
@@ -146,34 +194,32 @@ export async function runClosurePurge(
 
   const tally = { due: 0, purged: 0, blocked: 0, failed: 0, skipped: 0 };
   try {
-    const stale = new Date(now.getTime() - PURGE_RECLAIM_MS).toISOString();
+    // Candidates in a wider window; pickDue decides (fresh `purging` rows are left alone).
     const { data, error } = await svc
       .from("account_closures")
       .select("counselor_id, status, updated_at, requested_at, purge_after")
+      .in("status", ["pending", "purging"])
       .lte("purge_after", now.toISOString())
-      .or(`status.eq.pending,and(status.eq.purging,updated_at.lt.${stale})`)
       .order("purge_after", { ascending: true })
-      .limit(PURGE_BATCH);
+      .limit(PURGE_BATCH * 4);
     if (error) {
       if (isClosureTableMissing(error)) return { ran: false, reason: "migration-not-applied" };
       throw new Error(`account closure purge: due rows unreadable (${error.code ?? "?"})`);
     }
-    const rows = (data ?? []) as DueRow[];
+    const rows = pickDue((data ?? []) as DueRow[], now);
     tally.due = rows.length;
 
     for (const row of rows) {
       const id = row.counselor_id;
-      const fail = async (message: string) =>
-        svc.from("account_closures").update({ status: "failed", last_error: message.slice(0, 1000) }).eq("counselor_id", id).eq("status", "purging");
+      let claimed = false;
+      const fail = async (message: string) => {
+        if (!claimed) return;
+        const r = await svc.from("account_closures").update({ status: "failed", last_error: message.slice(0, 1000) }).eq("counselor_id", id).eq("status", "purging");
+        if (r.error) log.error({ code: r.error.code }, "account closure purge: could not mark a row failed");
+      };
+      const note = (action: string, metadata: Record<string, unknown>) =>
+        svc.from("audit_log").insert({ actor_id: null, action, entity_type: "profile", entity_id: id, metadata });
       try {
-        const prof = await svc.from("profiles").select("id, role, firm_id").eq("id", id).maybeSingle();
-        if (prof.error) throw new Error(`profile unreadable (${prof.error.code ?? "?"})`);
-        if (!prof.data) {
-          tally.skipped += 1;
-          continue;
-        }
-        const who = prof.data as DeletionSubject;
-
         // Claim it first, conditional on the row being exactly what was read, so a cancel in between wins.
         const claim = await svc
           .from("account_closures")
@@ -187,37 +233,57 @@ export async function runClosurePurge(
           tally.skipped += 1;
           continue;
         }
+        claimed = true;
 
-        const block = await deletionBlocker(svc, who);
-        if (block) {
-          await fail(block.message);
-          await svc.from("audit_log").insert({ actor_id: null, action: "account.closure.blocked", entity_type: "profile", entity_id: id, metadata: { code: block.code } });
+        const prof = await svc.from("profiles").select("id, role, firm_id").eq("id", id).maybeSingle();
+        if (prof.error) throw new Error(`profile unreadable (${prof.error.code ?? "?"})`);
+        const who = prof.data as DeletionSubject | null;
+        if (!who || who.role !== "counselor") {
+          // Only a counselor can ask to close; anything else is a row nobody should act on.
+          await fail("Only a counselor account can be closed this way. Ask Meridies to close it.");
+          await note("account.closure.blocked", { code: "not_counselor" });
           tally.blocked += 1;
           continue;
         }
 
-        // Recorded before the deletion: the closure row is about to cascade away with the profile.
-        await svc.from("audit_log").insert({
-          actor_id: null,
-          action: "account.closure.purging",
-          entity_type: "profile",
-          entity_id: id,
-          metadata: { role: who.role, requestedAt: row.requested_at, purgeAfter: row.purge_after },
-        });
+        const block = await deletionBlocker(svc, who);
+        if (block) {
+          await fail(block.message);
+          await note("account.closure.blocked", { code: block.code });
+          tally.blocked += 1;
+          continue;
+        }
+
+        // Recorded before the deletion: the closure row is about to cascade away with the profile. No record, no deletion.
+        const purging = await note("account.closure.purging", { role: who.role, requestedAt: row.requested_at, purgeAfter: row.purge_after });
+        if (purging.error) {
+          await fail("The account couldn't be closed right now (its record couldn't be written). Confirm again from Settings to retry.");
+          log.error({ code: purging.error.code }, "account closure purge: audit row failed, deletion skipped");
+          tally.failed += 1;
+          continue;
+        }
+
+        let revoked: SuiteProvider[] = [];
+        try {
+          revoked = await revoke(id);
+        } catch (err) {
+          log.warn({ err: err instanceof Error ? err.message : String(err) }, "account closure purge: revoking connections failed");
+        }
+
         try {
           await remove(who);
         } catch (err) {
           const stage = err instanceof DeletionFailed ? err.stage : "unknown";
-          await fail(`The account couldn't be deleted (${stage}). It will not be retried until the closure is confirmed again.`);
-          await svc.from("audit_log").insert({ actor_id: null, action: "account.closure.failed", entity_type: "profile", entity_id: id, metadata: { stage } });
+          await fail(`The account couldn't be deleted (${stage}). Confirm again from Settings to retry.`);
+          await note("account.closure.failed", { stage });
           log.error({ stage }, "account closure purge: deletion failed");
           tally.failed += 1;
           continue;
         }
-        await svc.from("audit_log").insert({ actor_id: null, action: "account.closure.purged", entity_type: "profile", entity_id: id, metadata: { role: who.role } });
+        await note("account.closure.purged", { role: who.role, connectionsRevoked: revoked });
         tally.purged += 1;
       } catch (err) {
-        await fail("The account couldn't be checked for closing. It will not be retried until the closure is confirmed again.");
+        await fail("The account couldn't be checked for closing. Confirm again from Settings to retry.");
         log.error({ err: err instanceof Error ? err.message : String(err) }, "account closure purge: row failed");
         tally.failed += 1;
       }

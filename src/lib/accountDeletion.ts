@@ -28,7 +28,7 @@ function readFailed(what: string, error: { code?: string; message?: string }): E
 
 /**
  * Why `who` can't be deleted now, or null. A counselor with students still on the roster (in a firm, archived ones
- * too: the firm can transfer them), a firm owner, a solo practice with a connected Stripe account (the families'
+ * too: the firm can transfer them), a firm owner, a solo practice whose Stripe account takes charges (the families'
  * card payments and the account's Stripe link would go with it: disconnect it in Stripe first), or an account
  * that signed agreements are kept against (when this database has agreements). A student is never blocked: their
  * record goes with them. Any read error throws, so a caller refuses rather than guesses.
@@ -57,13 +57,16 @@ export async function deletionBlocker(svc: SupabaseClient, who: DeletionSubject)
   if (firm.data) return { code: "owns_firm", message: "You own a firm. Hand ownership to someone else before deleting your account." };
 
   // A firm's Stripe account is the firm's (its owner is refused above); a solo counselor's is their own practice's.
+  // Only a live one blocks: charges enabled. Stripe's deauthorize webhook sets that false, so disconnecting in the
+  // Stripe dashboard unblocks; an onboarding never finished doesn't block. Billing history is kept apart from this:
+  // invoices and payments RESTRICT their package, so the deletion itself refuses while a family has any.
   if (!inFirm) {
-    const stripe = await svc.from("practice_stripe_accounts").select("practice_id").eq("counselor_id", me).limit(1);
+    const stripe = await svc.from("practice_stripe_accounts").select("practice_id").eq("counselor_id", me).eq("charges_enabled", true).limit(1);
     if (stripe.error && !NOT_APPLIED.has(stripe.error.code ?? "")) throw readFailed("stripe", stripe.error);
     if (!stripe.error && (stripe.data ?? []).length > 0) {
       return {
         code: "stripe_connected",
-        message: "Your practice takes card payments through Stripe. Disconnect Meridies in your Stripe dashboard (Settings › Connected accounts) and ask Meridies to remove the link before closing your account.",
+        message: "Your practice takes card payments through Stripe. Disconnect Meridies in your Stripe dashboard first, then try again.",
       };
     }
   }
