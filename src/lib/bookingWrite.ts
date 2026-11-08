@@ -93,6 +93,8 @@ export type NoticeInput = {
   timeZone: string;
   /** The student booked the meeting (true), or the counselor did and the student changed it. */
   byStudent: boolean;
+  /** A cancel whose calendar delete failed: the event is still on this calendar. */
+  calendarLeft?: SuiteProvider | null;
 };
 
 const when = (iso: string, tz: string) => whenShort(iso, tz).replace(/[  ]/g, " ");
@@ -108,8 +110,9 @@ export function noticeText(n: NoticeInput): { title: string; body: string } {
         ? `${n.first} moved a meeting to ${at}`
         : `${n.first} cancelled the meeting on ${at}`;
   const who = n.byStudent ? `${n.first} booked this in Meridies.` : `You set this meeting up; ${n.first} changed it in Meridies.`;
-  const body = n.action === "rescheduled" && n.previous ? `Moved from ${when(n.previous, n.timeZone)}. ${who}` : who;
-  return { title: clip(title, 200), body };
+  const moved = n.action === "rescheduled" && n.previous ? `Moved from ${when(n.previous, n.timeZone)}. ${who}` : who;
+  const left = n.calendarLeft ? ` It is still on your ${n.calendarLeft === "google" ? "Google" : "Outlook"} calendar; delete it there.` : "";
+  return { title: clip(title, 200), body: moved + left };
 }
 
 /**
@@ -315,11 +318,13 @@ export async function cancelBooking(io: BookingIo, i: Change): Promise<{ meeting
 
   // Nothing left on the counselor's calendar is "removed"; a failed delete is reported, never blocking.
   let calendarRemoved = true;
+  let calendarLeft: SuiteProvider | null = null;
   if (pointerOf(m)) {
     try {
       await io.calendar.remove(m);
     } catch {
       calendarRemoved = false;
+      calendarLeft = m.calendar_provider === "microsoft" ? "microsoft" : "google";
     }
   }
 
@@ -334,6 +339,7 @@ export async function cancelBooking(io: BookingIo, i: Change): Promise<{ meeting
       previous: null,
       timeZone: i.settings.timeZone,
       byStudent: m.booked_by_student === true,
+      calendarLeft,
     }),
   });
   return { meeting: claimed, invites, calendarRemoved };

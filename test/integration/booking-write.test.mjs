@@ -125,6 +125,9 @@ check("…with nothing beyond the first name, type and time", !/Zebulon|Smith/.t
 const noticeMail = await deliveries(`student_id='${sa.id}' and template='student-booking-counselor'`, 1);
 check("…and an email", noticeMail.length === 1 && noticeMail[0].to === A.email.toLowerCase() && noticeMail[0].kind === "counselor", JSON.stringify(noticeMail));
 
+const bucket = async (key) => (await sql(`select coalesce(sum(count), 0) from private.rate_limit_buckets where key = '${key}'`)) || "0";
+check("the student's invite round spends the booking bucket, not the counselor's own allowance", (await bucket(`meeting-invites:booking:${A.id}`)) === "1" && (await bucket(`meeting-invites:${A.id}`)) === "0", `${await bucket(`meeting-invites:booking:${A.id}`)} / ${await bucket(`meeting-invites:${A.id}`)}`);
+
 const meetType = await book(sa, video.id, at(3, 11));
 check("a Meet type with no calendar connected books without a link, and says so", meetType.status === 201 && meetType.body.joinUrl === null && meetType.body.conference === "not-connected" && meetType.body.mode === "google-meet", JSON.stringify(meetType.body));
 
@@ -249,11 +252,54 @@ check("the cancelled slot is offered again", starts(await slots(s2, checkIn.id, 
 await resetLimit(sa);
 // ---- a calendar that fails ----------------------------------------------------------------------
 
+// ---- booking paused, counselor unapproved, meetings with others on them ----------------------------
+
+await resetLimit(sa);
+const seedMeeting = (student, owner, startsAt, minutes = 30, extra = "") =>
+  sql(`insert into meetings (student_id, counselor_id, title, mode, starts_at, ends_at, status${extra ? ", guardians_invited" : ""})
+    values ('${student}', '${owner}', 'Seeded', 'phone', '${startsAt}', '${new Date(Date.parse(startsAt) + minutes * 60_000).toISOString()}', 'scheduled'${extra ? ", " + extra : ""}) returning id`).then((o) => o.split("\n")[0]);
+const p1 = await seedMeeting(sa.id, A.id, at(17, 9));
+const p2 = await seedMeeting(sa.id, A.id, at(17, 11));
+const pSoon = await seedMeeting(sa.id, A.id, new Date(Date.now() + 5 * 3_600_000).toISOString());
+await call(A.token, "PUT", "/booking/settings", { enabled: false });
+const pausedMove = await call(sa.token, "PATCH", `/me/booking/${p1}`, { startsAt: at(18, 9) });
+check("booking paused: a move is 404 booking_not_available", pausedMove.status === 404 && pausedMove.body.code === "booking_not_available", JSON.stringify(pausedMove.body));
+const pausedCancel = await call(sa.token, "DELETE", `/me/booking/${p1}`);
+check("booking paused: the student can still cancel", pausedCancel.status === 200 && pausedCancel.body.status === "cancelled" && (await row(p1)).status === "cancelled", JSON.stringify(pausedCancel.body));
+const pausedLate = await call(sa.token, "DELETE", `/me/booking/${pSoon}`);
+check("booking paused: the cancel cutoff still applies", pausedLate.status === 409 && pausedLate.body.code === "inside_cutoff", JSON.stringify(pausedLate.body));
+await call(A.token, "PUT", "/booking/settings", { studentsCanReschedule: false });
+const pausedOff = await call(sa.token, "DELETE", `/me/booking/${p2}`);
+check("booking paused with students_can_reschedule off: the cancel is 403 student_changes_off", pausedOff.status === 403 && pausedOff.body.code === "student_changes_off" && (await row(p2)).status === "scheduled", JSON.stringify(pausedOff.body));
+await call(A.token, "PUT", "/booking/settings", { enabled: true, studentsCanReschedule: true });
+
+const uMeeting = await seedMeeting(su.id, U.id, at(17, 9));
+const uMove = await call(su.token, "PATCH", `/me/booking/${uMeeting}`, { startsAt: at(18, 9) });
+const uCancel = await call(su.token, "DELETE", `/me/booking/${uMeeting}`);
+check("a student of an unapproved counselor can't move or cancel: 404 booking_not_available", [uMove, uCancel].every((r) => r.status === 404 && r.body.code === "booking_not_available") && (await row(uMeeting)).status === "scheduled", JSON.stringify([uMove.body, uCancel.body]));
+
+const withGuardians = await seedMeeting(sa.id, A.id, at(17, 10), 30, "true");
+const gMove = await call(sa.token, "PATCH", `/me/booking/${withGuardians}`, { startsAt: at(18, 10) });
+const gCancel = await call(sa.token, "DELETE", `/me/booking/${withGuardians}`);
+check("a meeting with guardians invited: ask_your_counselor", [gMove, gCancel].every((r) => r.status === 409 && r.body.code === "ask_your_counselor"), JSON.stringify([gMove.body, gCancel.body]));
+const bOwned = await seedMeeting(sa.id, B.id, at(17, 10, 30));
+const oMove = await call(sa.token, "PATCH", `/me/booking/${bOwned}`, { startsAt: at(18, 10) });
+const oCancel = await call(sa.token, "DELETE", `/me/booking/${bOwned}`);
+check("another counselor's meeting with the student: ask_your_counselor", [oMove, oCancel].every((r) => r.status === 409 && r.body.code === "ask_your_counselor"), JSON.stringify([oMove.body, oCancel.body]));
+check("…and none of them changed", (await row(withGuardians)).status === "scheduled" && (await row(bOwned)).status === "scheduled");
+const longOne = await seedMeeting(sa.id, A.id, at(17, 9, 30), 240);
+const longMove = await call(sa.token, "PATCH", `/me/booking/${longOne}`, { startsAt: at(18, 9) });
+check("a meeting longer than 180 minutes can't be moved by the student: ask_your_counselor", longMove.status === 409 && longMove.body.code === "ask_your_counselor", JSON.stringify(longMove.body));
+
+await resetLimit(sa);
 await sql(`insert into integration_tokens (owner_id, provider, access_token_enc, scopes) values ('${A.id}', 'google', 'not-a-real-token', '{https://www.googleapis.com/auth/calendar.events}')`);
+const deliveriesBefore = await sql(`select count(*) from message_deliveries where student_id='${sa.id}' or recipient_id='${A.id}'`);
 const failed = await book(sa, video.id, at(12, 9));
 check("a calendar write that fails is 503 calendar_write_failed", failed.status === 503 && failed.body.code === "calendar_write_failed", JSON.stringify(failed.body));
 check("…and leaves no meeting behind", (await sql(`select count(*) from meetings where counselor_id='${A.id}' and starts_at='${at(12, 9)}'`)) === "0");
 check("…nor any invite or notice", (await sql(`select count(*) from notifications where recipient_id='${A.id}' and title like '%booked Video chat on%'`)) === "1");
+await sleep(1500);
+check("…nor any email", (await sql(`select count(*) from message_deliveries where student_id='${sa.id}' or recipient_id='${A.id}'`)) === deliveriesBefore);
 const slotStill = starts(await slots(s2, video.id, 12)).some((s) => same(s, at(12, 9)));
 check("…so the slot is still offered", slotStill);
 
@@ -262,6 +308,8 @@ const withEvent = await sql(`insert into meetings (student_id, counselor_id, tit
 const failedMove = await call(sa.token, "PATCH", `/me/booking/${withEvent}`, { startsAt: at(13, 10) });
 check("a move whose calendar write fails is 503 and the old time is put back", failedMove.status === 503 && failedMove.body.code === "calendar_write_failed" && same((await row(withEvent)).starts_at, at(13, 9)), JSON.stringify(failedMove.body));
 const failedRemove = await call(sa.token, "DELETE", `/me/booking/${withEvent}`);
+const orphanNote = await sql(`select body from notifications where recipient_id='${A.id}' and student_id='${sa.id}' and title like 'Ana cancelled%' order by created_at desc limit 1`);
+check("…and the counselor is told the event is still on their calendar", orphanNote.endsWith("It is still on your Google calendar; delete it there."), orphanNote);
 check("a cancel whose calendar delete fails still cancels, calendarRemoved false", failedRemove.status === 200 && failedRemove.body.calendarRemoved === false && (await row(withEvent)).status === "cancelled", JSON.stringify(failedRemove.body));
 await sql(`delete from integration_tokens where owner_id='${A.id}'`);
 

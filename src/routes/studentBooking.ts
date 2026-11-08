@@ -28,7 +28,8 @@
  * the counselor is told (bell + email, first name, type and time only). A
  * student moves or cancels a scheduled meeting where they are the primary
  * student, with their own counselor, nobody else on it, outside the cutoff and
- * while the counselor lets students reschedule. All the service-role reads and
+ * while the counselor lets students reschedule. A cancel works even while the
+ * counselor has booking paused (`enabled` off); a move doesn't. All the service-role reads and
  * writes here are keyed by the caller's id and their own counselor's id.
  *
  * Before 20261111000001 everything answers 503 `booking_unavailable`; before
@@ -95,8 +96,8 @@ const NOT_AVAILABLE_MESSAGE = {
 const RATE_MESSAGE = "Too many booking changes in an hour. Try again later.";
 
 /** The gate every route shares: the student's own counselor, approved, with booking on; else 404. */
-async function bookingContext(request: FastifyRequest): Promise<Ctx> {
-  const ctx = await studentBookingContext(request);
+async function bookingContext(request: FastifyRequest, opts = { requireEnabled: true }): Promise<Ctx> {
+  const ctx = await studentBookingContext(request, opts);
   if (!ctx.ok) throw new HttpError(404, NOT_AVAILABLE_MESSAGE[ctx.reason], "booking_not_available");
   return ctx;
 }
@@ -225,14 +226,8 @@ function bookingIo(request: FastifyRequest, ctx: Ctx): BookingIo {
           throw err;
         }
       },
-      async remove(meeting) {
-        try {
-          await removeBookingProviderEvent(meeting, parties, log);
-        } catch (err) {
-          log.warn({ status: err instanceof HttpError ? err.statusCode : null, code: err instanceof HttpError ? err.code : null }, "booking: calendar event not deleted; cancelled in Meridies only");
-          throw err;
-        }
-      },
+      // removeBookingProviderEvent logs a failure itself (meeting, provider and event ids).
+      remove: (meeting) => removeBookingProviderEvent(meeting, parties, log),
     },
     invitesReady: () => invitesReady(svc),
     async invites(kind, before, after) {
@@ -246,7 +241,9 @@ function bookingIo(request: FastifyRequest, ctx: Ctx): BookingIo {
           attendeesBefore: before ? [studentId] : [],
           attendeesAfter: [studentId],
           notify: true,
-        }
+        },
+        // A student's rounds spend their own bucket, never the counselor's own invite allowance.
+        { consume: consumeRateLimit, now: new Date(), bucket: "booking" }
       );
       startInviteDelivery(prepared.round, log);
       return prepared.summary;
@@ -392,7 +389,8 @@ export default async function studentBookingRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       await chargeAction(request);
-      const ctx = await bookingContext(request);
+      // A cancel works while booking is paused (enabled off): only approval and set-up are required.
+      const ctx = await bookingContext(request, { requireEnabled: false });
       const { meeting, attendees } = await myMeeting(ctx, request.auth.userId, id);
       const out = await cancelBooking(bookingIo(request, ctx), {
         studentId: request.auth.userId,

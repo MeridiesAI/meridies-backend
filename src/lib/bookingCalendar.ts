@@ -24,6 +24,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { HttpError } from "./errors.js";
 import { GOOGLE_SCOPE, MICROSOFT_SCOPE, type SuiteProvider } from "./oauth.js";
 import {
   createConferenceEvent,
@@ -131,5 +132,17 @@ export async function removeBookingProviderEvent(
 ): Promise<void> {
   assertParties(meeting, expected);
   const p = pointer(meeting);
-  await deps.remove(expected.counselorId, p.provider, p.eventId, log);
+  try {
+    await deps.remove(expected.counselorId, p.provider, p.eventId, log);
+  } catch (err) {
+    // The event is left on the counselor's calendar: ids only, so it can be found and removed by hand.
+    log.warn({
+      meetingId: String(meeting.id),
+      provider: p.provider,
+      eventId: p.eventId,
+      status: err instanceof HttpError ? err.statusCode : null,
+      code: err instanceof HttpError ? (err.code ?? null) : null,
+    }, "booking: calendar event not deleted; cancelled in Meridies only");
+    throw err;
+  }
 }

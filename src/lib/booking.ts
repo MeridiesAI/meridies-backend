@@ -140,12 +140,33 @@ export type StudentBookingContext =
   | { ok: false; reason: "no_counselor" | "not_available" };
 
 /**
- * The caller's (a student's) counselor, when they can be booked: from the
- * caller's own profile row, approved, with booking enabled. An unapproved
- * counselor and booking switched off read the same (`not_available`), so the
- * answer says nothing about the counselor's account.
+ * Whether a student may use their counselor's booking, from what was read:
+ * the counselor must be approved and must have set booking up (a settings
+ * row). Reads, bookings and moves also need booking switched on
+ * (`requireEnabled`); a cancel does not, so pausing booking never strands a
+ * student with a meeting they can't call off (the cutoff and
+ * students_can_reschedule still apply). Unapproved, never set up and
+ * switched off all read `not_available`, so nothing is said about the account.
  */
-export async function studentBookingContext(request: FastifyRequest): Promise<StudentBookingContext> {
+export function bookingGate(i: {
+  approved: boolean;
+  settingsRow: Row | null;
+  requireEnabled: boolean;
+}): { ok: true; settings: BookingSettingsDto } | { ok: false; reason: "not_available" } {
+  if (!i.approved || !i.settingsRow) return { ok: false, reason: "not_available" };
+  if (i.requireEnabled && i.settingsRow.enabled !== true) return { ok: false, reason: "not_available" };
+  return { ok: true, settings: toSettings(i.settingsRow) };
+}
+
+/**
+ * The caller's (a student's) counselor, when they can be booked: from the
+ * caller's own profile row, approved, with booking set up and (unless
+ * `requireEnabled: false`, the cancel route) enabled. See bookingGate.
+ */
+export async function studentBookingContext(
+  request: FastifyRequest,
+  opts: { requireEnabled: boolean } = { requireEnabled: true }
+): Promise<StudentBookingContext> {
   const svc = serviceClient();
   if (!svc) throw bookingUnavailable();
   await requireBookingReady(svc);
@@ -156,8 +177,9 @@ export async function studentBookingContext(request: FastifyRequest): Promise<St
 
   const { data, error } = await svc.from("booking_settings").select(SETTINGS_COLUMNS).eq("counselor_id", counselorId).maybeSingle();
   if (error) throw fromPostgrest(error);
-  if (!data || (data as Row).enabled !== true) return { ok: false, reason: "not_available" };
-  return { ok: true, svc, counselorId, settings: toSettings(data as Row) };
+  const gate = bookingGate({ approved: true, settingsRow: (data as Row | null) ?? null, requireEnabled: opts.requireEnabled });
+  if (!gate.ok) return gate;
+  return { ok: true, svc, counselorId, settings: gate.settings };
 }
 
 /** The counselor's active meeting types, in their order. */

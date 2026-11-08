@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import type { FastifyRequest } from "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { slotsFor, toSettings, type MeetingTypeDto, type StudentBookingContext } from "../../src/lib/booking.js";
+import { bookingGate, slotsFor, toSettings, type MeetingTypeDto, type StudentBookingContext } from "../../src/lib/booking.js";
 import {
   bookSlot,
   cancelBooking,
@@ -280,4 +280,43 @@ test("the booking provider helper uses the counselor's token, only for that coun
   await assert.rejects(moveBookingProviderEvent({ ...existing, counselor_id: OTHER }, { counselorId: COUNSELOR, studentId: STUDENT }, { startsAt: day6(15) }, log, deps));
   await assert.rejects(removeBookingProviderEvent({ ...existing, student_id: OTHER }, { counselorId: COUNSELOR, studentId: STUDENT }, log, deps));
   assert.equal(used.length, 3, "nothing called for a mismatched meeting");
+});
+
+// ---- polish round -------------------------------------------------------------------------------
+
+test("the gate: reads and moves need booking on; a cancel needs only an approved counselor who set booking up", () => {
+  const row = { enabled: false, time_zone: "UTC", cancel_cutoff_hours: 6, students_can_reschedule: false };
+  const reason = (g: ReturnType<typeof bookingGate>) => (g.ok ? "ok" : g.reason);
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: row, requireEnabled: true })), "not_available");
+  const paused = bookingGate({ approved: true, settingsRow: row, requireEnabled: false });
+  assert.equal(reason(paused), "ok");
+  assert.ok(paused.ok && paused.settings.cancelCutoffHours === 6 && paused.settings.studentsCanReschedule === false, "the counselor's own rules still apply");
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: { ...row, enabled: true }, requireEnabled: true })), "ok");
+  assert.equal(reason(bookingGate({ approved: false, settingsRow: { ...row, enabled: true }, requireEnabled: false })), "not_available", "unapproved: never");
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: null, requireEnabled: false })), "not_available", "never set up: no student changes");
+});
+
+test("a cancel whose calendar delete failed tells the counselor the event is still there", async () => {
+  const notices: { body: string }[] = [];
+  const calls: Calls = [];
+  const base = io(calls);
+  await cancelBooking(io(calls, { calendar: { ...base.calendar, remove: async () => { throw new Error("down"); } }, notify: async (n) => void notices.push(n) }), changeInput);
+  assert.match(notices[0].body, /It is still on your Google calendar; delete it there\.$/);
+  notices.length = 0;
+  await cancelBooking(io([], { notify: async (n) => void notices.push(n) }), changeInput);
+  assert.doesNotMatch(notices[0].body, /still on your/);
+  const outlook = noticeText({ action: "cancelled", first: "Ana", typeName: null, startsAt: day6(14), previous: null, timeZone: "UTC", byStudent: true, calendarLeft: "microsoft" });
+  assert.match(outlook.body, /It is still on your Outlook calendar; delete it there\.$/);
+});
+
+test("a failed delete of the counselor's event is logged with ids only", async () => {
+  const lines: unknown[] = [];
+  const capture = { warn: (o: unknown) => void lines.push(o), info: () => undefined, error: () => undefined } as unknown as FastifyRequest["log"];
+  const deps = {
+    create: async () => ({ eventId: "e", joinUrl: "https://x" }),
+    update: async () => undefined,
+    remove: async () => { throw new HttpError(503, "down", "provider_down"); },
+  };
+  await assert.rejects(removeBookingProviderEvent(existing, { counselorId: COUNSELOR, studentId: STUDENT }, capture, deps));
+  assert.deepEqual(lines, [{ meetingId: MEETING, provider: "google", eventId: "evt1", status: 503, code: "provider_down" }]);
 });
