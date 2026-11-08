@@ -14,7 +14,11 @@
  *              student's own events (`student_calendar_events`, `personal`).
  *   deadline   also each school's application deadline on the student's
  *              college list (`student_colleges.deadline`), id `college:<row>`,
- *              until a decision is in.
+ *              until a decision is in, and the counselor's internal date for
+ *              it ("Your deadline", `custom_deadline`), id `college-custom:<row>`.
+ *   milestone  also a student's planned SAT/ACT date (`student_academics`),
+ *              id `test:<student>`, pseudo-type `test`, until it is taken
+ *              (never for a test-optional student).
  *
  * Saved Events Hub events ("Professional events", kind `event`) are owned by
  * the Events Hub routes and merged by the client; the type reassignments that
@@ -192,6 +196,117 @@ const ROUND_NAMES: Record<string, string> = {
   priority: "Priority",
 };
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** `2027-01-05` -> `Jan 5, 2027`. */
+function longDay(isoDate: string): string {
+  const [y, m, d] = isoDate.split("-").map(Number);
+  return `${MONTHS[(m ?? 1) - 1]} ${d}, ${y}`;
+}
+
+type Window = { from: string; to: string };
+const inWindow = (date: string | null, w: Window): date is string => !!date && date >= w.from && date <= w.to;
+
+const NO_EXTRAS = { attendeeIds: [] as string[], meetingStatus: null, taskId: null, school: null };
+
+/**
+ * A college list row's dates: the school's own deadline (`college:<row>`)
+ * and the counselor's internal one, "Your deadline" (`college-custom:<row>`,
+ * `student_colleges.custom_deadline`), each only when it falls inside the
+ * window and the counselor hasn't entered the same school and date by hand
+ * as a deadline. Both share the row id as `ref`, so a type reassignment of
+ * one moves both. The rows are already filtered by status (undecided only).
+ */
+export function collegeFeedItems(
+  rows: Row[],
+  w: Window,
+  handEntered: Set<string>,
+  typeOf: (kind: FeedKind, ref: string) => string
+): CalendarFeedItem[] {
+  const items: CalendarFeedItem[] = [];
+  for (const r of rows) {
+    const ref = s(r.id);
+    const name = s(r.name);
+    const student = s(r.student_id);
+    const school = ns(r.deadline);
+    const custom = ns(r.custom_deadline);
+    const done = s(r.status) === "submitted";
+    const shown = (date: string) => !handEntered.has(`${student}|${date}|${name.toLowerCase()}`);
+    const common = {
+      ...NO_EXTRAS,
+      kind: "deadline" as const,
+      ref,
+      type: typeOf("deadline", ref),
+      startsAt: null,
+      endsAt: null,
+      allDay: true,
+      studentId: student,
+      done,
+      school: name,
+    };
+    if (inWindow(school, w) && shown(school)) {
+      const round = ns(r.round);
+      items.push({
+        ...common,
+        id: `college:${ref}`,
+        title: `${name} application due`,
+        date: school,
+        detail: round ? `${ROUND_NAMES[round] ?? round} deadline` : null,
+      });
+    }
+    if (inWindow(custom, w) && shown(custom)) {
+      items.push({
+        ...common,
+        id: `college-custom:${ref}`,
+        title: `${name}: your deadline`,
+        date: custom,
+        detail: school && school !== custom ? `The school's deadline is ${longDay(school)}` : null,
+      });
+    }
+  }
+  return items;
+}
+
+const TEST_STATUS_LABEL: Record<string, string> = {
+  prepping: "Prepping",
+  scheduled: "Scheduled",
+  retaking: "Retaking",
+};
+
+/**
+ * A student's planned SAT/ACT date (`student_academics.planned_test_date`)
+ * as a `milestone` of the pseudo-type `test` (like `personal`, not a
+ * FeedKind: `calendar_event_type_assignments.event_kind` is check-constrained),
+ * id `test:<student>`. Skipped once the test is taken or the student is
+ * test-optional.
+ */
+export function testFeedItems(rows: Row[], w: Window): CalendarFeedItem[] {
+  const items: CalendarFeedItem[] = [];
+  for (const r of rows) {
+    const date = ns(r.planned_test_date);
+    const status = ns(r.test_status);
+    if (!inWindow(date, w)) continue;
+    if (status === "taken" || status === "test-optional") continue;
+    const student = s(r.student_id);
+    items.push({
+      ...NO_EXTRAS,
+      id: `test:${student}`,
+      kind: "milestone",
+      ref: student,
+      type: "test",
+      title: "Planned test date",
+      date,
+      startsAt: null,
+      endsAt: null,
+      allDay: true,
+      studentId: student,
+      detail: (status && TEST_STATUS_LABEL[status]) ?? null,
+      done: false,
+    });
+  }
+  return items;
+}
+
 /** Postgres / PostgREST answers for a table that isn't there yet. */
 export function isMissingTable(error: { code?: string } | null | undefined): boolean {
   return error?.code === "42P01" || error?.code === "PGRST205";
@@ -308,13 +423,23 @@ export async function buildCalendarFeed(
   }
 
   // ---- college list deadlines (the school's own date, until a decision) ----
+  // The school's own date or the counselor's internal one ("Your deadline") in the window.
   let colleges = request.db
     .from("student_colleges")
-    .select("id, student_id, name, round, deadline, status")
-    .gte("deadline", q.from)
-    .lte("deadline", q.to)
+    .select("id, student_id, name, round, deadline, custom_deadline, status")
+    .or(
+      `and(deadline.gte.${q.from},deadline.lte.${q.to}),and(custom_deadline.gte.${q.from},custom_deadline.lte.${q.to})`
+    )
     .in("status", q.includeDone ? ["not-started", "in-progress", "submitted"] : ["not-started", "in-progress"]);
   if (scopeStudent) colleges = colleges.eq("student_id", scopeStudent);
+
+  // ---- planned test dates (until taken; never for a test-optional student) ----
+  let academics = request.db
+    .from("student_academics")
+    .select("student_id, planned_test_date, test_status")
+    .gte("planned_test_date", q.from)
+    .lte("planned_test_date", q.to);
+  if (scopeStudent) academics = academics.eq("student_id", scopeStudent);
 
   // A counselor's whole calendar: name their students, so the two reads that
   // span students use the index instead of RLS-checking every practice's rows.
@@ -324,10 +449,11 @@ export async function buildCalendarFeed(
       deadlines = deadlines.in("student_id", caseload);
       tasks = tasks.in("student_id", caseload);
       colleges = colleges.in("student_id", caseload);
+      academics = academics.in("student_id", caseload);
     }
   }
 
-  const [dl, mt, tk, pe, eventTypes, assignments, cl, personal] = await Promise.all([
+  const [dl, mt, tk, pe, eventTypes, assignments, cl, personal, ac] = await Promise.all([
     deadlines.order("due_date").limit(3000),
     meetings.order("starts_at").limit(2000),
     tasks.limit(1000),
@@ -337,8 +463,9 @@ export async function buildCalendarFeed(
     colleges.order("deadline").limit(3000),
     // One student's own events: the student themselves, or a counselor looking at that student.
     scopeStudent ? loadPersonalEvents(request, scopeStudent, q.from, q.to) : Promise.resolve([] as Row[]),
+    academics.order("planned_test_date").limit(3000),
   ]);
-  for (const r of [dl, mt, tk, pe, cl]) if (r.error) throw fromPostgrest(r.error);
+  for (const r of [dl, mt, tk, pe, cl, ac]) if (r.error) throw fromPostgrest(r.error);
 
   const moved = new Map(assignments.map((a) => [`${a.eventKind}:${a.eventRef}`, a.type]));
   const typeOf = (kind: FeedKind, ref: string) => moved.get(`${kind}:${ref}`) ?? kind;
@@ -431,29 +558,8 @@ export async function buildCalendarFeed(
   const handEntered = new Set(
     ((dl.data ?? []) as Row[]).map((r) => `${s(r.student_id)}|${s(r.due_date)}|${s(r.school).toLowerCase()}`)
   );
-  for (const r of (cl.data ?? []) as Row[]) {
-    const ref = s(r.id);
-    const name = s(r.name);
-    const date = s(r.deadline);
-    if (handEntered.has(`${s(r.student_id)}|${date}|${name.toLowerCase()}`)) continue;
-    const round = ns(r.round);
-    items.push({
-      ...base,
-      id: `college:${ref}`,
-      kind: "deadline",
-      ref,
-      type: typeOf("deadline", ref),
-      title: `${name} application due`,
-      date,
-      startsAt: null,
-      endsAt: null,
-      allDay: true,
-      studentId: s(r.student_id),
-      detail: round ? `${ROUND_NAMES[round] ?? round} deadline` : null,
-      done: s(r.status) === "submitted",
-      school: name,
-    });
-  }
+  items.push(...collegeFeedItems((cl.data ?? []) as Row[], q, handEntered, typeOf));
+  items.push(...testFeedItems((ac.data ?? []) as Row[], q));
 
   for (const r of personal) {
     const ref = s(r.id);
