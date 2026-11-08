@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collegeFeedItems, testFeedItems, type FeedKind } from "../../src/lib/calendarFeed.js";
+import { buildCalendarFeed, collegeFeedItems, FEED_ID_CHUNK, inChunks, testFeedItems, type FeedKind } from "../../src/lib/calendarFeed.js";
 
 const window = { from: "2027-01-01", to: "2027-01-31" };
 const typeOf = (kind: FeedKind) => kind;
@@ -105,4 +105,56 @@ test("tests already taken, test-optional, undated or outside the window are skip
   assert.deepEqual(items.map((i) => i.id), ["test:e", "test:f"]);
   assert.equal(items[0]!.detail, null);
   assert.equal(items[1]!.detail, "Retaking");
+});
+
+// ---- The builder's scope (it also runs under the service role for the iCal feed) ----
+
+/** A stand-in client: every query builder method chains, awaiting answers no rows; records `.in` filters per table. */
+function fakeDb() {
+  const ins: Array<{ table: string; col: string; ids: string[] }> = [];
+  const make = (table: string): unknown =>
+    new Proxy(
+      {},
+      {
+        get(_t, prop) {
+          if (prop === "then") return (resolve: (v: unknown) => void) => resolve({ data: [], error: null });
+          return (...args: unknown[]) => {
+            if (prop === "in") ins.push({ table, col: String(args[0]), ids: args[1] as string[] });
+            return make(table);
+          };
+        },
+      }
+    );
+  return { db: { from: (t: string) => make(t) } as never, ins };
+}
+const q = { from: "2027-01-01", to: "2027-01-31", tz: "UTC", includeDone: true, includeCancelled: false };
+
+test("inChunks splits a list into batches", () => {
+  assert.deepEqual(inChunks([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+  assert.deepEqual(inChunks([], 2), []);
+});
+
+test("a counselor's whole calendar without a caseload is refused, never run unscoped", async () => {
+  const { db, ins } = fakeDb();
+  await assert.rejects(buildCalendarFeed({ db, ownerId: "c1", role: "counselor" }, q), /caseload/i);
+  assert.equal(ins.length, 0);
+});
+
+test("a big caseload is read in batches, every student-spanning read named", async () => {
+  const { db, ins } = fakeDb();
+  const caseload = Array.from({ length: FEED_ID_CHUNK * 2 + 5 }, (_, i) => `s${i}`);
+  const out = await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload }, q);
+  assert.deepEqual(out.items, []);
+  for (const table of ["deadlines", "deliverables", "student_colleges", "student_academics"]) {
+    const batches = ins.filter((x) => x.table === table && x.col === "student_id");
+    assert.equal(batches.length, 3, table);
+    assert.deepEqual(batches.flatMap((b) => b.ids), caseload, table);
+    assert.ok(batches.every((b) => b.ids.length <= FEED_ID_CHUNK), table);
+  }
+});
+
+test("an empty caseload reads nothing student-spanning", async () => {
+  const { db, ins } = fakeDb();
+  await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload: [] }, q);
+  assert.equal(ins.filter((x) => ["deadlines", "deliverables", "student_colleges", "student_academics"].includes(x.table)).length, 0);
 });
