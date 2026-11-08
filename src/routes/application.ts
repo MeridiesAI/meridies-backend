@@ -28,6 +28,8 @@ import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
 import { resultsUnavailable } from "../lib/resultsAvailability.js";
 import { getRemoteFile, exportGoogleDocText } from "../lib/suiteApi.js";
+import { essayBodyChanged } from "../lib/inactivity.js";
+import { noticeEssayEdit } from "../lib/essayNotice.js";
 import {
   catalogDeadline,
   ESSAY_SELECT,
@@ -768,6 +770,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from("essays").insert(insert).select(ESSAY_SELECT).single();
       if (error) throw fromPostgrest(error);
       await logEssayProgress(request, studentId, data as Row, "insert");
+      if (essayBodyChanged(null, insert.body as string | null | undefined)) void noticeEssayEdit(request, studentId, String((data as Row).id));
       return reply.code(201).send(essayDto(request, data as Row));
     }
   );
@@ -778,11 +781,12 @@ export default async function applicationRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = essayPatchBody.parse(request.body);
+      // The body is read only to tell the counselor it changed (lib/essayNotice.ts); it is never logged.
       const { data: current, error: readError } = await request.db
         .from("essays")
-        .select("student_id")
+        .select(b.body !== undefined ? "student_id, body" : "student_id")
         .eq("id", id)
-        .maybeSingle();
+        .maybeSingle<Row>();
       if (readError) throw fromPostgrest(readError);
       if (!current) throw notFound();
       const studentId = await resolveStudentId(request, String(current.student_id), "edit");
@@ -807,7 +811,10 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from("essays").update(update).eq("id", id).select(ESSAY_SELECT).maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
-      if (b.body !== undefined) await logEssayProgress(request, studentId, data as Row, "update");
+      if (b.body !== undefined) {
+        await logEssayProgress(request, studentId, data as Row, "update");
+        if (essayBodyChanged(current.body as string | null, b.body)) void noticeEssayEdit(request, studentId, id);
+      }
       return essayDto(request, data as Row);
     }
   );
@@ -868,7 +875,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       if (b.essayId) {
         const { data, error: curError } = await request.db
           .from("essays")
-          .select("id, student_id, essay_kind")
+          .select("id, student_id, essay_kind, body")
           .eq("id", b.essayId)
           .maybeSingle();
         if (curError) throw fromPostgrest(curError);
@@ -896,6 +903,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         if (error) throw fromPostgrest(error);
         if (!data) throw notFound();
         await logEssayProgress(request, studentId, data as Row, "update");
+        if (essayBodyChanged(current?.body as string | null, update.body as string)) void noticeEssayEdit(request, studentId, b.essayId);
         return reply.code(200).send(essayDto(request, data as Row));
       }
 
@@ -921,6 +929,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from("essays").insert(insert).select(ESSAY_SELECT).single();
       if (error) throw fromPostgrest(error);
       await logEssayProgress(request, studentId, data as Row, "insert");
+      if (essayBodyChanged(null, insert.body as string)) void noticeEssayEdit(request, studentId, String((data as Row).id));
       return reply.code(201).send(essayDto(request, data as Row));
     }
   );

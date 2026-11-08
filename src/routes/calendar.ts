@@ -30,7 +30,7 @@ import {
   toPracticeEvent,
 } from "../lib/calendarFeed.js";
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
-import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { fullCaseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 
 type Row = Record<string, unknown>;
@@ -119,7 +119,11 @@ export default async function calendarRoutes(app: FastifyInstance) {
         studentId = await resolveStudentId(request, q.studentId, "view");
       }
 
-      return buildCalendarFeed(request, {
+      // A counselor's whole calendar names every student they may view (never unscoped).
+      const role = request.profile.role;
+      const whole = role === "counselor" && !studentId;
+      const caseload = whole ? await fullCaseloadStudentIds(request.db, request.auth.userId) : undefined;
+      return buildCalendarFeed({ db: request.db, ownerId: request.auth.userId, role, caseload }, {
         from: q.from,
         to: q.to,
         tz: q.tz ?? profileZone(request.profile.timezone) ?? "UTC",
