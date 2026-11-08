@@ -147,6 +147,7 @@ src/
 │   ├── applicationAi.ts   # /application  their AxIS calls (lists, coherence, activities)
 │   ├── studentPage.ts     # /student-page info card, polygon, private note
 │   ├── studentAid.ts      # /student-aid  Financial aid page, scholarship matching
+│   ├── schoolScholarships.ts # /scholarships/internal, /colleges/:id/scholarships   a school's own awards (counselor)
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
 │   ├── messaging.ts       # /messaging    a consultant's own texting number: find, buy
 │   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
@@ -1170,6 +1171,31 @@ and `requirements` (`[{ id, label, done }]`). "Applying to N" is `student_person
 (`collegesPlanned` on the info routes). `GET /overview/student-summaries` adds `gradYear`, `collegesPlanned`,
 `applying`, `results` and `scholarships` per student. `lib/resultsAvailability.ts` turns a missing column into
 `503 college_results_unavailable`; the summaries read the new columns separately so they degrade, never fail.
+
+### School-specific scholarships (`20261111000006`)
+
+A school's own awards (a university's merit scholarships and their deadlines), kept on `public.scholarships` beside
+the national/state catalog: `college_id`, `owner_counselor_id`, `firm_id`, `source` (`catalog` | `counselor`) and
+`eligibility_text`. **Meridies never curates these**: a row exists only because a counselor typed it in (later also
+the cited-proposals pipeline), and it reads `verified: false` until an editor (service role) sets
+`source_verified_at`; the owner's own edit clears that stamp again. Routes (`routes/schoolScholarships.ts`, counselor
+only, `request.db`): `POST /scholarships/internal` (name, `collegeId` required, amount, dates, an https `url`,
+`eligibility`, `notes`, `basis`, `essayRequired`; 201), `PATCH /scholarships/internal/:id` (own rows only;
+`sourceVerifiedAt` is refused), `DELETE /scholarships/internal/:id` (soft: `is_active = false`, because a hard delete
+would cascade into students' `scholarship_matches`; one way), `GET /colleges/:id/scholarships` (`{ collegeId,
+scholarships }`, each with `source`, `ownedBy: "you" | "firm" | "meridies"`, `verified`, `canEdit`). Writes are 60 an
+hour per counselor and 200 active rows each (409 `scholarship_cap`; the database holds the same line, errcode 54000).
+**Who sees a counselor's row** (RLS, `private.can_see_school_scholarship`): its owner; their firm while the owner is
+still a member; a student whose counselor owns it or whose counselor's workspace firm is the row's firm. Never another
+practice or its students. Writes: owner only, `source = 'counselor'` with a school (CHECK); column grants keep source,
+owner, firm and the stamp out of client writes, and `private.scholarships_guard_client` pins the firm. Catalog rows
+stay service-role only. **The scan** (`scanScholarships`, `classifyScholarships`) shows a school row only when that
+school is on the student's `student_colleges` and, for a counselor's row, only when it is the student's practice's
+(`scholarship_practice(p_student)`, answered only to someone who can view the student; unknown means no counselor
+rows), with `matchedOn: "school"`; closed rows are `held` as usual. Scan DTOs gain `collegeId`, `source`, `verified`.
+**Deploy order:** migration first (either order is safe: without it the routes answer 503
+`school_scholarships_unavailable` and the scan shows the catalog only). Not in `REQUIRED_SCHEMA`. Tests:
+`test/unit/scholarship-scan.test.ts`, `test/integration/school-scholarships.test.mjs`.
 
 ### Aid generosity is three ratings, not one
 
