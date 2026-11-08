@@ -94,6 +94,11 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
+  // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
+  // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't
+  // write; nothing curated changes until a catalog editor approves through review_catalog_proposal.
+  "lib/catalogProposalsRun.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
