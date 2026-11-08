@@ -327,4 +327,95 @@ if (!FAKE) console.log("SKIP  Coherence model checks (set FAKE_ANTHROPIC_URL to 
   check("off again: the counselor's Coherence is unchanged", r.status === 200, `${r.status}`);
 }
 
+// ---- S4: Activities Build ----
+{
+  const c = await user("sat-act-c");
+  const s = await studentOf(c, "sat-act-s");
+  const other = await studentOf(c, "sat-act-o");
+  const rid = "00000000-0000-4000-8000-000000000000";
+  const search = (id) => ({ studentId: id, subjects: ["Robotics"], types: [], format: "Either", near: "Ithaca, NY", miles: 100, durations: [], extra: "something hands-on" });
+  const matches = (id) => sql(`select coalesce(json_agg(json_build_object('name', name, 'status', status, 'origin', origin, 'reviewed', reviewed_by is not null) order by name), '[]'::json) from public.opportunity_matches where student_id = '${id}'`).then(JSON.parse);
+
+  // Off: closed to the student, and nothing is written.
+  let r = await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`);
+  check("off: Activities Build is closed to a student (403: the practice hasn't turned on AI tools)", r.status === 403 && /turned on AI tools/.test(JSON.stringify(r.body)), `${r.status} ${JSON.stringify(r.body).slice(0, 100)}`);
+  r = await call(s.token, "POST", "/application/activities-build", search(s.id));
+  check("off: running it is refused before anything is written", r.status === 403 && (await matches(s.id)).length === 0, `${r.status}`);
+  r = await call(s.token, "PATCH", `/application/activities-build/programs/${rid}`, { status: "saved" });
+  check("off: changing a program is refused", r.status === 403, `${r.status}`);
+
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: true });
+
+  r = await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`);
+  check("on: the student's page loads, with nothing run and nothing tracked yet", r.status === 200 && r.body?.latest === null && Array.isArray(r.body?.tracked) && r.body.tracked.length === 0, `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+  r = await call(s.token, "GET", `/application/activities-build?studentId=${other.id}`);
+  check("on: another student's page is refused", r.status === 403, `${r.status}`);
+  r = await call(s.token, "POST", "/application/activities-build", search(other.id));
+  check("on: running it for another student is refused", r.status === 403 && (await matches(other.id)).length === 0, `${r.status}`);
+
+  if (FAKE) {
+    r = await call(s.token, "POST", "/application/activities-build", search(s.id));
+    const run = r.body;
+    check("on: the student runs it (201) and gets programs at once", r.status === 201 && run?.programs?.length === 2, `${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+    check("on: each is theirs, suggested, never waiting on the counselor", run?.programs?.every((p) => p.origin === "student" && p.status === "suggested"), JSON.stringify(run?.programs?.map((p) => [p.origin, p.status])));
+    const rows = await matches(s.id);
+    check("on: stored as the student's own, with no reviewer", rows.length === 2 && rows.every((x) => x.origin === "student" && x.status === "suggested" && x.reviewed === false), JSON.stringify(rows));
+    check("on: the request is the student's, under their counselor", (await sql(`select count(*) from public.opportunity_requests where student_id = '${s.id}' and counselor_id = '${c.id}' and constraints->>'ranBy' = 'student'`)) === "1");
+    const sys = (await lastPrompt("program_recommendations"))?.system ?? "";
+    check("on: the model was told to speak to the student", /You help a high school student/.test(sys) && !/counselor/i.test(sys) && /Write whyFit to the student/.test(sys), sys.slice(0, 100));
+    const prompt = (await lastPrompt("program_recommendations"))?.prompt ?? "";
+    check("on: the student's note is labelled as theirs", /Student's note: something hands-on/.test(prompt) && !/Counselor's note/.test(prompt));
+
+    r = await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`);
+    check("on: reopening shows their last search", r.status === 200 && r.body?.latest?.programs?.length === 2, `${r.status}`);
+    r = await call(c.token, "GET", `/application/activities-build?studentId=${s.id}`);
+    check("the counselor's own page does not show the student's search as theirs", r.status === 200 && r.body?.latest === null, `${r.status} ${JSON.stringify(r.body?.latest)?.slice(0, 80)}`);
+
+    // Track: saved, linked to the student's own to-do, visible to the counselor as tracked.
+    const prog = run?.programs?.[0];
+    r = await call(s.token, "PATCH", `/application/activities-build/programs/${prog?.id}`, { status: "saved" });
+    check("on: Track saves the program (status saved)", r.status === 200 && r.body?.status === "saved", `${r.status} ${JSON.stringify(r.body).slice(0, 100)}`);
+    check("on: …and set no reviewer", (await sql(`select reviewed_by is null from public.opportunity_matches where id = '${prog?.id}'`)) === "t");
+    r = await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`);
+    check("on: it shows under their tracked programs", r.body?.tracked?.length === 1 && r.body.tracked[0].id === prog?.id, JSON.stringify(r.body?.tracked?.length));
+    r = await call(c.token, "GET", `/application/activities-build?studentId=${s.id}`);
+    check("the counselor sees what the student tracked", r.status === 200 && r.body?.tracked?.length === 1 && r.body.tracked[0].id === prog?.id && r.body.tracked[0].origin === "student", `${r.status} ${JSON.stringify(r.body?.tracked)?.slice(0, 120)}`);
+
+    r = await call(s.token, "PATCH", `/application/activities-build/programs/${prog?.id}`, { assignedTaskId: rid });
+    check("on: a task that isn't theirs can't be linked (400)", r.status === 400, `${r.status}`);
+    for (const bad of ["approved", "counselor-review", "sent"]) {
+      r = await call(s.token, "PATCH", `/application/activities-build/programs/${prog?.id}`, { status: bad });
+      check(`on: a student can't set a program to ${bad} (400)`, r.status === 400, `${r.status}`);
+    }
+    r = await call(s.token, "PATCH", `/application/activities-build/programs/${run?.programs?.[1]?.id}`, { status: "dismissed" });
+    check("on: Dismiss removes a suggestion from their list", r.status === 200 && (await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`)).body?.latest?.programs?.length === 1);
+
+    // The database holds the line for a hand-made request.
+    r = await rest(s.token, "PATCH", `/rest/v1/opportunity_matches?id=eq.${prog?.id}`, { name: "Changed by hand", url: "https://evil.example", status: "sent" }, { Prefer: "return=representation" });
+    check("db: a student can't rename a program, change its link or send it", (await sql(`select name <> 'Changed by hand' and coalesce(url,'') <> 'https://evil.example' and status = 'saved' from public.opportunity_matches where id = '${prog?.id}'`)) === "t", `${r.status}`);
+    r = await rest(s.token, "POST", "/rest/v1/opportunity_matches", { student_id: s.id, name: "Forged", origin: "counselor", status: "sent" });
+    check("db: a student can't write a counselor's or a sent program", r.status >= 400 && (await sql(`select count(*) from public.opportunity_matches where name = 'Forged'`)) === "0", `${r.status}`);
+    r = await rest(s.token, "POST", "/rest/v1/opportunity_matches", { student_id: other.id, name: "Forged", origin: "student", status: "suggested" });
+    check("db: a student can't write a program onto another student", r.status >= 400 && (await matches(other.id)).length === 0, `${r.status}`);
+
+    // The counselor runs it too, exactly as before; the student never sees what waits for review.
+    r = await call(c.token, "POST", "/application/activities-build", search(s.id));
+    check("the counselor still runs it: programs wait for their review", r.status === 201 && r.body?.programs?.length === 2 && r.body.programs.every((p) => p.status === "counselor-review" && p.origin === "counselor"), `${r.status} ${JSON.stringify(r.body?.programs?.map((p) => [p.status, p.origin]))}`);
+    const csys = (await lastPrompt("program_recommendations"))?.system ?? "";
+    check("the counselor's prompt is still the counselor's", /You support independent college counselors/.test(csys));
+    r = await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`);
+    check("the student still sees only their own search, and none of what waits for review", r.status === 200 && r.body?.latest?.programs?.every((p) => p.origin === "student"), `${r.status}`);
+    r = await rest(s.token, "GET", `/rest/v1/opportunity_matches?student_id=eq.${s.id}&select=status,origin`);
+    check("db: no counselor-review row is readable to the student", r.status === 200 && !(r.body ?? []).some((x) => x.status === "counselor-review"), JSON.stringify(r.body));
+    r = await call(c.token, "GET", `/application/activities-build?studentId=${s.id}`);
+    check("the counselor's page shows their own search", r.body?.latest?.programs?.length === 2 && r.body.latest.programs.every((p) => p.origin === "counselor"), `${r.status}`);
+  }
+
+  await call(c.token, "PATCH", "/settings/privacy", { studentAiTools: false });
+  r = await call(s.token, "GET", `/application/activities-build?studentId=${s.id}`);
+  check("off again: closed to the student", r.status === 403, `${r.status}`);
+  r = await call(c.token, "GET", `/application/activities-build?studentId=${s.id}`);
+  check("off again: the counselor's page is unchanged", r.status === 200, `${r.status}`);
+}
+
 console.log(process.exitCode ? "student-ai-tools: FAILED" : "student-ai-tools: ok");

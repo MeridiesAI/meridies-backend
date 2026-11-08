@@ -38,6 +38,8 @@ import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js
 import { resolveStudentId } from "../lib/guards.js";
 import { requireStudentAiTools } from "../lib/practiceSettings.js";
 import {
+  activitiesNote,
+  activitiesSystem,
   coherenceAskSystem,
   coherenceNext,
   coherenceSystem,
@@ -654,10 +656,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.get(
     "/activities-build",
-    { preHandler: [app.authenticate, limit("application:activities-build", 120, 60)] },
+    // A counselor, or a student whose practice has the AI tools on (resolveStudentId pins them to themselves).
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:activities-build", 120, 60)] },
     async (request) => {
       const q = studentQuery.parse(request.query);
-      if (isStudent(request)) throw forbidden("Activities Build is your counselor's tool");
       const studentId = await resolveStudentId(request, q.studentId, "view");
       const { data: profile } = await request.db.from("profiles").select("hometown, profile").eq("id", studentId).maybeSingle();
       if (!profile) throw notFound("That student isn't on your roster");
@@ -665,14 +667,14 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const { data: acts } = await request.db.from("activities").select("category").eq("student_id", studentId).limit(30);
       const subjects = [...new Set([...majors, ...((acts ?? []) as Row[]).map((a) => String(a.category ?? "").trim()).filter(Boolean)])];
 
-      const { data: last } = await request.db
+      // The last search: a student's is the last THEY ran; a counselor's is the last that wasn't the student's.
+      let lastQuery = request.db
         .from("opportunity_requests")
         .select("id, constraints, created_at")
         .eq("student_id", studentId)
-        .contains("constraints", { tool: "activities-build" })
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .contains("constraints", isStudent(request) ? { tool: "activities-build", ranBy: "student" } : { tool: "activities-build" });
+      if (!isStudent(request)) lastQuery = lastQuery.not("constraints", "cs", JSON.stringify({ ranBy: "student" }));
+      const { data: last } = await lastQuery.order("created_at", { ascending: false }).limit(1).maybeSingle();
       let programs: Row[] = [];
       if (last) {
         const { data } = await request.db
@@ -683,7 +685,16 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           .order("created_at");
         programs = (data ?? []) as Row[];
       }
+      // What was tracked (saved or applied to), whoever found it: the student's own list, and what their counselor sees.
+      const { data: trackedRows } = await request.db
+        .from("opportunity_matches")
+        .select("*")
+        .eq("student_id", studentId)
+        .in("status", ["saved", "applied"])
+        .order("updated_at", { ascending: false })
+        .limit(50);
       return {
+        tracked: ((trackedRows ?? []) as Row[]).map(toProgram),
         defaults: {
           subjects: majors.length > 0 ? majors : subjects.slice(0, 1),
           subjectOptions: subjects,
@@ -703,7 +714,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.post(
     "/activities-build",
-    { preHandler: [app.authenticate, aiLimit("activities-build")] },
+    { preHandler: [app.authenticate, requireStudentAiTools, aiLimit("activities-build")] },
     async (request, reply) => {
       const b = z
         .object({
@@ -718,8 +729,11 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden("Activities Build is your counselor's tool");
+      const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
+      // The request is filed under the counselor: the student's own counselor when they run it themself.
+      const counselorId = audience === "student" ? ((request.profile as { counselor_id?: string | null }).counselor_id ?? null) : request.auth.userId;
+      if (!counselorId) throw forbidden("This AI feature isn't available until your counselor's practice is set up.");
       const brief = await studentBrief(request, studentId);
       const near = b.near?.trim() || brief.hometown;
       const onlineOnly = b.format === "Online" || !near;
@@ -733,13 +747,14 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         miles: b.miles,
         durations: b.durations,
         extra: b.extra ?? null,
+        ...(audience === "student" ? { ranBy: "student" } : {}),
       };
 
       const { data: requestRow, error: reqError } = await request.db
         .from("opportunity_requests")
         .insert({
           student_id: studentId,
-          counselor_id: request.auth.userId,
+          counselor_id: counselorId,
           interests: b.subjects.slice(0, 12),
           directions: b.extra ?? null,
           constraints: criteria,
@@ -777,22 +792,13 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "concierge",
         studentId,
         model: DEEP_MODEL,
-        system: [
-          BASE_SYSTEM,
-          "Recommend real, named programs, jobs, labs and volunteer roles the student can actually sign up for.",
-          "If you are not confident a program currently exists and is open to high school students, leave it out. A short honest list beats a long invented one.",
-          "Give the host's official https address only when you are sure of it; otherwise leave url out.",
-          "Deadlines: say what the host publishes (\"Early spring\", \"Rolling\"), never a guessed date.",
-          onlineOnly
-            ? "Only online programs."
-            : `In person within about ${b.miles} miles of ${near}, plus online ones when the format allows.`,
-        ].join("\n"),
+        system: activitiesSystem(audience, { onlineOnly, miles: b.miles, near: near ?? null }),
         prompt: [
           `Subjects: ${b.subjects.join(", ") || "any"}`,
           b.types.length ? `Types: ${b.types.join(", ")}` : "",
           b.durations.length ? `Duration: ${b.durations.join(", ")}` : "",
           `Format: ${b.format}`,
-          b.extra ? `Counselor's note: ${b.extra}` : "",
+          b.extra ? activitiesNote(audience, b.extra) : "",
           catalogRows.length ? `Already found in the Meridies catalog (do not repeat): ${catalogRows.map((c) => c.name).join("; ")}` : "",
           "",
           brief.json,
@@ -860,7 +866,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           online: c.format === "virtual",
           topics: Array.isArray(c.subject_tags) ? (c.subject_tags as string[]).slice(0, 6) : [],
           source: "catalog",
-          status: "counselor-review",
+          // A counselor's run waits for their review; a student's is theirs to read at once.
+          status: audience === "student" ? "suggested" : "counselor-review",
+          ...(audience === "student" ? { origin: "student" } : {}),
         })),
         ...(result.programs ?? [])
           .filter((p) => clip(p.name, 200) && (PROGRAM_TYPES as readonly string[]).includes(p.type) && (DURATIONS as readonly string[]).includes(p.duration))
@@ -882,8 +890,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
             online: Boolean(p.online),
             topics: (p.topics ?? []).map((t) => clip(t, 40)).filter(Boolean).slice(0, 6),
             source: "axis",
-            // Nothing reaches the student until the counselor approves it.
-            status: "counselor-review",
+            // A counselor's run: nothing reaches the student until the counselor approves it. A student's own run
+            // is theirs to read at once, marked as theirs and still carrying the "verify it" badge.
+            status: audience === "student" ? "suggested" : "counselor-review",
+            ...(audience === "student" ? { origin: "student" } : {}),
           })),
       ];
 
@@ -912,25 +922,33 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.patch(
     "/activities-build/programs/:id",
-    { preHandler: [app.authenticate, limit("application:program-update", 120, 60)] },
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:program-update", 120, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = z
         .object({
-          status: z.enum(["counselor-review", "approved", "dismissed", "saved"]).optional(),
+          status: z.enum(["counselor-review", "approved", "dismissed", "saved", "suggested", "applied"]).optional(),
           assignedTaskId: uuid.nullable().optional(),
         })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden();
-      const { data: match } = await request.db.from("opportunity_matches").select("student_id").eq("id", id).maybeSingle();
+      const self = isStudent(request);
+      // A counselor reviews (counselor-review, approved, dismissed, saved); a student tracks what they found
+      // (suggested, saved, applied, dismissed) and never approves or sends anything.
+      const allowed: readonly string[] = self ? ["suggested", "saved", "applied", "dismissed"] : ["counselor-review", "approved", "dismissed", "saved"];
+      if (b.status !== undefined && !allowed.includes(b.status)) throw badRequest("That isn't a status you can set");
+      const { data: match } = await request.db.from("opportunity_matches").select("*").eq("id", id).maybeSingle();
       if (!match) throw notFound();
       await resolveStudentId(request, String(match.student_id), "edit");
+      // A student changes only what they found themself; a program their counselor sent is read-only to them.
+      if (self && match.origin !== "student") throw forbidden("That program came from your counselor");
       const update: Row = {};
       if (b.status !== undefined) {
         update.status = b.status;
-        update.reviewed_by = request.auth.userId;
-        update.reviewed_at = new Date().toISOString();
+        if (!self) {
+          update.reviewed_by = request.auth.userId;
+          update.reviewed_at = new Date().toISOString();
+        }
       }
       if (b.assignedTaskId !== undefined) {
         if (b.assignedTaskId) {

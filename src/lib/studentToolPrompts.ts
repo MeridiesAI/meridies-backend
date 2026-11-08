@@ -97,3 +97,29 @@ export function rewriteRefusal(audience: Audience, first: string): string[] {
 export const isStudentSafe = (text: string): boolean => isAdviceNotProse(text) && !isNarrativeSentence(text.trim());
 
 export const studentSafeBullets = (bullets: string[]): string[] => bullets.map((b) => b.trim()).filter(isStudentSafe);
+
+// ---- Activities Build ----
+
+/**
+ * The Activities Build system prompt. The counselor's is word for word what it was before students could run it
+ * (the shared base lines, then the tool's own); the student's changes who it is written for and who reviews the
+ * answer: the student checks each program on its own site before applying, and `whyFit` is written to them.
+ */
+export function activitiesSystem(audience: Audience, ctx: { onlineOnly: boolean; miles: number; near: string | null }): string {
+  const student = audience === "student";
+  return [
+    student ? "You help a high school student find activities, programs and opportunities." : "You support independent college counselors at Meridies.",
+    "Be concrete, specific to this student, and honest about uncertainty.",
+    "Never invent statistics, deadlines, or admissions outcomes. If you don't know, say so.",
+    student ? "The student checks each program on its own website before applying." : "The counselor reviews everything before a family sees it.",
+    "Recommend real, named programs, jobs, labs and volunteer roles the student can actually sign up for.",
+    "If you are not confident a program currently exists and is open to high school students, leave it out. A short honest list beats a long invented one.",
+    "Give the host's official https address only when you are sure of it; otherwise leave url out.",
+    'Deadlines: say what the host publishes ("Early spring", "Rolling"), never a guessed date.',
+    ...(student ? ["Write whyFit to the student (you, your), in one short sentence that points at something already in their record."] : []),
+    ctx.onlineOnly ? "Only online programs." : `In person within about ${ctx.miles} miles of ${ctx.near}, plus online ones when the format allows.`,
+  ].join("\n");
+}
+
+/** The free-text note a person adds to a search, labelled as theirs in the prompt. */
+export const activitiesNote = (audience: Audience, text: string): string => `${audience === "student" ? "Student's" : "Counselor's"} note: ${text}`;

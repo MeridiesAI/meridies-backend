@@ -350,5 +350,7 @@ export function toProgram(r: Row) {
     source: (str(r.source) || "axis") as "catalog" | "axis",
     status: str(r.status),
     assignedTaskId: nstr(r.assigned_task_id),
+    /** Who found it: the student's own search, or the counselor's. No answer (an older database) is the counselor's. */
+    origin: (r.origin === "student" ? "student" : "counselor") as "student" | "counselor",
   };
 }

@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { NO_PROSE_SYSTEM } from "../../src/lib/anthropic.js";
 import { UNTRUSTED_DATA_RULE } from "../../src/lib/context/pack.js";
 import {
+  activitiesNote,
+  activitiesSystem,
   coherenceAskSystem,
   coherenceNext,
   coherenceSystem,
@@ -107,4 +109,48 @@ test("a student's bullets drop anything in the student's own voice, and anything
   assert.equal(isStudentSafe(""), false);
   assert.equal(isStudentSafe("One. Two. Three sentences is too many."), false, "the existing shape test still applies");
   assert.deepEqual(studentSafeBullets(["Settle the dates.", "I love robots and always have.", "  Check each supplement.  "]), ["Settle the dates.", "Check each supplement."]);
+});
+
+// ---- Activities Build ----
+
+// What the counselor's prompt said before students could run it, word for word (BASE_SYSTEM + the tool's own lines).
+const COUNSELOR_ACTIVITIES = (where: string) =>
+  [
+    "You support independent college counselors at Meridies.",
+    "Be concrete, specific to this student, and honest about uncertainty.",
+    "Never invent statistics, deadlines, or admissions outcomes. If you don't know, say so.",
+    "The counselor reviews everything before a family sees it.",
+    "Recommend real, named programs, jobs, labs and volunteer roles the student can actually sign up for.",
+    "If you are not confident a program currently exists and is open to high school students, leave it out. A short honest list beats a long invented one.",
+    "Give the host's official https address only when you are sure of it; otherwise leave url out.",
+    'Deadlines: say what the host publishes ("Early spring", "Rolling"), never a guessed date.',
+    where,
+  ].join("\n");
+
+test("the counselor's Activities Build prompt is exactly what it was", () => {
+  assert.equal(activitiesSystem("counselor", { onlineOnly: true, miles: 50, near: null }), COUNSELOR_ACTIVITIES("Only online programs."));
+  assert.equal(
+    activitiesSystem("counselor", { onlineOnly: false, miles: 120, near: "Ithaca, NY" }),
+    COUNSELOR_ACTIVITIES("In person within about 120 miles of Ithaca, NY, plus online ones when the format allows.")
+  );
+});
+
+test("the student's Activities Build prompt speaks to the student, names no counselor, and keeps the honesty rules", () => {
+  for (const ctx of [{ onlineOnly: true, miles: 50, near: null }, { onlineOnly: false, miles: 120, near: "Ithaca, NY" }]) {
+    const p = activitiesSystem("student", ctx);
+    assert.doesNotMatch(p, /counselor/i);
+    assert.match(p, /You help a high school student find activities/);
+    assert.match(p, /Never invent statistics, deadlines, or admissions outcomes/);
+    assert.match(p, /If you are not confident a program currently exists and is open to high school students, leave it out/);
+    assert.match(p, /Give the host's official https address only when you are sure of it/);
+    assert.match(p, /Write whyFit to the student \(you, your\)/);
+    assert.match(p, /checks each program on its own website before applying/);
+  }
+  assert.match(activitiesSystem("student", { onlineOnly: true, miles: 50, near: null }), /Only online programs\./);
+  assert.match(activitiesSystem("student", { onlineOnly: false, miles: 120, near: "Ithaca, NY" }), /In person within about 120 miles of Ithaca, NY/);
+});
+
+test("the note a person adds is labelled as theirs", () => {
+  assert.equal(activitiesNote("counselor", "robotics"), "Counselor's note: robotics");
+  assert.equal(activitiesNote("student", "robotics"), "Student's note: robotics");
 });
