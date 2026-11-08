@@ -93,6 +93,7 @@ try {
   check("a second file with the same headers is guessed the same way", secondPlan.body.plan?.sheets[0].columns.filter((x) => x.source === "preset-unverified").length === unverified.length);
   const saved = await call(c.token, "PUT", `/imports/${second}/plan`, { plan: secondPlan.body.plan, saveTemplate: { name: "imp14a layout" } });
   check("the counselor can remember it", saved.status === 200 && saved.body.templateSaved === true, JSON.stringify(saved.body).slice(0, 200));
+  check("the stored layout holds no unverified mark: every build can read it", (await sql(`select (parse_plan::text not like '%preset-unverified%' and parse_plan::text like '%"preset"%')::text from public.import_templates where counselor_id = '${c.id}' and name = 'imp14a layout'`)) === "true");
   const third = await register(c, csv, "synthetic cpp 3.csv");
   const thirdPlan = await call(c.token, "POST", `/imports/${third}/plan`);
   check("the remembered layout is applied as a template", thirdPlan.body.source === "template" && thirdPlan.body.plan.sheets[0].columns.every((x) => x.source === "template"), JSON.stringify(thirdPlan.body).slice(0, 300));

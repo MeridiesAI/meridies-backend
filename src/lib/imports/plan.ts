@@ -217,12 +217,19 @@ export function planFromTemplate(t: TemplatePlan, file: ProfiledFile): PlanSheet
   }));
 }
 
-/** The plan's sheets for one file, as a template. */
+/**
+ * The plan's sheets for one file, as a template. A guess ("preset-unverified")
+ * is stored as a plain "preset": a template is read back as "template" anyway,
+ * and a build that doesn't know the newer source would refuse the whole row
+ * and ignore the saved layout.
+ */
 export function templateFrom(plan: ParsePlan, file: ProfiledFile): TemplatePlan {
   return {
     version: 1,
     sheets: file.profile.sheets.map((s) => ({
-      columns: plan.sheets.find((p) => p.fileId === file.fileId && p.sheet === s.name)?.columns ?? [],
+      columns: (plan.sheets.find((p) => p.fileId === file.fileId && p.sheet === s.name)?.columns ?? []).map((c) =>
+        c.source === "preset-unverified" ? { ...c, source: "preset" as const } : c
+      ),
     })),
     constants: plan.constants,
     sourceSystem: plan.sourceSystem,

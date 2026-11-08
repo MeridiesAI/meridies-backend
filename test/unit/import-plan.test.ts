@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parsePlanSchema, validatePlan, planFromTemplate, templateFrom, type ParsePlan, type ProfiledFile, type Target } from "../../src/lib/imports/plan.js";
+import { parsePlanSchema, templatePlanSchema, validatePlan, planFromTemplate, templateFrom, type ParsePlan, type ProfiledFile, type Target } from "../../src/lib/imports/plan.js";
 import { detectSourceSystem, presetPlan, presetSheetsFor, presetTarget, unmappedColumns, vendorTarget, VENDOR_PRESETS, type VendorPresets } from "../../src/lib/imports/presets.js";
 import { profileFile } from "../../src/lib/imports/profile.js";
 import type { ParsedSheet } from "../../src/lib/imports/sheet.js";
@@ -331,7 +331,11 @@ test("a preset-unverified mapping is a valid plan, kept by validatePlan and a sa
   const check = validatePlan(plan, [cpp], FIELDS);
   assert.deepEqual(check.problems, []);
   assert.ok(check.plan.sheets[0].columns.every((c) => c.source === "preset-unverified"));
-  const again = planFromTemplate(templateFrom(plan, cpp), cpp);
+  const saved = templateFrom(plan, cpp);
+  assert.ok(saved.sheets[0].columns.every((c) => c.source === "preset"), "a stored layout holds a source every build knows: an older build refuses the whole row on an unknown one");
+  assert.ok(plan.sheets[0].columns.every((c) => c.source === "preset-unverified"), "templateFrom leaves the plan it was given alone");
+  assert.ok(templatePlanSchema.safeParse(saved).success);
+  const again = planFromTemplate(saved, cpp);
   assert.ok(again?.[0].columns.every((c) => c.source === "template"), "a layout the counselor remembered reads as their template, not as a guess");
   assert.equal(parsePlanSchema.safeParse({ ...plan, sheets: [{ ...plan.sheets[0], columns: [{ ...plan.sheets[0].columns[0], source: "vendor" }] }] }).success, false, "an unknown source is still refused");
 });
