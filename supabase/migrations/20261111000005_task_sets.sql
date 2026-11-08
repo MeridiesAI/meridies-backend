@@ -5,14 +5,17 @@
 --                        "shared": every counselor in that firm may READ it (and so apply it to their own
 --                        students); only the owner writes. A shared set must name the owner's own
 --                        current firm.
---   deliverables         task_set_id / task_set_item mark a task made from a set's item. A UNIQUE partial
---                        index on (student_id, task_set_id, task_set_item) makes applying a set twice
---                        harmless: the second insert is a 23505 the API reports as "already assigned".
---                        Only a counselor task may carry the marker (a student's own to-do can't squat
---                        on an item). Deleting a set clears the marker (on delete set null).
+--                        Every item in `items` carries a stable `key` (the API assigns it and keeps it
+--                        across edits), so a task is tied to the ITEM, not its place in the list:
+--                        reordering, inserting or removing items never makes a re-apply skip or repeat one.
+--   deliverables         task_set_id / task_set_item_key mark a task made from a set's item. A UNIQUE
+--                        partial index on (student_id, task_set_id, task_set_item_key) makes applying a set
+--                        twice harmless: the second insert is a 23505 on that index, which the API reports
+--                        as "already assigned". Only a counselor task may carry the marker (a student's own
+--                        to-do can't squat on an item). Deleting a set clears the marker (on delete set null).
 --   firm_roster()        SECURITY DEFINER, for a firm OWNER or ADMIN only (a member, a solo counselor, a
 --                        student, an unapproved counselor are refused with 42501): every active student of
---                        the firm's consultants as id, name, class year and counselor. Names only. It does
+--                        the firm's APPROVED consultants as id, name, class year and counselor. Names only. It does
 --                        NOT widen private.can_view_student: a student's record stays readable only by
 --                        their counselor and collaborators.
 --
@@ -62,6 +65,8 @@ create policy task_sets_firm_read on public.task_sets
     firm_id is not null
     and private.is_counselor((select auth.uid()))
     and private.crm_firm_member(firm_id, (select auth.uid()))
+    -- Only while the owner is still in that firm: leaving it takes their sets with them.
+    and private.crm_firm_member(firm_id, counselor_id)
   );
 
 revoke all on public.task_sets from public, anon, authenticated;
@@ -74,20 +79,22 @@ select private.attach_approval_gate('public.task_sets');
 
 alter table public.deliverables
   add column if not exists task_set_id uuid null references public.task_sets (id) on delete set null,
-  add column if not exists task_set_item integer null;
+  add column if not exists task_set_item_key text null;
 
 do $$
 begin
   if not exists (select 1 from pg_constraint where conname = 'deliverables_task_set_marker') then
     alter table public.deliverables add constraint deliverables_task_set_marker check (
-      (task_set_id is null)
-      or (source = 'counselor' and task_set_item is not null and task_set_item between 0 and 29)
+      -- A marked task names its item; deleting the set clears task_set_id and leaves the (now inert) key.
+      (task_set_id is null or task_set_item_key is not null)
+      and (task_set_item_key is null
+           or (source = 'counselor' and task_set_item_key ~ '^[A-Za-z0-9_-]{1,64}$'))
     );
   end if;
 end $$;
 
-create unique index if not exists deliverables_task_set_item_uidx
-  on public.deliverables (student_id, task_set_id, task_set_item)
+create unique index if not exists deliverables_task_set_item_key_uidx
+  on public.deliverables (student_id, task_set_id, task_set_item_key)
   where task_set_id is not null;
 
 -- ---- firm_roster() --------------------------------------------------------------------------------
@@ -125,8 +132,9 @@ begin
   select s.id, s.full_name, s.grad_year::text, s.counselor_id
   from public.profiles s
   join consultants c on c.cid = s.counselor_id
-  join public.profiles cp on cp.id = s.counselor_id and cp.role = 'counselor'
   where s.role = 'student' and s.archived_at is null
+    -- An approved counselor only (private.is_counselor is the approval predicate).
+    and private.is_counselor(s.counselor_id)
   order by s.full_name, s.id;
 end;
 $$;
