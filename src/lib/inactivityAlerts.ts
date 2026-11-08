@@ -23,6 +23,7 @@ import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import {
   firstNameOf,
   inactivityTitle,
+  FUTURE_SKEW_MS,
   LAST_ACTIVE_WRITE_EVERY_MS,
   selectInactive,
   shouldTouchLastActive,
@@ -129,7 +130,17 @@ async function alertCounselor(svc: SupabaseClient, log: Log, counselorId: string
       action_items: [],
       created_by: null,
     });
-    if (nErr) log.error({ code: nErr.code, studentId: d.studentId }, "inactivity alerts: notification insert failed");
+    if (nErr) {
+      // Unannounce the streak, so the next sweep tries again rather than never telling anyone.
+      log.error({ code: nErr.code, studentId: d.studentId }, "inactivity alerts: notification insert failed");
+      const { error: dErr } = await svc
+        .from("student_inactivity_alerts")
+        .delete()
+        .eq("student_id", d.studentId)
+        .eq("last_activity_at", d.lastActivityAt);
+      if (dErr) log.error({ code: dErr.code, studentId: d.studentId }, "inactivity alerts: alert row cleanup failed");
+      continue;
+    }
     alerted += 1;
 
     if (!to) continue;
@@ -170,12 +181,13 @@ export function touchLastActive(profile: { id: string; role?: string | null; las
   const svc = serviceClient();
   if (!svc) return;
   const cutoff = new Date(now.getTime() - LAST_ACTIVE_WRITE_EVERY_MS).toISOString();
+  const future = new Date(now.getTime() + FUTURE_SKEW_MS).toISOString();
   void Promise.resolve(
     svc
       .from("profiles")
       .update({ last_active_at: now.toISOString() })
       .eq("id", profile.id)
-      .or(`last_active_at.is.null,last_active_at.lt.${cutoff}`)
+      .or(`last_active_at.is.null,last_active_at.lt.${cutoff},last_active_at.gt.${future}`)
   )
     .then(({ error }) => {
       if (error) log.warn({ code: error.code }, "last_active_at write failed");

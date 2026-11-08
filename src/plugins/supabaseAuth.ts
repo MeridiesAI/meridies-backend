@@ -99,7 +99,8 @@ export default fp(async (app) => {
     }
 
     // The inactivity alert's signal (lib/inactivityAlerts.ts): a student's request marks them active, at
-    // most once an hour, on the service client, after the response's work is under way. Never awaited.
+    // most once an hour, on the service client. Started here and never awaited, so the request doesn't wait
+    // on it and a failed write never fails the request.
     touchLastActive(request.profile, request.log);
   });
 });

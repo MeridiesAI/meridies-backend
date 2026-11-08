@@ -154,6 +154,7 @@ export async function runScheduledSweep(
   let failedCounselors = 0;
   let unapproved = 0;
   let inactivityAlerts = 0;
+  let escalationError: unknown;
 
   try {
     const byCounselor = await dueStudentsByCounselor(svc, new Date().toISOString());
@@ -180,7 +181,12 @@ export async function runScheduledSweep(
         log.error({ err, counselorId }, "accountability sweep: counselor sweep failed");
       }
     }
+  } catch (err) {
+    // The escalation failing must not skip the inactivity pass below; the run still reports it.
+    escalationError = err;
+  }
 
+  try {
     // The inactivity alert has its own roster read (the escalation above starts from open red flags),
     // under the same lease. It never fails the sweep.
     try {
@@ -194,6 +200,9 @@ export async function runScheduledSweep(
     const { error } = await svc.rpc("release_job_lease", { p_name: LEASE_NAME, p_holder: holder });
     if (error) log.warn({ code: error.code }, "accountability sweep: lease release failed");
   }
+
+  // As before this pass existed: an escalation failure ends the run as an error, after the lease is freed.
+  if (escalationError !== undefined) throw escalationError;
 
   const summary = {
     counselors,
