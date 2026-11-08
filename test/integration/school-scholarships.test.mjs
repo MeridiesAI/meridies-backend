@@ -209,3 +209,37 @@ check("writes are throttled (60 an hour)", limited === 60, `first 429 at ${limit
 const P = await user("sch-pending", "counselor", { approved: false });
 const pending = await call(P.token, "POST", "/scholarships/internal", body());
 check("a pending counselor can't add one", pending.status === 403, `${pending.status}`);
+
+// ---- Fix round 1: a deleted counselor never takes a student's tracked award with them ---------------------------
+{
+  const E = await user("sch-del");
+  const SE = await studentOf(E, "sch-del-student");
+  await sql(`insert into student_colleges (student_id, college_id, name) values ('${SE.id}', '${stanford}', 'Stanford University')`);
+  const r = await call(E.token, "POST", "/scholarships/internal", body({ name: `Won award ${tag}` }));
+  check("a counselor adds the award their student will win", r.status === 201, `${r.status}`);
+  const matchId = await sql(`insert into scholarship_matches (student_id, scholarship_id, name, url, amount_cents, deadline, status, awarded_cents)
+    values ('${SE.id}', '${r.body.id}', 'Won award ${tag}', 'https://knight-hennessy.stanford.edu/', 500000, '${deadline}', 'awarded', 450000) returning id`).then((o) => o.split("\n")[0]);
+  await sql(`delete from auth.users where id = '${E.id}'`);
+  const gone = await sql(`select count(*) from scholarships where id = '${r.body.id}'`);
+  check("deleting the counselor's account deletes what they typed", gone === "0", gone);
+  const kept = await sql(`select coalesce(scholarship_id::text, 'null') || '|' || status || '|' || awarded_cents || '|' || name from scholarship_matches where id = '${matchId}'`);
+  check("…but the student's won award stays, unlinked, with its own copy", kept === `null|awarded|450000|Won award ${tag}`, kept);
+}
+
+// ---- Fix round 1: counselor rows can't crowd the catalog out of the scan's read ----------------------------------
+{
+  const F = await user("sch-crowd");
+  const SF = await studentOf(F, "sch-crowd-student");
+  await sql(`insert into student_colleges (student_id, college_id, name) values ('${SF.id}', '${stanford}', 'Stanford University')`);
+  const later = new Date(Date.now() + 200 * 86400000).toISOString().slice(0, 10);
+  const soon = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+  // As postgres (the trigger's cap is for clients): 1,100 visible counselor rows, inserted before the catalog row.
+  await sql(`insert into scholarships (name, college_id, owner_counselor_id, source, deadline)
+             select 'Crowd ' || g, '${stanford}', '${F.id}', 'counselor', '${later}' from generate_series(1, 1100) g`);
+  const catalogName = `Catalog survivor ${tag}`;
+  const catalogId = await sql(`insert into scholarships (name, deadline, tags) values ('${catalogName}', '${soon}', '{national}') returning id`).then((o) => o.split("\n")[0]);
+  const crowded = await call(SF.token, "GET", `/student-aid/${SF.id}/scholarships/scan`);
+  check("with 1,100 counselor rows visible, the catalog still matches", crowded.status === 200 && crowded.body?.matches?.some((m) => m.id === catalogId), `${crowded.status} ${JSON.stringify(crowded.body?.matches?.map((m) => m.name))}`);
+  check("…and the school rows match too", crowded.body?.matches?.some((m) => m.matchedOn === "school"), "");
+  await sql(`delete from scholarships where owner_counselor_id = '${F.id}' or id = '${catalogId}'`);
+}

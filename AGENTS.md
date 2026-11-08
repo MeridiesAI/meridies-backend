@@ -1181,8 +1181,8 @@ the cited-proposals pipeline), and it reads `verified: false` until an editor (s
 `source_verified_at`; the owner's own edit clears that stamp again. Routes (`routes/schoolScholarships.ts`, counselor
 only, `request.db`): `POST /scholarships/internal` (name, `collegeId` required, amount, dates, an https `url`,
 `eligibility`, `notes`, `basis`, `essayRequired`; 201), `PATCH /scholarships/internal/:id` (own rows only;
-`sourceVerifiedAt` is refused), `DELETE /scholarships/internal/:id` (soft: `is_active = false`, because a hard delete
-would cascade into students' `scholarship_matches`; one way), `GET /colleges/:id/scholarships` (`{ collegeId,
+`sourceVerifiedAt` is refused), `DELETE /scholarships/internal/:id` (soft: `is_active = false`, so a row a student
+is tracking keeps its link; one way), `GET /colleges/:id/scholarships` (`{ collegeId,
 scholarships }`, each with `source`, `ownedBy: "you" | "firm" | "meridies"`, `verified`, `canEdit`). Writes are 60 an
 hour per counselor and 200 active rows each (409 `scholarship_cap`; the database holds the same line, errcode 54000).
 **Who sees a counselor's row** (RLS, `private.can_see_school_scholarship`): its owner; their firm while the owner is
@@ -1193,6 +1193,12 @@ stay service-role only. **The scan** (`scanScholarships`, `classifyScholarships`
 school is on the student's `student_colleges` and, for a counselor's row, only when it is the student's practice's
 (`scholarship_practice(p_student)`, answered only to someone who can view the student; unknown means no counselor
 rows), with `matchedOn: "school"`; closed rows are `held` as usual. Scan DTOs gain `collegeId`, `source`, `verified`.
+The scan reads the catalog (`owner_counselor_id is null`) and the school rows for the student's listed colleges as
+two queries, so counselor rows never crowd the catalog out of the read. Deleting a counselor's account deletes their
+rows, but a student's tracked match survives: `scholarship_matches.scholarship_id` is `on delete set null` (the match
+keeps its own name, link, amount and deadline). `PUT /student-aid/:id/scholarships/:scholarshipId/recommend` lets a
+counselor recommend their own (or their firm's) school row even when the student hasn't listed that school; it reaches
+no other practice.
 **Deploy order:** migration first (either order is safe: without it the routes answer 503
 `school_scholarships_unavailable` and the scan shows the catalog only). Not in `REQUIRED_SCHEMA`. Tests:
 `test/unit/scholarship-scan.test.ts`, `test/integration/school-scholarships.test.mjs`.

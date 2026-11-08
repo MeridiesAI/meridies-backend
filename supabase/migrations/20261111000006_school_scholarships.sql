@@ -11,6 +11,7 @@
 --                       cascade, the awards their students are tracking. Whoever deletes a college decides first.
 --   owner_counselor_id  the counselor who typed it. ON DELETE CASCADE: deleting the account deletes what it wrote
 --                       (the profile's own data; SET NULL would break the CHECK below and leave an ownerless row).
+--                       Students' tracked matches survive: scholarship_matches.scholarship_id is SET NULL below.
 --                       profiles is not captured by the AxIS trash, so axis-trash-db's whole-branch check is unchanged.
 --   firm_id             the owner's firm when the row was written, pinned by a trigger (never the client's). ON DELETE
 --                       SET NULL: a deleted firm leaves the row its owner's alone. firms is not captured either.
@@ -29,7 +30,7 @@
 -- rows, not their own.
 --
 -- Writes: only an approved counselor, only rows they own with source 'counselor' and a school; never DELETE (soft
--- delete is is_active = false, because a hard delete would cascade into students' scholarship_matches). Column grants
+-- delete is is_active = false, so a row a student is tracking keeps its link). Column grants
 -- keep source, owner, firm and source_verified_at out of every client UPDATE; the guard trigger pins firm_id and the
 -- verification stamp and caps a counselor at 200 active rows (errcode 54000), so PostgREST can't get round the API.
 --
@@ -73,6 +74,14 @@ alter table public.scholarships add constraint scholarships_counselor_bounds_che
     and coalesce(cardinality(tags), 0) <= 10
     and eligibility = '{}'::jsonb
   ));
+
+-- A student's tracked award outlives the row it came from. scholarship_matches keeps its own copy of name, url,
+-- amount and deadline (a hand-added row already has no scholarship_id), so when a counselor's account (and with it
+-- their rows) is deleted, the student's match, a won award included, stays and only loses the link. It was ON DELETE
+-- CASCADE (20260828000007). Neither table is captured by the AxIS trash.
+alter table public.scholarship_matches drop constraint if exists scholarship_matches_scholarship_id_fkey;
+alter table public.scholarship_matches add constraint scholarship_matches_scholarship_id_fkey
+  foreign key (scholarship_id) references public.scholarships(id) on delete set null;
 
 create index if not exists scholarships_college_idx on public.scholarships (college_id) where is_active and college_id is not null;
 create index if not exists scholarships_owner_idx on public.scholarships (owner_counselor_id) where owner_counselor_id is not null;
@@ -180,6 +189,8 @@ begin
     new.source_verified_at := null;
     new.is_active := true;
     new.eligibility := '{}'::jsonb;
+    -- One counselor's inserts queue here, so two at once can't both read 199 and both pass the cap.
+    perform pg_advisory_xact_lock(hashtext('school_scholarship_cap:' || v_uid::text));
     select count(*) into v_active from public.scholarships
       where owner_counselor_id = v_uid and is_active;
     if v_active >= 200 then

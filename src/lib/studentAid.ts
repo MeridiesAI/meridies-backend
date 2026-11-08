@@ -710,6 +710,59 @@ export function classifyScholarships(
   return { matches: out, held };
 }
 
+/**
+ * The national/state catalog: rows with no owner. Read apart from the school rows so a practice's rows can never
+ * crowd the catalog out of the read. Before 20261111000006 there is no owner column, and every row is the catalog.
+ */
+async function readCatalog(db: SupabaseClient): Promise<Row[]> {
+  const scoped = await db
+    .from("scholarships")
+    .select("*")
+    .eq("is_active", true)
+    .is("owner_counselor_id", null)
+    .limit(1000);
+  if (!scoped.error) return (scoped.data ?? []) as Row[];
+  if (!NOT_APPLIED.has(String(scoped.error.code))) throw fromPostgrest(scoped.error);
+  const legacy = await db.from("scholarships").select("*").eq("is_active", true).limit(1000);
+  if (legacy.error) throw fromPostgrest(legacy.error);
+  return (legacy.data ?? []) as Row[];
+}
+
+/** Ids per `in (...)` filter, so a long list stays well inside a URL. */
+const SCHOOL_CHUNK = 100;
+
+/**
+ * A practice's rows for the colleges on the student's list. Nothing to read without a known practice or a listed
+ * college; RLS still applies, and classifyScholarships checks the practice again.
+ */
+async function readSchoolRows(db: SupabaseClient, scope: SchoolScope): Promise<Row[]> {
+  const p = scope.practice;
+  const ids = [...scope.rostered.keys()];
+  if (!p || (!p.counselorId && !p.firmId) || ids.length === 0) return [];
+  const owners = [
+    p.counselorId ? `owner_counselor_id.eq.${p.counselorId}` : null,
+    p.firmId ? `firm_id.eq.${p.firmId}` : null,
+  ].filter(Boolean).join(",");
+  const out: Row[] = [];
+  for (let i = 0; i < ids.length; i += SCHOOL_CHUNK) {
+    const { data, error } = await db
+      .from("scholarships")
+      .select("*")
+      .eq("is_active", true)
+      .not("owner_counselor_id", "is", null)
+      .in("college_id", ids.slice(i, i + SCHOOL_CHUNK))
+      .or(owners)
+      .order("deadline", { ascending: true, nullsFirst: false })
+      .limit(1000);
+    if (error) {
+      if (NOT_APPLIED.has(String(error.code))) return [];
+      throw fromPostgrest(error);
+    }
+    out.push(...((data ?? []) as Row[]));
+  }
+  return out;
+}
+
 export async function scanScholarships(
   db: SupabaseClient,
   studentId: string,
@@ -725,7 +778,7 @@ export async function scanScholarships(
   const today = todayIso();
 
   const [catalog, matches, attrs, school] = await Promise.all([
-    db.from("scholarships").select("*").eq("is_active", true).limit(1000),
+    readCatalog(db),
     db
       .from("scholarship_matches")
       .select("id, scholarship_id, status")
@@ -734,8 +787,8 @@ export async function scanScholarships(
     studentAttrs(db, studentId, prefs),
     schoolScope(db, studentId),
   ]);
-  if (catalog.error) throw fromPostgrest(catalog.error);
   if (matches.error) throw fromPostgrest(matches.error);
+  const schoolRows = await readSchoolRows(db, school);
 
   const recommended = new Map<string, string>();
   for (const m of (matches.data ?? []) as Row[]) {
@@ -744,7 +797,7 @@ export async function scanScholarships(
     }
   }
 
-  const { matches: out, held } = classifyScholarships((catalog.data ?? []) as Row[], attrs, {
+  const { matches: out, held } = classifyScholarships([...catalog, ...schoolRows], attrs, {
     today,
     prefs,
     wholeCatalog: opts.wholeCatalog,

@@ -230,7 +230,7 @@ export default async function schoolScholarshipRoutes(app: FastifyInstance) {
   app.delete("/scholarships/internal/:id", { preHandler: counselor }, async (request) => {
     const { id } = idParam.parse(request.params);
     await throttle(request);
-    // No RETURNING: the removed row no longer passes the select policy (is_active), and a returning update would fail.
+    // A count, not RETURNING: the reply needs no row, and only the owner may read a removed one anyway.
     const { count, error } = await request.db
       .from("scholarships")
       .update({ is_active: false }, { count: "exact" })
