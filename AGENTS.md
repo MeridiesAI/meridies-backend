@@ -111,6 +111,8 @@ src/
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
+│   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
+│   ├── accountClosure.ts  # Leave Meridies: 30-day grace dates, the closure DTO and emails, the purge (off by default)
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
 │   ├── profileUpdates.ts  # Profile Update: draft validation, completeness, filing into the sheets
@@ -1767,6 +1769,14 @@ curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
   "https://<api-host>/internal/pipeline-sequences/dispatch"
 ```
 
+**Not created yet: the account-closure purge.** `POST /internal/account-closures/purge`, same bearer token, once a
+day. It deletes nothing unless `ACCOUNT_PURGE_ENABLED=true` (see "Leave Meridies"); creating the Railway cron and
+switching the flag on are the owner's steps, with their explicit OK:
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
+  "https://<api-host>/internal/account-closures/purge"
+```
+
 ## AI inside the search
 
 The model never writes a result list and never changes the catalog.
@@ -3370,6 +3380,48 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   user; a counselor with an active roster or an owned firm is refused, and a
   firm member with any student, archived included, is told to ask an owner or
   admin to transfer them.
+  The checks are `deletionBlocker` (`lib/accountDeletion.ts`), each a 409 with a code: `caseload_not_empty`,
+  `owns_firm`, `stripe_connected` (a solo practice with a connected Stripe account: disconnect it first; a firm's
+  account is the firm's) and `signed_agreements_kept` (probed: only on a database with the agreements tables). A
+  read that fails is a 503, never a guess. `deleteAccount` is the one deletion path (AxIS trash first, 503 if that
+  fails, the `account.deleted` audit row with `via`, the AI counters, then the auth user).
+- **Leave Meridies: closing with a 30-day grace period** (`20261111000004`, `lib/accountClosure.ts`, routes in
+  `routes/account.ts`). Counselors only, open to a pending account (`allowPending`). **Nothing is deleted when they
+  ask.** `GET /account/closure` answers `{ status: "none" | "pending", requestedAt, purgeAfter, daysLeft,
+  purgeEnabled, blockedReason }` (`purgeEnabled` is the env flag, so the app can say automatic deletion isn't
+  switched on; `blockedReason` is set when the purge held the account back). `POST /account/closure` with
+  `{ "confirm": "CLOSE" }` (exact; strict body; 10 an hour) runs `deletionBlocker` (same 409s as `DELETE /account`),
+  then writes the row with `purge_after` = now + 30 days (201), revokes and forgets the Google/Microsoft tokens
+  through `revokeAndForget` and removes the `integrations` rows (best effort; nothing logged but the provider),
+  emails the counselor at their sign-in address (the date in their time zone, cancel from Settings, export first;
+  no student names; template `account-closure-requested`) and writes `account.closure.requested` to `audit_log`. A
+  second request while one is open answers it again (200, no email); after a cancel it starts over with new dates
+  (201); a closure the purge held back (`failed`) is reopened on its old date once the blocker is gone (200).
+  `DELETE /account/closure` cancels (200 `{ status: "none" }`, email `account-closure-cancelled`), 404 `no_closure`
+  when none is open, 409 `closure_in_progress` while it is being deleted. **During the grace period the account
+  keeps working**, read and write; only its Google/Microsoft connections are gone (they can be connected again).
+  `account_closures` has RLS (a counselor selects their own row) and the approval gate; there is no client write
+  grant, so the API reads and writes it with the service role keyed by the caller's verified id.
+  **The purge** is `POST /internal/account-closures/purge` (CRON_SECRET, constant-time; lease
+  `account-closure-purge`, 15 minutes; heartbeat `account-closure-purge`). **It is OFF**: unless
+  `ACCOUNT_PURGE_ENABLED` is exactly `true` it answers `{ ran: false, reason: "purge_disabled" }` and touches nothing
+  (no heartbeat either). When on, for at most 5 rows a run, oldest due first (pending with `purge_after` <= now, or
+  `purging` untouched for an hour after a crash): a conditional claim to `purging` (a cancel in between wins),
+  `deletionBlocker` again (a block marks the row `failed` with the reason in `last_error`, writes
+  `account.closure.blocked`, emails nobody, and the account stays), `account.closure.purging` in `audit_log`, then
+  `deleteAccount` (the `DELETE /account` path, `via: "closure"`), then `account.closure.purged`. The closure row
+  cascades with the profile, which is why the outcome is in `audit_log`; a deletion that fails marks the row
+  `failed` and is not retried until the counselor confirms again. Students of the account stay
+  (`profiles.counselor_id` is set null). **Deploy order:** the migration first is best, either is safe; not in
+  `REQUIRED_SCHEMA`. Without the table the routes answer 503 `account_closure_unavailable` and the purge (when on)
+  answers `{ ran: false, reason: "migration-not-applied" }`. **The heartbeat row is not seeded** (it would read
+  overdue on `/internal/status` with no cron): when the cron is created, add it with `insert into
+  public.job_heartbeats (job, expected_every) values ('account-closure-purge', '1 day') on conflict do nothing;`.
+  **Not verified:** Stripe Connect (no Stripe locally: the 409 is unit tested on a stand-in client), a real Google
+  token revoke (no tokens or `INTEGRATION_TOKEN_KEY` locally), real email delivery (Mailpit only), and the purge
+  on production data. Tests: `test/unit/account-closure.test.ts`, `test/integration/account-closure.test.mjs`
+  (`PURGE_API_URL`: a second API with `ACCOUNT_PURGE_ENABLED=true`; that section runs only with it, against
+  counselors the suite makes).
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
   `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
   when one hasn't run cleanly within twice its interval. It also lists as

@@ -92,7 +92,7 @@ export function closureEmail(kind: "requested" | "cancelled", o: { purgeAfter: s
             `You asked to close your Meridies account. It will be closed on or after ${date}.`,
             "Until then your account keeps working as it does today. You can cancel any time before that date from Settings.",
             "We recommend exporting your data first (Settings › Export), so you keep a copy of your students' records and your practice's work.",
-            "Your Google and Microsoft connections have been disconnected. Connect them again from Settings if you need them before you leave.",
+            "Any Google or Microsoft connection on your account has been disconnected. Connect it again from Settings if you need it before you leave.",
             "If you didn't ask for this, cancel it from Settings and reply to this email.",
           ],
           cta: { label: "Open Settings", url: settings },
