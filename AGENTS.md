@@ -208,7 +208,7 @@ roster, archived included, the students shared with them, and the caller), or
 null past 250 ids, when the query runs unscoped as before. RLS still applies on top.
 The calendar feed does not take that fallback: `buildCalendarFeed({ db, ownerId, role, caseload }, q)` needs the
 whole caseload for a counselor's whole calendar (`fullCaseloadStudentIds(db, counselorId)`, read page by page, never
-null), throws without it, and reads in batches of `FEED_ID_CHUNK` (200) ids, because it also runs on the service
+null), throws without it, and reads in batches of `FEED_ID_CHUNK` (200) ids (at most `FEED_BATCH_CONCURRENCY`, 4, in flight per build), because it also runs on the service
 client for the subscribed feed, where no RLS would hold it to the counselor's students.
 
 ### Schema
@@ -1124,12 +1124,14 @@ answers `{ exists, createdAt, rotatedAt, lastFetchedAt }` and never the URL; `DE
 UTC; UID `feed-<id prefix>-<ref>@meridiesai.com`, e.g. `feed-college-custom-<row>`), with `Cache-Control: private,
 max-age=300`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`. A malformed, unknown, rotated or revoked token
 and an unapproved counselor are the same 404 with the same body. Limits: 60 an hour per token, 600 an hour per address
-(`enforceRateLimit`), plus 60 a minute in process. `last_fetched_at` is written at most once a minute. The path is
+(`enforceRateLimit`), plus 60 a minute in process. Making or rotating the URL is 10 an hour; revoking has its own bucket (120 an hour), so a
+counselor who rotated a leaked URL several times can always still revoke it. `last_fetched_at` is written at most once a minute. The path is
 dropped from request logs (`lib/requestLog.ts`). **What the file may say** (`feedIcsEvents`; the URL can be forwarded):
 a student only as first name and last initial ("Ana P.: Common App essay"), a meeting only as "Meeting with Ana P., Ben
 O." and its times (never its title, agenda, location or link), no item's detail or notes, no scores, never a student's
 own events (`student_calendar_events`) or a cancelled meeting, and only names of students on the counselor's
-caseload. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the three authenticated routes
+caseload. Task, deadline, college and practice-event **titles appear in the file as written** (only meeting titles are
+left out), so anything a counselor typed into a title travels with the URL; the Settings card should say so. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Before the migration the three authenticated routes
 answer 503 `calendar_feed_unavailable` (also without the service key or `PUBLIC_API_URL`) and the feed URL 404s.
 Unverified: how often Google refreshes a subscribed feed (believed about daily; Apple and Outlook honour the hour
 more closely). Tests: `test/unit/calendar-feed-ics.test.ts` (folding, escaping, all-day, injection through a title,
