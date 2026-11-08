@@ -38,6 +38,10 @@ const envSchema = z.object({
   // Time saved: activity heartbeats are recorded only when "true". Stays off in
   // production until the privacy policy line about time tracking is live.
   KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Agreements (typed-name acceptance, routes/agreements.ts): every route answers
+  // 404 agreements_off unless "true". Stays off in production until the consent
+  // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
+  AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any
@@ -57,6 +61,8 @@ const envSchema = z.object({
   // Test double for AI meeting summaries (no model): a part's summary is its first line, the merge joins them,
   // and both still pass cleanSummary. Same rules as RESEARCH_FAKE: development or test only (lib/meetingSummary.ts).
   MEETING_SUMMARY_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for the Google Sheets export (lib/driveExport.ts): no call to Google. Same rules as TRANSLATE_FAKE.
+  DRIVE_EXPORT_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
   // The model that translates a family's messages; defaults to DEEP_MODEL (lib/translate.ts). A model the
   // private.ai_prices table doesn't price is charged at the table's highest rates, so add its row first.
   TRANSLATE_MODEL: blankIsUnset(z.string().min(5).max(80).optional()),

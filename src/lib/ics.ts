@@ -201,3 +201,134 @@ export function buildMeetingIcs(e: IcsEventInput): string {
   );
   return lines.map(foldLine).join(CRLF) + CRLF;
 }
+
+// ---- The subscribable calendar feed (GET /calendar/ical/:token.ics) -------------------
+
+/**
+ * One event in the subscribed feed, already reduced to what the feed may say.
+ * Built only by feedIcsEvents, which decides the privacy rules.
+ */
+export type FeedIcsEvent = {
+  /** The feed item's id (`<kind>:<ref>`), the source of a stable UID. */
+  itemId: string;
+  summary: string;
+  /** `YYYY-MM-DD` for an all-day item. */
+  date: string;
+  allDay: boolean;
+  /** ISO times for a timed item; written in UTC. */
+  startsAt: string | null;
+  endsAt: string | null;
+};
+
+/** The same for the life of the item: `feed-<kind>-<ref>@meridiesai.com` (`<kind>` is the id's prefix, e.g. college-custom). */
+export function feedUid(itemId: string): string {
+  return `feed-${itemId.replace(/:/g, "-").replace(/[^A-Za-z0-9-]/g, "-")}@${UID_DOMAIN}`;
+}
+
+/** "Ana María Pérez" -> "Ana P."; one word stays as it is; nothing -> null. */
+export function shortName(full: string | null | undefined): string | null {
+  const words = (full ?? "").replace(CONTROLS, "").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return null;
+  const first = words[0]!;
+  if (words.length === 1) return first;
+  const last = [...words[words.length - 1]!][0]!;
+  return `${first} ${last.toUpperCase()}.`;
+}
+
+/**
+ * What a subscribed calendar is told, item by item. The URL can be forwarded or
+ * leak, so the file says as little as is useful: a student only as first name
+ * and last initial; a meeting only as who it is with and when (never its title,
+ * agenda, location or join link); no item's detail or notes; never a student's
+ * own events (`personal`) or a cancelled meeting. `names` maps a student id to
+ * the full name; an id without one reads "A student".
+ */
+export function feedIcsEvents(
+  items: Array<{
+    id: string;
+    kind: string;
+    title: string;
+    date: string;
+    startsAt: string | null;
+    endsAt: string | null;
+    allDay: boolean;
+    studentId: string | null;
+    attendeeIds: string[];
+    meetingStatus: string | null;
+    personal?: boolean;
+  }>,
+  names: Map<string, string>
+): FeedIcsEvent[] {
+  const who = (id: string) => shortName(names.get(id)) ?? "A student";
+  const out: FeedIcsEvent[] = [];
+  for (const it of items) {
+    if (it.personal || it.id.startsWith("personal:")) continue;
+    let summary: string;
+    if (it.kind === "meeting") {
+      if (it.meetingStatus === "cancelled") continue;
+      const people = (it.attendeeIds.length ? it.attendeeIds : it.studentId ? [it.studentId] : []).map(who);
+      summary = people.length ? `Meeting with ${people.join(", ")}` : "Meeting";
+    } else {
+      summary = it.studentId ? `${who(it.studentId)}: ${it.title}` : it.title;
+    }
+    out.push({
+      itemId: it.id,
+      summary,
+      date: it.date,
+      allDay: it.allDay || !it.startsAt,
+      startsAt: it.allDay ? null : it.startsAt,
+      endsAt: it.allDay ? null : it.endsAt,
+    });
+  }
+  return out;
+}
+
+const dateValue = (isoDate: string) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) throw new Error("Not a calendar day");
+  return isoDate.replace(/-/g, "");
+};
+const nextDay = (isoDate: string) => {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+};
+
+const clip = (v: string, max: number) => {
+  const chars = [...v];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : v;
+};
+
+/** The whole subscribed calendar: PUBLISH, refreshed hourly, CRLF line ends, folded, ending in CRLF. */
+export function buildFeedIcs(events: FeedIcsEvent[], opts: { now?: Date } = {}): string {
+  const stamp = icsDate((opts.now ?? new Date()).toISOString());
+  const lines: string[] = [
+    "BEGIN:VCALENDAR",
+    "PRODID:-//Meridies//Calendar feed//EN",
+    "VERSION:2.0",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "X-WR-CALNAME:Meridies",
+    "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
+    "X-PUBLISHED-TTL:PT1H",
+  ];
+  for (const e of events) {
+    const when: string[] = [];
+    if (e.allDay || !e.startsAt) {
+      when.push(`DTSTART;VALUE=DATE:${dateValue(e.date)}`, `DTEND;VALUE=DATE:${dateValue(nextDay(e.date))}`);
+    } else {
+      when.push(`DTSTART:${icsDate(e.startsAt)}`);
+      if (e.endsAt && Date.parse(e.endsAt) > Date.parse(e.startsAt)) when.push(`DTEND:${icsDate(e.endsAt)}`);
+    }
+    lines.push(
+      "BEGIN:VEVENT",
+      `UID:${feedUid(e.itemId)}`,
+      `DTSTAMP:${stamp}`,
+      ...when,
+      `SUMMARY:${escapeText(clip(e.summary.trim(), 300))}`,
+      `TRANSP:${e.allDay || !e.startsAt ? "TRANSPARENT" : "OPAQUE"}`,
+      "END:VEVENT"
+    );
+  }
+  lines.push("END:VCALENDAR");
+  return lines.map(foldLine).join(CRLF) + CRLF;
+}
