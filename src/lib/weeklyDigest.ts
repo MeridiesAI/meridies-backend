@@ -57,11 +57,14 @@ export type DigestTally = {
   drafted: number;
   alreadyDrafted: number;
   nothingToReport: number;
+  /** A counselor whose settings or roster couldn't be read (the lease is released so the next cron retries). */
   failedCounselors: number;
+  /** A student whose week couldn't be read or written; the rest of the roster carries on. */
+  failedStudents: number;
 };
 
 export async function runWeeklyDigest(svc: SupabaseClient, log: Log, now = new Date()): Promise<DigestTally> {
-  const tally: DigestTally = { ran: false, counselors: 0, drafted: 0, alreadyDrafted: 0, nothingToReport: 0, failedCounselors: 0 };
+  const tally: DigestTally = { ran: false, counselors: 0, drafted: 0, alreadyDrafted: 0, nothingToReport: 0, failedCounselors: 0, failedStudents: 0 };
   const holder = `${hostname()}:${process.pid}:${randomUUID()}`;
   const { data: acquired, error: leaseErr } = await svc.rpc("acquire_job_lease", {
     p_name: DIGEST_LEASE,
@@ -100,7 +103,8 @@ export async function runWeeklyDigest(svc: SupabaseClient, log: Log, now = new D
     await release(svc, holder, log);
     throw err;
   }
-  // A counselor that failed is tried again on the next run, not an hour later.
+  // A counselor that failed is tried again on the next run, not an hour later. A student that failed waits for the
+  // next hourly run: a failure that keeps coming back must not make every dispatch cron redo the whole pass.
   if (tally.failedCounselors > 0) await release(svc, holder, log);
   log.info(tally, "weekly digest finished");
   return tally;
@@ -152,57 +156,68 @@ async function draftForCounselor(svc: SupabaseClient, log: Log, counselorId: str
       tally.alreadyDrafted += 1;
       continue;
     }
-    const digest = buildWeeklyDigest({ fullName: (s.full_name as string | null) ?? null, week, ...(await loadWeek(svc, studentId, week)) });
-    if (!digest) {
-      tally.nothingToReport += 1;
-      continue;
+    try {
+      await draftForStudent(svc, log, counselorId, s, week, tally);
+    } catch (err) {
+      // The reason only: never the content or the student's name.
+      tally.failedStudents += 1;
+      log.error({ counselorId, studentId, reason: err instanceof Error ? err.message : "unknown" }, "weekly digest: student failed");
     }
-
-    const { data: report, error: iErr } = await svc
-      .from("family_reports")
-      .insert({
-        student_id: studentId,
-        counselor_id: counselorId,
-        title: digest.title,
-        kind: "weekly",
-        period_start: week.periodStart,
-        period_end: week.periodEnd,
-        summary: digest.summary,
-        highlights: digest.highlights,
-        body: digest.body,
-        // A draft, never sent: the counselor reads it and approves the send.
-        status: "draft",
-      })
-      .select("id")
-      .single();
-    if (iErr?.code === UNIQUE_VIOLATION) {
-      tally.alreadyDrafted += 1; // an overlapping run drafted it a moment ago
-      continue;
-    }
-    if (iErr) throw new Error(`report insert failed (${iErr.code ?? "unknown"})`);
-    const reportId = String((report as Row).id);
-
-    const first = firstNameOf((s.full_name as string | null) ?? null);
-    const { error: wErr } = await svc.from("counselor_work_items").insert({
-      counselor_id: counselorId,
-      assigned_by: counselorId,
-      student_id: studentId,
-      kind: "report",
-      title: `Approve ${first}'s weekly family update`,
-      detail: `${shortDay(week.periodStart)} to ${shortDay(week.periodEnd)}`,
-      due_date: week.nextMonday,
-      source: "Family reports",
-      family_report_id: reportId,
-    });
-    if (wErr) {
-      // Without the work item the draft would sit unseen: take it back, so the next run drafts both.
-      log.error({ code: wErr.code, studentId }, "weekly digest: work item insert failed");
-      const { error: dErr } = await svc.from("family_reports").delete().eq("id", reportId);
-      if (dErr) log.error({ code: dErr.code, studentId }, "weekly digest: draft cleanup failed");
-      throw new Error(`work item insert failed (${wErr.code ?? "unknown"})`);
-    }
-    tally.drafted += 1;
   }
+}
+
+async function draftForStudent(svc: SupabaseClient, log: Log, counselorId: string, s: Row, week: DigestWeek, tally: DigestTally): Promise<void> {
+  const studentId = String(s.id);
+  const digest = buildWeeklyDigest({ fullName: (s.full_name as string | null) ?? null, week, ...(await loadWeek(svc, studentId, week)) });
+  if (!digest) {
+    tally.nothingToReport += 1;
+    return;
+  }
+
+  const { data: report, error: iErr } = await svc
+    .from("family_reports")
+    .insert({
+      student_id: studentId,
+      counselor_id: counselorId,
+      title: digest.title,
+      kind: "weekly",
+      period_start: week.periodStart,
+      period_end: week.periodEnd,
+      summary: digest.summary,
+      highlights: digest.highlights,
+      body: digest.body,
+      // A draft, never sent: the counselor reads it and approves the send.
+      status: "draft",
+    })
+    .select("id")
+    .single();
+  if (iErr?.code === UNIQUE_VIOLATION) {
+    tally.alreadyDrafted += 1; // an overlapping run drafted it a moment ago
+    return;
+  }
+  if (iErr) throw new Error(`report insert failed (${iErr.code ?? "unknown"})`);
+  const reportId = String((report as Row).id);
+
+  const first = firstNameOf((s.full_name as string | null) ?? null);
+  const { error: wErr } = await svc.from("counselor_work_items").insert({
+    counselor_id: counselorId,
+    assigned_by: counselorId,
+    student_id: studentId,
+    kind: "report",
+    title: `Approve ${first}'s weekly family update`,
+    detail: `${shortDay(week.periodStart)} to ${shortDay(week.periodEnd)}`,
+    due_date: week.nextMonday,
+    source: "Family reports",
+    family_report_id: reportId,
+  });
+  if (wErr) {
+    // Without the work item the draft would sit unseen: take it back, so the next run drafts both.
+    log.error({ code: wErr.code, studentId }, "weekly digest: work item insert failed");
+    const { error: dErr } = await svc.from("family_reports").delete().eq("id", reportId);
+    if (dErr) log.error({ code: dErr.code, studentId }, "weekly digest: draft cleanup failed");
+    throw new Error(`work item insert failed (${wErr.code ?? "unknown"})`);
+  }
+  tally.drafted += 1;
 }
 
 /** The week's facts for one student. Every read throws on error: a half-read week is not "nothing to report". */
