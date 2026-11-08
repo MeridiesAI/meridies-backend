@@ -879,12 +879,21 @@ the database (`20261010*`):
   sheet's limits), honors (keyed on name and year), first-gen, intended
   majors and the **optional date of birth** (`20261111000007`:
   `intakeAnswers.birthday`, `YYYY-MM-DD`, into
-  `student_personal_details.birthday`; `private.intake_birthday` keeps only a
-  real calendar date, not in the future, of a student aged 10 to 25 that day,
-  anything else is skipped as `invalid` and changes nothing; it is a minor's,
-  so it is the only date of birth copied, never logged or named by value in a
-  report, and `birthday` is not on the AI allowlist, so no model reads it;
-  the info card marks it `fromQuestionnaire: "birthday"`; no backfill). Rules: **fill only what is empty**; a re-saved questionnaire may
+  `student_personal_details.birthday`). `private.intake_birthday` keeps only
+  a real calendar date, not in the future, of a student aged 10 to 25 that
+  day. A non-empty string that fails it is skipped as `invalid` and changes
+  nothing; an empty or non-string answer counts as no answer, so it takes
+  back a birthday the questionnaire wrote that is still unchanged. It is a
+  minor's, so it is the only date of birth copied, never logged or named by
+  value in a report, and `birthday` is not on the AI allowlist, so no model
+  reads it. "Cleared" is not "gone": the raw answer stays in
+  `profiles.profile.intakeAnswers.birthday` and `intake_fills` keeps an
+  unsalted hash of it; a true removal would need an explicit delete path
+  (not built). Once copied it takes part in roster-import matching
+  (`lib/imports/match.ts`: name plus birthday, and a different birthday is a
+  contradiction), the same as one a counselor entered. The info card marks it
+  `fromQuestionnaire: "birthday"`; no backfill.
+  Rules: **fill only what is empty**; a re-saved questionnaire may
   change a value (or take back a row, or a field whose answer is gone) only
   while it is still exactly what the questionnaire wrote, compared by hash
   in `intake_fills` the way import provenance compares; anything the

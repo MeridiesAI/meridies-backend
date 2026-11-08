@@ -92,7 +92,17 @@ const dob = (age, md = "03-09") => `${thisYear - age}-${md}`;
     report.skipped.some((x) => x.field === "student_personal_details.birthday" && x.reason === "invalid") && !JSON.stringify(report).includes("2999"),
     JSON.stringify(report));
 
-  // The answer taken out: the questionnaire takes back its own value.
+  // A non-string answer counts as no answer: it takes back the questionnaire's own value.
+  await save(s, { birthday: 20080309, firstGen: "no" });
+  check("a non-string birthday (a number) counts as no answer and takes back the questionnaire's own value",
+    (await birthday(s.id)) === null, await birthday(s.id));
+
+  // So does an empty one, and an answer taken out.
+  await save(s, { birthday: d2, firstGen: "no" });
+  check("…filled again from a valid answer", (await birthday(s.id)) === d2, await birthday(s.id));
+  await save(s, { birthday: "  ", firstGen: "no" });
+  check("an empty birthday answer takes back the questionnaire's own value", (await birthday(s.id)) === null, await birthday(s.id));
+  await save(s, { birthday: d2, firstGen: "no" });
   await save(s, { firstGen: "no" });
   check("a birthday answer removed takes back the questionnaire's own value", (await birthday(s.id)) === null, await birthday(s.id));
 }

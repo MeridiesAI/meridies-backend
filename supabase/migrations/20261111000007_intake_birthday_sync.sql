@@ -11,7 +11,10 @@
 --
 -- Validation (private.intake_birthday): a real calendar date (Feb 29 only in
 -- a leap year), not in the future, and the student aged 10 to 25 on the day
--- of the sync; anything else is skipped as 'invalid' and changes nothing.
+-- of the sync. A non-empty string that fails this is skipped as 'invalid'
+-- and changes nothing. An empty or non-string answer counts as no answer, so
+-- (like every other field) it takes back a birthday the questionnaire wrote
+-- that is still unchanged.
 --
 -- Privacy: this is a minor's date of birth. It is optional in the app, and
 -- it is the only date of birth the questionnaire copies; citizenship, aid
@@ -21,6 +24,11 @@
 -- field and a reason, never the date. student_personal_details.birthday is
 -- not on the AI allowlist (src/lib/context/ai-allowlist.ts;
 -- test/unit/context-allowlist.test.ts), so no AI feature reads it.
+-- "Cleared" is not "gone": the raw answer stays in
+-- profiles.profile.intakeAnswers.birthday and intake_fills keeps an unsalted
+-- hash of the copied value; a true removal needs an explicit delete path (not
+-- built). Once copied, the birthday takes part in roster-import matching
+-- (src/lib/imports/match.ts), the same as one a counselor entered.
 --
 -- Deploy order: either. Before this migration a saved birthday answer stays
 -- in intakeAnswers and copies nothing; the info card's mark needs only
