@@ -100,6 +100,12 @@ const REVIEWED = [
   // service_role only), which re-checks the token, its expiry and the agreement's status under a row lock. The
   // counselor routes run on the caller's own client.
   "routes/agreements.ts",
+  // lib/booking.ts: student booking, inside a student's own request (authenticate + requireRole("student")): the
+  // counselor is the caller's own profiles.counselor_id (the row authenticate loaded, never a request value), asked
+  // isCounselorApproved first (fail closed), then booking_settings.enabled; reads only that counselor's
+  // booking_settings, active booking_meeting_types, scheduled meetings' start and end, and which calendar providers
+  // they connected (integration_tokens.provider only). Only free slot times are returned. Writes nothing.
+  "lib/booking.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
