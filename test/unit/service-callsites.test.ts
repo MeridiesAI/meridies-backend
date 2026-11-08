@@ -94,6 +94,14 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // routes/calendarIcal.ts: the subscribed calendar feed. GET /calendar/ical/:token.ics is public: the hashed token
+  // decides, and lib/calendarIcal.ts (handed the client) asks approvedCounselorIds for the token's counselor before
+  // building anything, then names that counselor's own caseload (fullCaseloadStudentIds) in every student-spanning
+  // query (buildCalendarFeed throws without one, never runs unscoped); it writes only that token row's
+  // last_fetched_at. The authenticated GET/POST/DELETE run inside an approved counselor's own request
+  // (authenticate + requireRole) and read or write only the caller's own calendar_feed_tokens row, keyed by
+  // request.auth.userId; the table has no client grant.
+  "routes/calendarIcal.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
