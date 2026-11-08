@@ -34,6 +34,7 @@ import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
 import { markOutside, markShort, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { ACTIVITY_OPS, draftWrite, type DraftTurn } from "./drafts/write.js";
 import { anyLong, freeBlocks } from "../context/freeText.js";
 
 export type ProposedAction = {
@@ -59,6 +60,8 @@ export type ToolContext = {
   /** Shared by every call in the turn: write counts and whether outside content was read. */
   turn: TurnBudget;
   onOperation: (e: OperationEvent) => void;
+  /** The conversation's activity draft: activity ops are merged into it, never filed directly (lib/axis/drafts). */
+  draft?: DraftTurn;
 };
 
 export type ToolOutput = {
@@ -494,6 +497,7 @@ const DEFS: ToolDef[] = [
     },
     run: async (ctx, raw) => {
       const i = z.object({ action: z.string().min(1).max(80), input: z.record(z.unknown()) }).parse(raw);
+      if (ctx.draft && ACTIVITY_OPS.has(i.action)) return draftWrite(opContext(ctx), ctx.draft, i.action, i.input);
       return runWrite(opContext(ctx), i.action, i.input);
     },
   },

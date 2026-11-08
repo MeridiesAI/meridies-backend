@@ -7,6 +7,7 @@
  * is unrelated: answered as usual, and it can't change the draft. Essay requests are always unrelated, so they keep
  * the essay route. The table in test/unit/axis-draft-sorter.test.ts pins the rule; tune it there.
  */
+import { COLLEGE_ATTRIBUTES } from "../lexicon.js";
 import type { Understanding } from "../nlu.js";
 import { freeTextKey, hasActivityValue } from "./normalize.js";
 import type { Draft } from "./state.js";
@@ -40,11 +41,13 @@ function namesDraft(text: string, draft: Draft): boolean {
   );
 }
 
-export function sortMessage(text: string, u: Pick<Understanding, "intent" | "scores">, draft: Draft): Verdict {
+export function sortMessage(text: string, u: Pick<Understanding, "intent" | "scores"> & Partial<Pick<Understanding, "attributes">>, draft: Draft): Verdict {
   if (isCancel(text)) return "cancel";
   if (isContinue(text)) return "continue";
   if (u.intent === "essay") return "unrelated";
-  const nothingScored = Object.values(u.scores).every((s) => s <= 0);
+  // A college matched by a place name in the details ("the Santa Clara library") is no question about a college.
+  const asksCollege = (u.attributes ?? []).some((a) => COLLEGE_ATTRIBUTES.has(a));
+  const nothingScored = Object.entries(u.scores).every(([k, s]) => s <= 0 || (k === "colleges" && !asksCollege));
   if (isYes(text) || hasActivityValue(text) || namesDraft(text, draft) || isCorrection(text) || u.intent === "action" || nothingScored) return "draft";
   return "unrelated";
 }

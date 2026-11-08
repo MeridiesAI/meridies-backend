@@ -180,7 +180,8 @@ export default async function axisRoutes(app: FastifyInstance) {
 
           // After done nothing may turn the answer into an error: each step is logged and skipped.
           try {
-            await saveState(request, id, turn.state);
+            // A turn with an activity draft saved the state itself, before `done` (lib/axis/drafts/state.ts).
+            if (!turn.stateSaved) await saveState(request, id, turn.state);
             // Only what the code couldn't confirm goes to the adjudicator.
             const { wanted, checks, material, ledger } = turn.verify;
             if (wanted && checks.some((c) => c.status !== "grounded")) {

@@ -104,13 +104,14 @@ export async function draftWrite(ctx: OpContext, turn: DraftTurn, name: string, 
     throw err;
   }
 
+  // An expired draft (its line shown this turn) or one with nothing left open gives way to a new one (spec 4.1).
+  if (d.header && (d.header.expired_at || !isOpen(d))) closeDraft(d);
   // Pinned to its student: nothing for anyone else while it is open (spec 4.1).
-  if (d.header && isOpen(d) && d.header.student_id !== studentId) {
+  if (d.header && d.header.student_id !== studentId) {
     patchHeader(d, { switch_to: { student_id: studentId, name: turn.studentName(studentId) } });
     d.notes.push({ kind: "refused-student" });
     return notRun(`there's an open activity draft for ${d.header.student_name}; don't add anything for another student. The counselor will be asked.`);
   }
-  if (d.header && !isOpen(d)) closeDraft(d);
   if (!d.header) {
     const now = turn.now.toISOString();
     openDraft(d, {
@@ -145,7 +146,9 @@ export async function draftWrite(ctx: OpContext, turn: DraftTurn, name: string, 
 async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op: "add" | "update", item: Record<string, unknown>, reply: Reply) {
   const d = turn.draft;
   const header = d.header!;
-  const key = typeof item.draft_row === "string" ? item.draft_row : typeof item.key === "string" ? item.key : null;
+  // Only draft_row names an existing row; a batch row's own key ("r1") only reuses a row that already has it.
+  const key = typeof item.draft_row === "string" ? item.draft_row : null;
+  const ownKey = typeof item.key === "string" ? item.key : null;
   let row: DraftRow | undefined;
   if (op === "update") {
     const activityId = typeof item.activity_id === "string" ? item.activity_id : null;
@@ -170,6 +173,7 @@ async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op
         return;
       }
     }
+    if (!row && ownKey) row = d.rows.find((r) => r.key === ownKey && r.op === "add" && (r.status === "collecting" || r.status === "card"));
     const org = normalizeField("organization", item.organization);
     const open = d.rows.filter((r) => r.op === "add" && (r.status === "collecting" || r.status === "card"));
     if (!row && org.ok && typeof org.value === "string") row = open.find((r) => freeTextKey(String(r.fields.organization ?? "")) === freeTextKey(org.value as string));
@@ -269,7 +273,8 @@ const filingFailed = (r: DraftRow, out: OpOutput) => {
  */
 export async function fileIfReady(ctx: OpContext, turn: DraftTurn, force: boolean): Promise<void> {
   const d = turn.draft;
-  if (!d.header) return;
+  // No draft, or the switch question is waiting: nothing is filed for either student until it's answered.
+  if (!d.header || d.header.switch_to) return;
   const touched = (r: DraftRow) => touchedFields(d, r.key).size > 0;
 
   for (const r of d.rows.filter((x) => x.op === "update" && (x.status === "collecting" || (x.status === "card" && touched(x))))) {

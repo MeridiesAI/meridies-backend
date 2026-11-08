@@ -120,7 +120,9 @@ export function draftBlock(d: Draft): string {
     "Don't say whether anything was saved, tried or needs Confirm, and don't describe earlier attempts: status lines written by the server follow your answer.",
   ];
   if (d.switchAccepted) {
-    lines.push(`The counselor agreed to drop the earlier draft and start one for ${d.header.student_name} from their message before this one: add that activity now with application.add_activity.`);
+    lines.push(
+      `The counselor agreed to drop the earlier draft and start one for ${d.header.student_name} from their message before this one: add that activity now with application.add_activity and student_id ${d.header.student_id}.`
+    );
   }
   return lines.join("\n");
 }

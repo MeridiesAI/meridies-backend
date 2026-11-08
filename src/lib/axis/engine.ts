@@ -61,7 +61,14 @@ import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
 import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
 import { isReadOnly, readsOutside, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
-import { newTurnBudget, recentActionsText, type OperationEvent } from "./ops/run.js";
+import { markShort, newTurnBudget, recentActionsText, type OpContext, type OperationEvent } from "./ops/run.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { axisNow } from "./clock.js";
+import { continueReply, draftBlock, LINES, missingOf, outcomeCodes, statusLines } from "./drafts/lines.js";
+import { anyOutside, closeIfDone, isOpen, patchHeader, saveDraft } from "./drafts/state.js";
+import { startDraftTurn } from "./drafts/turn.js";
+import { fileIfReady } from "./drafts/write.js";
+import { COLLEGE_ATTRIBUTES } from "./lexicon.js";
 import { PROFILES as CONTEXT_PROFILES, TRUSTED_SECTIONS } from "../context/profiles.js";
 import { tokens } from "./text.js";
 
@@ -101,6 +108,11 @@ export type TurnResult = {
   quotes: QuoteRun[];
   /** The answer was checked for quotes (the rule is on): the route stores its runs, [] when clean. */
   quotesChecked: boolean;
+  /**
+   * The turn already saved the dialogue state, with the activity draft's header, before returning (the conversation
+   * has or had a draft): the route must not write `state` again after `done`, or it could undo a merged header.
+   */
+  stateSaved: boolean;
 };
 
 type Free = { source: string; text: string }[];
@@ -262,6 +274,8 @@ async function axisTurn(opts: {
   newFiles?: boolean;
   /** The counselor's message this turn answers: its files go as files, earlier files as their stored text. */
   messageId?: string;
+  /** The server client the activity draft is saved through (tests pass a fake); defaults to saveDraft's own. */
+  draftDb?: SupabaseClient | null;
 }): Promise<TurnResult> {
   const { request, studentId, content, emit, signal } = opts;
   const startedAt = Date.now();
@@ -301,15 +315,59 @@ async function axisTurn(opts: {
   const recentActions = recentActionsText(request, opts.conversationId).catch(() => "");
 
   // ---- 2. Understanding ----
-  const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state });
+  // AxIS's clock: the wall clock, or the evals' controllable one (lib/axis/clock.ts).
+  const now = axisNow();
+  const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state, now });
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
   // A direct or essay answer runs no tools: whatever the last turn read stays in force, and an answer that
   // quotes text someone else wrote (below) taints the next turn the way reading it would have.
-  const state = {
-    ...nextState(u, history.state, chatStudent),
+  const state: DialogueState = {
+    ...nextState(u, history.state, chatStudent, now),
     ...(history.state?.outside ? { outside: true } : {}),
     ...(flags && history.state?.short ? { short: true } : {}),
   };
+  const actions: (ProposedAction | OperationEvent)[] = [];
+  const onOperation = (e: OperationEvent) => {
+    actions.push(e);
+    emit("action", e);
+  };
+
+  // ---- 2b. The activity draft (lib/axis/drafts): what this message is to it ----
+  const nameOf = (id: string) => roster.get(id)?.name ?? (id === studentId ? ctx.name : null) ?? "the student";
+  const ds = await startDraftTurn({ request, conversationId: opts.conversationId, content, u, now, messageId: opts.messageId, onOperation, studentName: nameOf });
+  const dt = ds.turn;
+  const draft = dt.draft;
+  const drafting = dt.verdict === "draft";
+  const lead = ds.lead ? `${ds.lead}\n\n` : "";
+  // Draft work outside the model loop (the code replies, filing on the direct and essay paths).
+  const codeCtx: OpContext = { request, conversationId: opts.conversationId, studentId, roster, turn: newTurnBudget(history.state?.outside === true), signal, onOperation };
+  /** Saves the draft with the dialogue state (before `done`) and builds the lines that follow the answer. */
+  const finishDraft = async (s: DialogueState, withLines: boolean) => {
+    closeIfDone(draft);
+    const involved = draft.hadHeader || draft.header !== null;
+    const { draft: _stale, ...plain } = s;
+    const final: DialogueState = { ...plain, ...(draft.header ? { draft: draft.header } : {}) };
+    // Through the server's own client (saveDraft's default), or the one a test hands in.
+    const ok = involved ? await (opts.draftDb === undefined ? saveDraft(request, opts.conversationId, final, draft) : saveDraft(request, opts.conversationId, final, draft, opts.draftDb)) : true;
+    const ranOp = draft.notes.length > 0 || draft.touched.rows.size > 0;
+    const lines = withLines && (drafting || ranOp || !ok) ? statusLines(draft, { name: draft.header?.student_name ?? ds.name, saveFailed: !ok }) : !ok ? [LINES.saveFailed] : [];
+    if (dt.verdict === "unrelated" && draft.header && isOpen(draft)) lines.push(LINES.reminder(draft.header.student_name));
+    return { state: final, tail: lines.join("\n"), involved };
+  };
+  const draftLog = () =>
+    ds.log === "closed:cancelled" || ds.log === "closed:timeout" || ds.log === "expired"
+      ? ds.log
+      : draft.notes.some((n) => n.kind === "opened")
+        ? "opened"
+        : draft.hadHeader && !draft.header
+          ? "closed:saved"
+          : ds.log;
+  /** One log line per turn: the category and path, the draft's state and outcome codes. Never text, values or names. */
+  const logTurn = (path: TurnResult["path"], calls: number, maxCalls: number, frame?: string) =>
+    request.log.info(
+      { axis: { path, intent: u.intent, ...(frame ? { frame } : {}), draft: draftLog(), outcomes: outcomeCodes(draft), calls, maxCalls, conversationId: opts.conversationId, ms: Date.now() - startedAt } },
+      "axis turn"
+    );
   const ledger = new SourceLedger();
   const trace: { label: string }[] = [];
   const sources = new Set<string>(ctx.labels);
@@ -319,8 +377,26 @@ async function axisTurn(opts: {
   };
   if (ctx.usage) emit("context", ctx.usage);
 
+  // ---- 2c. Replies written in code: cancel, continue ----
+  if (ds.reply !== null || dt.verdict === "continue") {
+    // "Continue" shows where the draft stands: it files only a complete draft, never one with blanks.
+    if (dt.verdict === "continue") await fileIfReady(codeCtx, { ...dt, askedBefore: false }, false).catch((err) => request.log.warn({ err: errInfo(err) }, "axis draft not filed"));
+    const reply = ds.reply ?? continueReply(draft, { name: draft.header?.student_name ?? ds.name });
+    emit("route", { intent: u.intent, path: "direct", frame: "activity-draft" });
+    emit("status", { phase: "answering" });
+    const fin = await finishDraft(state, false);
+    const text = fin.tail ? `${reply}\n\n${fin.tail}` : reply;
+    emit("delta", { text });
+    logTurn("direct", 0, 0, "activity-draft");
+    return {
+      path: "direct", text, citations: [], trace, sources: [], actions, understanding: u, state: fin.state,
+      verify: { wanted: false, checks: [], material: [], ledger }, runId: null, quotes: [], quotesChecked: flags, stateSaved: fin.involved,
+    };
+  }
+
   // ---- 3. Direct answers ----
-  if (u.intent !== "essay" && !opts.newFiles) {
+  // A message that continues an activity draft goes to the Clerk, never to a direct answer from the record.
+  if (u.intent !== "essay" && !opts.newFiles && !drafting) {
     const direct = await compileDirect(u, { request, chatStudentId: studentId, roster, ledger, chatFacts }).catch((err) => {
       request.log.warn({ err: errInfo(err) }, "axis direct answer skipped");
       return null;
@@ -330,20 +406,27 @@ async function axisTurn(opts: {
       emit("sources", { sources: direct.sources });
       for (const t of direct.trace) step(t);
       emit("status", { phase: "answering" });
-      emit("delta", { text: direct.text });
+      emit("delta", { text: `${lead}${direct.text}` });
       const { citations } = resolveCitations(direct.text, ledger);
       if (citations.length) emit("citations", { citations });
-      request.log.info({ axis: { path: "direct", frame: direct.frame, ms: Date.now() - startedAt } }, "axis turn");
-      return {
-        path: "direct", text: direct.text, citations, trace, sources: direct.sources, actions: [], understanding: u,
-        state: {
+      const fin = await finishDraft(
+        {
           ...((flags ? direct.freeText : direct.outside) ? { ...state, outside: true } : state),
           // A direct answer that shows her short fields: the next turn's student-visible changes wait.
           ...(flags && direct.outside ? { short: true } : {}),
         },
+        true
+      );
+      if (fin.tail) emit("delta", { text: `\n\n${fin.tail}` });
+      const text = `${lead}${direct.text}${fin.tail ? `\n\n${fin.tail}` : ""}`;
+      logTurn("direct", 0, 0, direct.frame);
+      return {
+        path: "direct", text, citations, trace, sources: direct.sources, actions, understanding: u,
+        state: fin.state,
         verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
-        quotes: flags ? quotedRuns(direct.text, [...(direct.freeBlocks ?? []), ...history.quoted]) : [],
+        quotes: flags ? quotedRuns(text, [...(direct.freeBlocks ?? []), ...history.quoted]) : [],
         quotesChecked: flags,
+        stateSaved: fin.involved,
       };
     }
   }
@@ -355,29 +438,42 @@ async function axisTurn(opts: {
     // Advice needs the whole record (an uploaded draft, the activity descriptions) and runs no tools to fetch what
     // a short-only record leaves out: under the rule it reads the full record and the turn is judged by it.
     const essayCtx = flags && !forChange && studentId ? await loadContext(request, studentId, false, false) : ctx;
-    const text = await essayAdvice(request, studentId, content, essayCtx.record, { signal, hold: opts.prepaid });
-    emit("delta", { text });
-    return {
-      // The bullets were written over the student's record (their essays, activities): saved to the
-      // chat, they are outside content for the next turn.
-      path: "essay", text, citations: [], trace, sources: [...sources], actions: [], understanding: u,
-      state: {
+    const bullets = await essayAdvice(request, studentId, content, essayCtx.record, { signal, hold: opts.prepaid });
+    emit("delta", { text: `${lead}${bullets}` });
+    const fin = await finishDraft(
+      {
         ...((flags ? essayCtx.freeText : ctx.outside) ? { ...state, outside: true } : state),
         ...(flags && essayCtx.outside ? { short: true } : {}),
       },
+      true
+    );
+    if (fin.tail) emit("delta", { text: `\n\n${fin.tail}` });
+    const text = `${lead}${bullets}${fin.tail ? `\n\n${fin.tail}` : ""}`;
+    logTurn("essay", 0, 0);
+    return {
+      // The bullets were written over the student's record (their essays, activities): saved to the
+      // chat, they are outside content for the next turn.
+      path: "essay", text, citations: [], trace, sources: [...sources], actions, understanding: u,
+      state: fin.state,
       verify: { wanted: false, checks: [], material: [], ledger }, runId: null,
       quotes: flags ? quotedRuns(text, [...essayCtx.free, ...history.quoted]) : [],
       quotesChecked: flags,
+      stateSaved: fin.involved,
     };
   }
 
   // ---- 5. Evidence, in parallel ----
-  const mode = u.intent as Mode;
+  // A message that continues an activity draft runs as the Clerk, whatever it scored.
+  const mode = (drafting ? "action" : u.intent) as Mode;
   const profile = PROFILES[mode];
   const effort = effortFor(profile, u);
   if (sources.size) emit("sources", { sources: [...sources] });
+  // While drafting, a college matched by a fragment ("City Library" in a town's name) isn't fetched unless the
+  // message asks a college question (spec 4.8).
+  const draftOpen = draft.header !== null && isOpen(draft);
+  const planU = draftOpen && !u.attributes.some((a) => COLLEGE_ATTRIBUTES.has(a)) ? { ...u, colleges: [], ambiguousColleges: [] } : u;
   const evidence = await gatherEvidence({
-    request, u, chatStudentId: studentId, roster, ledger, connected, retrievalReady: retrievalOn, speculative, signal, onStep: step,
+    request, u: planU, chatStudentId: studentId, roster, ledger, connected, retrievalReady: retrievalOn, speculative, signal, onStep: step,
     freeRule: flags,
   });
   for (const s of evidence.sources) sources.add(s);
@@ -396,7 +492,6 @@ async function axisTurn(opts: {
   const system = systemBlocks(ctx.record, ctx.roster, history.summary, new Date(), signerLine(request.profile));
   const base = requestBase(system, tools, effort);
   const api = opts.api ?? messagesApi();
-  const actions: (ProposedAction | OperationEvent)[] = [];
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
   // So does whatever in the system prompt someone other than the counselor wrote: the student record's
   // uploaded files and student-written sections, the roster's high schools, deadlines and student tasks.
@@ -420,11 +515,12 @@ async function axisTurn(opts: {
     // Under the rule, short student-written fields read this turn (the record, the evidence) or the turn before
     // still make an instant change a student or family sees wait (ops/run.ts COUNSELOR_ONLY).
     turn: newTurnBudget(outside, inherited, flags, flags && (ctx.outside || evidence.outside), flags && history.state?.short === true),
-    onOperation: (e) => {
-      actions.push(e);
-      emit("action", e);
-    },
+    onOperation,
+    // Activity ops go through the draft (lib/axis/drafts/write.ts), never straight to a card.
+    draft: dt,
   };
+  // Values in the draft from a file or a student's document are someone else's words, even when short.
+  if (drafting && draft.rows.some(anyOutside)) markShort(toolCtx.turn);
   const exec: LoopOptions["exec"] = async (c, sig) => {
     const out = await runTool(toolCtx, c.name, c.input, sig);
     index.add(out.content);
@@ -442,7 +538,7 @@ async function axisTurn(opts: {
   // Which kinds of passage the planner already found: a part they cover needs no specialist.
   const kinds = new Set(ledger.all().map((p) => p.kind));
   const covered = (i: string) => (i === "documents" ? kinds.has("upload") || kinds.has("drive") || kinds.has("onedrive") : i === "email" ? kinds.has("outlook") || kinds.has("gmail") : true);
-  const tasks = specialistTasks(u, covered);
+  const tasks = drafting ? null : specialistTasks(u, covered);
   if (hasFiles) step(`Reading ${fileNames.length === 1 ? fileNames[0] : `${fileNames.length} attached files`}`);
   const run: Run = await openRun(request, "axis", studentId, {
     files: fileNames.length,
@@ -479,6 +575,7 @@ async function axisTurn(opts: {
       findings ? `Specialist findings:\n${findings}` : "",
       evidence.skipped.length ? `Not gathered in time (use a tool if you need it): ${evidence.skipped.join("; ")}.` : "",
       featureOn("systemMessages") ? "" : `(${modeLine(turnMode)})`,
+      drafting ? draftBlock(draft) : "",
       content,
     ].filter(Boolean);
     // Earlier files' text: one message ahead of the history, the same every turn so the prompt cache keeps it.
@@ -503,6 +600,8 @@ async function axisTurn(opts: {
       if (!opaqueFiles) grounder.push(d);
     };
     emit("status", { phase: "answering" });
+    // The expiry line opens the reply, before the model's words.
+    if (lead) emit("delta", { text: lead });
     const res = await runLoop({
       api, base: requestBase(system, tools, turnEffort), messages, effort: turnEffort, maxCalls: turnProfile.maxCalls,
       deadline: startedAt + TURN_BUDGET_MS, signal, exec, readOnly: isReadOnly, gate: budget,
@@ -524,7 +623,18 @@ async function axisTurn(opts: {
     // A cut answer is saved as the counselor saw it, never the model's full text.
     const answer = gate.blocked ? gate.text : res.text;
     const { citations, invalid } = resolveCitations(answer, ledger);
-    const text = dropInvalidCitations(answer, invalid);
+    // The draft: file what is ready, once, after the answer; remember what AxIS still asked for.
+    if (drafting || draft.touched.rows.size > 0) {
+      await fileIfReady(toolCtx, dt, dt.fileNow).catch((err) => request.log.warn({ err: errInfo(err) }, "axis draft not filed"));
+      const missing = [...new Set(draft.rows.filter((r) => r.op === "add" && r.status === "collecting").flatMap(missingOf))];
+      if (draft.header && missing.length && opts.messageId) patchHeader(draft, { asked: { at: now.toISOString(), fields: missing, after_msg: opts.messageId } });
+    }
+    const fin = await finishDraft(
+      { ...state, outside: toolCtx.turn.sawOutside, ...(flags ? { short: toolCtx.turn.sawShort } : {}) },
+      true
+    );
+    if (fin.tail) emit("delta", { text: `\n\n${fin.tail}` });
+    const text = `${lead}${dropInvalidCitations(answer, invalid)}${fin.tail ? `\n\n${fin.tail}` : ""}`;
     // The runs of 8+ words the saved answer repeated from free text the turn saw: the files, the passages from
     // outside (found by the planner, the specialists or a tool), the record, the evidence, earlier quoted runs.
     const passages = ledger.all().filter((p) => OUTSIDE_PASSAGES.has(p.kind)).map((p) => ({ source: `${p.kind}:${p.title}`, text: p.text }));
@@ -536,9 +646,11 @@ async function axisTurn(opts: {
       ms: Date.now() - startedAt, writes: toolCtx.turn.writes, autoWrites: toolCtx.turn.autoWrites, tainted: toolCtx.turn.tainted,
       essayGuard: gate.blocked,
     });
+    logTurn(tasks ? "specialists" : "agent", res.calls, turnProfile.maxCalls);
     return {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
-      state: { ...state, outside: toolCtx.turn.sawOutside, ...(flags ? { short: toolCtx.turn.sawShort } : {}) },
+      state: fin.state,
+      stateSaved: fin.involved,
       verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
       runId: run.id,
       quotes,
