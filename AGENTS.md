@@ -1350,14 +1350,24 @@ supplement prompts (the cycle turns over August 1). `groundCandidates` keeps a c
 that was read and its quote (12+ characters) is on THAT page after folding; a prompt must be on the page and its
 word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support and a
 prompt for another stated cycle are dropped; everything dropped is counted. A flag's value must be what its quote
-says (`statementFits` / `reportingFits`, conservative: when in doubt it is dropped and counted): the personal
-statement flag needs the statement named, and `false` a negation (not, n't, no, no longer, never, without, cannot,
-neither, nor) while `true` needs none; `self-report` a self-report mention and no negation anywhere in the quote;
-`official-only` either a self-report mention refused in its own clause (a negation at most three words before it,
-"we do not accept self-reported", or as its verb after it, "self-reported scores are not accepted") with nothing
-saying official scores aren't required, or, with no self-report mention, official scores or reports required (or
-"directly from the testing agency") and no negation anywhere in the quote; `score-send` sending wording, no
-self-report mention and no negation anywhere; `not-applicable` "test-blind"/"test-free" not itself negated. **Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
+says (`statementFits` / `reportingFits`; a safety net under the editor's review, so strictly conservative: when in
+doubt the candidate is dropped and counted). The personal statement flag needs the statement named and a read-type
+verb (read, consider, review, evaluate, use, factor, weigh); `false` needs every such verb negated (a negator up to
+three words before it in its clause, "is not read", "isn't read", or "reviewed without the personal statement"), so
+"not required" or "optional" alone, or any un-negated read clause ("but we read it if you submit one"), drops it;
+`true` needs no verb negated, no negation anywhere (a bare "no" included) and no hedge (rarely, seldom, little or
+limited weight, optional, only if, if you choose/submit/send, may/might be read). Test reporting: a quote about
+TOEFL, IELTS or Duolingo that names neither the SAT nor the ACT is dropped; `self-report` needs a self-report mention
+and no negation anywhere; `official-only` is dropped when scoped or conditional (for merit/scholarships/honors/a
+program/housing/aid, unless, except, outside the, international, non-US, transfer, "but we do", however, only
+for/if/when, before, after a month, deadline) or required only later (upon enrollment, once admitted, after
+admission, if admitted, before enrolling, ...), and otherwise needs either a self-report mention refused in its own
+clause (a negation up to three words before it, or a negated verb right after it: "self-reported scores are not
+accepted") with nothing saying official scores aren't required (not required/mandatory/needed, need not, optional),
+or, with no self-report mention, official scores or reports required (or "directly from the testing agency") and no
+negation anywhere; `score-send` needs sending wording, no self-report mention and no negation anywhere;
+`not-applicable` needs "test-blind"/"test-free" not itself negated.
+**Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
 already on file in any slot (matched by its folded words) is unchanged, one already pending is a duplicate, and each
 new prompt takes the next free `sort_order` after every curated row and pending proposal, in the page's order; its
 `fact_key` is the prompt and word limit, not the slot. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;

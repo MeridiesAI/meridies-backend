@@ -561,3 +561,53 @@ test("plain statements of each value are still kept", () => {
   assert.equal(flag("personalStatementRead", true, "We read the personal statement as part of every application."), "kept");
   assert.equal(flag("personalStatementRead", false, "We do not read the personal statement."), "kept");
 });
+
+// ---- Fix round 3: the reviewer's table, every row through groundCandidates ----------------------------------
+
+const ROUND3_DROP: [Parameters<typeof flag>[0], unknown, string][] = [
+  ["personalStatementRead", false, "We do not require a personal statement, but we read it if you submit one."],
+  ["personalStatementRead", false, "No personal statement is required; if you send one, our readers will review it."],
+  ["personalStatementRead", false, "Personal statement: not required, but we do read it if you submit one."],
+  ["personalStatementRead", false, "No personal statement is required."],
+  ["personalStatementRead", false, "A personal statement is not required."],
+  ["personalStatementRead", true, "Personal statements are optional and rarely read."],
+  ["personalStatementRead", true, "We rarely read the personal statement."],
+  ["personalStatementRead", true, "We seldom read the personal statement."],
+  ["personalStatementRead", true, "The personal statement carries little weight."],
+  ["personalStatementRead", true, "The personal statement is optional."],
+  ["personalStatementRead", true, "Please upload your personal statement through the Common App."],
+  ["testReporting", "official-only", "We do not accept self-reported scores for merit scholarships, but we do for admission."],
+  ["testReporting", "official-only", "We do not accept self-reported scores for merit scholarships."],
+  ["testReporting", "official-only", "We do not accept self-reported scores for the honors program."],
+  ["testReporting", "official-only", "Self-reported scores will not be accepted from applicants outside the United States."],
+  ["testReporting", "official-only", "We do not accept self-reported scores unless you applied before January 1."],
+  ["testReporting", "official-only", "Official score reports are required only upon enrollment."],
+  ["testReporting", "official-only", "Official scores are required only after you are admitted and enroll."],
+  ["testReporting", "official-only", "Self-report is not an option, though official score reports are not mandatory at the time of application."],
+  ["testReporting", "score-send", "International applicants should send TOEFL scores."],
+];
+const ROUND3_KEEP: [Parameters<typeof flag>[0], unknown, string][] = [
+  ["personalStatementRead", false, "We do not read the personal statement."],
+  ["personalStatementRead", false, "We never consider the personal essay."],
+  ["personalStatementRead", false, "Applications are reviewed without the personal statement."],
+  ["personalStatementRead", false, "We neither require nor read the personal statement."],
+  ["personalStatementRead", true, "We read the personal statement as part of every application."],
+  ["testReporting", "official-only", "Self-reported scores are not accepted; official score reports must come directly from the testing agency."],
+  ["testReporting", "official-only", "Students may not self-report scores; official scores are required."],
+  ["testReporting", "official-only", "Applicants who do not self-report must send official scores directly from the testing agency."],
+  ["testReporting", "self-report", "We accept self-reported test scores."],
+  ["testReporting", "self-report", "Self-reported scores are accepted, but official scores are required after admission."],
+  ["testReporting", "score-send", "Applicants must send official scores from the testing agency."],
+];
+
+for (const [field, value, q] of ROUND3_DROP) {
+  test(`round 3 drops (${field}=${String(value)}): ${q}`, () => assert.equal(flag(field, value, q), "invalid"));
+}
+for (const [field, value, q] of ROUND3_KEEP) {
+  test(`round 3 keeps (${field}=${String(value)}): ${q}`, () => assert.equal(flag(field, value, q), "kept"));
+}
+
+test("English-proficiency scores alone are not SAT/ACT reporting", () => {
+  assert.equal(flag("testReporting", "self-report", "Applicants may self-report TOEFL or IELTS scores."), "invalid");
+  assert.equal(flag("testReporting", "score-send", "Send your Duolingo English Test scores directly."), "invalid");
+});
