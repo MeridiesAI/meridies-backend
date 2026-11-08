@@ -59,10 +59,35 @@ test("without outside, a card in a clean turn has no reason", async () => {
 });
 
 test("in a tainted turn an activity card is outside-content even without the option", async () => {
+  for (const [name, input] of [
+    ["application.add_activities", batchInput([row("r1", "Code Club")])],
+    ["application.add_activity", { student_id: STUDENT, organization: "Code Club" }],
+    ["application.update_activity", { student_id: STUDENT, activity_id: "a0000000-0000-4000-8000-000000000001", hours_per_week: 8 }],
+  ] as const) {
+    const t = tables();
+    const { ctx } = ctxFor(t, { tainted: true });
+    const out = await runWrite(ctx, name, input);
+    assert.equal((t.axis_actions![0]!.payload as Row).reason, "outside-content", name);
+    assert.doesNotMatch(out.content, /would normally run at once/, `${name}: it always asks, so the model isn't told otherwise`);
+  }
+});
+
+test("a confirm card never shows a cut line: too long to show whole is refused, not clipped", async () => {
   const t = tables();
-  const { ctx } = ctxFor(t, { tainted: true });
-  await runWrite(ctx, "application.add_activities", batchInput([row("r1", "Code Club")]), { outside: ctx.turn.tainted });
-  assert.equal((t.axis_actions![0]!.payload as Row).reason, "outside-content");
+  const { ctx } = ctxFor(t);
+  const upd = await runWrite(ctx, "application.update_activity", { student_id: STUDENT, activity_id: "a0000000-0000-4000-8000-000000000001", description: "d".repeat(2000) });
+  assert.ok(upd.isError);
+  assert.match(upd.content, /too long to show whole/);
+  const long = row("r1", "o".repeat(300), { position: "p".repeat(300), description: "d".repeat(1000), sources: { organization: "your message", description: "resume" } });
+  const add = await runWrite(ctx, "application.add_activities", batchInput([long]));
+  assert.ok(add.isError);
+  assert.match(add.content, /too long to show whole/);
+  assert.equal(t.axis_actions!.length, 0, "nothing was filed");
+});
+
+test("a batch card's row keys are unique", () => {
+  const def = getOp("application.add_activities")!;
+  assert.ok(!def.input.safeParse(batchInput([row("r1", "A"), row("r1", "B")])).success);
 });
 
 test("the batch card shows every row on one line each, the description whole, and a row view for the app", async () => {
@@ -122,9 +147,10 @@ test("Confirm keeps only the chosen rows, and without a choice keeps all", async
   await confirmOperation(all.request, storedCard(three));
   assert.equal((JSON.parse(all.injected.find((c) => c.method === "POST")!.payload!) as { rows: Row[] }).rows.length, 3);
 
+  // A selection naming no row on the card is the client's mistake: refused (the route hands the claim back), never a failed card.
   const none = fakeOpsRequest(tables(), { userId: ME, answer: okBatch });
-  const bad = await confirmOperation(none.request, storedCard(three), { keep: ["r9"] });
-  assert.equal(bad.status, "failed");
+  await assert.rejects(confirmOperation(none.request, storedCard(three), { keep: ["r9"] }), (e: { statusCode?: number }) => e.statusCode === 400);
+  assert.equal(none.injected.filter((c) => c.method !== "GET").length, 0);
 });
 
 test("Confirm answers per row; a refused row doesn't stop the others; all refused is a failure", async () => {

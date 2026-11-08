@@ -1140,7 +1140,12 @@ export const applicationSheets: OpGroup = {
       risk: "confirm",
       title: "Several activities on one card, filed by AxIS from an activity draft. To add an activity, use add_activity.",
       doc: "{ student_id, rows: [{ key r1-r10, add_activity's fields… }] (1-10) }",
-      input: z.object({ student_id: uuid, rows: z.array(batchRow).min(1).max(10) }).strict(),
+      input: z
+        .object({
+          student_id: uuid,
+          rows: z.array(batchRow).min(1).max(10).refine((rows) => new Set(rows.map((r) => r.key)).size === rows.length, "row keys must be unique"),
+        })
+        .strict(),
       takesStudent: true,
       request: (i) => ({ method: "POST", url: "/application/activities/batch", body: { studentId: i.student_id, rows: i.rows.map(batchFields) } }),
       describe: (i, h) =>

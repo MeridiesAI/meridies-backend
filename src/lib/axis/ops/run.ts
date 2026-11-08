@@ -30,6 +30,19 @@ import { freeBlocks } from "../../context/freeText.js";
 
 export const MAX_WRITES_PER_TURN = 20;
 export const MAX_AUTO_WRITES_PER_TURN = 5;
+/** The longest card line. An auto change's line is clipped to it; a confirm card longer than it is refused, never cut. */
+export const DETAIL_MAX = 1600;
+
+/**
+ * Cards that always ask (activities) but must still say why when the turn read outside content, so the app's Confirm
+ * all skips them (spec 4.11). The same gap for every other always-ask op is the security design's to close.
+ */
+const FLAGGED_WHEN_TAINTED: ReadonlySet<string> = new Set([
+  "application.add_activity",
+  "application.update_activity",
+  "application.add_activities",
+  "application.delete_activities",
+]);
 
 /** Shared by every tool call in one turn (the object is passed by reference). */
 export type TurnBudget = {
@@ -251,6 +264,7 @@ export function fitPayload(p: StoredPayload): StoredPayload | null {
 }
 
 const notRun = (why: string): OpOutput => ({ content: `Not done: ${why}`, isError: true, fresh: false });
+export const TOO_LONG_FOR_CARD = "it is too long to show whole on a confirmation card. Shorten it (a shorter message, fewer details) and file it again.";
 const STOPPED = "the answer was stopped before this change ran. Nothing was changed.";
 const writeLimit = (): OpOutput => ({
   content: `That's ${MAX_WRITES_PER_TURN} changes in one message, the limit. Stop here and tell the counselor what is left to do.`,
@@ -408,7 +422,8 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts:
   const described = await safely(() => def.describe?.(input, hDescribe));
   const summary = clipText(typeof described === "string" && described.trim() ? described : def.title, 300);
   const detailLines = await safely(() => def.details?.(input, h));
-  const details = (Array.isArray(detailLines) ? detailLines : []).slice(0, 12).map((d) => clipText(String(d), 1600));
+  const rawDetails = (Array.isArray(detailLines) ? detailLines : []).slice(0, 12).map(String);
+  const details = rawDetails.map((d) => clipText(d, DETAIL_MAX));
 
   // From here to the reservation below nothing awaits, so calls running side by side in one round
   // can't all pass the checks before any of them counts.
@@ -416,16 +431,22 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts:
   if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
   let risk = riskOf(def, input);
   let reason: OperationPayload["reason"] = null;
+  // An instant change turned into a card: the model is told it would normally have run.
+  let flipped = false;
   const shortStop = ctx.turn.freeRule && ctx.turn.shortTainted && !COUNSELOR_ONLY.has(def.name);
   if (risk === "auto" && (ctx.turn.tainted || shortStop)) {
     risk = "confirm";
     reason = "outside-content";
+    flipped = true;
   } else if (risk === "auto" && ctx.turn.autoWrites >= MAX_AUTO_WRITES_PER_TURN) {
     risk = "confirm";
     reason = "many-changes";
+    flipped = true;
   }
-  // A card that always asks (an activity) still says why it is flagged when its values came from outside.
-  if (risk === "confirm" && reason === null && opts.outside) reason = "outside-content";
+  // A card that always asks (an activity) still says why it is flagged: its values came from outside, or its turn read outside content.
+  if (risk === "confirm" && reason === null && (opts.outside || (ctx.turn.tainted && FLAGGED_WHEN_TAINTED.has(def.name)))) reason = "outside-content";
+  // A card the counselor confirms must show every line whole: a line that would be cut is refused, never clipped.
+  if (risk === "confirm" && rawDetails.some((d) => d.length > DETAIL_MAX)) return notRun(TOO_LONG_FOR_CARD);
   ctx.turn.writes++;
   if (risk === "auto") ctx.turn.autoWrites++;
 
@@ -438,9 +459,7 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts:
   });
   if (!stored) return notRun("that change is too large for AxIS to file or record. Nothing was changed; tell the counselor to make it in the app.");
   // A card the counselor confirms must show all of it (a message's whole body): never a trimmed one.
-  if (risk === "confirm" && stored.details !== details) {
-    return notRun("it is too long to show whole on a confirmation card. Shorten it (a shorter message, fewer details) and file it again.");
-  }
+  if (risk === "confirm" && stored.details !== details) return notRun(TOO_LONG_FOR_CARD);
   const show = (status: OperationStatus, undoable: boolean, message: string | null = null): OperationPayload => ({
     op: stored.op, area: stored.area, summary, details: stored.details, warning, reason, status, undoable, message,
     ...(stored.rows ? { rows: stored.rows } : {}),
@@ -459,7 +478,7 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts:
     }
     opts.onFiled?.(rec.id);
     if (!ctx.signal.aborted) ctx.onOperation({ id: rec.id, type: "operation", studentId, payload: show("pending", false) });
-    const why = reason === "outside-content" ? " (it would normally run at once, but this turn read outside content)" : reason === "many-changes" ? " (many changes in one message)" : "";
+    const why = !flipped ? "" : reason === "outside-content" ? " (it would normally run at once, but this turn read outside content)" : " (many changes in one message)";
     return {
       content: `Filed for the counselor's confirmation${why}: ${wrapUntrusted("action", summary)}. Card ${rec.id}. It has NOT happened yet; say it is waiting for them to confirm.`,
       fresh: true,
@@ -519,7 +538,8 @@ export async function confirmOperation(
   // A card with rows: only the rows the counselor kept run, and the result must still be a valid input.
   if (opts.keep && def.select) {
     const kept = def.input.safeParse(safelySync(() => def.select!(input, opts.keep!)));
-    if (!kept.success) return { status: "failed", result: { ok: false, message: "None of the chosen rows are on this card." } };
+    // The client's mistake, not the card's: refused before anything runs, and the route hands the claim back.
+    if (!kept.success) throw new HttpError(400, "None of the chosen rows are on this card.");
     input = kept.data as Record<string, unknown>;
   }
   try {

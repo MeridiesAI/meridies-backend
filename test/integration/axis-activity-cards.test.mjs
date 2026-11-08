@@ -35,6 +35,10 @@ check("the card lists as confirmed", listed.find((a) => a.id === first)?.status 
 
 const bad = await call(c.token, "POST", `/axis/actions/${await card([{ key: "r1", organization: "X" }])}/confirm`, { rows: ["r99"] });
 check("a malformed row key is a 400", bad.status === 400, `status ${bad.status}`);
+const lone = await card([{ key: "r1", organization: "Lone Club" }]);
+const absent = await call(c.token, "POST", `/axis/actions/${lone}/confirm`, { rows: ["r5"] });
+check("a row the card doesn't have is a 400", absent.status === 400, `status ${absent.status} ${JSON.stringify(absent.body)}`);
+check("…and the card is still pending", (await sql(`select status from public.axis_actions where id = '${lone}'`)) === "pending");
 
 // ---- Undo keeps a row edited since it was saved, and names it -----------------------------------------
 const second = await card([{ key: "r1", organization: "Chess Club" }, { key: "r2", organization: "Art Club" }]);
