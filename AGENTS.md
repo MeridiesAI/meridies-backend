@@ -805,8 +805,13 @@ forget it.
   max days ahead, buffer, cancel cutoff, `students_can_reschedule`) and `booking_meeting_types` (15-180 minutes; modes
   google-meet, teams, in-person, phone) are owner-only like `calendar_event_types`; a student reads them only through
   `/me/booking`, where the counselor is the caller's own `profiles.counselor_id`, approved (fail closed) with booking
-  on; an unapproved counselor and booking off both answer `reason: "not_available"` (slots: 404
-  `booking_not_available`). Slots are the weekly hours in the counselor's zone minus their scheduled meetings (no end
+  on. `GET /me/booking/types` says why not (`available: false`, `reason`): `counselor_unavailable` (no counselor,
+  or not approved: nothing else is said), `not_set_up` (no settings row), `paused` (`enabled` off), `no_types` (on,
+  no active type); and, whenever an approved counselor has a settings row (paused or not), their two change rules
+  `cutoffHours` and `studentsCanChange`, so the app can say why Reschedule / Cancel are off before a try. Nothing
+  else about the counselor (no hours, notice, buffer, days ahead or calendar state; the zone only when available;
+  `bookingTypesAnswer`). These replaced the earlier `no_counselor` / `not_available`, which no client branched on.
+  The other routes answer 404 `booking_not_available`. Slots are the weekly hours in the counselor's zone minus their scheduled meetings (no end
   = an hour) and their connected calendar's busy time, each widened by the buffer; at most 14 days a request, clamped to
   max days ahead; only free times are returned. **Busy time** uses only scopes already granted: Google `events.list` on
   `primary` (skips transparent and cancelled; all-day = the counselor's whole local day), Graph `GET /me/calendarView`
