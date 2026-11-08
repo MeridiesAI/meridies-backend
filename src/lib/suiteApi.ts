@@ -11,7 +11,9 @@
 
 import { randomUUID } from "node:crypto";
 import { badRequest, conflict, HttpError, unavailable } from "./errors.js";
+import { wallTimeToInstant, type BusyInterval } from "./bookingSlots.js";
 import { detectContentType } from "./fileSniff.js";
+import { enforceRateLimit } from "./limits.js";
 import {
   accessTokenFor,
   GOOGLE_SCOPE,
@@ -721,6 +723,197 @@ export async function deleteCalendarEvent(
   if (!res.ok && res.status !== 404 && res.status !== 410) {
     throw providerFailure(provider, res, log, "calendar event");
   }
+}
+
+// ---- Busy time (student booking) ----------------------------------------------
+
+/**
+ * The counselor's busy time between two instants, from their own connected
+ * calendar, for student booking (lib/bookingSlots.ts). Only the scopes the
+ * counselor already granted: Google `events.list` on `primary` (calendar.events
+ * allows it), Microsoft `GET /me/calendarView` (Calendars.ReadWrite). Never
+ * `freebusy.query` (needs calendar.freebusy or readonly: re-consent and Google
+ * verification) or `getSchedule` (not available to personal Microsoft
+ * accounts). Nothing about an event is kept but its start and end.
+ *
+ * Skipped: Google events marked free (`transparency: transparent`) or
+ * cancelled; Outlook events shown as free or cancelled. An all-day event is
+ * busy for that whole day in the counselor's booking zone.
+ *
+ * A counselor with no grant for `provider`, or a grant without Calendar, has no
+ * busy time there ([]). Any other failure throws (a 503 or the refresh's 409),
+ * so slots are never offered over busy time we couldn't read. Answers are
+ * cached for 60 s per counselor, provider, window and zone; a miss is rate
+ * limited per counselor (`busy:<counselorId>`).
+ */
+export type { BusyInterval };
+
+type BusyScope = { name: string; what: string; code?: string };
+const BUSY_GOOGLE: BusyScope = { name: GOOGLE_CALENDAR_SCOPE, what: "reading your calendar", code: "busy_scope_missing" };
+const BUSY_MICROSOFT: BusyScope = { name: MS_CALENDAR_SCOPE, what: "reading your calendar", code: "busy_scope_missing" };
+const BUSY_TTL_MS = 60_000;
+const BUSY_CACHE_MAX = 500;
+const BUSY_MAX_PAGES = 5;
+export const BUSY_RATE_LIMIT = { max: 30, windowSeconds: 60 };
+
+const busyCache = new Map<string, { at: number; value: BusyInterval[] }>();
+
+/** Test seam: the provider request (default: `call`), the clock, and a cache reset. */
+export const __busy = {
+  request: async (ownerId: string, provider: SuiteProvider, url: string, init: RequestInit, scope: BusyScope): Promise<Response> =>
+    (await call(ownerId, provider, url, init, scope)).res,
+  now: () => Date.now(),
+  reset() {
+    busyCache.clear();
+    __busy.request = async (ownerId, provider, url, init, scope) => (await call(ownerId, provider, url, init, scope)).res;
+    __busy.now = () => Date.now();
+  },
+};
+
+function notConnected(e: unknown, provider: SuiteProvider): boolean {
+  return (
+    e instanceof HttpError &&
+    e.statusCode === 409 &&
+    (e.code === `${provider}_disconnected` || e.code === "busy_scope_missing")
+  );
+}
+
+function isoOrNull(v: unknown, assumeUtc = false): string | null {
+  if (typeof v !== "string" || !v) return null;
+  const s = assumeUtc && !/(Z|[+-]\d\d:?\d\d)$/.test(v) ? `${v}Z` : v;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+function wholeLocalDays(startDate: string, endDate: string, timeZone: string): BusyInterval | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return null;
+  const start = wallTimeToInstant(startDate, "00:00", timeZone);
+  const end = wallTimeToInstant(endDate, "00:00", timeZone);
+  return end > start ? { start: new Date(start).toISOString(), end: new Date(end).toISOString() } : null;
+}
+
+type GoogleBusyEvent = {
+  status?: string;
+  transparency?: string;
+  start?: { dateTime?: string; date?: string };
+  end?: { dateTime?: string; date?: string };
+};
+type GraphBusyEvent = {
+  showAs?: string;
+  isCancelled?: boolean;
+  isAllDay?: boolean;
+  start?: { dateTime?: string };
+  end?: { dateTime?: string };
+};
+
+async function googleBusy(ownerId: string, from: string, to: string, timeZone: string, log: Log): Promise<BusyInterval[]> {
+  const out: BusyInterval[] = [];
+  let pageToken: string | null = null;
+  for (let page = 0; page < BUSY_MAX_PAGES; page++) {
+    const params = new URLSearchParams({
+      timeMin: from,
+      timeMax: to,
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: "250",
+      fields: "items(status,transparency,start,end),nextPageToken",
+    });
+    if (pageToken) params.set("pageToken", pageToken);
+    const res = await __busy.request(
+      ownerId,
+      "google",
+      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params.toString()}`,
+      {},
+      BUSY_GOOGLE
+    );
+    if (!res.ok) throw providerFailure("google", res, log, "calendar");
+    const body = (await res.json()) as { items?: GoogleBusyEvent[]; nextPageToken?: string };
+    for (const ev of body.items ?? []) {
+      if (ev.status === "cancelled" || ev.transparency === "transparent") continue;
+      if (ev.start?.date && ev.end?.date) {
+        const day = wholeLocalDays(ev.start.date, ev.end.date, timeZone);
+        if (day) out.push(day);
+        continue;
+      }
+      const start = isoOrNull(ev.start?.dateTime);
+      const end = isoOrNull(ev.end?.dateTime);
+      if (start && end && end > start) out.push({ start, end });
+    }
+    pageToken = typeof body.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : null;
+    if (!pageToken) break;
+  }
+  return out;
+}
+
+async function microsoftBusy(ownerId: string, from: string, to: string, timeZone: string, log: Log): Promise<BusyInterval[]> {
+  const out: BusyInterval[] = [];
+  const params = new URLSearchParams({
+    startDateTime: from,
+    endDateTime: to,
+    $select: "showAs,isCancelled,isAllDay,start,end",
+    $top: "250",
+  });
+  let url: string | null = `https://graph.microsoft.com/v1.0/me/calendarView?${params.toString()}`;
+  for (let page = 0; page < BUSY_MAX_PAGES && url; page++) {
+    const res = await __busy.request(ownerId, "microsoft", url, { headers: { Prefer: 'outlook.timezone="UTC"' } }, BUSY_MICROSOFT);
+    if (!res.ok) throw providerFailure("microsoft", res, log, "calendar");
+    const body = (await res.json()) as { value?: GraphBusyEvent[]; "@odata.nextLink"?: string };
+    for (const ev of body.value ?? []) {
+      if (ev.isCancelled || ev.showAs === "free") continue;
+      if (ev.isAllDay) {
+        const day = wholeLocalDays(String(ev.start?.dateTime ?? "").slice(0, 10), String(ev.end?.dateTime ?? "").slice(0, 10), timeZone);
+        if (day) out.push(day);
+        continue;
+      }
+      const start = isoOrNull(ev.start?.dateTime, true);
+      const end = isoOrNull(ev.end?.dateTime, true);
+      if (start && end && end > start) out.push({ start, end });
+    }
+    const next = body["@odata.nextLink"];
+    // Only ever back to Graph itself: the token goes wherever this points.
+    url = typeof next === "string" && next.startsWith("https://graph.microsoft.com/") ? next : null;
+  }
+  return out;
+}
+
+export async function listBusy(
+  ownerId: string,
+  provider: SuiteProvider,
+  from: string,
+  to: string,
+  timeZone: string,
+  log: Log
+): Promise<BusyInterval[]> {
+  const key = `${ownerId}|${provider}|${from}|${to}|${timeZone}`;
+  const now = __busy.now();
+  const hit = busyCache.get(key);
+  if (hit && now - hit.at < BUSY_TTL_MS) return hit.value;
+
+  await enforceRateLimit(
+    `busy:${ownerId}`,
+    BUSY_RATE_LIMIT.max,
+    BUSY_RATE_LIMIT.windowSeconds,
+    "Too many availability checks for this counselor. Try again in a minute."
+  );
+
+  let value: BusyInterval[];
+  try {
+    value =
+      provider === "google"
+        ? await googleBusy(ownerId, from, to, timeZone, log)
+        : await microsoftBusy(ownerId, from, to, timeZone, log);
+  } catch (e) {
+    if (notConnected(e, provider)) value = [];
+    else throw e;
+  }
+  value.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+
+  if (busyCache.size >= BUSY_CACHE_MAX) {
+    for (const [k, v] of busyCache) if (now - v.at >= BUSY_TTL_MS) busyCache.delete(k);
+    if (busyCache.size >= BUSY_CACHE_MAX) busyCache.clear();
+  }
+  busyCache.set(key, { at: now, value });
+  return value;
 }
 
 // ---- OneDrive picker ------------------------------------------------------------------
