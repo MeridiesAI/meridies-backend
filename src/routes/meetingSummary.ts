@@ -1,6 +1,7 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { hasAnthropic } from "../env.js";
 import { FAST_MODEL, runStructured } from "../lib/anthropic.js";
+import { estimatePromptTokens, reserve, settle } from "../lib/aiBudget.js";
 import { readTranscriptFile } from "../lib/documentText.js";
 import { HttpError, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -15,6 +16,7 @@ import {
   summarizeTranscript,
   summaryPrompt,
   type SummaryCall,
+  type SummaryStep,
 } from "../lib/meetingSummary.js";
 import { assertAiAllowed } from "../lib/practiceSettings.js";
 import { prepareTranscript, transcriptTooLong } from "../lib/transcript.js";
@@ -24,6 +26,28 @@ import { prepareTranscript, transcriptTooLong } from "../lib/transcript.js";
  * 600,000 characters of pasted text, or a 2 MB file. This route only.
  */
 const BODY_LIMIT = 3 * 1024 * 1024;
+
+/**
+ * The test double stands in for the model call only. The AI budget gate still runs around it, as runStructured
+ * does (reserve, then settle as unused: no model was reached), so the caps and the ceiling bite the same way.
+ */
+async function budgetedFake(request: FastifyRequest, step: SummaryStep): ReturnType<SummaryCall> {
+  const hold = await reserve(
+    { userId: request.auth.userId },
+    {
+      model: FAST_MODEL,
+      maxOutputTokens: step.maxTokens,
+      promptTokens: estimatePromptTokens({ system: step.system, messages: [{ role: "user", content: step.prompt }] }),
+      module: "meeting-summary",
+    },
+    request.log
+  );
+  try {
+    return await fakeSummaryCall(step);
+  } finally {
+    await settle(hold, "unused", request.log);
+  }
+}
 
 /**
  * POST /ai/meeting-summary: a draft only. It reads the text in the request and
@@ -53,7 +77,7 @@ export default async function meetingSummaryRoutes(app: FastifyInstance) {
       if (b.kind === "notes") {
         if (meetingSummaryFakeOn()) {
           await assertAiAllowed(request, "meeting-summary");
-          const draft = await fakeSummaryCall({
+          const draft = await budgetedFake(request, {
             stage: "single",
             index: 1,
             total: 1,
@@ -103,7 +127,7 @@ export default async function meetingSummaryRoutes(app: FastifyInstance) {
       await enforceRateLimit(`ai:meeting-transcript:${request.auth.userId}`, 20, 3600, "That's a lot of transcripts in an hour. Give it a little while.");
 
       const call: SummaryCall = fake
-        ? fakeSummaryCall
+        ? (step) => budgetedFake(request, step)
         : (step) =>
             runStructured({
               request,
