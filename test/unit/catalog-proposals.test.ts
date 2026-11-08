@@ -527,3 +527,37 @@ test("a subpage that redirects off the school's domain is dropped, and so is any
   assert.equal(rows.length, 0);
   assert.ok(r.droppedOffDomain >= 1);
 });
+
+// ---- Fix round 2: negations scoped to what they negate ---------------------------------------------------
+
+test("reviewer probes: a negated requirement or send is never kept as official-only or score-send", () => {
+  for (const q of [
+    "Official test scores are not required for admission.",
+    "Official score reports are not required until you enroll.",
+    "Applicants may self-report their scores, and we do not require official score reports until enrollment.",
+    "Self-reported scores are not accepted, and official scores are not required until you enroll.",
+  ]) {
+    assert.equal(flag("testReporting", "official-only", q), "invalid", q);
+  }
+  for (const q of [
+    "You do not need to send your scores to us.",
+    "You may self-report your scores; you do not need to send official scores until you enroll.",
+    "We will not accept scores sent by applicants.",
+  ]) {
+    assert.equal(flag("testReporting", "score-send", q), "invalid", q);
+  }
+});
+
+test("reviewer probes: a bare 'no' negates the personal statement", () => {
+  for (const q of ["There is no personal statement at this school.", "No personal statement is required for admission."]) {
+    assert.equal(flag("personalStatementRead", true, q), "invalid", q);
+  }
+});
+
+test("plain statements of each value are still kept", () => {
+  assert.equal(flag("testReporting", "official-only", "Self-reported scores are not accepted; official score reports must come directly from the testing agency."), "kept");
+  assert.equal(flag("testReporting", "self-report", "We accept self-reported test scores."), "kept");
+  assert.equal(flag("testReporting", "score-send", "Applicants must send official scores from the testing agency."), "kept");
+  assert.equal(flag("personalStatementRead", true, "We read the personal statement as part of every application."), "kept");
+  assert.equal(flag("personalStatementRead", false, "We do not read the personal statement."), "kept");
+});

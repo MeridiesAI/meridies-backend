@@ -185,14 +185,37 @@ function pageKey(url: string): string | null {
  * the value, in the conservative direction: a quote that doesn't plainly say it is dropped (and counted).
  */
 const NEGATION = /(?<![a-z])(?:not|never|no longer|without|cannot|neither|nor)(?![a-z])|n't(?![a-z])/;
+/** For the statement flag a bare "no" negates too: "There is no personal statement", "No personal statement is required". */
+const NEGATION_OR_NO = new RegExp(`${NEGATION.source}|(?<![a-z])no(?![a-z])`);
 const SELF_REPORT = /self[- ]?report/;
+/**
+ * A self-report mention that is itself refused, the negation next to it in the same clause: before it, at most three
+ * words away ("we do not accept self-reported scores"), or after it as the clause's verb ("self-reported scores are
+ * not accepted"). A negation elsewhere in the quote ("self-report ..., and we do not require official reports")
+ * doesn't refuse self-reporting.
+ */
+const SELF_REFUSED =
+  /(?<![a-z])(?:not|never|cannot|no longer|neither|nor|without)(?: [a-z-]+){0,3} self[- ]?report|n't(?: [a-z-]+){0,3} self[- ]?report|self[- ]?report[a-z]*(?: [a-z-]+){0,2} (?:are|is|will be|will|can|may) (?:not|never)(?![a-z])|self[- ]?report[a-z]*(?: [a-z-]+){0,2} (?:aren't|isn't|won't|cannot|can't)/;
 const STATEMENT = /personal statement|common app(?:lication)? essay|personal essay/;
 const OFFICIAL_REQUIRED =
   /(?:must|required|requires|require|only)[^.;]*(?:directly from (?:the )?testing agenc|from (?:the )?testing agenc|official (?:test )?scores?|official (?:score )?reports?)|(?:directly from (?:the )?testing agenc|official (?:test )?scores?|official (?:score )?reports?)[^.;]*(?:must|required|requires|only)/;
 const SCORE_SEND = /(?:send|sent|submit)[a-z]*(?: [a-z]+){0,3} scores?|scores?(?: [a-z]+){0,3} (?:sent|submitted)(?![a-z])/;
+/** "official ... not required", "don't require official ...": official scores are NOT what is required. */
+const OFFICIAL_NOT_REQUIRED = /official[^.;]*(?:not|n't|never)(?: be)? (?:required|needed|necessary)|(?:not|n't|never)(?: [a-z-]+){0,2} (?:require|need)[a-z]*(?: [a-z-]+){0,2} official/;
 const TEST_FREE = /test[- ](?:blind|free)/;
 const TEST_FREE_NEGATED = /(?:not|n't|no longer|never)(?: [a-z]+)? test[- ](?:blind|free)/;
 
+/**
+ * Whether a quote says what the test-reporting value claims (exported for tests). Conservative: when in doubt the
+ * candidate is dropped and counted; a valid fact lost is acceptable, a mislabelled one is not.
+ *   self-report     a self-report mention and no negation anywhere in the quote.
+ *   official-only   a self-report mention refused in its own clause (SELF_REFUSED) and nothing saying official scores
+ *                   aren't required, or, with no self-report mention
+ *                   at all, official scores/reports required (or "directly from the testing agency") and no negation
+ *                   anywhere in the quote.
+ *   score-send      sending wording, no self-report mention and no negation anywhere in the quote.
+ *   not-applicable  "test-blind"/"test-free", not itself negated.
+ */
 export function reportingFits(value: TestReporting, quote: string): boolean {
   const q = normalizeForQuote(quote);
   const neg = NEGATION.test(q);
@@ -201,20 +224,18 @@ export function reportingFits(value: TestReporting, quote: string): boolean {
     case "self-report":
       return self && !neg;
     case "official-only":
-      // "We do not accept self-reported scores", or official scores required with no self-report in sight.
-      return (self && neg) || (!self && OFFICIAL_REQUIRED.test(q));
+      return self ? SELF_REFUSED.test(q) && !OFFICIAL_NOT_REQUIRED.test(q) : OFFICIAL_REQUIRED.test(q) && !neg;
     case "score-send":
-      // Sending wording, and self-report is not offered (a mention must be a refusal).
-      return SCORE_SEND.test(q) && (!self || neg);
+      return SCORE_SEND.test(q) && !self && !neg;
     case "not-applicable":
       return TEST_FREE.test(q) && !TEST_FREE_NEGATED.test(q);
   }
 }
 
-/** true: the statement is read (no negation); false: a negation says it isn't. */
+/** true: the statement is read (no negation, a bare "no" included); false: a negation says it isn't. */
 export function statementFits(value: boolean, quote: string): boolean {
   const q = normalizeForQuote(quote);
-  return STATEMENT.test(q) && NEGATION.test(q) === !value;
+  return STATEMENT.test(q) && NEGATION_OR_NO.test(q) === !value;
 }
 
 /**

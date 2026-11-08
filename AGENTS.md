@@ -1350,10 +1350,14 @@ supplement prompts (the cycle turns over August 1). `groundCandidates` keeps a c
 that was read and its quote (12+ characters) is on THAT page after folding; a prompt must be on the page and its
 word limit in its quote, a label the page doesn't use becomes "Prompt N", a value its quote doesn't support and a
 prompt for another stated cycle are dropped; everything dropped is counted. A flag's value must be what its quote
-says (`statementFits` / `reportingFits`, conservative): `false` needs a negation (not, n't, no longer, never,
-without), `true` its absence; `self-report` an un-negated self-report mention; `official-only` a refused self-report
-or official scores required with no self-report; `score-send` sending wording; `not-applicable` an un-negated
-test-blind/test-free. **Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
+says (`statementFits` / `reportingFits`, conservative: when in doubt it is dropped and counted): the personal
+statement flag needs the statement named, and `false` a negation (not, n't, no, no longer, never, without, cannot,
+neither, nor) while `true` needs none; `self-report` a self-report mention and no negation anywhere in the quote;
+`official-only` either a self-report mention refused in its own clause (a negation at most three words before it,
+"we do not accept self-reported", or as its verb after it, "self-reported scores are not accepted") with nothing
+saying official scores aren't required, or, with no self-report mention, official scores or reports required (or
+"directly from the testing agency") and no negation anywhere in the quote; `score-send` sending wording, no
+self-report mention and no negation anywhere; `not-applicable` "test-blind"/"test-free" not itself negated. **Supplement slots are ours, never the model's** (0-based, like the curated loader): a prompt
 already on file in any slot (matched by its folded words) is unchanged, one already pending is a duplicate, and each
 new prompt takes the next free `sort_order` after every curated row and pending proposal, in the page's order; its
 `fact_key` is the prompt and word limit, not the slot. Survivors are PENDING `catalog_change_proposals` rows (`proposed_by` null, so only editors read them;
