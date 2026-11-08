@@ -17,7 +17,8 @@
 import { forgetUser } from "../lib/aiBudget.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, conflict, fromPostgrest, unavailable } from "../lib/errors.js";
+import { badRequest, conflict, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
+import { profileKeepsSignedAgreements, SIGNED_AGREEMENT_ACCOUNT_MESSAGE } from "../lib/agreements.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { forgetAxisTrash } from "../lib/axisTrash.js";
 import { limit } from "../lib/limits.js";
@@ -149,6 +150,15 @@ export default async function accountRoutes(app: FastifyInstance) {
       }
       const { data: firm } = await svc.from("firms").select("id").eq("owner_id", me).maybeSingle();
       if (firm) throw conflict("You own a firm. Hand ownership to someone else before deleting your account.");
+      // An accepted agreement is a permanent record (20261111000010); its acceptance would refuse the cascade.
+      let keeps: boolean;
+      try {
+        keeps = await profileKeepsSignedAgreements(svc, me);
+      } catch (err) {
+        request.log.error({ err }, "account delete: could not check for signed agreements");
+        throw unavailable("Couldn't delete the account right now. Try again shortly.");
+      }
+      if (keeps) throw new HttpError(409, SIGNED_AGREEMENT_ACCOUNT_MESSAGE, "signed_agreements_kept");
     }
 
     // The AxIS trash it made and the trash about it, with the files it kept (the cascade can't reach a row that

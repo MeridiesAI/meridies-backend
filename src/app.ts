@@ -32,6 +32,7 @@ import collegeIntelRoutes from "./routes/collegeIntel.js";
 import webhookRoutes from "./routes/webhooks.js";
 import stripeWebhookRoutes from "./routes/stripeWebhook.js";
 import payRoutes from "./routes/pay.js";
+import agreementRoutes from "./routes/agreements.js";
 import resourceRoutes from "./routes/resources.js";
 import searchRoutes from "./routes/search.js";
 import settingsRoutes from "./routes/settings.js";
@@ -73,6 +74,7 @@ import eventRoutes from "./routes/events.js";
 // v10 sync imports: management-pipeline
 import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
+import taskSetRoutes from "./routes/taskSets.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
@@ -80,6 +82,7 @@ import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
+import calendarIcalRoutes from "./routes/calendarIcal.js";
 // SV Demo v2: the student view
 import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
@@ -232,10 +235,14 @@ export function buildApp() {
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
   // Absolute paths (/pay/:token): the public pay link page.
   app.register(payRoutes);
+  app.register(agreementRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
+  app.register(taskSetRoutes, { prefix: "/task-sets" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
+  // Absolute paths (/calendar/ical, /calendar/ical/:token.ics): no prefix.
+  app.register(calendarIcalRoutes);
   // SV Demo v2 routes: the student view. profileUpdateRoutes sits at the root
   // because it also serves the counselor's /students/:id/profile-updates.
   app.register(meRoutes, { prefix: "/me" });
