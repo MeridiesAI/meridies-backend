@@ -78,7 +78,8 @@ alter table public.scholarships add constraint scholarships_counselor_bounds_che
 -- A student's tracked award outlives the row it came from. scholarship_matches keeps its own copy of name, url,
 -- amount and deadline (a hand-added row already has no scholarship_id), so when a counselor's account (and with it
 -- their rows) is deleted, the student's match, a won award included, stays and only loses the link. It was ON DELETE
--- CASCADE (20260828000007). Neither table is captured by the AxIS trash.
+-- CASCADE (20260828000007). scholarships is not captured by the AxIS trash, and scholarship_matches' trash trigger
+-- watches deadline_id only, so this SET NULL does not fire it.
 alter table public.scholarship_matches drop constraint if exists scholarship_matches_scholarship_id_fkey;
 alter table public.scholarship_matches add constraint scholarship_matches_scholarship_id_fkey
   foreign key (scholarship_id) references public.scholarships(id) on delete set null;
