@@ -3173,6 +3173,11 @@ step 1's and is never gated.
   invitation's grad year only); template management beyond list and delete;
   a database-held pilot list. Header presets and source-system detection are
   deliberately conservative until real exports arrive (spec §13).
+- **Vendor presets are unverified guesses** (`VENDOR_PRESETS`, `lib/imports/presets.ts`: College Planner Pro and Counselmore, one
+  shared list; no real export from either tool exists). A file naming one in its headers (read per file, before mapping) is mapped
+  with that table first, only spellings `PRESETS` lacks, as `source: "preset-unverified"` ("Guessed from <tool>'s usual headers:
+  check"); all else maps as before. Never a bare GPA/Grade/School, a test date, an ID or a parent column (no field holds one).
+  Re-derive the table from a real export when one arrives; the fixtures are labelled SYNTHETIC.
 
 ## Safe coding standards
 
