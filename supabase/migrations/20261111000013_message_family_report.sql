@@ -12,7 +12,7 @@
 -- A trigger keeps it pointing at a report about the same student, so a row can't name another student's report.
 -- ON DELETE SET NULL: deleting a report never removes the record of a message that went out.
 --
--- Deploy order: before the code that writes it. Without this file approve-send answers 503
+-- Deploy order: after 20261108000003 (the AxIS trash) and before the code that writes it. Without this file approve-send answers 503
 -- `family_report_send_unavailable` (it refuses rather than send without the receives_reports re-check) and the
 -- rest of the API is unchanged; with it and the previous build, nothing writes the column. Additive only; not in
 -- REQUIRED_SCHEMA.
@@ -49,3 +49,16 @@ drop trigger if exists student_messages_report_same_student on public.student_me
 create trigger student_messages_report_same_student
   before insert or update of family_report_id, student_id on public.student_messages
   for each row execute function private.student_messages_report_same_student();
+
+-- AxIS keeps a deleted family report restorable (20261108000003): a row whose key is set null by a covered delete has
+-- to be kept too, or Restore would bring the report back and leave its messages forgetting which report they carried
+-- (and so skip the receives_reports re-check). student_messages is never deleted by AxIS, so it gets only the
+-- set-null trigger, like message_deliveries (whose family_report_id is already covered) and email_blasts. Its rule is
+-- the student's, like message_deliveries'. The whole-branch check in test/integration/axis-trash-db.test.mjs ("every
+-- child row a covered delete reaches is kept") names a missing one.
+
+insert into private.axis_trash_rules (table_name, rule, columns, student_col) values
+  ('student_messages', 'student', '{student_id}', 'student_id')
+on conflict (table_name) do nothing;
+
+select private.attach_axis_trash('public.student_messages', '{family_report_id}', false);

@@ -1,7 +1,8 @@
 // The weekly family digest (Task 8b): the draft job on the dispatch cron, the review queue, and approve-and-send.
 // Needs 20261111000003 applied and an API with the service role key and CRON_SECRET; no email/SMS provider
 // (deliveries record without sending). Fixtures are namespaced `digest8b-` and removed at the end.
-import { API, CRON_SECRET, call, check, sql } from "./harness.mjs";
+import { randomUUID } from "node:crypto";
+import { API, CRON_SECRET, call, check, rest, sql } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 import { user as baseUser } from "./harness.mjs";
 
@@ -260,6 +261,21 @@ const rep = await reportOf(ana);
   const adhoc = await sql(`with r as (insert into public.family_reports (student_id, counselor_id, title, kind, body, status) values ('${delMe.id}', '${A.id}', 'Ad hoc', 'ad-hoc', 'Body', 'draft') returning id) select id from r`);
   const r2 = await call(A.token, "DELETE", `/reports/family/${adhoc}`);
   check("another kind of report is still deleted", r2.status === 200 && (await count(`select count(*) from public.family_reports where id = '${adhoc}'`)) === 0);
+}
+
+// ---- An AxIS delete of a report keeps its messages' link, and Restore puts it back ---------------------------------------
+{
+  const rid = await sql(`with r as (insert into public.family_reports (student_id, counselor_id, title, kind, body, status) values ('${delMe.id}', '${A.id}', 'Trash me', 'ad-hoc', 'Body', 'sent') returning id) select id from r`);
+  const mid = await sql(`with m as (insert into public.student_messages (student_id, counselor_id, audience, channel, kind, recipients, subject, body, status, family_report_id)
+    values ('${delMe.id}', '${A.id}', 'parent', 'email', 'message', '[{"kind":"guardian","id":"${randomUUID()}","name":"P","email":"p@test.local","phone":null}]', 'S', 'B', 'cancelled', '${rid}') returning id) select id from m`);
+  const action = randomUUID();
+  const del = await rest(A.token, "DELETE", `/rest/v1/family_reports?id=eq.${rid}`, undefined, { "x-meridies-axis-action": action, Prefer: "return=representation" });
+  check("(an AxIS-marked delete of a report goes through)", del.status === 200, `${del.status} ${JSON.stringify(del.body).slice(0, 200)}`);
+  const kept = await sql(`select coalesce(string_agg(table_name || ':' || kind, ','), '') from private.axis_trash where action_id = '${action}'`);
+  check("the message whose report link is set null is kept in the trash", kept.includes("student_messages:"), kept);
+  const back = await rest(A.token, "POST", "/rest/v1/rpc/axis_trash_restore", { p_action: action });
+  const linked = await sql(`select coalesce(family_report_id::text, 'null') from public.student_messages where id = '${mid}'`);
+  check("...and Restore links it to the report again", back.body?.ok === true && linked === rid, `${JSON.stringify(back.body)} ${linked}`);
 }
 
 // ---- One student's failure doesn't stop the rest of the roster -------------------------------------------------------------
