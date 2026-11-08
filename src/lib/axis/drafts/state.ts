@@ -69,8 +69,19 @@ export type DraftNote = {
   kind: "filed" | "replaced" | "saved" | "rejected" | "missing" | "failed" | "refused-student" | "refused-unrelated" | "cancelled" | "opened" | "expired";
   key?: string;
   field?: string;
+  /** Why, for the model (or the route's own words, for a refused row). */
   reason?: string;
+  /** Why, for the counselor's status line, when it differs from `reason`. */
+  counselor?: string;
+  /** The row's name when the note was made (its organization, else its position): the row may be gone by the lines. */
+  label?: string;
 };
+
+/** How a row is named in lines: its organization, else its position, else "the new activity". */
+export const rowLabel = (r: Pick<DraftRow, "fields">): string =>
+  (typeof r.fields.organization === "string" && r.fields.organization.trim()) ||
+  (typeof r.fields.position === "string" && r.fields.position.trim()) ||
+  "the new activity";
 
 /** What this turn changed, so a save that lost a race can re-apply exactly that on top of the other turn's write. */
 export type Touched = {
@@ -95,6 +106,14 @@ export type Draft = {
 };
 
 const emptyTouched = (): Touched => ({ header: new Set(), rows: new Map(), closed: false });
+
+/** A conversation with no draft yet (or one whose draft couldn't be read). */
+export const emptyDraft = (ready = true, version: string | null = null): Draft => ({
+  ready, version, header: null, rows: [], notes: [], touched: emptyTouched(), hadHeader: false,
+});
+
+/** The fields this turn set on a row. */
+export const touchedFields = (d: Draft, key: string): Set<ActivityField> => d.touched.rows.get(key)?.fields ?? new Set();
 
 // ---- Readiness ----------------------------------------------------------------------------------------
 
@@ -357,15 +376,15 @@ export async function syncCards(request: FastifyRequest, d: Draft): Promise<void
       else if (mine && mine.ok !== true) {
         const message = typeof mine.message === "string" ? mine.message.slice(0, 300) : "It wasn't saved.";
         setStatus(d, row, "failed", { message });
-        d.notes.push({ kind: "failed", key: row.key, reason: message });
+        d.notes.push({ kind: "failed", key: row.key, reason: message, label: rowLabel(row) });
       } else {
         setStatus(d, row, "saved", typeof mine?.id === "string" ? { activity_id: mine.id } : {});
-        d.notes.push({ kind: "saved", key: row.key });
+        d.notes.push({ kind: "saved", key: row.key, label: rowLabel(row) });
       }
     } else if (a.status === "failed") {
       const message = typeof mine?.message === "string" ? mine.message : typeof result.message === "string" ? result.message : "It wasn't saved.";
       setStatus(d, row, "failed", { message: message.slice(0, 300) });
-      d.notes.push({ kind: "failed", key: row.key, reason: message.slice(0, 300) });
+      d.notes.push({ kind: "failed", key: row.key, reason: message.slice(0, 300), label: rowLabel(row) });
     } else {
       // dismissed, or confirmed and then undone
       setStatus(d, row, "dismissed");

@@ -285,6 +285,13 @@ const ask = (raw: unknown, what: string): Norm<never> => ({ ok: false, problem: 
 
 function normGrades(raw: unknown): Norm<Grade[]> {
   if (Array.isArray(raw) && raw.length === 0) return { ok: true, value: [] };
+  // A list: every item must be a grade, so a bad one is refused rather than dropped.
+  if (Array.isArray(raw) && raw.length > 1) {
+    const each = raw.map((x) => normGrades(x));
+    const bad = each.find((n) => !n.ok);
+    if (bad) return bad;
+    return { ok: true, value: sortGrades(each.flatMap((n) => (n.ok ? n.value : []))) };
+  }
   const text = asText(raw);
   if (text === null) return ask(raw, "isn't a grade (9, 10, 11, 12 or PG)");
   const value = sortGrades(gradeHits(text, true).flatMap((h) => h.value));

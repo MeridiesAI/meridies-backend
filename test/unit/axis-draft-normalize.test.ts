@@ -31,6 +31,7 @@ test("grades: numbers, ordinals, class names, ranges and whole spans", () => {
   const r = normalizeField("grade_levels", "grades 10–12");
   assert.ok(r.ok && r.readAs === "grades 10–12", "a converted value says how it was read");
   assert.match(problem(normalizeField("grade_levels", "13")), /grade/i);
+  assert.match(problem(normalizeField("grade_levels", [11, 13])), /"13" isn't a grade/, "a bad grade in a list is refused, not dropped");
 });
 
 test("timing: summer and breaks are break, school-year words are school, both or all year is year", () => {

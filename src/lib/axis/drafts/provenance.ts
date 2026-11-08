@@ -128,22 +128,26 @@ export function sourcesFor(request: FastifyRequest, conversationId: string, stud
 /** Words that carry no part of a name: the stopwords and the words a request is made of. */
 const INSTRUCTION_WORDS = new Set(["add", "put", "please", "change", "update", "set", "make", "list", "sheet", "row", "activity", "activities", "his", "her", "their", "it"]);
 const isContent = (w: string) => !STOPWORDS.has(w) && !INSTRUCTION_WORDS.has(w);
-const PHRASE_BREAK = /\n|[,;|·.!?:()]|\s[/\-–—]\s/;
+/** Where one phrase ends and the next starts. Captured, so a connector word ("and") stays in the word stream. */
+const PHRASE_BREAK = /(\n|[,;|·.!?:()]|\s[/\-–—&]\s|\sand\s)/i;
 
 /** True when `value` is a whole-word run in `text` covering at least half the content words of the phrase(s) it sits in. */
 export function coversPhrase(value: string, text: string): boolean {
   const want = freeTextKey(value).split(" ").filter(Boolean);
   if (!want.length || !want.some(isContent)) return false;
-  // Words in order, each tagged with its phrase.
+  // Words in order, each tagged with its phrase; a connector between phrases ("and") belongs to none (-1).
   const words: { w: string; phrase: number }[] = [];
+  let phrase = 0;
   text.split(PHRASE_BREAK).forEach((p, i) => {
-    for (const w of freeTextKey(p).split(" ").filter(Boolean)) words.push({ w, phrase: i });
+    const isBreak = i % 2 === 1;
+    for (const w of freeTextKey(p).split(" ").filter(Boolean)) words.push({ w, phrase: isBreak ? -1 : phrase });
+    if (isBreak) phrase++;
   });
   const content = new Map<number, number>();
   for (const x of words) if (isContent(x.w)) content.set(x.phrase, (content.get(x.phrase) ?? 0) + 1);
   for (let i = 0; i + want.length <= words.length; i++) {
     if (!want.every((w, j) => words[i + j]!.w === w)) continue;
-    const phrases = new Set(words.slice(i, i + want.length).map((x) => x.phrase));
+    const phrases = new Set(words.slice(i, i + want.length).map((x) => x.phrase).filter((p) => p >= 0));
     const total = [...phrases].reduce((n, p) => n + (content.get(p) ?? 0), 0);
     if (want.length * 2 >= total) return true;
   }

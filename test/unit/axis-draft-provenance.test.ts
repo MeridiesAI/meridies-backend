@@ -62,6 +62,10 @@ test("a fragment of a longer name doesn't trace; a name inside an instruction do
   assert.equal((await traceValue(a, "organization", "Code Kidds Adventure"))?.label, "your message");
   const b = sources({ messages: ["add Code Club to his activities sheet"] }).set;
   assert.equal((await traceValue(b, "organization", "Code Club"))?.label, "your message");
+  const d = sources({ messages: ["2 week/yr and Debate Club, captain"] }).set;
+  assert.equal((await traceValue(d, "organization", "Debate Club"))?.label, "your message", "'and' between two names starts a new phrase");
+  const e = sources({ messages: ["add Robotics and Coding Club"] }).set;
+  assert.equal((await traceValue(e, "organization", "Robotics and Coding Club"))?.label, "your message", "a name with 'and' in it still traces");
   const c = sources({ messages: ["Code Club / Cofounder/Teacher / Grade 11 Summer / 6hr week, 2 week/yr"] }).set;
   assert.equal((await traceValue(c, "position", "Cofounder/Teacher"))?.label, "your message");
   assert.equal((await traceValue(c, "organization", "Code Club"))?.label, "your message");
