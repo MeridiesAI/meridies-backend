@@ -174,6 +174,39 @@ test("over the user's daily spend cap: 429 with the daily message; another user 
   await reserve({ userId: V }, EST, log);
 });
 
+test("a student's reservation carries the lower daily limits; monthly limits and the company line are unchanged", async () => {
+  const { b, log } = setup();
+  await reserve({ userId: U, role: "student" }, EST, log);
+  const lines = b.reserves[0]!;
+  const by = (subject: string, metric: string) => lines.find((l) => l.subject === subject && l.metric === metric)!;
+  assert.equal(lines.length, 5);
+  assert.equal(by(`user:${U}`, "calls").limit, 40);
+  assert.equal(by(`user:${U}`, "spend_usd").limit, 1);
+  assert.equal(by(`user:${U}`, "output_tokens").limit, 5_000_000);
+  assert.equal(by(`user:${U}`, "input_weighted").limit, 100_000_000);
+  assert.equal(by("company", "spend_usd").limit, 100);
+});
+
+test("a student at $1 of daily spend is refused with the daily message; a counselor with the same spend still passes", async () => {
+  const { b, log } = setup();
+  b.set(`user:${U}`, "spend_usd", "day", "2026-11-02", 1);
+  b.set(`user:${V}`, "spend_usd", "day", "2026-11-02", 1);
+  const err = await refusal(reserve({ userId: U, role: "student" }, EST, log));
+  assert.equal(err.statusCode, 429);
+  assert.match(err.message, DAILY);
+  await reserve({ userId: V }, EST, log);
+  await reserve({ userId: V, role: "counselor" }, EST, log);
+});
+
+test("a student past 40 calls in a day is refused; the 300-call counselor limit is unchanged", async () => {
+  const { b, log } = setup();
+  b.set(`user:${U}`, "calls", "day", "2026-11-02", 40);
+  b.set(`user:${V}`, "calls", "day", "2026-11-02", 40);
+  const err = await refusal(reserve({ userId: U, role: "student" }, EST, log));
+  assert.match(err.message, DAILY);
+  await reserve({ userId: V }, EST, log);
+});
+
 test("over a monthly cap: the monthly message", async () => {
   const { b, log } = setup();
   b.set(`user:${U}`, "output_tokens", "month", "2026-11-01", 4_999_000);
