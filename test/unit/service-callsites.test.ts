@@ -94,6 +94,12 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // routes/branding.ts: inside an approved counselor's own request (authenticate + requireRole("counselor")), after a
+  // firm scope's owner/admin check on their RLS client (a solo counselor's scope is their own id). The service role only
+  // touches the public branding bucket, which has no client write policy, and only under that scope's own folder: it
+  // mints a signed upload URL for a path the API names, reads back an object a save names (only once ownBrandingPath
+  // put it in the caller's folder) and removes one a save replaced, cleared or that wasn't the image it claimed.
+  "routes/branding.ts",
   // lib/driveExport.ts: only the DRIVE_EXPORT_FAKE test double (refused at boot outside development/test) reads the
   // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
   // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.

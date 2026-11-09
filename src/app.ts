@@ -25,6 +25,7 @@ import collegeRoutes from "./routes/colleges.js";
 import deadlineRoutes from "./routes/deadlines.js";
 import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
+import brandingRoutes from "./routes/branding.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
 import accountRoutes from "./routes/account.js";
@@ -185,6 +186,7 @@ export function buildApp() {
   app.register(fileRoutes, { prefix: "/files" });
   app.register(blastRoutes, { prefix: "/blasts" });
   app.register(firmRoutes, { prefix: "/firms" });
+  app.register(brandingRoutes, { prefix: "/branding" });
   app.register(opportunityRoutes, { prefix: "/opportunities" });
   app.register(preferenceRoutes, { prefix: "/preference-cards" });
   app.register(meetingRoutes, { prefix: "/meetings" });

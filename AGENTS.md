@@ -100,6 +100,7 @@ src/
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
+│   ├── branding.ts        # logo/banner/accent: scope, the branding bucket's URL and path rules, image sniffing
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
@@ -142,6 +143,7 @@ src/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
+│   ├── branding.ts        # /branding     logo, banner, accent colour (firm or solo); signed image uploads
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
 │   ├── opportunities.ts, ai.ts, chat.ts
@@ -1279,6 +1281,44 @@ and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) no
 open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
 against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
 
+### Practice branding (`20261111000008`; `lib/branding.ts`, `routes/branding.ts`)
+
+A logo, a banner and an accent colour, persisted (the app kept them in localStorage as data URLs). **Two scopes,
+one shape:** a counselor in a firm reads the firm's (`firms.logo_url`, `banner_url`, `accent_color`,
+`accent_color_source`, which already existed) and only an owner or admin changes it; a solo counselor has their own
+`counselor_branding` row (owner-only RLS both ways, approval gate). `GET /branding` answers `{ scope: "firm" | "solo",
+canEdit, logoUrl, bannerUrl, accentColor, accentColorSource }`; `PUT /branding` takes `{ accentColor?: "#RRGGBB" | null,
+accentColorSource?: "default" | "logo" | "banner" | "manual", logoUrl?: string | null, bannerUrl?: string | null }`
+(strict) and answers the same shape; a colour without a source is `manual`, null is `default` (the rule
+`PATCH /firms/mine` always had: both now call `brandingColumns` / `firmBrandingUpdate` and `assertFirmBrandingEditor`).
+`POST /branding/upload-url` `{ kind: "logo" | "banner", contentType: "image/png" | "image/jpeg" | "image/webp",
+sizeBytes }` (20 an hour) answers `{ bucket, path, token, uploadUrl, publicUrl, expiresIn, maxBytes, contentType }`;
+the client PUTs the bytes to `uploadUrl` (or `uploadToSignedUrl(path, token, file)`), then saves `publicUrl` with PUT.
+**The bucket** `branding` is public-read, PNG/JPEG/WebP only, **never SVG** (a browser runs its script), 4 MB per object
+(a logo is held to 2 MB by the API), and has **no storage.objects policy**: no client writes or lists it. Objects
+are `<firm id | counselor id>/<kind>-<16 hex>.<png|jpg|webp>`, named by the API, and only a signed upload URL the API
+minted with the service role (after the owner/admin check) writes one. **A saved URL** must be exactly this project's
+public URL of such a path in the caller's own folder, of the field's own kind (`ownBrandingPath`: rebuilt and compared
+as a string, so look-alike hosts, ports, credentials, queries, dot segments and encodings fail; plain http only when
+`SUPABASE_URL` is a loopback). Before saving, the object is read back: missing is 400 "hasn't finished uploading",
+over the kind's size or bytes that aren't the image the extension says (`sniffImageType`) are removed and refused. A
+replaced or cleared image is removed, best effort and only from the caller's own folder. `counselor_branding`'s CHECKs
+hold each URL column to its kind in the counselor's own folder; the host is the API's check (the migration can't know
+the project URL). **The folder cleans itself and is capped** (no cron): before minting, `POST /branding/upload-url`
+lists the scope's folder with the service role, removes objects of the API's naming scheme older than two hours
+(`BRANDING_STALE_MS`: a signed upload URL lives two hours, so nothing that old can still be on its way to a save) that
+are not the saved logo or banner (`brandingCleanup`; anything else in the folder is never touched and still counts),
+then answers 429 `branding_folder_full` when 10 objects remain (`BRANDING_FOLDER_MAX`), so unsaved uploads can't
+become free public hosting. A removed object can stay visible for up to an hour through Storage's CDN cache. A
+counselor who joins a firm keeps their unused `counselor_branding` row and its objects, and gets them back if they
+leave. `PATCH /firms/mine` takes https logo and banner URLs only (plain http and data URLs refused); narrowing it to
+the branding bucket's own paths follows with the app slice, so existing firm rows and AxIS's `practice.update` keep
+working until then. **Deploy order:** either; not
+in `REQUIRED_SCHEMA`. Without the file a solo counselor's GET/PUT and every upload answer 503 `branding_unavailable`,
+and firm branding reads and saves as before. **Not verified:** real Supabase Storage on production (signed uploads to a
+bucket with no policy were tested on the local stack only). Known limits: an upload that is never saved stays in the
+bucket until the next upload URL for that folder cleans it; old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
+`test/unit/branding.test.ts`, `test/integration/branding.test.mjs`.
 ### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
 
 **More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
