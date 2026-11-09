@@ -33,17 +33,6 @@ export const MAX_AUTO_WRITES_PER_TURN = 5;
 /** The longest card line. An auto change's line is clipped to it; a confirm card longer than it is refused, never cut. */
 export const DETAIL_MAX = 1600;
 
-/**
- * Cards that always ask (activities) but must still say why when the turn read outside content, so the app's Confirm
- * all skips them (spec 4.11). The same gap for every other always-ask op is the security design's to close.
- */
-const FLAGGED_WHEN_TAINTED: ReadonlySet<string> = new Set([
-  "application.add_activity",
-  "application.update_activity",
-  "application.add_activities",
-  "application.delete_activities",
-]);
-
 /** Shared by every tool call in one turn (the object is passed by reference). */
 export type TurnBudget = {
   /** Changes wait for a click: outside content reached the model this turn, or the turn before. */
@@ -443,8 +432,10 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts:
     reason = "many-changes";
     flipped = true;
   }
-  // A card that always asks (an activity) still says why it is flagged: its values came from outside, or its turn read outside content.
-  if (risk === "confirm" && reason === null && (opts.outside || (ctx.turn.tainted && FLAGGED_WHEN_TAINTED.has(def.name)))) reason = "outside-content";
+  // A card that always asks still says why it is flagged when its values came from outside or its turn read outside
+  // content, so the app's Confirm all leaves it for its own click (security spec 2.1). Every confirm op, not a list: a
+  // card AxIS files after reading a PDF may be what the PDF asked for. A short student field doesn't flag (spec 3).
+  if (risk === "confirm" && reason === null && (opts.outside || ctx.turn.tainted)) reason = "outside-content";
   // A card the counselor confirms must show every line whole: a line that would be cut is refused, never clipped.
   if (risk === "confirm" && rawDetails.some((d) => d.length > DETAIL_MAX)) return notRun(TOO_LONG_FOR_CARD);
   ctx.turn.writes++;

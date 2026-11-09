@@ -2395,7 +2395,10 @@ anyone copying it.
   op with valid input, as the counselor.
 - **Guards in code, not in the prompt.** A turn that read outside content
   turns every auto change into a card, so text someone else wrote can't change
-  anything without a click. Outside content is documents, mail, connected
+  anything without a click, and every card it files (one that always asks too:
+  a delete, an archive, an invitation) carries `reason: "outside-content"`, so
+  the app's Confirm all leaves it for its own click (`axis-ops.test.ts` runs
+  every Confirm-tier op). Outside content is documents, mail, connected
   files, chat attachments, **and any text a student, a family, an import or
   the web wrote**: the record sections on `OUTSIDE_SECTIONS`
   (`lib/context/profiles.ts`: profile fields beyond the name and class,
@@ -2486,7 +2489,8 @@ anyone copying it.
   keep only the ticked rows, and answers each row's new id. Its Undo
   (`application.delete_activities` with `only_unedited`) keeps rows edited since
   they were saved and names them. A card whose values came from a chat file or a
-  student document carries `reason: "outside-content"`, so Confirm all skips it.
+  student document, or that is filed in a turn that read outside content, carries
+  `reason: "outside-content"`, so Confirm all skips it.
 - **Routes and logs.** `POST /application/activities/batch { studentId, rows ≤10 }` answers each row
   (`{ results: [{ ok, id } | { ok: false, message }] }`); `DELETE /application/activities?studentId&ids&onlyUnedited`
   answers `{ deleted, skipped }`. The draft lives in `ai_conversations.state.draft` (header) and `draft_rows`
