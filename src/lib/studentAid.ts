@@ -385,12 +385,19 @@ export type ScholarshipDto = {
   scope: string | null;
   essayRequired: boolean | null;
   sourceUrl: string | null;
+  /** Set on a school's own award (20261111000006); null for the national/state catalog. */
+  collegeId: string | null;
+  /** `counselor`: a counselor typed it in; never curated by Meridies. `catalog`: Meridies' catalog. */
+  source: "catalog" | "counselor";
+  /** True only once an editor stamped source_verified_at. A counselor's row starts unverified. */
+  verified: boolean;
 };
 
 export type ScholarshipMatch = ScholarshipDto & {
   /** The line that says which part of this student's profile it matched. */
   fit: string;
-  matchedOn: "audience" | "major" | "activity" | "axis" | "state" | "gpa" | "grade" | "open";
+  /** `school`: a school's own award, shown because that school is on the student's list. */
+  matchedOn: "audience" | "major" | "activity" | "axis" | "state" | "gpa" | "grade" | "open" | "school";
   recommended: boolean;
   matchId: string | null;
 };
@@ -426,6 +433,9 @@ function toScholarship(r: Row): ScholarshipDto {
     scope: scope ? scope[0].toUpperCase() + scope.slice(1) : null,
     essayRequired: typeof r.essay_required === "boolean" ? r.essay_required : null,
     sourceUrl: s(r.source_url),
+    collegeId: s(r.college_id),
+    source: r.source === "counselor" ? "counselor" : "catalog",
+    verified: s(r.source_verified_at) !== null,
   };
 }
 
@@ -433,6 +443,8 @@ function toScholarship(r: Row): ScholarshipDto {
 export function seniorClassYear(now: Date = new Date()): number {
   return now.getUTCMonth() >= 7 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
 }
+
+export type ScholarshipAttrs = Attrs;
 
 type Attrs = {
   firstName: string;
@@ -587,6 +599,170 @@ export function passesPrefs(dto: Pick<ScholarshipDto, "amountCents" | "essayRequ
   return true;
 }
 
+/**
+ * Which school rows a student's scan may show (20261111000006). `rostered` is the colleges on the student's own
+ * list (college id -> the name on the list). `practice` is the student's counselor and that counselor's firm, from
+ * `scholarship_practice` (which answers only to someone who can view the student); null when it is unknown, and then
+ * no counselor's row is shown at all (fail closed). RLS already limits what the caller reads; this narrows it to the
+ * student's own practice, so a collaborating counselor from elsewhere never sees their own rows on this student, and
+ * one practice's rows never reach another's student.
+ */
+export type SchoolScope = {
+  rostered: Map<string, string>;
+  practice: { counselorId: string | null; firmId: string | null } | null;
+};
+
+const NO_SCHOOL: SchoolScope = { rostered: new Map(), practice: null };
+
+/** Missing objects: before the migration the RPC and columns aren't there. */
+const NOT_APPLIED = new Set(["PGRST202", "PGRST204", "42883", "42703"]);
+
+async function schoolScope(db: SupabaseClient, studentId: string): Promise<SchoolScope> {
+  const [list, practice] = await Promise.all([
+    db.from("student_colleges").select("college_id, name").eq("student_id", studentId).not("college_id", "is", null),
+    db.rpc("scholarship_practice", { p_student: studentId }),
+  ]);
+  if (list.error) throw fromPostgrest(list.error);
+  const rostered = new Map<string, string>();
+  for (const r of (list.data ?? []) as Row[]) rostered.set(String(r.college_id), String(r.name ?? "this school"));
+
+  // An unknown practice shows no counselor's row; the catalog still matches. Before the migration there are no
+  // counselor rows to show, so a missing function is not an error.
+  if (practice.error) {
+    if (!NOT_APPLIED.has(String(practice.error.code))) throw fromPostgrest(practice.error);
+    return { rostered, practice: null };
+  }
+  const p = (practice.data ?? null) as Row | null;
+  return {
+    rostered,
+    practice: p ? { counselorId: s(p.counselorId), firmId: s(p.firmId) } : null,
+  };
+}
+
+/** Whether a row may reach this student: the catalog always; a school's row only for a listed school; a counselor's only from their practice. */
+function schoolRowAllowed(r: Row, scope: SchoolScope): boolean {
+  const owner = s(r.owner_counselor_id);
+  if (owner !== null || r.source === "counselor") {
+    const p = scope.practice;
+    if (!p || owner === null) return false;
+    const firm = s(r.firm_id);
+    if (!(owner === p.counselorId || (firm !== null && firm === p.firmId))) return false;
+  }
+  const college = s(r.college_id);
+  return college === null || scope.rostered.has(college);
+}
+
+/**
+ * The scan's rules over rows already read: eligibility, the counselor's answers, then time. Pure, so the unit
+ * tests hold it. Matches come back recommended first, then soonest deadline; held by deadline.
+ */
+export function classifyScholarships(
+  rows: Row[],
+  attrs: Attrs,
+  ctx: {
+    today: string;
+    prefs: ScholarshipPrefs;
+    wholeCatalog?: boolean;
+    recommended: Map<string, string>;
+    school?: SchoolScope;
+  }
+): { matches: ScholarshipMatch[]; held: HeldScholarship[] } {
+  const scope = ctx.school ?? NO_SCHOOL;
+  const out: ScholarshipMatch[] = [];
+  const held: HeldScholarship[] = [];
+
+  for (const r of rows) {
+    if (!schoolRowAllowed(r, scope)) continue;
+    const dto = toScholarship(r);
+    const fit = matchOne(r, attrs);
+    if (!fit.ok) continue;
+
+    // The counselor's answers (a whole-catalog search applies them itself).
+    if (!ctx.wholeCatalog && !passesPrefs(dto, ctx.prefs)) continue;
+
+    // Time. A listing whose deadline passed is worse than no result.
+    if (dto.deadline && dto.deadline < ctx.today) {
+      held.push({ ...dto, reason: "closed" });
+      continue;
+    }
+    if (dto.opensAt && dto.opensAt > ctx.today) {
+      held.push({ ...dto, reason: "not-open" });
+      continue;
+    }
+
+    const school = dto.collegeId ? scope.rostered.get(dto.collegeId) : undefined;
+    out.push({
+      ...dto,
+      fit: school ? `${school}'s own award, on ${attrs.firstName}'s list.` : fit.fit,
+      matchedOn: school ? "school" : fit.matchedOn,
+      recommended: ctx.recommended.has(dto.id),
+      matchId: ctx.recommended.get(dto.id) ?? null,
+    });
+  }
+
+  // Recommended first, then soonest deadline.
+  out.sort(
+    (x, y) =>
+      Number(y.recommended) - Number(x.recommended) ||
+      (x.deadline ?? "9999").localeCompare(y.deadline ?? "9999")
+  );
+  held.sort((x, y) => (x.deadline ?? "").localeCompare(y.deadline ?? ""));
+  return { matches: out, held };
+}
+
+/**
+ * The national/state catalog: rows with no owner. Read apart from the school rows so a practice's rows can never
+ * crowd the catalog out of the read. Before 20261111000006 there is no owner column, and every row is the catalog.
+ */
+async function readCatalog(db: SupabaseClient): Promise<Row[]> {
+  const scoped = await db
+    .from("scholarships")
+    .select("*")
+    .eq("is_active", true)
+    .is("owner_counselor_id", null)
+    .limit(1000);
+  if (!scoped.error) return (scoped.data ?? []) as Row[];
+  if (!NOT_APPLIED.has(String(scoped.error.code))) throw fromPostgrest(scoped.error);
+  const legacy = await db.from("scholarships").select("*").eq("is_active", true).limit(1000);
+  if (legacy.error) throw fromPostgrest(legacy.error);
+  return (legacy.data ?? []) as Row[];
+}
+
+/** Ids per `in (...)` filter, so a long list stays well inside a URL. */
+const SCHOOL_CHUNK = 100;
+
+/**
+ * A practice's rows for the colleges on the student's list. Nothing to read without a known practice or a listed
+ * college; RLS still applies, and classifyScholarships checks the practice again.
+ */
+async function readSchoolRows(db: SupabaseClient, scope: SchoolScope): Promise<Row[]> {
+  const p = scope.practice;
+  const ids = [...scope.rostered.keys()];
+  if (!p || (!p.counselorId && !p.firmId) || ids.length === 0) return [];
+  const owners = [
+    p.counselorId ? `owner_counselor_id.eq.${p.counselorId}` : null,
+    p.firmId ? `firm_id.eq.${p.firmId}` : null,
+  ].filter(Boolean).join(",");
+  const out: Row[] = [];
+  for (let i = 0; i < ids.length; i += SCHOOL_CHUNK) {
+    const { data, error } = await db
+      .from("scholarships")
+      .select("*")
+      .eq("is_active", true)
+      .not("owner_counselor_id", "is", null)
+      .in("college_id", ids.slice(i, i + SCHOOL_CHUNK))
+      .or(owners)
+      .order("deadline", { ascending: true, nullsFirst: false })
+      .limit(1000);
+    if (error) {
+      if (NOT_APPLIED.has(String(error.code))) return [];
+      throw fromPostgrest(error);
+    }
+    out.push(...((data ?? []) as Row[]));
+  }
+  return out;
+}
+
 export async function scanScholarships(
   db: SupabaseClient,
   studentId: string,
@@ -601,17 +777,18 @@ export async function scanScholarships(
   const prefs = prefsOverride ?? (await loadPrefs(db, studentId));
   const today = todayIso();
 
-  const [catalog, matches, attrs] = await Promise.all([
-    db.from("scholarships").select("*").eq("is_active", true).limit(1000),
+  const [catalog, matches, attrs, school] = await Promise.all([
+    readCatalog(db),
     db
       .from("scholarship_matches")
       .select("id, scholarship_id, status")
       .eq("student_id", studentId)
       .not("scholarship_id", "is", null),
     studentAttrs(db, studentId, prefs),
+    schoolScope(db, studentId),
   ]);
-  if (catalog.error) throw fromPostgrest(catalog.error);
   if (matches.error) throw fromPostgrest(matches.error);
+  const schoolRows = await readSchoolRows(db, school);
 
   const recommended = new Map<string, string>();
   for (const m of (matches.data ?? []) as Row[]) {
@@ -620,42 +797,13 @@ export async function scanScholarships(
     }
   }
 
-  const out: ScholarshipMatch[] = [];
-  const held: HeldScholarship[] = [];
-
-  for (const r of (catalog.data ?? []) as Row[]) {
-    const dto = toScholarship(r);
-    const fit = matchOne(r, attrs);
-    if (!fit.ok) continue;
-
-    // The counselor's answers (a whole-catalog search applies them itself).
-    if (!opts.wholeCatalog && !passesPrefs(dto, prefs)) continue;
-
-    // Time. A listing whose deadline passed is worse than no result.
-    if (dto.deadline && dto.deadline < today) {
-      held.push({ ...dto, reason: "closed" });
-      continue;
-    }
-    if (dto.opensAt && dto.opensAt > today) {
-      held.push({ ...dto, reason: "not-open" });
-      continue;
-    }
-
-    out.push({
-      ...dto,
-      fit: fit.fit,
-      matchedOn: fit.matchedOn,
-      recommended: recommended.has(dto.id),
-      matchId: recommended.get(dto.id) ?? null,
-    });
-  }
-
-  // Recommended first, then soonest deadline.
-  out.sort(
-    (x, y) =>
-      Number(y.recommended) - Number(x.recommended) ||
-      (x.deadline ?? "9999").localeCompare(y.deadline ?? "9999")
-  );
+  const { matches: out, held } = classifyScholarships([...catalog, ...schoolRows], attrs, {
+    today,
+    prefs,
+    wholeCatalog: opts.wholeCatalog,
+    recommended,
+    school,
+  });
 
   const missing: string[] = [];
   if (attrs.gpa === null) missing.push("weighted GPA");
@@ -667,7 +815,7 @@ export async function scanScholarships(
     today,
     prefs,
     matches: opts.wholeCatalog ? out : out.slice(0, prefs.maxApplications),
-    held: held.sort((x, y) => (x.deadline ?? "").localeCompare(y.deadline ?? "")),
+    held,
     missing,
   };
 }

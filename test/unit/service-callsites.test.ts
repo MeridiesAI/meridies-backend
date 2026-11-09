@@ -98,6 +98,44 @@ const REVIEWED = [
   // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
   // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
   "lib/driveExport.ts",
+  // routes/agreements.ts: the public /agree/:token page (nobody signed in). The hashed token decides; it reads only
+  // the agreement that token names, its contact's email, the practice's name and its counselor's email, asks
+  // approvedCounselorIds for the agreement's counselor first, and writes only through accept_agreement (EXECUTE to
+  // service_role only), which re-checks the token, its expiry and the agreement's status under a row lock. The
+  // counselor routes run on the caller's own client.
+  "routes/agreements.ts",
+  // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
+  // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
+  // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't
+  // write; nothing curated changes until a catalog editor approves through review_catalog_proposal.
+  "lib/catalogProposalsRun.ts",
+  // routes/calendarIcal.ts: the subscribed calendar feed. GET /calendar/ical/:token.ics is public: the hashed token
+  // decides, and lib/calendarIcal.ts (handed the client) asks approvedCounselorIds for the token's counselor before
+  // building anything, then names that counselor's own caseload (fullCaseloadStudentIds) in every student-spanning
+  // query (buildCalendarFeed throws without one, never runs unscoped); it writes only that token row's
+  // last_fetched_at. The authenticated GET/POST/DELETE run inside an approved counselor's own request
+  // (authenticate + requireRole) and read or write only the caller's own calendar_feed_tokens row, keyed by
+  // request.auth.userId; the table has no client grant.
+  "routes/calendarIcal.ts",
+  // lib/inactivityAlerts.ts: runInactivityPass rides on the scheduled sweep (acts for no request); it asks
+  // approvedCounselorIds before anything, reads each approved counselor's own roster by profiles.counselor_id, and
+  // writes only student_inactivity_alerts and that counselor's own notification and email (a first name and a number
+  // of days). touchLastActive stamps the caller's own profiles.last_active_at, keyed by the row authenticate loaded.
+  "lib/inactivityAlerts.ts",
+  // lib/essayNotice.ts: inside a student's own request, after their RLS client saved the essay: tells only the
+  // caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request value) after
+  // asking isCounselorApproved; writes one notification (no essay text) and reads that counselor's settings and email.
+  "lib/essayNotice.ts",
+  // routes/reports.ts: approve-send, inside an approved counselor's own request (authenticate + requireRole), after
+  // resolveStudentId(edit) and their own RLS client claimed the report and wrote the message rows; the service role
+  // writes only the audit_log row naming the caller and that report (no student data).
+  "routes/reports.ts",
+  // lib/booking.ts: student booking, inside a student's own request (authenticate + requireRole("student")): the
+  // counselor is the caller's own profiles.counselor_id (the row authenticate loaded, never a request value), asked
+  // isCounselorApproved first (fail closed), then booking_settings.enabled; reads only that counselor's
+  // booking_settings, active booking_meeting_types, scheduled meetings' start and end, and which calendar providers
+  // they connected (integration_tokens.provider only). Only free slot times are returned. Writes nothing.
+  "lib/booking.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",

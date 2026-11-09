@@ -6,17 +6,39 @@
  * now there was no way to resolve a flag, approve a report, or record that one
  * was sent, which meant the counselor's half of the workflow lived nowhere.
  *
- * Approving is not sending. `POST /reports/family/:id/sent` records a send that
- * happened; nothing in this API delivers a family report on its own, and the
- * `approved -> sent` step is deliberately a separate, explicit call.
+ * Sending is always the counselor's explicit call, never a side effect:
+ *  - `GET /reports/family/:id/recipients` shows who would receive a draft right
+ *    now and the exact text each would read (lib/familyReportSend.ts), and who
+ *    wouldn't and why.
+ *  - `POST /reports/family/:id/approve-send` `{ confirm: true }` re-decides the
+ *    recipients on the server, claims the draft (draft -> sent, once), and writes
+ *    one scheduled `student_messages` row per channel (audience parent) for the
+ *    dispatch cron, which re-checks roster, approval, alerts, addresses, quiet
+ *    hours and the daily cap before anything goes out.
+ *  - `POST /reports/family/:id/dismiss` discards a draft without sending.
+ *  - `POST /reports/family/:id/sent` still only records a send that happened
+ *    elsewhere.
+ * The weekly digest job (lib/weeklyDigest.ts) writes drafts and never sends.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { loadAlertPrefs } from "../lib/accountability.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, tooManyRequests } from "../lib/errors.js";
+import {
+  emailBodyOf,
+  planReportRecipients,
+  reportMessages,
+  smsTextOf,
+  type GuardianRow,
+  type RecipientPlan,
+  type ReportChannel,
+} from "../lib/familyReportSend.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
-import { limit } from "../lib/limits.js";
+import { enforceQuota, limit } from "../lib/limits.js";
+import { serviceClient } from "../lib/supabase.js";
 import { loadPracticeSettings } from "../lib/practiceSettings.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { toFamilyReport, toNarrativeFlag } from "../lib/serialize.js";
 
 type Row = Record<string, unknown>;
@@ -205,6 +227,166 @@ export default async function reportRoutes(app: FastifyInstance) {
     }
   );
 
+
+  // ---- Approve and send -----------------------------------------------------
+
+  /**
+   * Who would receive this report right now, and the exact text each would
+   * read; plus who wouldn't, and why. Read-only.
+   */
+  app.get(
+    "/family/:id/recipients",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:recipients", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+      const report = await loadReport(request, id);
+      const { plan, studentName } = await recipientPlan(request, owner);
+      const messages = reportMessages(report, plan.recipients, { counselorName: request.profile.full_name ?? null, studentName });
+      return {
+        reportId: id,
+        status: report.status,
+        canSend: report.status === "draft" && plan.recipients.length > 0,
+        recipients: plan.recipients,
+        skipped: plan.skipped,
+        skippedGuardians: plan.skippedGuardians,
+        messages,
+      };
+    }
+  );
+
+  /**
+   * Approve a draft and send it to the family. The recipients are decided here,
+   * never by the client; the draft is claimed (draft -> sent) before any message
+   * row is written, so a second call, or two at once, can never send twice. The
+   * rows are scheduled for now: the dispatch cron sends them through the same
+   * re-checks as any scheduled composer message.
+   */
+  app.post(
+    "/family/:id/approve-send",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:approve-send", 30, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      z.object({ confirm: z.literal(true) }).strict().parse(request.body);
+      const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+      const report = await loadReport(request, id);
+      if (report.status !== "draft") throw notDraft(report.status);
+
+      // The dispatcher sends a message only for the student's own counselor, so only they may approve one.
+      const { plan, counselorId } = await recipientPlan(request, owner);
+      if (counselorId !== request.auth.userId) throw forbidden("Only the student's counselor can send a report to their family");
+      if (plan.recipients.length === 0) {
+        throw badRequest(
+          plan.skipped.parentsOff > 0
+            ? "Messages to the parents are switched off for this student"
+            : "No parent or guardian on file receives reports at an address we have"
+        );
+      }
+      await enforceQuota(request.auth.userId, "parent_alerts", "day", 100, "You've sent a lot of family messages today.");
+
+      const sentAt = new Date().toISOString();
+      const { data: claimed, error: claimError } = await request.db
+        .from("family_reports")
+        .update({ status: "sent", sent_at: sentAt })
+        .eq("id", id)
+        .eq("status", "draft")
+        .select("*")
+        .maybeSingle();
+      if (claimError) throw fromPostgrest(claimError);
+      if (!claimed) throw conflict("This report was already sent or dismissed");
+
+      const rows = (["email", "sms"] as ReportChannel[])
+        .map((channel) => ({
+          channel,
+          recipients: plan.recipients
+            .filter((r) => r.channels.includes(channel))
+            .map((r) => ({ kind: "guardian" as const, id: r.guardianId, name: r.name, email: r.email, phone: r.phone })),
+        }))
+        .filter((g) => g.recipients.length > 0)
+        .map((g) => ({
+          student_id: owner,
+          counselor_id: request.auth.userId,
+          audience: "parent",
+          channel: g.channel,
+          kind: "message",
+          recipients: g.recipients,
+          subject: g.channel === "email" ? report.title.slice(0, 300) : null,
+          body: g.channel === "email" ? emailBodyOf(report) : smsTextOf(report),
+          status: "scheduled",
+          scheduled_for: sentAt,
+          hold_reason: "Approved family report: it goes out with the next scheduled send",
+          // Dispatch re-checks each guardian's receives_reports for a row that carries a report.
+          family_report_id: id,
+        }));
+      const { data: written, error: insertError } = await request.db.from("student_messages").insert(rows).select("id, channel, scheduled_for");
+      if (insertError) {
+        // Nothing was queued: give the draft back, so the counselor can try again.
+        const { error: undoError } = await request.db
+          .from("family_reports")
+          .update({ status: "draft", sent_at: null })
+          .eq("id", id)
+          .eq("status", "sent");
+        if (undoError) request.log.error({ code: undoError.code }, "approve-send: draft restore failed");
+        if (insertError.code === "54000") throw tooManyRequests("You've sent a lot of family messages today.");
+        // Without 20261111000013 the send couldn't re-check receives_reports at dispatch: refuse rather than send.
+        if (isResultsNotApplied(insertError)) {
+          throw new HttpError(503, "Sending family reports isn't switched on yet", "family_report_send_unavailable");
+        }
+        throw fromPostgrest(insertError);
+      }
+
+      await closeWorkItems(request, id);
+      // Who approved it and when, beside the message rows (counselor_id, created_at). Best effort.
+      const svc = serviceClient();
+      if (svc) {
+        const { error: auditError } = await svc.from("audit_log").insert({
+          actor_id: request.auth.userId,
+          student_id: owner,
+          action: "family_report.approve_send",
+          entity_type: "family_report",
+          entity_id: id,
+          metadata: { messageIds: ((written ?? []) as Row[]).map((m) => String(m.id)), recipients: plan.recipients.length },
+        });
+        if (auditError) request.log.warn({ code: auditError.code }, "approve-send: audit insert failed");
+      }
+
+      return {
+        report: toFamilyReport(claimed as Row),
+        messages: ((written ?? []) as Row[]).map((m) => ({
+          id: String(m.id),
+          channel: m.channel as ReportChannel,
+          scheduledFor: String(m.scheduled_for),
+        })),
+        recipients: plan.recipients.length,
+        skipped: plan.skipped,
+      };
+    }
+  );
+
+  /** Discard a draft without sending it; its work item is done. */
+  app.post(
+    "/family/:id/dismiss",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:dismiss", 60, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
+      await resolveStudentId(request, owner, "edit");
+      const { data, error } = await request.db
+        .from("family_reports")
+        .update({ status: "archived" })
+        .eq("id", id)
+        .eq("status", "draft")
+        .select("*")
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!data) throw conflict("Only a draft can be dismissed");
+      await closeWorkItems(request, id);
+      return toFamilyReport(data as Row);
+    }
+  );
+
   app.delete(
     "/family/:id",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("family-reports:delete", 60, 60)] },
@@ -213,11 +395,80 @@ export default async function reportRoutes(app: FastifyInstance) {
       const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
       await resolveStudentId(request, owner, "edit");
 
+      // A weekly digest is archived, not deleted: its row is what stops the hourly job drafting that week again.
+      const { data: kindRow, error: kindError } = await request.db.from("family_reports").select("kind").eq("id", id).maybeSingle();
+      if (kindError) throw fromPostgrest(kindError);
+      if (kindRow?.kind === "weekly") {
+        const { error: archiveError } = await request.db.from("family_reports").update({ status: "archived" }).eq("id", id);
+        if (archiveError) throw fromPostgrest(archiveError);
+        await closeWorkItems(request, id);
+        return { deleted: true, archived: true };
+      }
+
       const { error } = await request.db.from("family_reports").delete().eq("id", id);
       if (error) throw fromPostgrest(error);
       return { deleted: true };
     }
   );
+}
+
+type ReportRow = { id: string; status: string; title: string; summary: string | null; body: string | null };
+
+async function loadReport(request: FastifyRequest, id: string): Promise<ReportRow> {
+  const { data, error } = await request.db
+    .from("family_reports")
+    .select("id, status, title, summary, body")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw fromPostgrest(error);
+  if (!data) throw notFound("That report doesn't exist");
+  return data as ReportRow;
+}
+
+function notDraft(status: string): HttpError {
+  return new HttpError(
+    409,
+    status === "sent" ? "This report was already sent" : "This report was dismissed",
+    "report_not_draft"
+  );
+}
+
+/**
+ * Who would receive a report about this student now: copy_parents (failing
+ * closed, `loadAlertPrefs`), then each guardian's alerts, reports and preferred
+ * channel (`planReportRecipients`). Read on the caller's own client.
+ */
+async function recipientPlan(
+  request: FastifyRequest,
+  studentId: string
+): Promise<{ plan: RecipientPlan; studentName: string; counselorId: string | null }> {
+  const [prefs, guardians, student] = await Promise.all([
+    loadAlertPrefs(request, studentId),
+    request.db
+      .from("guardians")
+      .select("id, full_name, email, phone, relationship, preferred_channel, alerts_enabled, receives_reports")
+      .eq("student_id", studentId)
+      .order("is_primary", { ascending: false })
+      .order("created_at", { ascending: true }),
+    request.db.from("profiles").select("full_name, counselor_id").eq("id", studentId).maybeSingle(),
+  ]);
+  if (guardians.error) throw fromPostgrest(guardians.error);
+  if (student.error) throw fromPostgrest(student.error);
+  return {
+    plan: planReportRecipients((guardians.data ?? []) as GuardianRow[], prefs),
+    studentName: String(student.data?.full_name ?? ""),
+    counselorId: (student.data?.counselor_id as string | null) ?? null,
+  };
+}
+
+/** The report's Review Queue items are done. Never fatal: the report's own status is the record. */
+async function closeWorkItems(request: FastifyRequest, reportId: string): Promise<void> {
+  const { error } = await request.db
+    .from("counselor_work_items")
+    .update({ done: true, done_at: new Date().toISOString() })
+    .eq("family_report_id", reportId)
+    .eq("done", false);
+  if (error) request.log.warn({ code: error.code }, "family report: work item update failed");
 }
 
 /** The row's real student_id — never one a client claimed. */

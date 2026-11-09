@@ -527,3 +527,15 @@ test("the summary counts invitees, not the counselor's copy, and notes only guar
   assert.equal(leave.summary.status, "sending");
   if (leave.summary.status === "sending") assert.equal(leave.summary.note, undefined);
 });
+
+test("a student's booking round is charged to its own bucket, never the counselor's own allowance", async () => {
+  const spentOn: string[] = [];
+  const consume = async (key: string, limit: number) => (spentOn.push(`${key}/${limit}`), true);
+  const r = await prepareInviteRound(req(fakeDb(baseTables())), { before: null, after: m(), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: consume as never, now: NOW, bucket: "booking" });
+  assert.equal(r.summary.status, "sending");
+  assert.deepEqual(spentOn, [`meeting-invites:booking:${C}/60`]);
+  // The counselor's own rounds are unchanged.
+  spentOn.length = 0;
+  await prepareInviteRound(req(fakeDb(baseTables())), { before: null, after: m(), attendeesBefore: [], attendeesAfter: [A], notify: true }, { consume: consume as never, now: NOW });
+  assert.deepEqual(spentOn, [`meeting-invites:${C}/60`]);
+});

@@ -2,14 +2,14 @@
 // the files it kept, at most once an hour (the axis-trash-purge lease); deleting an account removes the trash it
 // made and the trash about it; the data export carries no trash.
 import { randomUUID } from "node:crypto";
-import { API, CRON_SECRET, SB, call, check, rest, sql, user } from "./harness.mjs";
+import { API, CLIENT, CRON_SECRET, SB, call, check, rest, sql, user } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 
 const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const one = (q) => sql(q).then((o) => o.split("\n")[0]);
 const marked = (action) => ({ "x-meridies-axis-action": action, Prefer: "return=representation" });
 const del = (token, path, action) => rest(token, "DELETE", `/rest/v1/${path}`, undefined, marked(action));
-const cron = (path) => fetch(`${API}${path}`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+const cron = (path) => fetch(`${API}${path}`, { method: "POST", headers: { ...CLIENT, Authorization: `Bearer ${CRON_SECRET}` } });
 const kept = (action, extra = "") => one(`select count(*) from private.axis_trash where action_id = '${action}' ${extra}`);
 const objects = (path) => one(`select count(*) from storage.objects where bucket_id = 'student-documents' and name = '${path}'`);
 const age = (action) => sql(`update private.axis_trash set deleted_at = now() - interval '31 days' where action_id = '${action}'`);
