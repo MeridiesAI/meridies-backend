@@ -82,6 +82,14 @@ export async function mintAgreementLink(
   return { url: agreementUrl(opts.publicApiUrl, token), expiresAt };
 }
 
+/**
+ * The statuses an agreement can still change from: a `draft` can be sent or voided, a `sent` one sent again (a
+ * new link) or voided. `accepted` and `void` are ends; the database's guard refuses any change to them.
+ */
+export const OPEN_AGREEMENT_STATUSES = ["draft", "sent"] as const;
+export const isOpenAgreement = (status: unknown): boolean =>
+  (OPEN_AGREEMENT_STATUSES as readonly unknown[]).includes(status);
+
 export const AGREEMENT_COLUMNS =
   "id, counselor_id, firm_id, contact_id, title, body_text, body_sha256, consent_version, status, created_at, sent_at, accepted_at, voided_at";
 

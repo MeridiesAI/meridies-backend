@@ -23,6 +23,7 @@ import {
   closeDraft,
   dismissCards,
   isOpen,
+  isOpenRow,
   newRow,
   openDraft,
   patchHeader,
@@ -161,7 +162,7 @@ async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op
       reply.notKept.push("Not kept: activity_id: use the id from application.list_sheets.");
       return;
     }
-    row = d.rows.find((r) => r.op === "update" && r.activity_id === activityId && (r.status === "collecting" || r.status === "card"));
+    row = d.rows.find((r) => r.op === "update" && r.activity_id === activityId && isOpenRow(r));
     if (!row) {
       if (!canAddRow(d)) return refuseRow(d, reply, typeof item.organization === "string" ? item.organization : "this change");
       row = newRow(d, "update", activityId);
@@ -181,9 +182,9 @@ async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op
         return;
       }
     }
-    if (!row && ownKey) row = d.rows.find((r) => r.key === ownKey && r.op === "add" && (r.status === "collecting" || r.status === "card"));
+    if (!row && ownKey) row = d.rows.find((r) => r.key === ownKey && r.op === "add" && isOpenRow(r));
     const org = normalizeField("organization", item.organization);
-    const open = d.rows.filter((r) => r.op === "add" && (r.status === "collecting" || r.status === "card"));
+    const open = d.rows.filter((r) => r.op === "add" && isOpenRow(r));
     if (!row && org.ok && typeof org.value === "string") row = open.find((r) => freeTextKey(String(r.fields.organization ?? "")) === freeTextKey(org.value as string));
     if (!row && !org.ok && open.length === 1) row = open[0];
     if (!row) {
@@ -312,7 +313,7 @@ export async function fileIfReady(ctx: OpContext, turn: DraftTurn, force: boolea
     await fileUpdate(ctx, d, r);
   }
 
-  const open = d.rows.filter((r) => r.op === "add" && (r.status === "collecting" || r.status === "card"));
+  const open = d.rows.filter((r) => r.op === "add" && isOpenRow(r));
   const onCard = open.filter((r) => r.status === "card");
   const changed = onCard.filter(touched);
   // A new row is filed once it has an organization and nothing is missing, or the counselor said to file it as is,

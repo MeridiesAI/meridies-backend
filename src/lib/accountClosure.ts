@@ -28,6 +28,14 @@ const DAY_MS = 86_400_000;
 type Log = { info: (obj: object, msg?: string) => void; warn: (obj: object, msg?: string) => void; error: (obj: object, msg?: string) => void };
 
 export type ClosureStatus = "pending" | "cancelled" | "purging" | "done" | "failed";
+/**
+ * A closure still under way: waiting for its date (`pending`) or being deleted right now (`purging`). `cancelled`
+ * and `done` are ends; `failed` is on hold until the counselor confirms again or cancels.
+ */
+export const ACTIVE_CLOSURE_STATUSES = ["pending", "purging"] as const satisfies readonly ClosureStatus[];
+export const isActiveClosure = (row: { status: string } | null | undefined): boolean =>
+  !!row && (ACTIVE_CLOSURE_STATUSES as readonly string[]).includes(row.status);
+
 export type ClosureRow = { status: ClosureStatus | string; requested_at: string; purge_after: string; last_error: string | null; updated_at?: string };
 
 /** The env flag: only the exact string "true" switches the purge on. */
@@ -72,7 +80,7 @@ export function closureView(row: ClosureRow | null, now: Date, purgeEnabled: boo
   if (row.status === "failed") {
     return { ...none, status: "on_hold", requestedAt: new Date(row.requested_at).toISOString(), blockedReason: row.last_error };
   }
-  if (row.status !== "pending" && row.status !== "purging") return none;
+  if (!isActiveClosure(row)) return none;
   return {
     status: "pending",
     requestedAt: new Date(row.requested_at).toISOString(),
@@ -211,7 +219,7 @@ export async function runClosurePurge(
     const { data, error } = await svc
       .from("account_closures")
       .select("counselor_id, status, updated_at, requested_at, purge_after")
-      .in("status", ["pending", "purging"])
+      .in("status", [...ACTIVE_CLOSURE_STATUSES])
       .lte("purge_after", now.toISOString())
       .order("purge_after", { ascending: true })
       .limit(PURGE_BATCH * 4);

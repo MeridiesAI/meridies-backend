@@ -366,7 +366,14 @@ export function closeDraft(d: Draft): void {
 }
 
 /** A row still being filled in, or waiting on its card. */
-export const isOpen = (d: Draft): boolean => d.header !== null && d.rows.some((r) => r.status === "collecting" || r.status === "card");
+/**
+ * A row still in play: being asked about (`collecting`) or filed as a card that waits for Confirm (`card`). The
+ * other statuses are ends: `saved`, `dismissed`, `skipped`, `failed`.
+ */
+export const OPEN_ROW_STATUSES = ["collecting", "card"] as const satisfies readonly RowStatus[];
+export const isOpenRow = (r: Pick<DraftRow, "status">): boolean => (OPEN_ROW_STATUSES as readonly RowStatus[]).includes(r.status);
+
+export const isOpen = (d: Draft): boolean => d.header !== null && d.rows.some(isOpenRow);
 
 /** No counselor message for longer than the draft lives. */
 export const isStale = (d: Draft, now: Date): boolean => d.header !== null && now.getTime() - Date.parse(d.header.updated_at) > DRAFT_TTL_MS;

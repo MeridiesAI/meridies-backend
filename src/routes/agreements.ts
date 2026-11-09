@@ -51,6 +51,8 @@ import {
   parseAcceptForm,
   truncateUserAgent,
   type TokenLookup,
+  isOpenAgreement,
+  OPEN_AGREEMENT_STATUSES,
 } from "../lib/agreements.js";
 import { crmError } from "../lib/crm.js";
 import { sendEmail } from "../lib/email.js";
@@ -235,7 +237,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       const row = await loadAgreement(request, id);
-      if (row.status !== "draft" && row.status !== "sent") {
+      if (!isOpenAgreement(row.status)) {
         throw new HttpError(409, "This agreement was already accepted or withdrawn", "agreement_closed");
       }
       const c = await request.db
@@ -282,14 +284,14 @@ export default async function agreementRoutes(app: FastifyInstance) {
   app.post("/agreements/:id/void", { preHandler: [...counselor, limit("agreements:write", 60, 60)] }, async (request) => {
     const { id } = idParam.parse(request.params);
     const row = await loadAgreement(request, id);
-    if (row.status !== "draft" && row.status !== "sent") {
+    if (!isOpenAgreement(row.status)) {
       throw new HttpError(409, "Only a draft or a sent agreement can be voided", "agreement_closed");
     }
     const { data, error } = await request.db
       .from("agreements")
       .update({ status: "void" })
       .eq("id", id)
-      .in("status", ["draft", "sent"])
+      .in("status", [...OPEN_AGREEMENT_STATUSES])
       .select(AGREEMENT_COLUMNS)
       .maybeSingle();
     if (error) throw agreementsError(error);

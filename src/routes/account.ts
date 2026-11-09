@@ -26,7 +26,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { env } from "../env.js";
 import { DeletionFailed, blockError, deleteAccount, deletionBlocker, type DeletionSubject } from "../lib/accountDeletion.js";
-import { closureEmail, closureView, isClosureTableMissing, isStalePurging, purgeAfterFrom, purgeFlag, type ClosureRow } from "../lib/accountClosure.js";
+import { closureEmail, closureView, isActiveClosure, isClosureTableMissing, isStalePurging, purgeAfterFrom, purgeFlag, type ClosureRow } from "../lib/accountClosure.js";
 import { sendEmail } from "../lib/email.js";
 import { badRequest, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
@@ -410,7 +410,7 @@ export default async function accountRoutes(app: FastifyInstance) {
     const enabled = purgeFlag(env.ACCOUNT_PURGE_ENABLED);
 
     const existing = await readClosure(svc, me);
-    if (existing && (existing.status === "pending" || existing.status === "purging")) {
+    if (isActiveClosure(existing)) {
       return reply.code(200).send(closureView(existing, now, enabled));
     }
 
