@@ -1,8 +1,8 @@
 // Counselor approval gate: work queued before a revoke does not run after it.
-import { API, CRON_SECRET, check, sql, user } from "./harness.mjs";
+import { API, CLIENT, CRON_SECRET, check, sql, user } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 
-const cron = (path) => fetch(`${API}${path}`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+const cron = (path) => fetch(`${API}${path}`, { method: "POST", headers: { ...CLIENT, Authorization: `Bearer ${CRON_SECRET}` } });
 const noQuietHours = (c) => sql(`insert into public.accountability_settings (counselor_id, timezone, quiet_hours_start, quiet_hours_end) values ('${c.id}', 'UTC', null, null)`);
 const scheduled = (c, s) => sql(`with m as (insert into public.student_messages (student_id, counselor_id, audience, channel, recipients, subject, body, status, scheduled_for)
   values ('${s.id}', '${c.id}', 'student', 'email', '[{"kind":"student","id":"${s.id}","name":"S","email":"${s.email}","phone":null}]'::jsonb,
