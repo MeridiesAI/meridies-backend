@@ -16,7 +16,7 @@ const day = (offset) => new Date(Date.now() + offset * 86_400_000).toISOString()
 
 // ---- Seeding ----
 
-async function base(tag) {
+export async function base(tag) {
   const c = await user(`eval-${tag}`);
   const s = await studentOf(c, `eval-${tag}-s`);
   await sql(`update public.profiles set full_name = 'Maya Chen' where id = '${s.id}'`);

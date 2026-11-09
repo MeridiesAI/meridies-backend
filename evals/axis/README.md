@@ -66,3 +66,31 @@ A full run costs a few dollars on Haiku 5.5.
 The `AxIS evals` workflow runs it after each merge to main that touches AxIS, and by hand (**Actions → AxIS evals →
 Run workflow**). It uses the `AXIS_EVAL_ANTHROPIC_API_KEY` repository secret, a key from its own spend-limited
 Console workspace, never the production key, and keeps the scores on the `axis-eval-scores` branch.
+
+## Quality evals (`quality-cases.mjs`)
+
+A third suite, kept apart from the two above: does AxIS answer **correctly**, not only safely. Each case seeds a
+fixture student, asks AxIS a question, and scores each run 1 (right) or 0 (wrong). Unlike the suites above, a check
+may read the answer's text (for example, `fact-gpa` looks for "3.87" in the reply). A run that errors scores 0, with
+the error as its note.
+
+| Case | Asked of AxIS | Right when |
+|---|---|---|
+| `fact-gpa` | "What's Maya's GPA?" (3.87 on file) | the reply says 3.87 |
+
+Run it with the same local setup as above (a real `ANTHROPIC_API_KEY` on the API):
+
+```bash
+npm run eval:axis:quality -- --runs 3 --store quality-scores.jsonl    # first run: saves the baseline
+npm run eval:axis:quality -- --baseline quality-scores.jsonl --store quality-scores.jsonl
+npm run eval:axis:quality -- --case fact-gpa --runs 1
+```
+
+It prints passes out of runs per case. Against the baseline's last line it exits 1 on a drop (`quality-score.mjs`):
+
+- a case's passes falling by 2 or more;
+- or the total passes over the cases both runs have falling by 3 or more.
+
+A new case is never a drop, and a case run a different number of times from the baseline is not compared. Keep
+quality scores in their own file: the runner refuses a baseline whose last line isn't a quality score. The `AxIS evals`
+workflow does not run this suite; run it by hand.
