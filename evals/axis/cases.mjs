@@ -26,7 +26,7 @@ export async function base(tag) {
 }
 
 /** A confirmed, AI-readable document with its text, as a parsed upload. */
-async function plantDocument(ctx, filename, kind, text) {
+export async function plantDocument(ctx, filename, kind, text) {
   await sql(`insert into public.documents (owner_id, student_id, filename, title, bucket, storage_path, mime_type, size_bytes, uploaded_by, kind, kind_confirmed, available_to_llm, ai_access, parsed_data)
              values ('${ctx.c.id}', '${ctx.s.id}', '${q(filename)}', '${q(filename)}', 'student-documents', '${ctx.s.id}/eval-${Date.now()}-${q(filename)}', 'application/pdf', ${text.length},
                      '${ctx.s.id}', '${kind}', true, true, 'default', '${q(JSON.stringify({ text }))}'::jsonb)`);
@@ -34,7 +34,7 @@ async function plantDocument(ctx, filename, kind, text) {
 const plantIntake = (ctx, answers) => sql(`insert into public.intake_responses (student_id, answers) values ('${ctx.s.id}', '${q(JSON.stringify(answers))}'::jsonb)
                                             on conflict (student_id) do update set answers = excluded.answers`);
 const addGuardian = (ctx) => sql(`insert into public.guardians (student_id, full_name, email, relationship, alerts_enabled, is_primary) values ('${ctx.s.id}', 'Lin Chen', 'lin.chen@families.test', 'parent', true, true)`);
-async function addTask(ctx, title) {
+export async function addTask(ctx, title) {
   const r = await call(ctx.c.token, "POST", "/tasks", { studentId: ctx.s.id, title, dueDate: day(20) });
   if (r.status !== 201) throw new Error(`task ${r.status} ${JSON.stringify(r.body)}`);
   return r.body.id;

@@ -77,6 +77,16 @@ the error as its note.
 | Case | Asked of AxIS | Right when |
 |---|---|---|
 | `fact-gpa` | "What's Maya's GPA?" (3.87 on file) | the reply says 3.87 |
+| `ai-resume-read` | "What does Maya's resume say about robotics?" | it names the 22 members and the 2nd place |
+| `ai-rundown` | her GPA, SAT and the tasks she still needs to finish | it has 3.87, 1480 and both open tasks |
+| `ai-transcript-lowest` | "On her transcript, which AP class has her lowest grade?" | AP Calculus BC, B+ |
+
+**`fact-gpa` never reaches the model.** A one-fact lookup is answered in code from the rows
+(`lib/axis/compiler.ts`), so it checks that path. The `ai-*` cases ask what only the model can answer: a document,
+several facts at once, a comparison. Each also checks the run made an AxIS model call (an `ai_runs` row, module
+`axis`). If the code path ever answers one, it scores 0 with the note "answered without the model; rewrite the
+question", because the case would no longer test the model. A new `ai-*` question should avoid the lookup words in
+`ATTRIBUTE_PATTERNS` (`lib/axis/lexicon.ts`), or carry one of its `JUDGEMENT_WORDS`.
 
 Run it with the same local setup as above (a real `ANTHROPIC_API_KEY` on the API):
 
