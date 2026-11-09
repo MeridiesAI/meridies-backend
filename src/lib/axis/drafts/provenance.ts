@@ -126,10 +126,13 @@ export function sourcesFor(request: FastifyRequest, conversationId: string, stud
 // ---- Free text: a phrase the value covers at least half of ------------------------------------------
 
 /** Words that carry no part of a name: the stopwords and the words a request is made of. */
-const INSTRUCTION_WORDS = new Set(["add", "put", "please", "change", "update", "set", "make", "list", "sheet", "row", "activity", "activities", "his", "her", "their", "it"]);
+const INSTRUCTION_WORDS = new Set([
+  "add", "put", "please", "change", "update", "set", "make", "list", "sheet", "row", "activity", "activities", "his", "her", "their", "it",
+  "rename", "renamed", "call", "called", "named",
+]);
 const isContent = (w: string) => !STOPWORDS.has(w) && !INSTRUCTION_WORDS.has(w);
 /** Where one phrase ends and the next starts. Captured, so a connector word ("and") stays in the word stream. */
-const PHRASE_BREAK = /(\n|[,;|·.!?:()]|\s[/\-–—&]\s|\sand\s)/i;
+const PHRASE_BREAK = /(\n|[,;|·.!?:()]|\s[/\-–—&]\s|\s(?:and|to|as|for)\s)/i;
 
 /** True when `value` is a whole-word run in `text` covering at least half the content words of the phrase(s) it sits in. */
 export function coversPhrase(value: string, text: string): boolean {
