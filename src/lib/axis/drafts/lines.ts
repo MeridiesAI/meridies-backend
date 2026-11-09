@@ -8,7 +8,7 @@
  */
 import { wrapUntrusted } from "../../context/pack.js";
 import type { ActivityField } from "./normalize.js";
-import { rowLabel, type Draft, type DraftRow } from "./state.js";
+import { isOpenRow, rowLabel, type Draft, type DraftRow } from "./state.js";
 
 /** The fixed sentences (spec 4.1, 4.4, 4.7). */
 export const LINES = {
@@ -95,7 +95,7 @@ const show = (v: unknown) => (Array.isArray(v) ? v.join(", ") : typeof v === "st
 export function draftBlock(d: Draft): string {
   if (!d.header) return "";
   const rows = d.rows
-    .filter((r) => r.status === "collecting" || r.status === "card" || r.status === "saved")
+    .filter((r) => isOpenRow(r) || r.status === "saved")
     .map((r) => {
       const parts: string[] = [];
       for (const [f, v] of Object.entries(r.fields) as [ActivityField, unknown][]) {
