@@ -100,12 +100,14 @@ src/
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
+│   ├── branding.ts        # logo/banner/accent: scope, the branding bucket's URL and path rules, image sniffing
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
+│   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
@@ -115,8 +117,12 @@ src/
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
-│   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
+│   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
+│   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
+│   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
+│   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
+│   ├── accountClosure.ts  # Leave Meridies: 30-day grace dates, the closure DTO and emails, the purge (off by default)
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── catalogProposals.ts # cited proposals from a school's own pages: page picking, quote grounding, fact keys (+ Run, Fake)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
@@ -129,7 +135,8 @@ src/
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
-│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items)
+│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items), transcript map-reduce
+│   ├── transcript.ts      # meeting transcripts: VTT/SRT/pasted text to speaker turns, neutral speaker labels, parts for the map-reduce
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
 │   │   ├── drafts/        # activity drafts: normalizers, provenance, the draft's state (draft_rows), sorter, write path, status lines
@@ -143,6 +150,7 @@ src/
 │   ├── health.ts, auth.ts, invites.ts, students.ts, deadlines.ts
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
+│   ├── branding.ts        # /branding     logo, banner, accent colour (firm or solo); signed image uploads
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
 │   ├── opportunities.ts, ai.ts, chat.ts
@@ -156,6 +164,7 @@ src/
 │   ├── applicationAi.ts   # /application  their AxIS calls (lists, coherence, activities)
 │   ├── studentPage.ts     # /student-page info card, polygon, private note
 │   ├── studentAid.ts      # /student-aid  Financial aid page, scholarship matching
+│   ├── schoolScholarships.ts # /scholarships/internal, /colleges/:id/scholarships   a school's own awards (counselor)
 │   ├── communication.ts   # /communication composer; /communication/internal/dispatch (cron)
 │   ├── messaging.ts       # /messaging    a consultant's own texting number: find, buy
 │   ├── collegesV10.ts     # /colleges     search (search_colleges RPC), filters, profile extras, list builder
@@ -170,6 +179,7 @@ src/
 │   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out
 │   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)
 │   ├── pay.ts             # /pay/:token   public: an invoice's pay link, opens Stripe Checkout
+│   ├── agreements.ts      # /agreements (counselor) + /agree/:token (public): typed-name acceptance, OFF unless AGREEMENTS_ENABLED=true
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
@@ -178,7 +188,8 @@ src/
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
-│   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── account.ts         # /account      data export (self, a student, batches of 25, a roster Sheet), account deletion
+│   ├── guardians.ts       # /guardians    the parents directory (read-only list + CSV), counselor
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
@@ -534,6 +545,43 @@ forget it.
   `stripeReady`); otherwise status says `configured: false`, the other routes
   and the pay page answer 503, and the tracker is what it was. Not in
   `REQUIRED_SCHEMA`.
+- **Agreements: typed-name acceptance, NOT a certified e-signature, switched OFF** (`20261111000010`;
+  `routes/agreements.ts`, `lib/agreements.ts`, `lib/agreementConsent.ts`). A counselor who may bill a Contact Pipeline
+  contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;
+  `GET /agreements?contactId=`, `GET /agreements/:id` with its acceptance, `POST /agreements/:id/void` for draft|sent).
+  `POST /agreements/:id/send` mints a link on the caller's own client (`issue_agreement_link`, SECURITY DEFINER, checks
+  `crm_can_bill` for auth.uid(); 32 random bytes, sha256 in `agreement_tokens`, service role only, 30 days; a resend
+  expires every earlier link, so a superseded email stops working) and emails
+  the card's parent (else student) address, 400 `contact_no_email` without one; the delivery record keeps no link.
+  `GET /agree/:token` (public; CSP with no script, no-store, noindex, no-referrer) shows the text and a name field and a
+  consent box, and **changes nothing**; `POST` takes exactly `signerName` + `consent=yes` and `accept_agreement`
+  (service role only) records it in one transaction: one `agreement_acceptances` row (unique per agreement; typed name,
+  UTC time, IP, user agent, the body's sha256, the consent version, and a plain-text certificate ending "Typed-name
+  acceptance; not a certified electronic signature."), the agreement `accepted`, an `audit_log` row, and the contact
+  moved to its workspace's "Contract signed" stage when that stage is ahead of it (open contacts only). A second submit
+  shows "already accepted" (409), never a second row; expired and void links 410, unknown 404. Both parties get a copy
+  (certificate + text). Once accepted, the public page (and the 409 page) shows only the name, the UTC time, the
+  document SHA-256 and the "not a certified electronic signature" line: the IP and user agent stay in the stored
+  certificate, the emails and the counselor's `GET /agreements/:id`. The consent version recorded is the server's
+  (`AGREEMENT_CONSENT_VERSION`, passed only by `accept_agreement`'s service-role caller), never a client's. Limits: 30 a minute per address, 60 views and 10 accept tries an hour per link. **Immutable:**
+  the body hash is computed by a trigger, title and body are fixed once sent, nothing changes once accepted or void, and
+  an acceptance has no update/delete grant for anyone (service_role included) plus a trigger refusing update, delete and
+  truncate even as postgres; an accepted agreement RESTRICTs deleting its contact. The guard trigger is SECURITY
+  DEFINER, so it tells a client session apart by `current_setting('role')` (PostgREST's SET ROLE), never
+  `current_user` (always the owner inside it): a client can only void a draft or sent agreement, never accept one.
+  `DELETE /pipeline/contacts/:id` answers 409 `agreement_on_file` for a contact with a signed agreement, and
+  `DELETE /account` 409 `signed_agreements_kept` when the account wrote one or created its contact ("ask Meridies to
+  close the account"); a draft, sent or void agreement goes with its contact. **AxIS trash:** `agreements` and
+  `agreement_tokens` are captured (rule `parent`), so an AxIS-deleted contact's unsigned agreements and their links
+  come back on Restore exactly as they were (the guard keeps a restored row's status and times, recomputes the hash and
+  refuses an accepted one); `agreement_acceptances` is not captured because its RESTRICT means it never reaches the
+  trash. Text only (no PDF; `storage_path`
+  stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
+  unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
+  'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open
+  decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
+  the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
+  `test/integration/agreements.test.mjs` (CI runs the API with the switch on).
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a
@@ -575,6 +623,41 @@ forget it.
   (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/internal/blasts/dispatch"`, every 10-15
   minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. Tests:
   `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`.
+- **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
+  `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
+  counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
+  belongs to, so a consultant can see every parent in one place and download it. **It stores, sends and changes
+  nothing and must not become any of those:** blasts and the composer derive who they reach from the roster at send
+  time on purpose (see Email blasts above), so a curated "parents list" would be a second source of truth that goes
+  stale and emails people who opted out. Don't add a send, a tag, a saved selection or an edit here; those belong on the
+  student page, where the guardian row lives. **Read as the caller** (`request.db`, no service client), scoped by
+  `caseloadStudentIds` (past 250 ids it reads the roster from `profiles` and names its students in chunks of 200),
+  RLS underneath. Query: `q` (100 characters; matches a parent's name or email or the student's name, case and accents
+  ignored, never an id or a phone), `classYear`, `includeArchived=true` (archived students are left out otherwise),
+  `limit` (default 100, max 500), and `cursor` **or** `offset` (not both). Answers `{ guardians: [{ id, name,
+  relationship, email, phone, studentId, studentName, classYear, receivesAlerts, receivesReports }], total, nextCursor,
+  sharedNotShown }`: exactly those keys, so a student's own email, notes and scores never leave. Ordered by the
+  student's surname (the last word of `full_name`, or the part before a comma; a Jr./III is ignored), first names, then
+  the parent's name, ties by id; `nextCursor` is the last row's sort key (an opaque base64url string), so rows added
+  or removed between pages move nothing already read. 60 a minute (`limit("guardians:roster", 60, 60)`, it fans out;
+  `fanout-limits.test.ts` lists both). **A shared student's parents are not listed.** `guardians` RLS lets a
+  collaborator read them, but `profiles` RLS does not let a collaborator read the student's row (the same reason the
+  roster Sheet skips them), so the list can't name the student. They are left out and counted in `sharedNotShown`
+  (0 when none; the CSV carries the same number in an `X-Shared-Not-Shown` response header, since a file has no
+  room for a note and the app fetches it server-side) so the list never silently looks complete. **The count ignores
+  `q`, `classYear` and `includeArchived`**: it is every parent of a student shared with the caller that this list
+  can't show, not "hidden by the filters". App copy should read "N parents of students shared with you that this
+  list can't show", never "N more matching". A firm colleague's unshared students are not in the caseload at all.
+  `q` is only ever a plain substring matched in code (no PostgREST filter, LIKE pattern or regex is built from it), so
+  `x,id.neq.0`, `%`, `*`, `\` and `(` are ordinary characters (tested). The CSV (`text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="meridies-parents-
+  YYYY-MM-DD.csv"` with the UTC date, `Cache-Control: no-store`, no byte-order mark, CRLF) uses the same filters, no
+  paging, and is built with `lib/csv.ts`, so any cell starting with `=`, `+`, `-` or `@` gets a leading apostrophe
+  (a phone number written `+1 555...` therefore shows with one). Over 5,000 rows it answers 413 `roster_too_large`
+  ("more than 5,000 parents for one download", narrow with `classYear` or a search). Separately, a request reads at
+  most 20,000 parents (one allowance across all its chunks, before `q` is applied): past it, the list and the CSV both
+  answer 413 `roster_too_large` with different words ("too many parents to read at once", only `classYear` narrows
+  what is read, since `classYear` and `includeArchived` filter students before their parents are read and `q` does not).
+  10 an hour. Tests: `test/unit/guardian-roster.test.ts`, `test/integration/guardians-roster.test.mjs`.
 - **Seasonal stage emails** (`20261110000003`; `lib/stageTemplates.ts`, `routes/emailTemplates.ts`, `routes/blasts.ts`).
   Nine rough drafts of the mass emails a practice sends through the year (starting the college search, essay ideas,
   a summer plan, essay planning, first drafts, revisions, regular deadlines, wrap-up and financial aid, decisions),
@@ -1008,8 +1091,24 @@ the database (`20261010*`):
   exam's option reads on the IB scale), advanced courses (not the grade
   level: `courses.grade` is the mark), activities (the type mapped onto
   `ACTIVITY_TYPES`, anything else "Other Club/Activity"; text cut to the
-  sheet's limits), honors (keyed on name and year), first-gen and intended
-  majors. Rules: **fill only what is empty**; a re-saved questionnaire may
+  sheet's limits), honors (keyed on name and year), first-gen, intended
+  majors and the **optional date of birth** (`20261111000007`:
+  `intakeAnswers.birthday`, `YYYY-MM-DD`, into
+  `student_personal_details.birthday`). `private.intake_birthday` keeps only
+  a real calendar date, not in the future, of a student aged 10 to 25 that
+  day. A non-empty string that fails it is skipped as `invalid` and changes
+  nothing; an empty or non-string answer counts as no answer, so it takes
+  back a birthday the questionnaire wrote that is still unchanged. It is a
+  minor's, so it is the only date of birth copied, never logged or named by
+  value in a report, and `birthday` is not on the AI allowlist, so no model
+  reads it. "Cleared" is not "gone": the raw answer stays in
+  `profiles.profile.intakeAnswers.birthday` and `intake_fills` keeps an
+  unsalted hash of it; a true removal would need an explicit delete path
+  (not built). Once copied it takes part in roster-import matching
+  (`lib/imports/match.ts`: name plus birthday, and a different birthday is a
+  contradiction), the same as one a counselor entered. The info card marks it
+  `fromQuestionnaire: "birthday"`; no backfill.
+  Rules: **fill only what is empty**; a re-saved questionnaire may
   change a value (or take back a row, or a field whose answer is gone) only
   while it is still exactly what the questionnaire wrote, compared by hash
   in `intake_fills` the way import provenance compares; anything the
@@ -1206,6 +1305,52 @@ the database (`20261010*`):
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
+### Students' AI tools (`20261111000020`-`22`)
+
+A student can run Build College Lists, Narrative Coherence, Activities Build and the scholarship Ask box, each the
+counselor's tool with small changes, **only while their practice has switched "Let students use AI tools" on**.
+Decided 2026-11-07 (Brandon), and it replaces the older position that kept students off these tools (the "essay
+restriction" below still holds: nothing here writes essay prose).
+
+- **The switch** is `practice_settings.student_ai_tools`, **off by default** (a practice with no row, and every
+  existing row, reads off). `lib/practiceSettings.ts` reads it for a student fail-closed (`studentPracticeSettings`:
+  no counselor, an unapproved counselor, a read error or an older `my_practice_ai_settings()` all read off), and
+  retries its select without the column when the migration isn't applied. `assertAiAllowed` holds a **student** on
+  the four tool modules (`narrative-coherence`, `concierge`, `college-list`, `scholarship-match`: `STUDENT_TOOL_MODULES`),
+  never a counselor; `requireStudentAiTools` / `assertStudentAiTools` gate the routes that spend no model call
+  themselves; `GET /me/ai-tools` answers `{ enabled }` for the app (never an error). Only a firm owner/admin or a solo
+  counselor changes it (`PATCH /settings/privacy { studentAiTools }`).
+- **A lower cap.** A student's daily limits are `AI_STUDENT_DAILY_CALLS` (40) and `AI_STUDENT_DAILY_USD` ($1);
+  `runStructured` passes the caller's role to the budget (`BudgetSubject.role`), so no DB change. The monthly limits and
+  the company ceiling are shared, so many students can still use up the day's ceiling: that is why the switch is off by
+  default. (A combined student-pool line would be the real protection if it is ever on by default.)
+- **Build College Lists.** `GET /colleges/list-builder/{schools,defaults}`, `POST /colleges/list-builder` and
+  `POST /ai/college-list-chat` accept a student (`requireRoleIn("counselor","student")` + the switch; `resolveStudentId`
+  pins them to themselves); `explain` and the alumni-outcome notes stay the counselor's. `POST /colleges/list-builder/add`
+  (student only, strict `{ collegeIds }` body) puts schools on their own list as Interested through `addToList`, skips
+  any already there, and **the server tags each Reach / Target / Safety** (`lib/studentListFit.ts`: the Builder's own
+  `studentOdds` + `fitFor` on the student's numbers, always WITH scores, so it can differ from a test-optional run's tier).
+  The database refuses a student-set `fit`, so the tag is one service-client column write on the rows the request just
+  inserted (keyed on the row, the student and `added_by`; `test/unit/service-callsites.test.ts` records why).
+- **Narrative Coherence** (`20261111000021`). A student reads, inserts and deletes only a `coherence_reports` row they
+  created about themself, and reads/writes only the `narrative_flags` of those reports (a trigger limits a student's flag
+  update to status and the task link). The counselor's policies are untouched, so they read every report; `ranBy` is
+  derived from `created_by`. The routes drop their student refusals; a student's run uses a direct brief instead of
+  `buildStudentContext` (which stays counselor-only, spec section 4), the student-addressed prompts of
+  `lib/studentToolPrompts.ts`, and one more filter: any bullet in the student's own voice (`isStudentSafe`) is dropped. A
+  request for wording gets questions and no model call. No counselor-addressed activity alignment for a student.
+- **Activities Build** (`20261111000022`). `opportunity_matches.origin` ('counselor' default | 'student'). A student's run
+  has **no review step**: rows are `origin student`, status `suggested`, and the request is filed under their own
+  counselor with `constraints.ranBy = "student"` (which keeps each side's "last search" apart). A student Tracks
+  (`saved`, linked to their own to-do) or dismisses; they can't set `approved`, `sent` or `counselor-review` (400) or touch
+  a program their counselor sent. `GET` also returns `tracked` (saved/applied) for both sides.
+- **Scholarships.** Scan and Track (`PUT .../recommend`) need no AI and always worked for a student; only the Ask box is gated.
+  `ScholarshipDto.applyUrl` is new; the seeded catalog has none (`url` = `source_url`).
+- **Deploy order:** either, for every migration (each states why). **Tests:** `test/integration/student-ai-tools.test.mjs`
+  (switch, authz, RLS, fit, model paths when `FAKE_ANTHROPIC_URL` points at a stand-in model), `test/unit/student-ai-tools.test.ts`,
+  `student-list-fit.test.ts`, `student-tool-prompts.test.ts`, `coherence-report-dto.test.ts`, `program-dto.test.ts`,
+  `scholarship-dto.test.ts`.
+
 ### A student's own messages and calendar events (QA round 10, `20261105000017`)
 
 `routes/studentOwn.ts` (student only, under `/me`). **`POST /me/messages/counselor`** `{ body }` (4,000
@@ -1225,6 +1370,44 @@ and date. **Scholarship Ask AxIS** (`POST /student-aid/:id/scholarships/ask`) no
 open catalog (`scanScholarships(..., { wholeCatalog: true })`), lets the model pick by short keys checked
 against that pool, and returns `found` (each `isNew` when it wasn't in the list shown) and `searched`.
 
+### Practice branding (`20261111000008`; `lib/branding.ts`, `routes/branding.ts`)
+
+A logo, a banner and an accent colour, persisted (the app kept them in localStorage as data URLs). **Two scopes,
+one shape:** a counselor in a firm reads the firm's (`firms.logo_url`, `banner_url`, `accent_color`,
+`accent_color_source`, which already existed) and only an owner or admin changes it; a solo counselor has their own
+`counselor_branding` row (owner-only RLS both ways, approval gate). `GET /branding` answers `{ scope: "firm" | "solo",
+canEdit, logoUrl, bannerUrl, accentColor, accentColorSource }`; `PUT /branding` takes `{ accentColor?: "#RRGGBB" | null,
+accentColorSource?: "default" | "logo" | "banner" | "manual", logoUrl?: string | null, bannerUrl?: string | null }`
+(strict) and answers the same shape; a colour without a source is `manual`, null is `default` (the rule
+`PATCH /firms/mine` always had: both now call `brandingColumns` / `firmBrandingUpdate` and `assertFirmBrandingEditor`).
+`POST /branding/upload-url` `{ kind: "logo" | "banner", contentType: "image/png" | "image/jpeg" | "image/webp",
+sizeBytes }` (20 an hour) answers `{ bucket, path, token, uploadUrl, publicUrl, expiresIn, maxBytes, contentType }`;
+the client PUTs the bytes to `uploadUrl` (or `uploadToSignedUrl(path, token, file)`), then saves `publicUrl` with PUT.
+**The bucket** `branding` is public-read, PNG/JPEG/WebP only, **never SVG** (a browser runs its script), 4 MB per object
+(a logo is held to 2 MB by the API), and has **no storage.objects policy**: no client writes or lists it. Objects
+are `<firm id | counselor id>/<kind>-<16 hex>.<png|jpg|webp>`, named by the API, and only a signed upload URL the API
+minted with the service role (after the owner/admin check) writes one. **A saved URL** must be exactly this project's
+public URL of such a path in the caller's own folder, of the field's own kind (`ownBrandingPath`: rebuilt and compared
+as a string, so look-alike hosts, ports, credentials, queries, dot segments and encodings fail; plain http only when
+`SUPABASE_URL` is a loopback). Before saving, the object is read back: missing is 400 "hasn't finished uploading",
+over the kind's size or bytes that aren't the image the extension says (`sniffImageType`) are removed and refused. A
+replaced or cleared image is removed, best effort and only from the caller's own folder. `counselor_branding`'s CHECKs
+hold each URL column to its kind in the counselor's own folder; the host is the API's check (the migration can't know
+the project URL). **The folder cleans itself and is capped** (no cron): before minting, `POST /branding/upload-url`
+lists the scope's folder with the service role, removes objects of the API's naming scheme older than two hours
+(`BRANDING_STALE_MS`: a signed upload URL lives two hours, so nothing that old can still be on its way to a save) that
+are not the saved logo or banner (`brandingCleanup`; anything else in the folder is never touched and still counts),
+then answers 429 `branding_folder_full` when 10 objects remain (`BRANDING_FOLDER_MAX`), so unsaved uploads can't
+become free public hosting. A removed object can stay visible for up to an hour through Storage's CDN cache. A
+counselor who joins a firm keeps their unused `counselor_branding` row and its objects, and gets them back if they
+leave. `PATCH /firms/mine` takes https logo and banner URLs only (plain http and data URLs refused); narrowing it to
+the branding bucket's own paths follows with the app slice, so existing firm rows and AxIS's `practice.update` keep
+working until then. **Deploy order:** either; not
+in `REQUIRED_SCHEMA`. Without the file a solo counselor's GET/PUT and every upload answer 503 `branding_unavailable`,
+and firm branding reads and saves as before. **Not verified:** real Supabase Storage on production (signed uploads to a
+bucket with no policy were tested on the local stack only). Known limits: an upload that is never saved stays in the
+bucket until the next upload URL for that folder cleans it; old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
+`test/unit/branding.test.ts`, `test/integration/branding.test.mjs`.
 ### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
 
 **More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
@@ -1341,6 +1524,37 @@ and `requirements` (`[{ id, label, done }]`). "Applying to N" is `student_person
 (`collegesPlanned` on the info routes). `GET /overview/student-summaries` adds `gradYear`, `collegesPlanned`,
 `applying`, `results` and `scholarships` per student. `lib/resultsAvailability.ts` turns a missing column into
 `503 college_results_unavailable`; the summaries read the new columns separately so they degrade, never fail.
+
+### School-specific scholarships (`20261111000006`)
+
+A school's own awards (a university's merit scholarships and their deadlines), kept on `public.scholarships` beside
+the national/state catalog: `college_id`, `owner_counselor_id`, `firm_id`, `source` (`catalog` | `counselor`) and
+`eligibility_text`. **Meridies never curates these**: a row exists only because a counselor typed it in (later also
+the cited-proposals pipeline), and it reads `verified: false` until an editor (service role) sets
+`source_verified_at`; the owner's own edit clears that stamp again. Routes (`routes/schoolScholarships.ts`, counselor
+only, `request.db`): `POST /scholarships/internal` (name, `collegeId` required, amount, dates, an https `url`,
+`eligibility`, `notes`, `basis`, `essayRequired`; 201), `PATCH /scholarships/internal/:id` (own rows only;
+`sourceVerifiedAt` is refused), `DELETE /scholarships/internal/:id` (soft: `is_active = false`, so a row a student
+is tracking keeps its link; one way), `GET /colleges/:id/scholarships` (`{ collegeId,
+scholarships }`, each with `source`, `ownedBy: "you" | "firm" | "meridies"`, `verified`, `canEdit`). Writes are 60 an
+hour per counselor and 200 active rows each (409 `scholarship_cap`; the database holds the same line, errcode 54000).
+**Who sees a counselor's row** (RLS, `private.can_see_school_scholarship`): its owner; their firm while the owner is
+still a member; a student whose counselor owns it or whose counselor's workspace firm is the row's firm. Never another
+practice or its students. Writes: owner only, `source = 'counselor'` with a school (CHECK); column grants keep source,
+owner, firm and the stamp out of client writes, and `private.scholarships_guard_client` pins the firm. Catalog rows
+stay service-role only. **The scan** (`scanScholarships`, `classifyScholarships`) shows a school row only when that
+school is on the student's `student_colleges` and, for a counselor's row, only when it is the student's practice's
+(`scholarship_practice(p_student)`, answered only to someone who can view the student; unknown means no counselor
+rows), with `matchedOn: "school"`; closed rows are `held` as usual. Scan DTOs gain `collegeId`, `source`, `verified`.
+The scan reads the catalog (`owner_counselor_id is null`) and the school rows for the student's listed colleges as
+two queries, so counselor rows never crowd the catalog out of the read. Deleting a counselor's account deletes their
+rows, but a student's tracked match survives: `scholarship_matches.scholarship_id` is `on delete set null` (the match
+keeps its own name, link, amount and deadline). `PUT /student-aid/:id/scholarships/:scholarshipId/recommend` lets a
+counselor recommend their own (or their firm's) school row even when the student hasn't listed that school; it reaches
+no other practice.
+**Deploy order:** migration first (either order is safe: without it the routes answer 503
+`school_scholarships_unavailable` and the scan shows the catalog only). Not in `REQUIRED_SCHEMA`. Tests:
+`test/unit/scholarship-scan.test.ts`, `test/integration/school-scholarships.test.mjs`.
 
 ### Aid generosity is three ratings, not one
 
@@ -1992,6 +2206,14 @@ curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
   "https://<api-host>/internal/pipeline-sequences/dispatch"
 ```
 
+**Not created yet: the account-closure purge.** `POST /internal/account-closures/purge`, same bearer token, once a
+day. It deletes nothing unless `ACCOUNT_PURGE_ENABLED=true` (see "Leave Meridies"); creating the Railway cron and
+switching the flag on are the owner's steps, with their explicit OK:
+```bash
+curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" \
+  "https://<api-host>/internal/account-closures/purge"
+```
+
 ## AI inside the search
 
 The model never writes a result list and never changes the catalog.
@@ -2412,7 +2634,47 @@ turns action items into tasks through `POST /tasks`, so RLS, limits and notifica
 practice's "AI summaries" switch gates it (`"meeting-summary"` is in `SUMMARY_MODULES`). The essay
 shape test is deliberately not applied: a counselor's meeting record is first person ("I told Maya").
 **Deploy order:** either. `20261028000007` adds the `ai_runs` label; before it, only the audit row is skipped.
-Tests: `test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
+**Transcripts** (`kind: "transcript"`, optional: absent means notes, so old clients are unchanged). The counselor
+pastes a transcript in `rawNotes` or sends the exported file as `file: { name, type?, data }` (base64, at most 2 MB;
+`.vtt`, `.srt`, `.txt`/`.md` or `.docx` through `readTranscriptFile` in `lib/documentText.ts`; the essay readers still
+refuse `.vtt`/`.srt`), never both. This route alone takes a 3 MB body. `lib/transcript.ts` (pure) strips the WebVTT/SRT
+structure (header, NOTE/STYLE/REGION blocks, cue ids, timings with their settings, `<v>`/`<c>`/`<i>` and timestamp
+tags, `{\an8}`, entities, BOM, CRLF), drops caption lines the previous cue already showed, merges a speaker's
+consecutive lines (a repeat is dropped only when the same speaker said it in this cue or the one before). **Who is a
+speaker (heuristic):** a `<v ...>` voice tag (up to 200 characters) always. In a VTT/SRT cue, a leading "label:" of
+up to 80 characters (any letters, CJK included, digits, spaces and `, . ' - ( ) [ ] & / @ _ + | – — ·`) is a speaker
+on its **first** cue when it is short (five words or fewer, separators like "-", "&", "|" not counted: "maya chen",
+"Maya's iPad", "iPhone 12", "Mom and Dad", "Jamal - Lincoln HS", "[Mom]", "李明"), name-shaped (every word outside
+nested parentheses and brackets capitalised, a particle such as de/van/bin, "and", or a number, at most six words:
+"Chen, Maya", "Maya Chen (Lincoln High School student)") or an email; a longer label that isn't name-shaped only when
+it starts two or more cues. Never a whole-label prose heading (Note(s), Agenda, Summary, Remember, Reminder, Total, Key
+Points, Follow Up, Open Questions, Action Items, Next Steps, Deadline(s), Time, Yes, No, Wait, Step/Option/Part/Q/A N,
+day and month names... "Total Recall Productions" is still a name), nor one ending in "!"/"?". The hard rule (a display
+name never reaches the model) outranks prose: a short "The plan: apply early" line is read as a speaker. **It is still
+a heuristic**: a label that fails every rule and starts only one cue reaches the model as text, and names spoken inside
+the talk pass as they do in pasted notes. In pasted text (no timings) it stays conservative: leading timestamps are
+stripped and "label:" is a speaker only when the same label starts two or more lines and is either a short label or
+"Last, First" (one or two capitalised words each side); Otter's "Name  0:03" headers too. **Speaker labels never reach the model**: they are
+display names the meeting tool wrote, not words the counselor typed, so each becomes "Speaker 1", "Speaker 2"... in
+order of first appearance, and only the answer maps them back (`restoreSpeakers`; the legend is returned as
+`transcript.speakers`). Names said inside the talk pass as in notes. Limits: 600,000 characters before cleaning,
+200,000 after (413 `transcript_too_long`), fewer than 20 spoken characters is 400 `transcript_empty`, a wrong file 400
+`transcript_file_type` / `transcript_unreadable`. **Map-reduce** (`summarizeTranscript`): whole sentences packed into
+parts of at most 15,000 characters (a new part prefers a speaker turn past 14,000; a run with no punctuation is cut
+at a space; a part starting mid-turn repeats its label), at most 15 parts; one `runStructured` call per part (three at
+a time, the same tool schema, "part i of n") and one merge call, so at most 16 calls, each through the AI switch, the
+budget gate and its own `ai_runs` row (the 16-call bound, 15 parts + 1 merge, was reviewed and accepted
+2026-11-08). The first failure stops the run (no new part starts, nothing merged, nothing
+stored; the usual 503/429/403). Every answer, each part's and the merge's, goes through `cleanSummary` against the
+**whole** transcript's spoken words (`speakerLabels: true` lets "Speaker 2" through without letting its digit count
+as a stated figure); names put back into the answer are cut to the 4,000-character cap at a sentence end or a space,
+never mid-word. The practice switch is checked before any call, and transcripts are also capped at 20 an hour
+per counselor. The answer adds `transcript: { characters, parts, modelCalls, speakers }`. Transcript text is never
+logged (`serializeReq` in `lib/requestLog.ts` logs no body). **Test double:** `MEETING_SUMMARY_FAKE=fixture`
+(refused outside `NODE_ENV` development and test, like `RESEARCH_FAKE`; CI sets it on the persona API) answers a
+part with its first line and the merge with the parts joined, still through `cleanSummary`, for notes too. The
+notetaker integration stays off; no migration. Tests: `test/unit/transcript-clean.test.ts`,
+`test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
 
 ### The essay restriction is a hard product constraint
 
@@ -3299,8 +3561,9 @@ step 1's and is never gated.
   counselor's token; only the uploader, only a draft) -> `POST /:id/files`
   (download on the same token, size, sha256, magic bytes, parse and profile;
   a bad file fails by name and the rest go on; up to 20 files and 5,000 rows)
-  -> `POST /:id/plan` (template by header fingerprint, then presets, then the
-  AI fallback; the import moves to `mapping`) -> `PUT /:id/plan` (every edit;
+  -> `POST /:id/plan` (template by header fingerprint, then vendor presets
+  for a tool the headers name, then presets, then the AI fallback; the import
+  moves to `mapping`) -> `PUT /:id/plan` (every edit;
   a plan with problems is stored with them, staging refuses until there are
   none; `saveTemplate: { name }` is "Remember this layout") -> `POST /:id/stage`
   (synchronous, about 30 s for 5,000 rows; a double click gets 409) ->
@@ -3355,6 +3618,15 @@ step 1's and is never gated.
   uploaded documents" switch (`practiceSettings.ts` `DOCUMENT_MODULES`). AI
   cell cleanup (`import-cleanup`) is deferred: a cell that won't clean is a
   manual fix in review.
+- **Vendor presets are unverified guesses** (`VENDOR_PRESETS`, `presets.ts`:
+  College Planner Pro and Counselmore; no real export from either). A file
+  naming one in its headers maps with its table first (only spellings `PRESETS`
+  lacks) as `source: "preset-unverified"`; never a bare GPA, test date, ID or
+  parent column. A saved layout stores `preset`. Re-derive from a real export.
+  **Deploy order:** either order works; the app's label for the new source is
+  preferred first, because an old app draws an empty chip for it. No data
+  effect. **Tests:** `import-plan`, `import-match` (unit) and
+  `imports-vendor-presets.test.mjs` (integration; fixtures are SYNTHETIC).
 - **Sensitive values** (`sensitive.ts`, §7.4): a header naming a never-stored
   category is forced to ignore whoever mapped it (`validatePlan`); an
   SSN-shaped value is dropped and counted; a bare 9-digit value is flagged
@@ -3609,10 +3881,115 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
+  **Bulk export** (`lib/studentExport.ts`, `lib/csv.ts`, `lib/driveExport.ts`; no migration):
+  `POST /account/export/students` `{ studentIds }` (1-25 uuids, counselor, approved only like the
+  per-student export) returns, per id on the caller's caseload (`caseloadStudentIds`, past 250 the same
+  rule asked about these ids), the per-student export's JSON, a CSV per table with rows plus `profile`
+  (`toCsv`: RFC 4180, CRLF; any string cell starting with `= + - @`, tab or CR, after leading white space
+  or as a full-width look-alike, gets a leading `'`; typed numbers are left alone) and `documents` (name,
+  kind, path, link). Any other id, another practice's student or a random uuid, is exactly
+  `{ id, status: "not_found" }` and is never read. File bytes are never included (`filesIncluded: false`,
+  `filesNote`). Cost-based limit: one unit per distinct id from 1,000 an hour (40 batches of 25, so a roster of up to 1,000
+  exports in one sitting; the app (11c) can loop the whole roster) (`account:export-batch:<id>`,
+  `consumeUnits`, spent before reading, also when refused: 429 `export_rate_limited` with
+  `retryAfterSeconds` and `Retry-After`, an hour, the window's longest wait); it never touches
+  the per-student export's 60 an hour. **Every export table read is paged** (`lib/pagedRead.ts`:
+  1,000 rows a page in primary-key order, `ORDER_KEYS` for the tables keyed by student, until a short
+  page or 5,000 rows a table), because PostgREST's `max_rows` (1,000) silently cut each read before; at
+  the cap a one-row probe decides, and only a table really cut is listed in `truncated` (in the student's
+  JSON, on the batch entry, and `truncated: [{ id, tables }]` on the batch; the self export lists
+  `roster` / `practice.*`). This applies to all three exports. **Size**: a batch answer is at most
+  20,000 rows and 10 MB of JSON plus CSV. A student over that alone (their read stops early,
+  `pageGuard`) is `{ id, status: "too_large" }` and the batch goes on: **the app (11c) then fetches that
+  student with `GET /account/students/:id/export`**, which has no batch cap (its 60 an hour applies).
+  Students that each fit but not together make the batch 413 `export_too_large`: retry with fewer.
+  Paging stops only on an empty page (never a short one, so a lower `max_rows` can't cut a table), but
+  offset paging is not snapshot-consistent: a row inserted or deleted between pages can be duplicated or
+  missed at a page boundary. **For 11c:** the `GET /account/students/:id/export` fallback and the self
+  export have no size guard (up to 5,000 rows for each of the ~60 tables).
+  `POST /account/export/drive` `{ studentIds }` or `{ scope: "roster-summary" }` (whole caseload, at most
+  250, else 413 `roster_too_large`; 10 an hour) creates ONE Google Sheet "Meridies export <date>" in the caller's Drive under the
+  existing `drive.file` scope (multipart CSV upload converted to Sheets): name, email, grad year,
+  status, counts of colleges, tasks, documents, essays and meetings. `{ webViewLink, title, rows, skipped }`
+  (`skipped`: students whose profile row the caller can't read, left off the Sheet);
+  409 `drive_not_granted` (not connected, reconnect needed, or no drive.file), 502 `drive_failed`, 503
+  `drive_unavailable` (no Google settings). Only the HTTP status is ever logged, never the CSV or a
+  token; no path segment carries a token, so `lib/requestLog.ts` needs nothing. `DRIVE_EXPORT_FAKE=fixture`
+  (development/test only, refused at boot otherwise) stands in for Google from the caller's
+  `integration_tokens` row (`account_email` starting `drive-fail` answers 502). A shared (collaborator)
+  student's profile row is not readable through profiles RLS, so their export has `profile: null` and
+  the Sheet leaves them out (counted in `skipped`). Tests: `test/unit/csv.test.ts`, `export-paging.test.ts`, `student-export-batch.test.ts`,
+  `drive-export.test.ts`, `test/integration/account-export.test.mjs` (API with `DRIVE_EXPORT_FAKE=fixture`).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
   user; a counselor with an active roster or an owned firm is refused, and a
   firm member with any student, archived included, is told to ask an owner or
   admin to transfer them.
+  The checks are `deletionBlocker` (`lib/accountDeletion.ts`), each a 409 with a code: `caseload_not_empty`,
+  `owns_firm`, `stripe_connected`, `billing_history` and `signed_agreements_kept` (probed: only on a database with
+  the agreements tables). A read that fails is a 503, never a guess. **`stripe_connected` is a new refusal on `DELETE /account`
+  too**: a solo practice whose `practice_stripe_accounts` row has `charges_enabled = true` is told "disconnect
+  Meridies in your Stripe dashboard first, then try again". Stripe's `account.application.deauthorized` webhook sets
+  `charges_enabled` false, which unblocks; an onboarding never finished never blocks; a firm's account is the firm's
+  (its owner is already refused). **`billing_history` is new too**: invoices, payments and credit refunds RESTRICT
+  their package, and deleting the profile cascades its contacts and their packages, so an account with any of them
+  (on a contact whose `counselor_id` is the account, firm or solo) could never be deleted: the cleanup steps would run
+  and the auth user deletion would then fail. It is refused up front with "Your account has invoices or payments on
+  record, which Meridies has to keep. Ask the team to close it for you." (fail-closed on a read error, ignored on a
+  database without those tables). **Self-service closure is therefore not possible with billing history**: the team
+  closes such an account by hand (the records have to be kept), and the app should say so. **Runbook, a stuck row**
+  (the counselor disconnected in Stripe but the webhook never arrived): check the account in the Stripe dashboard, then
+  as `postgres` `update public.practice_stripe_accounts set charges_enabled = false, updated_at = now() where
+  counselor_id = '<profile id>';` and ask them to try again. `deleteAccount` is the one deletion path (AxIS trash
+  first, 503 if that fails, the `account.deleted` audit row with `via`, the AI counters, then the auth user).
+- **Leave Meridies: closing with a 30-day grace period** (`20261111000004`, `lib/accountClosure.ts`, routes in
+  `routes/account.ts`). Counselors only, open to a pending account (`allowPending`). **Nothing is deleted or
+  disconnected when they ask: the account keeps working, read and write, Google/Microsoft connections included,
+  until the actual purge.** `GET /account/closure` answers `{ status, requestedAt, purgeAfter, daysLeft,
+  purgeEnabled, blockedReason }`, `status` one of: `"none"` (never asked, or cancelled; the rest null), `"pending"`
+  (waiting for its date, or being deleted right now; `daysLeft` is 0 once due), `"on_hold"` (the purge found a
+  blocker: `blockedReason` says what, `purgeAfter` and `daysLeft` are null, and nothing happens until the counselor
+  fixes it and confirms again, or cancels). `purgeEnabled` is the env flag, so the app can say automatic deletion
+  isn't switched on. `POST /account/closure` with `{ "confirm": "CLOSE" }` (exact; strict body; 10 an hour) runs
+  `deletionBlocker` (same 409s as `DELETE /account`), then writes the row with `purge_after` = now + 30 days (201),
+  emails the counselor at their sign-in address (the date in their time zone, cancel from Settings, export first; no
+  student names; template `account-closure-requested`) and writes `account.closure.requested` to `audit_log`. A
+  second request while one is pending answers it again (200, no email); after a cancel, or from `on_hold`, it starts a
+  fresh 30 days with a new email (201; `account.closure.reopened` for the latter). `DELETE /account/closure` cancels
+  (200 `{ status: "none" }`, email `account-closure-cancelled`, which names the old date only for a pending closure,
+  never the past date of one on hold), 404 `no_closure` when none is open, 409
+  `closure_in_progress` while a purge is working on it; a row stuck in `purging` for over an hour (a crashed run) can
+  be cancelled (conditional on the `updated_at` read). `account_closures` has RLS (a counselor selects their own
+  row) and the approval gate; there is no client write grant, so the API reads and writes it with the service role
+  keyed by the caller's verified id.
+  **The purge** is `POST /internal/account-closures/purge` (CRON_SECRET, constant-time; lease
+  `account-closure-purge`, 15 minutes; heartbeat `account-closure-purge`). **It is OFF**: unless
+  `ACCOUNT_PURGE_ENABLED` is exactly `true` (any other value is off; it never fails boot) it answers `{ ran: false,
+  reason: "purge_disabled" }` and touches nothing, heartbeat included. When on, for at most 5 rows a run, oldest due
+  first (pending with `purge_after` <= now, or `purging` untouched for an hour after a crash, never sooner): a
+  conditional claim to `purging` on the row as read (a cancel in between wins); the profile must be a counselor (else
+  `failed`, never deleted); `deletionBlocker` again (a block marks the row `failed` with the reason in `last_error`,
+  writes `account.closure.blocked`, emails nobody, and the account stays); `account.closure.purging` in `audit_log`
+  (if that insert fails the row is `failed` and nothing is deleted); the Google/Microsoft tokens revoked and
+  forgotten with the `integrations` rows (`revokeConnections`: best effort per provider, a failure logged without
+  the token); `deleteAccount` (the `DELETE /account` path, `via: "closure"`); then `account.closure.purged` (with
+  `connections: { forgotten, revokedAtProvider }`, or `{ error: true }` when the revoke threw; Microsoft has no
+  revoke call, so only Google can appear in `revokedAtProvider`). Right before the deletion the row is re-checked as
+  still `purging` (else `account.closure.skipped`, nothing deleted). The closure row cascades with the profile, which
+  is why the outcome is in `audit_log`; a deletion that fails marks the row `failed` (on hold) and nothing retries it
+  until the counselor confirms again. **A deletion that fails after the revoke leaves the account intact but its
+  Google/Microsoft connections revoked** (the counselor reconnects them in Settings if they stay); every precondition,
+  billing history included, is checked before anything is revoked or wiped, so a blocked account loses nothing.
+  Students of the account stay (`profiles.counselor_id` is set null). **Deploy order:** the migration first is best,
+  either is safe; not in `REQUIRED_SCHEMA`. Without the table the routes answer 503 `account_closure_unavailable`
+  and the purge (when on) answers `{ ran: false, reason: "migration-not-applied" }`. **The heartbeat row is not
+  seeded** (with no cron it would read overdue on `/internal/status`, and a disabled run doesn't beat): when the flag
+  is switched on (with the cron), add it: `insert into public.job_heartbeats (job, expected_every) values
+  ('account-closure-purge', '1 day') on conflict do nothing;`.
+  **Not verified:** Stripe Connect against Stripe (no Stripe locally: the 409 is tested on table rows), a real Google
+  token revoke (no tokens or `INTEGRATION_TOKEN_KEY` locally), real email delivery (Mailpit only), and the purge
+  on production data. Tests: `test/unit/account-closure.test.ts`, `test/unit/account-closure-purge.test.ts` (the
+  purge on an in-memory client), `test/integration/account-closure.test.mjs` (`PURGE_API_URL`: a second API with
+  `ACCOUNT_PURGE_ENABLED=true`; that section runs only with it, against counselors the suite makes).
 - **Monitoring.** Every scheduled job writes `job_heartbeats`.
   `GET /internal/status` (CRON_SECRET) answers 503 and lists the overdue job
   when one hasn't run cleanly within twice its interval. It also lists as
@@ -3780,6 +4157,7 @@ npm run dev               # http://localhost:4000
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
 | `IMPORTS_ROLLOUT` / `IMPORTS_PILOT` | The Import page: `off`, `pilot` (default; only the practices in `IMPORTS_PILOT`, firm or solo counselor ids, comma-separated) or `all`. Ready to apply is never gated |
 | `IMPORTS_AI` | `on` (default) or `off`: the AI column mapping's kill switch |
+| `AGREEMENTS_ENABLED` | `true` turns on agreements (`/agreements`, `/agree/:token`); default off, every route 404 `agreements_off`. Keep off in production until the consent wording in `lib/agreementConsent.ts` is reviewed |
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional; Google connect. Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/google` (the app, not this API) |

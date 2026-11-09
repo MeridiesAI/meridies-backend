@@ -38,6 +38,14 @@ const envSchema = z.object({
   // Time saved: activity heartbeats are recorded only when "true". Stays off in
   // production until the privacy policy line about time tracking is live.
   KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Leave Meridies: the purge that deletes closed accounts after their 30-day grace period
+  // (POST /internal/account-closures/purge). OFF unless exactly "true" (lib/accountClosure.ts purgeFlag); any
+  // other value is off, never a boot error. Not switched on without the owner's explicit OK.
+  ACCOUNT_PURGE_ENABLED: blankIsUnset(z.string().optional()),
+  // Agreements (typed-name acceptance, routes/agreements.ts): every route answers
+  // 404 agreements_off unless "true". Stays off in production until the consent
+  // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
+  AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any
@@ -58,6 +66,11 @@ const envSchema = z.object({
   // cases). The server refuses to start with it unless NODE_ENV isn't production and SUPABASE_URL is a local stack
   // (lib/axis/clock.ts).
   AXIS_EVAL_CLOCK: blankIsUnset(z.enum(["on"]).optional()),
+  // Test double for AI meeting summaries (no model): a part's summary is its first line, the merge joins them,
+  // and both still pass cleanSummary. Same rules as RESEARCH_FAKE: development or test only (lib/meetingSummary.ts).
+  MEETING_SUMMARY_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for the Google Sheets export (lib/driveExport.ts): no call to Google. Same rules as TRANSLATE_FAKE.
+  DRIVE_EXPORT_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
   // The model that translates a family's messages; defaults to DEEP_MODEL (lib/translate.ts). A model the
   // private.ai_prices table doesn't price is charged at the table's highest rates, so add its row first.
   TRANSLATE_MODEL: blankIsUnset(z.string().min(5).max(80).optional()),
@@ -162,6 +175,10 @@ const envSchema = z.object({
   // Company-wide: estimated spend per UTC day; at it, all AI pauses until midnight UTC.
   AI_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(300)),
   AI_USER_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(10)),
+  // A student's own daily limits are lower than a counselor's, so many students can't crowd the shared company
+  // ceiling out from under the counselors (students use AI tools only when their practice has turned them on).
+  AI_STUDENT_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(1)),
+  AI_STUDENT_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(40)),
   AI_MONTHLY_OUTPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(5_000_000)),
   AI_MONTHLY_INPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(100_000_000)),
   AI_DAILY_CEILING_USD: blankIsUnset(z.coerce.number().positive().default(100)),

@@ -33,7 +33,8 @@ export type SystemSubject = "events-discovery" | "catalog-proposals";
 /** catalog-proposals: one Haiku read per college run (lib/catalogProposals.ts), a few hundred schools a month at most. */
 export const SYSTEM_CALLS_PER_MONTH: Record<SystemSubject, number> = { "events-discovery": 2000, "catalog-proposals": 500 };
 
-export type BudgetSubject = { userId: string } | { system: SystemSubject };
+/** `role` only selects the daily limits: a student's are lower than a counselor's (AI_STUDENT_DAILY_*). Unset means the counselor's. */
+export type BudgetSubject = { userId: string; role?: "student" | "counselor" } | { system: SystemSubject };
 export type CallEstimate = { model: string; maxOutputTokens: number; promptTokens: number; webSearches?: number; module?: string };
 
 type Metric = "calls" | "output_tokens" | "input_weighted" | "spend_usd";
@@ -97,6 +98,13 @@ function caps() {
     input: env.AI_MONTHLY_INPUT_TOKENS,
     ceiling: env.AI_DAILY_CEILING_USD,
   };
+}
+
+/** The daily limits that depend on who is asking: calls and estimated spend per UTC day. */
+function dailyLimits(subject: { userId: string; role?: "student" | "counselor" }): { calls: number; spend: number } {
+  return subject.role === "student"
+    ? { calls: env.AI_STUDENT_DAILY_CALLS, spend: env.AI_STUDENT_DAILY_USD }
+    : { calls: env.AI_DAILY_CALLS, spend: env.AI_USER_DAILY_USD };
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -208,12 +216,13 @@ function linesFor(subject: BudgetSubject, est: CallEstimate, t: PriceTable, now:
     return [{ subject: key, metric: "calls", period: "month", period_start: month, amount: 1, limit: SYSTEM_CALLS_PER_MONTH[subject.system] }, company];
   }
   const user = subjectKey(subject);
+  const daily = dailyLimits(subject);
   const input = round6(weightedInput(t, est.model, { input: est.promptTokens, output: 0, cacheRead: 0, cacheWrite: 0 }));
   return [
-    { subject: user, metric: "calls", period: "day", period_start: day, amount: 1, limit: c.calls },
+    { subject: user, metric: "calls", period: "day", period_start: day, amount: 1, limit: daily.calls },
     { subject: user, metric: "output_tokens", period: "month", period_start: month, amount: est.maxOutputTokens, limit: c.output },
     { subject: user, metric: "input_weighted", period: "month", period_start: month, amount: input, limit: c.input },
-    { subject: user, metric: "spend_usd", period: "day", period_start: day, amount: spend, limit: c.userSpend },
+    { subject: user, metric: "spend_usd", period: "day", period_start: day, amount: spend, limit: daily.spend },
     company,
   ];
 }
@@ -252,7 +261,7 @@ function memoryReserve(subject: BudgetSubject, est: CallEstimate, now: Date): Ho
   const key = subjectKey(subject);
   const calls = `${key}|calls|${dayOf(now)}`;
   const output = `${key}|output|${monthOf(now)}`;
-  const callLimit = "system" in subject ? SYSTEM_CALLS_PER_MONTH[subject.system] : c.calls;
+  const callLimit = "system" in subject ? SYSTEM_CALLS_PER_MONTH[subject.system] : dailyLimits(subject).calls;
   if ((memory.get(calls) ?? 0) + 1 > callLimit) throw "system" in subject ? new HttpError(429, SYSTEM_SPENT) : dailyError(now);
   if ((memory.get(output) ?? 0) + est.maxOutputTokens > c.output) throw new HttpError(429, MONTHLY);
   memory.set(calls, (memory.get(calls) ?? 0) + 1);
@@ -267,7 +276,7 @@ async function fallbackReserve(subject: BudgetSubject, est: CallEstimate, now: D
     log.warn(`AI budget fallback active: migration ${MIGRATION} not applied, caps not enforced`);
   }
   // As the API always counted: the daily call quota (which lets a call through when its own check errors).
-  if ("userId" in subject && !(await consumeQuota(subject.userId, "ai_calls", "day", caps().calls))) throw dailyError(now);
+  if ("userId" in subject && !(await consumeQuota(subject.userId, "ai_calls", "day", dailyLimits(subject).calls))) throw dailyError(now);
   return { subject, model: est.model, mode: "fallback", lines: [], settled: false };
 }
 

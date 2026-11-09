@@ -32,6 +32,11 @@ const REVIEWED = [
   // loaded the college; the service role reads and writes only that one Meridies-wide college_photos row (and
   // the photo bucket copy of it) and that one college_site_info row (what the school's own site says about
   // applying; the library code is handed these reads and writes and holds no client), and never replaces a photo.
+  // Also POST /list-builder/add: inside a student's own request (requireRole("student") and the practice's student-AI
+  // switch ran; the schools were inserted on the student's own RLS client). The service role is handed to
+  // lib/studentListFit.ts, which sets ONE column, `fit`, on the rows that request just inserted (keyed on the row,
+  // the student and added_by = the student). The tag is computed from the student's own numbers; nothing in the
+  // request chooses it (the body is strict). The database refuses a student-set fit, which is why the server writes it.
   // lib/imports/files.ts, mapping.ts, stage.ts: the import worker inside an approved counselor's own
   // request (authenticate + requireRole ran), p_actor = that counselor; every function re-checks
   // private.can_manage_import (which asks the approval gate). lib/imports/retention.ts: the sweep acts
@@ -97,6 +102,27 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // routes/branding.ts: inside an approved counselor's own request (authenticate + requireRole("counselor")), after a
+  // firm scope's owner/admin check on their RLS client (a solo counselor's scope is their own id). The service role only
+  // touches the public branding bucket, which has no client write policy, and only under that scope's own folder: it
+  // mints a signed upload URL for a path the API names, reads back an object a save names (only once ownBrandingPath
+  // put it in the caller's folder) and removes one a save replaced, cleared or that wasn't the image it claimed.
+  "routes/branding.ts",
+  // lib/driveExport.ts: only the DRIVE_EXPORT_FAKE test double (refused at boot outside development/test) reads the
+  // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
+  // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
+  "lib/driveExport.ts",
+  // lib/accountDeletion.ts: deleteAccount runs inside the account's own request (DELETE /account) or for the
+  // closure purge (lib/accountClosure.ts, handed the client by routes/internal.ts behind CRON_SECRET and
+  // ACCOUNT_PURGE_ENABLED); it removes only that account's own trash, AI counters and auth user. Approval isn't asked:
+  // a pending or revoked counselor may still leave.
+  "lib/accountDeletion.ts",
+  // routes/agreements.ts: the public /agree/:token page (nobody signed in). The hashed token decides; it reads only
+  // the agreement that token names, its contact's email, the practice's name and its counselor's email, asks
+  // approvedCounselorIds for the agreement's counselor first, and writes only through accept_agreement (EXECUTE to
+  // service_role only), which re-checks the token, its expiry and the agreement's status under a row lock. The
+  // counselor routes run on the caller's own client.
+  "routes/agreements.ts",
   // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
   // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
   // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't

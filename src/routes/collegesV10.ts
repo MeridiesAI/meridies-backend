@@ -35,9 +35,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { FAST_MODEL, enforceNoProse, runStructured } from "../lib/anthropic.js";
-import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
+import { HttpError, badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
-import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { requireRole, requireRoleIn, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { collegeLogoUrls, loadCollegeLogos, logoUrlOf } from "../lib/collegeLogos.js";
 import { lookUpLogoOnly, lookUpMediaSoon } from "../lib/collegeMediaLookup.js";
@@ -48,6 +48,10 @@ import { fetchSitePage } from "../lib/links.js";
 import { supabasePhotoStore } from "../lib/ingest/collegePhotos.js";
 import { wikimediaClient } from "../lib/ingest/wikimedia.js";
 import { serviceClient } from "../lib/supabase.js";
+import { requireStudentAiTools } from "../lib/practiceSettings.js";
+import { STAGE_STATUS } from "../lib/studentApplication.js";
+import { fitsForSchools, stampFits } from "../lib/studentListFit.js";
+import { addToList } from "./application.js";
 import { findOrCreateChild, practiceFolder } from "../lib/practiceFolders.js";
 import { fourPointGpa, gpaLabel } from "../lib/gpa.js";
 import { toAidBandRating, toAidRating } from "../lib/serialize.js";
@@ -148,6 +152,15 @@ export async function loadListSchools(request: FastifyRequest): Promise<ListScho
     .map((l) => toListSchool(byId.get(String(l.college_id))!, l, need.get(String(l.college_id)) ?? null));
 }
 
+/** Schools by catalog id in the builder's shape: the curated list profiles first, then the rest of the catalog. */
+export async function listSchoolsByIds(request: FastifyRequest, ids: string[]): Promise<ListSchool[]> {
+  const want = new Set(ids);
+  const curated = (await loadListSchools(request)).filter((s) => want.has(s.collegeId));
+  const have = new Set(curated.map((s) => s.collegeId));
+  const rest = ids.filter((id) => !have.has(id));
+  return [...curated, ...(rest.length ? await catalogSchoolsByIds(request, rest) : [])];
+}
+
 /**
  * Schools from the whole catalog that fit the builder's hard criteria (distance,
  * majors, test-optional), through the search RPC, in the builder's shape. The
@@ -164,6 +177,11 @@ export async function catalogListCandidates(request: FastifyRequest, c: ListCrit
   if (error) throw fromPostgrest(error);
   const ids = ((data ?? []) as Row[]).map((r) => String(r.college_id)).filter((id) => !have.has(id));
   if (!ids.length) return [];
+  return catalogSchoolsByIds(request, ids);
+}
+
+/** Catalog schools (Scorecard facts) by id, in the builder's shape; one with no stats row is left out. */
+export async function catalogSchoolsByIds(request: FastifyRequest, ids: string[]): Promise<ListSchool[]> {
   const [colleges, stats, factors, ratings, programs] = await Promise.all([
     request.db.from("colleges").select(COLLEGE_CARD_COLUMNS + ", brand_color").in("id", ids),
     request.db.from("college_stats").select("college_id, latitude, longitude, locale, undergrad_enrollment, admit_rate, sat_total_25, sat_total_75").in("college_id", ids),
@@ -410,6 +428,9 @@ const PER_TIER_MAX = 12;
 
 export default async function collegeV10Routes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
+  // Build College Lists: a counselor, or a student whose practice has the AI tools on. A student only ever reaches
+  // their own record (resolveStudentId pins them), and the student switch is checked before anything is read.
+  const tool = [app.authenticate, requireRoleIn("counselor", "student"), requireStudentAiTools];
 
   // ---- Search & research --------------------------------------------------------
 
@@ -1029,7 +1050,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
 
   // ---- Build College Lists ------------------------------------------------------------
 
-  app.get("/list-builder/schools", { preHandler: [...counselor, limit("colleges:list-schools", 60, 60)] }, async (request) => {
+  app.get("/list-builder/schools", { preHandler: [...tool, limit("colleges:list-schools", 60, 60)] }, async (request) => {
     const schools = await loadListSchools(request);
     return schools.map((s) => ({
       collegeId: s.collegeId,
@@ -1041,7 +1062,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
   });
 
   /** The form's starting answers for one student: their own majors, nothing else assumed. */
-  app.get("/list-builder/defaults", { preHandler: [...counselor, limit("colleges:list-defaults", 120, 60)] }, async (request) => {
+  app.get("/list-builder/defaults", { preHandler: [...tool, limit("colleges:list-defaults", 120, 60)] }, async (request) => {
     const { studentId } = z.object({ studentId: z.string().uuid() }).parse(request.query);
     await resolveStudentId(request, studentId, "view");
     const s = await studentNumbers(request, studentId);
@@ -1065,7 +1086,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
    * rate has no odds and sits under Reach. Constraints are loosened in a fixed
    * order when nothing matches, and the response says which.
    */
-  app.post("/list-builder", { preHandler: [...counselor, limit("colleges:list-builder", 240, 60)] }, async (request) => {
+  app.post("/list-builder", { preHandler: [...tool, limit("colleges:list-builder", 240, 60)] }, async (request) => {
     const b = z
       .object({
         studentId: z.string().uuid(),
@@ -1122,7 +1143,8 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     });
 
     let why = new Map<string, string>();
-    if (b.explain) {
+    // The one-line AxIS reasons are the counselor's; a student's run is the deterministic list alone (and spends no model call).
+    if (b.explain && request.profile.role !== "student") {
       const shown = picks.filter((p) => tiers.some((t) => t.schools.some((x) => x.collegeId === p.school.collegeId)));
       why = await explainPicks(request, b.studentId, student, shown);
     }
@@ -1139,4 +1161,68 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       tiers: tiers.map((t) => ({ ...t, schools: t.schools.map((x) => ({ ...x, why: why.get(x.collegeId) ?? null })) })),
     };
   });
+
+  /**
+   * "Add to my list" for a student, from a Build College Lists run: the schools go onto their own list as
+   * Interested (status not-started, added by them), where the counselor sees them on the same board. The student
+   * picks schools and nothing else: the body is strict, so no stage, no tag and no student id can be sent. The
+   * Reach / Target / Safety tag is the server's (lib/studentListFit.ts), written on the rows just added; a school
+   * already on the list is skipped, and the batch carries on.
+   */
+  app.post(
+    "/list-builder/add",
+    { preHandler: [app.authenticate, requireRole("student"), requireStudentAiTools, limit("colleges:list-builder-add", 30, 60)] },
+    async (request) => {
+      const b = z
+        .object({ collegeIds: z.array(z.string().uuid()).min(1).max(36) })
+        .strict()
+        .parse(request.body);
+      const studentId = request.auth.userId;
+
+      const added: { rowId: string; collegeId: string }[] = [];
+      const skipped: { collegeId: string; reason: "already-on-list" | "not-found" }[] = [];
+      for (const collegeId of [...new Set(b.collegeIds)]) {
+        try {
+          const row = await addToList(request, studentId, { collegeId, status: STAGE_STATUS.interested });
+          added.push({ rowId: String(row.id), collegeId });
+        } catch (err) {
+          if (err instanceof HttpError && err.statusCode === 409) skipped.push({ collegeId, reason: "already-on-list" });
+          else if (err instanceof HttpError && err.statusCode === 404) skipped.push({ collegeId, reason: "not-found" });
+          else throw err;
+        }
+      }
+
+      if (added.length) {
+        // The tag is a nicety on top of a school that is already on the list: if reading the numbers fails the
+        // schools stay, untagged, and the counselor can set it.
+        try {
+          const [{ numbers }, schools] = await Promise.all([studentNumbers(request, studentId), listSchoolsByIds(request, added.map((a) => a.collegeId))]);
+          const bySchool = new Map(schools.map((sc) => [sc.collegeId, sc]));
+          await stampFits(serviceClient(), {
+            studentId,
+            numbers,
+            rows: added.map((a) => ({ rowId: a.rowId, school: bySchool.get(a.collegeId) ?? null })),
+            log: request.log,
+          });
+        } catch (err) {
+          request.log.warn({ err: err instanceof Error ? err.message : String(err) }, "Couldn't tag the schools a student added; they stay untagged");
+        }
+      }
+
+      // Answer with what is stored, not what was meant to be.
+      const { data } = added.length
+        ? await request.db.from("student_colleges").select("id, name, fit").in("id", added.map((a) => a.rowId))
+        : { data: [] as Row[] };
+      const stored = new Map(((data ?? []) as Row[]).map((r) => [String(r.id), r]));
+      return {
+        added: added.map((a) => ({
+          id: a.rowId,
+          collegeId: a.collegeId,
+          name: (stored.get(a.rowId)?.name as string | undefined) ?? null,
+          fit: (stored.get(a.rowId)?.fit as string | null | undefined) ?? null,
+        })),
+        skipped,
+      };
+    }
+  );
 }

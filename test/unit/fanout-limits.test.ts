@@ -21,6 +21,8 @@ const FANOUT_READS: Array<[file: string, path: string, after?: string]> = [
   ["pipeline.ts", "/"],
   ["pipeline.ts", "/payments"],
   ["management.ts", "/"],
+  ["guardians.ts", "/roster"],
+  ["guardians.ts", "/roster.csv"],
 ];
 
 const src = (f: string) => readFileSync(new URL(`../../src/routes/${f}`, import.meta.url), "utf8");
