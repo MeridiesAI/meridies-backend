@@ -116,14 +116,10 @@ src/
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
-<<<<<<< HEAD
 │   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
-│   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
-=======
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
 │   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
 │   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
->>>>>>> 055c6ff (Student AI tools, step 5: record the architecture in AGENTS.md (backend))
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
 │   ├── accountClosure.ts  # Leave Meridies: 30-day grace dates, the closure DTO and emails, the purge (off by default)
