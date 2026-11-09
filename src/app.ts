@@ -32,6 +32,7 @@ import collegeIntelRoutes from "./routes/collegeIntel.js";
 import webhookRoutes from "./routes/webhooks.js";
 import stripeWebhookRoutes from "./routes/stripeWebhook.js";
 import payRoutes from "./routes/pay.js";
+import agreementRoutes from "./routes/agreements.js";
 import resourceRoutes from "./routes/resources.js";
 import searchRoutes from "./routes/search.js";
 import settingsRoutes from "./routes/settings.js";
@@ -233,6 +234,7 @@ export function buildApp() {
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
   // Absolute paths (/pay/:token): the public pay link page.
   app.register(payRoutes);
+  app.register(agreementRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
   app.register(taskSetRoutes, { prefix: "/task-sets" });

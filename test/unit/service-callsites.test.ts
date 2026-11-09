@@ -94,6 +94,12 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // routes/agreements.ts: the public /agree/:token page (nobody signed in). The hashed token decides; it reads only
+  // the agreement that token names, its contact's email, the practice's name and its counselor's email, asks
+  // approvedCounselorIds for the agreement's counselor first, and writes only through accept_agreement (EXECUTE to
+  // service_role only), which re-checks the token, its expiry and the agreement's status under a row lock. The
+  // counselor routes run on the caller's own client.
+  "routes/agreements.ts",
   // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
   // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
   // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't

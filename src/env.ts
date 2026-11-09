@@ -38,6 +38,10 @@ const envSchema = z.object({
   // Time saved: activity heartbeats are recorded only when "true". Stays off in
   // production until the privacy policy line about time tracking is live.
   KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Agreements (typed-name acceptance, routes/agreements.ts): every route answers
+  // 404 agreements_off unless "true". Stays off in production until the consent
+  // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
+  AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any

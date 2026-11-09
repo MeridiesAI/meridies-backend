@@ -15,6 +15,8 @@ export function loggedUrl(url: string): string {
     // The one-click unsubscribe links (routes/kpiUnsubscribe.ts, routes/pipelineUnsubscribe.ts)
     // carry a long-lived capability token in the path; a log line must not be able to use it.
     .replace(/^\/*(kpi|pipeline)\/unsubscribe\/[^/]*\/?$/, "/$1/unsubscribe/…")
+    // An agreement link (routes/agreements.ts) is the capability to accept it.
+    .replace(/^\/*agree\/[^/]*\/?$/, "/agree/…")
     // The subscribed calendar feed's URL is its only credential (routes/calendarIcal.ts).
     .replace(/^\/*calendar\/ical\/[^/]+\/?$/, "/calendar/ical/…");
   const keys = query
