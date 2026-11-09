@@ -3784,6 +3784,11 @@ step 1's and is never gated.
   (`test/unit/regex-dos-helpers.ts`); `test/integration/regex-dos.test.mjs`
   runs the review's attacks against the API and checks `/health` still
   answers while each one is in flight.
+- **Name a status set once.** When code asks "is this row still in play?" in more than one place, the answer is a
+  named list and a predicate beside the row's type (`OPEN_AGREEMENT_STATUSES` / `isOpenAgreement`,
+  `OPEN_ROW_STATUSES` / `isOpenRow` for activity drafts, `ACTIVE_CLOSURE_STATUSES` / `isActiveClosure`), used by the
+  check and by the conditional update's `.in("status", [...])` alike, so the two can't drift.
+  `test/unit/open-statuses.test.ts` walks every status of each type.
 - CORS is an allowlist from `CORS_ORIGIN` — never `*`
 - Treat model output as untrusted user content
 
