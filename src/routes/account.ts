@@ -23,8 +23,6 @@ import { z } from "zod";
 import { badRequest, conflict, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { profileKeepsSignedAgreements, SIGNED_AGREEMENT_ACCOUNT_MESSAGE } from "../lib/agreements.js";
-import { profileKeepsSignedAgreements, SIGNED_AGREEMENT_ACCOUNT_MESSAGE } from "../lib/agreements.js";
-import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { forgetAxisTrash } from "../lib/axisTrash.js";
 import { consumeUnits, limit } from "../lib/limits.js";
 import { sheetClient, sheetTitle } from "../lib/driveExport.js";
