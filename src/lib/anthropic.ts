@@ -162,6 +162,8 @@ function userContent(prompt: string, attachments: AiAttachment[] | undefined): A
 type CallContext = {
   actorId: string | null;
   subject?: BudgetSubject;
+  /** Only picks the daily limits (a student's are lower, lib/aiBudget.ts); unset means a counselor's. */
+  role?: "student" | "counselor";
   log: { warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
 };
 
@@ -169,7 +171,8 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
   const { request, ...rest } = opts;
   // The practice's Data & privacy switches come before the budget is spent.
   await assertAiAllowed(request, opts.module);
-  return structuredCall(rest, { actorId: request.auth.userId, log: request.log });
+  const role = request.profile?.role;
+  return structuredCall(rest, { actorId: request.auth.userId, role: role === "student" || role === "counselor" ? role : undefined, log: request.log });
 }
 
 /**
@@ -208,7 +211,7 @@ async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: Call
   const content = userContent(opts.prompt, opts.attachments);
   const tools = [{ name: opts.toolName, description: "Return the result in this exact structure.", input_schema: opts.schema as never }];
   // A programming mistake, not a user error: a call with no actor must name its system budget.
-  const subject: BudgetSubject | null = ctx.subject ?? (actorId ? { userId: actorId } : null);
+  const subject: BudgetSubject | null = ctx.subject ?? (actorId ? { userId: actorId, role: ctx.role } : null);
   if (!subject) throw new Error("structuredCall: no actor and no system budget");
   // Every model call reserves against the budget first (lib/aiBudget.ts) and settles after, whatever happens.
   const hold = await reserve(

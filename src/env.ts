@@ -171,6 +171,10 @@ const envSchema = z.object({
   // Company-wide: estimated spend per UTC day; at it, all AI pauses until midnight UTC.
   AI_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(300)),
   AI_USER_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(10)),
+  // A student's own daily limits are lower than a counselor's, so many students can't crowd the shared company
+  // ceiling out from under the counselors (students use AI tools only when their practice has turned them on).
+  AI_STUDENT_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(1)),
+  AI_STUDENT_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(40)),
   AI_MONTHLY_OUTPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(5_000_000)),
   AI_MONTHLY_INPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(100_000_000)),
   AI_DAILY_CEILING_USD: blankIsUnset(z.coerce.number().positive().default(100)),

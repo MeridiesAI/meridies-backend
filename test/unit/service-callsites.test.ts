@@ -29,6 +29,11 @@ const REVIEWED = [
   // loaded the college; the service role reads and writes only that one Meridies-wide college_photos row (and
   // the photo bucket copy of it) and that one college_site_info row (what the school's own site says about
   // applying; the library code is handed these reads and writes and holds no client), and never replaces a photo.
+  // Also POST /list-builder/add: inside a student's own request (requireRole("student") and the practice's student-AI
+  // switch ran; the schools were inserted on the student's own RLS client). The service role is handed to
+  // lib/studentListFit.ts, which sets ONE column, `fit`, on the rows that request just inserted (keyed on the row,
+  // the student and added_by = the student). The tag is computed from the student's own numbers; nothing in the
+  // request chooses it (the body is strict). The database refuses a student-set fit, which is why the server writes it.
   // lib/imports/files.ts, mapping.ts, stage.ts: the import worker inside an approved counselor's own
   // request (authenticate + requireRole ran), p_actor = that counselor; every function re-checks
   // private.can_manage_import (which asks the approval gate). lib/imports/retention.ts: the sweep acts

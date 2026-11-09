@@ -117,7 +117,9 @@ src/
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
 │   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
-│   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing)
+│   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
+│   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
+│   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
 │   ├── accountClosure.ts  # Leave Meridies: 30-day grace dates, the closure DTO and emails, the purge (off by default)
@@ -1300,6 +1302,52 @@ the database (`20261010*`):
   of the student's first name. `GET /me/messages` lists what was sent to the student; RLS
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
+
+### Students' AI tools (`20261111000020`-`22`)
+
+A student can run Build College Lists, Narrative Coherence, Activities Build and the scholarship Ask box, each the
+counselor's tool with small changes, **only while their practice has switched "Let students use AI tools" on**.
+Decided 2026-11-07 (Brandon), and it replaces the older position that kept students off these tools (the "essay
+restriction" below still holds: nothing here writes essay prose).
+
+- **The switch** is `practice_settings.student_ai_tools`, **off by default** (a practice with no row, and every
+  existing row, reads off). `lib/practiceSettings.ts` reads it for a student fail-closed (`studentPracticeSettings`:
+  no counselor, an unapproved counselor, a read error or an older `my_practice_ai_settings()` all read off), and
+  retries its select without the column when the migration isn't applied. `assertAiAllowed` holds a **student** on
+  the four tool modules (`narrative-coherence`, `concierge`, `college-list`, `scholarship-match`: `STUDENT_TOOL_MODULES`),
+  never a counselor; `requireStudentAiTools` / `assertStudentAiTools` gate the routes that spend no model call
+  themselves; `GET /me/ai-tools` answers `{ enabled }` for the app (never an error). Only a firm owner/admin or a solo
+  counselor changes it (`PATCH /settings/privacy { studentAiTools }`).
+- **A lower cap.** A student's daily limits are `AI_STUDENT_DAILY_CALLS` (40) and `AI_STUDENT_DAILY_USD` ($1);
+  `runStructured` passes the caller's role to the budget (`BudgetSubject.role`), so no DB change. The monthly limits and
+  the company ceiling are shared, so many students can still use up the day's ceiling: that is why the switch is off by
+  default. (A combined student-pool line would be the real protection if it is ever on by default.)
+- **Build College Lists.** `GET /colleges/list-builder/{schools,defaults}`, `POST /colleges/list-builder` and
+  `POST /ai/college-list-chat` accept a student (`requireRoleIn("counselor","student")` + the switch; `resolveStudentId`
+  pins them to themselves); `explain` and the alumni-outcome notes stay the counselor's. `POST /colleges/list-builder/add`
+  (student only, strict `{ collegeIds }` body) puts schools on their own list as Interested through `addToList`, skips
+  any already there, and **the server tags each Reach / Target / Safety** (`lib/studentListFit.ts`: the Builder's own
+  `studentOdds` + `fitFor` on the student's numbers, always WITH scores, so it can differ from a test-optional run's tier).
+  The database refuses a student-set `fit`, so the tag is one service-client column write on the rows the request just
+  inserted (keyed on the row, the student and `added_by`; `test/unit/service-callsites.test.ts` records why).
+- **Narrative Coherence** (`20261111000021`). A student reads, inserts and deletes only a `coherence_reports` row they
+  created about themself, and reads/writes only the `narrative_flags` of those reports (a trigger limits a student's flag
+  update to status and the task link). The counselor's policies are untouched, so they read every report; `ranBy` is
+  derived from `created_by`. The routes drop their student refusals; a student's run uses a direct brief instead of
+  `buildStudentContext` (which stays counselor-only, spec section 4), the student-addressed prompts of
+  `lib/studentToolPrompts.ts`, and one more filter: any bullet in the student's own voice (`isStudentSafe`) is dropped. A
+  request for wording gets questions and no model call. No counselor-addressed activity alignment for a student.
+- **Activities Build** (`20261111000022`). `opportunity_matches.origin` ('counselor' default | 'student'). A student's run
+  has **no review step**: rows are `origin student`, status `suggested`, and the request is filed under their own
+  counselor with `constraints.ranBy = "student"` (which keeps each side's "last search" apart). A student Tracks
+  (`saved`, linked to their own to-do) or dismisses; they can't set `approved`, `sent` or `counselor-review` (400) or touch
+  a program their counselor sent. `GET` also returns `tracked` (saved/applied) for both sides.
+- **Scholarships.** Scan and Track (`PUT .../recommend`) need no AI and always worked for a student; only the Ask box is gated.
+  `ScholarshipDto.applyUrl` is new; the seeded catalog has none (`url` = `source_url`).
+- **Deploy order:** either, for every migration (each states why). **Tests:** `test/integration/student-ai-tools.test.mjs`
+  (switch, authz, RLS, fit, model paths when `FAKE_ANTHROPIC_URL` points at a stand-in model), `test/unit/student-ai-tools.test.ts`,
+  `student-list-fit.test.ts`, `student-tool-prompts.test.ts`, `coherence-report-dto.test.ts`, `program-dto.test.ts`,
+  `scholarship-dto.test.ts`.
 
 ### A student's own messages and calendar events (QA round 10, `20261105000017`)
 
