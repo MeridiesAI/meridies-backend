@@ -73,6 +73,7 @@ import eventRoutes from "./routes/events.js";
 // v10 sync imports: management-pipeline
 import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
+import taskSetRoutes from "./routes/taskSets.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
@@ -80,6 +81,7 @@ import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
+import calendarIcalRoutes from "./routes/calendarIcal.js";
 // SV Demo v2: the student view
 import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
@@ -88,6 +90,8 @@ import resumeRoutes from "./routes/resume.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
+import bookingRoutes from "./routes/booking.js";
+import studentBookingRoutes from "./routes/studentBooking.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -231,8 +235,11 @@ export function buildApp() {
   app.register(payRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
+  app.register(taskSetRoutes, { prefix: "/task-sets" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
+  // Absolute paths (/calendar/ical, /calendar/ical/:token.ics): no prefix.
+  app.register(calendarIcalRoutes);
   // SV Demo v2 routes: the student view. profileUpdateRoutes sits at the root
   // because it also serves the counselor's /students/:id/profile-updates.
   app.register(meRoutes, { prefix: "/me" });
@@ -252,6 +259,9 @@ export function buildApp() {
   app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
   // AI help for the questionnaire's tables (POST /me/intake/fill).
   app.register(intakeFillRoutes);
+  // Student self-booking: the counselor's hours and types, the student's slots.
+  app.register(bookingRoutes, { prefix: "/booking" });
+  app.register(studentBookingRoutes, { prefix: "/me/booking" });
   startSweepInterval(app);
   startExtractionRecovery(app);
 

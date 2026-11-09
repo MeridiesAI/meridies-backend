@@ -51,7 +51,7 @@ const item2 = await addItem(imp2, { studentId: s2.id });
 await addChange(imp2, item2, { target: "student_academics", field: "gpa_weighted", value: 92, studentId: s2.id });
 await addChange(imp2, item2, { target: "student_personal_details", field: "birthday", value: "1975-01-01", studentId: s2.id });
 await addChange(imp2, item2, { target: "student_academics", field: "sat_superscore", value: 1300, studentId: s2.id });
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${imp2}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${imp2}'`);
 const out2 = JSON.parse(await sql(`select public.commit_import('${imp2}', '${c.id}')`));
 check("validation problems send the import back to review", out2.status === "review" && out2.problems.length === 2, JSON.stringify(out2));
 check("nothing was applied", (await academics(s2.id)) === null);
@@ -67,14 +67,14 @@ const itemB = await addItem(impR, { studentId: sB.id });
 await addChange(impR, itemA, { target: "student_academics", field: "sat_superscore", value: 1300, studentId: sA.id });
 await addChange(impR, itemB, { target: "student_academics", field: "gpa_weighted", value: 92, studentId: sB.id });
 await sql(`update public.profiles set counselor_id = '${other.id}' where id = '${sA.id}'`);
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impR}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${impR}'`);
 const outR = JSON.parse(await sql(`select public.commit_import('${impR}', '${c.id}')`));
 check("problems send it back to review", outR.status === "review", JSON.stringify(outR));
 check("the reassigned student's item is not left skipped after a rollback to review", (await sql(`select match_status from public.import_items where id = '${itemA}'`)) === "matched_email");
 
 // A different actor can't run someone else's job.
 const impX = await makeImport(c);
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impX}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${impX}'`);
 const outX = JSON.parse(await sql(`select public.commit_import('${impX}', '${other.id}')`));
 check("a different actor gets not-requested", outX.status === "not-requested" && (await importRow(impX)).status === "committing", JSON.stringify(outX));
 
@@ -84,7 +84,7 @@ const imp3 = await makeImport(c);
 const item3 = await addItem(imp3, { studentId: s3.id });
 await addChange(imp3, item3, { target: "student_academics", field: "sat_superscore", value: 1300, studentId: s3.id });
 await sql(`update public.profiles set counselor_id = '${other.id}' where id = '${s3.id}'`);
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${imp3}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${imp3}'`);
 const out3 = JSON.parse(await sql(`select public.commit_import('${imp3}', '${c.id}')`));
 check("a reassigned student's item is skipped and the import still commits", out3.status === "committed" &&
   (await sql(`select match_status from public.import_items where id = '${item3}'`)) === "skipped");
@@ -94,7 +94,7 @@ const s4 = await studentOf(c, "imp-commit-student4");
 const imp4 = await makeImport(c);
 const item4 = await addItem(imp4, { studentId: s4.id });
 await addChange(imp4, item4, { target: "test_scores", field: "*", op: "insert_row", value: { exam: "SAT", kind: "sat", score: "1400" } });
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${imp4}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${imp4}'`);
 const [r1, r2] = await Promise.all([
   sqlAsync(`select public.commit_import('${imp4}', '${c.id}')`),
   sqlAsync(`select public.commit_import('${imp4}', '${c.id}')`),
@@ -110,7 +110,7 @@ const imp5 = await makeImport(c);
 const item5 = await addItem(imp5, { studentId: s5.id });
 await addChange(imp5, item5, { target: "student_academics", field: "gpa_weighted", value: 92, studentId: s5.id });
 await addChange(imp5, item5, { target: "student_academics", field: "gpa_scale", value: "100", studentId: s5.id });
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${imp5}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${imp5}'`);
 const out5 = JSON.parse(await sql(`select public.commit_import('${imp5}', '${c.id}')`));
 check("GPA 92 commits when the scale changes to 100 in the same import", out5.status === "committed" && Number((await academics(s5.id)).gpa_weighted) === 92, JSON.stringify(out5));
 
@@ -151,7 +151,7 @@ const impL = await makeImport(c);
 const itemL = await addItem(impL, { studentId: sL.id });
 await addChange(impL, itemL, { target: "student_academics", field: "gpa_scale", value: "4.0", studentId: sL.id });
 await addChange(impL, itemL, { target: "student_academics", field: "gpa_weighted", value: 3.8, studentId: sL.id });
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impL}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${impL}'`);
 const outL = JSON.parse(await sql(`select public.commit_import('${impL}', '${c.id}')`));
 const aL = await academics(sL.id);
 check("lowering the scale with a new GPA commits", outL.status === "committed" && Number(aL.gpa_weighted) === 3.8 && aL.gpa_scale === "4.0", JSON.stringify({ outL, aL }));
@@ -162,6 +162,6 @@ await sql(`insert into public.student_academics (student_id, gpa_weighted, gpa_s
 const impM = await makeImport(c);
 const itemM = await addItem(impM, { studentId: sM.id });
 await addChange(impM, itemM, { target: "student_academics", field: "gpa_scale", value: "4.0", studentId: sM.id });
-await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}' where id = '${impM}'`);
+await sql(`update public.roster_imports set status = 'committing', job_actor = '${c.id}', job_requested_at = now() where id = '${impM}'`);
 const outM = JSON.parse(await sql(`select public.commit_import('${impM}', '${c.id}')`));
 check("a scale change that strands the GPA goes to review", outM.status === "review" && /GPA 92(\.0+)? needs a 100-point scale/.test(JSON.stringify(outM.problems)), JSON.stringify(outM));
