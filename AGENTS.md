@@ -1303,7 +1303,7 @@ the database (`20261010*`):
   `message_deliveries_student_self` (`20261013000002`) returns only rows
   addressed to them, never their guardians' or the counselor's.
 
-### Students' AI tools (`20261111000001`-`03`)
+### Students' AI tools (`20261111000020`-`22`)
 
 A student can run Build College Lists, Narrative Coherence, Activities Build and the scholarship Ask box, each the
 counselor's tool with small changes, **only while their practice has switched "Let students use AI tools" on**.
@@ -1330,14 +1330,14 @@ restriction" below still holds: nothing here writes essay prose).
   `studentOdds` + `fitFor` on the student's numbers, always WITH scores, so it can differ from a test-optional run's tier).
   The database refuses a student-set `fit`, so the tag is one service-client column write on the rows the request just
   inserted (keyed on the row, the student and `added_by`; `test/unit/service-callsites.test.ts` records why).
-- **Narrative Coherence** (`20261111000002`). A student reads, inserts and deletes only a `coherence_reports` row they
+- **Narrative Coherence** (`20261111000021`). A student reads, inserts and deletes only a `coherence_reports` row they
   created about themself, and reads/writes only the `narrative_flags` of those reports (a trigger limits a student's flag
   update to status and the task link). The counselor's policies are untouched, so they read every report; `ranBy` is
   derived from `created_by`. The routes drop their student refusals; a student's run uses a direct brief instead of
   `buildStudentContext` (which stays counselor-only, spec section 4), the student-addressed prompts of
   `lib/studentToolPrompts.ts`, and one more filter: any bullet in the student's own voice (`isStudentSafe`) is dropped. A
   request for wording gets questions and no model call. No counselor-addressed activity alignment for a student.
-- **Activities Build** (`20261111000003`). `opportunity_matches.origin` ('counselor' default | 'student'). A student's run
+- **Activities Build** (`20261111000022`). `opportunity_matches.origin` ('counselor' default | 'student'). A student's run
   has **no review step**: rows are `origin student`, status `suggested`, and the request is filed under their own
   counselor with `constraints.ranBy = "student"` (which keeps each side's "last search" apart). A student Tracks
   (`saved`, linked to their own to-do) or dismisses; they can't set `approved`, `sent` or `counselor-review` (400) or touch
