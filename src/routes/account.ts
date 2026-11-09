@@ -30,7 +30,6 @@ import { closureEmail, closureView, isClosureTableMissing, isStalePurging, purge
 import { sendEmail } from "../lib/email.js";
 import { badRequest, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
-import { profileKeepsSignedAgreements, SIGNED_AGREEMENT_ACCOUNT_MESSAGE } from "../lib/agreements.js";
 import { forgetAxisTrash } from "../lib/axisTrash.js";
 import { consumeUnits, limit } from "../lib/limits.js";
 import { sheetClient, sheetTitle } from "../lib/driveExport.js";
