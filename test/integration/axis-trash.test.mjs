@@ -125,6 +125,42 @@ for (const [op, seed] of Object.entries(cases)) {
   check("a restored meeting has its attendee once", attendees === "1", attendees);
 }
 
+// A restored meeting sends its invitation again (Elvin, 11/8): the delete emailed a cancellation, so the families
+// would otherwise think it's off. Only a meeting still ahead with invites on; every other restore sends nothing (above).
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const invites = async (meetingId, min) => {
+    let n = 0;
+    for (let i = 0; i < 40; i++) {
+      n = Number(await one(`select count(*) from public.message_deliveries where meeting_id = '${meetingId}' and template = 'meeting-invite' and lower(to_email) = lower('${s.email}')`));
+      if (n >= min) break;
+      await sleep(250);
+    }
+    return n;
+  };
+  const meeting = (when) =>
+    one(`insert into public.meetings (student_id, counselor_id, title, starts_at, ends_at, send_invites)
+         values ('${s.id}', '${c.id}', 'Essay review', now() + interval '${when}', now() + interval '${when}' + interval '30 minutes', true) returning id`);
+
+  const ahead = await meeting("4 days");
+  const aheadAction = await propose("meetings.delete", { meeting_id: ahead });
+  const deleted = await call(c.token, "POST", `/axis/actions/${aheadAction}/confirm`);
+  check("a meeting with invites on is deleted through AxIS", deleted.status === 200 && (await count("meetings", `id = '${ahead}'`)) === "0", JSON.stringify(deleted.body));
+  const restored = await call(c.token, "POST", `/axis/actions/${aheadAction}/undo`);
+  check("restoring it says the invitation went out again", restored.status === 200 && restored.body?.invited === true, `${restored.status} ${JSON.stringify(restored.body)}`);
+  check("…and a fresh invite goes to the student", (await invites(ahead, 1)) >= 1);
+  const seq = Number(await one(`select ics_sequence from public.meetings where id = '${ahead}'`));
+  check("…with a sequence above the cancellation the delete sent (1)", seq >= 2, String(seq));
+
+  const past = await meeting("-2 days");
+  const pastAction = await propose("meetings.delete", { meeting_id: past });
+  await call(c.token, "POST", `/axis/actions/${pastAction}/confirm`);
+  const pastRestored = await call(c.token, "POST", `/axis/actions/${pastAction}/undo`);
+  check("a past meeting comes back without an invitation", pastRestored.status === 200 && pastRestored.body?.invited !== true, JSON.stringify(pastRestored.body));
+  await sleep(1000);
+  check("…and nothing is emailed for it", (await invites(past, 0)) === 0);
+}
+
 // A work item about a student moved to another counselor isn't restored through the card either.
 {
   const s3 = await studentOf(c, "trash-api-moved-item");
