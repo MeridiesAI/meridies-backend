@@ -159,3 +159,13 @@ test("the fixed sentences", () => {
   assert.equal(provenanceRefusal("position", "Host, library workshop"), "position 'Host, library workshop' isn't in the counselor's words; use their wording or leave it blank and ask");
   assert.equal(IMAGE_ONLY_HINT, "ask the counselor to type it or attach a PDF or text file");
 });
+
+test("a rename's new name traces, and so do roles given with 'as' (eval drafts-08)", async () => {
+  const r = sources({ messages: ["rename Code Club to Coding Club"] }).set;
+  assert.equal((await traceValue(r, "organization", "Coding Club"))?.label, "your message");
+  const a = sources({ messages: ["add him to Robotics Club as Treasurer"] }).set;
+  assert.equal((await traceValue(a, "position", "Treasurer"))?.label, "your message");
+  assert.equal((await traceValue(a, "organization", "Robotics Club"))?.label, "your message");
+  const b = sources({ messages: ["she runs the Back to School Drive"] }).set;
+  assert.equal((await traceValue(b, "organization", "Back to School Drive"))?.label, "your message", "a name with 'to' in it still traces");
+});

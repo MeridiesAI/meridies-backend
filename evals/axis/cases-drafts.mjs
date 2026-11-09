@@ -68,7 +68,8 @@ function rowMatches(want, got) {
 
 /**
  * The hard checks: `activities` per student as an exact set (each expected row matched once, nothing extra),
- * `cards` as the exact list of ops and statuses (and reason where given), `draft` "open"/"closed", and the misses
+ * `cards` as the exact list of ops and statuses (and reason where given; with `ignoreReplaced`, cards replaced along
+ * the way by a correction are left out), `draft` "open"/"closed", and the misses
  * the steps recorded (replyIncludes / replyNever). Every reply is checked for raw validation text.
  */
 async function hard(ctx, expect) {
@@ -85,7 +86,7 @@ async function hard(ctx, expect) {
     if (left.length) why.push(`${who}: extra rows ${JSON.stringify(left.map((g) => g.organization))}`);
   }
   if (expect.cards) {
-    const got = await cards(ctx);
+    const got = (await cards(ctx)).filter((c) => !(expect.ignoreReplaced && c.status === "dismissed"));
     const shape = (c) => `${c.op}:${c.status}${c.reason !== undefined ? `:${c.reason}` : ""}`;
     const want = expect.cards.map(shape);
     const have = got.map((c, i) => shape({ ...c, reason: expect.cards[i]?.reason !== undefined ? c.reason : undefined }));
@@ -210,9 +211,16 @@ export const DRAFT_CASES = [
       draftCheck: (d) => (d.rows.some((r) => key(r.fields?.organization) === "code club") ? null : "the expired fields weren't restored"),
     },
   }),
+  // 200 is never saved and never shows raw validation text, whether the model sends it (the server refuses it with a
+  // plain line, unit-tested) or asks the counselor first.
   draftCase("drafts-14-too-many-hours", "\"200 hours a week\"", {
-    steps: [{ say: "Add Code Club for Avery: cofounder, grade 11, summer, 200 hours a week, 2 weeks a year", replyIncludes: ["Couldn't save Code Club yet: hours per week"] }],
-    expect: { activities: { avery: [] }, draft: "open" },
+    steps: [{ say: "Add Code Club for Avery: cofounder, grade 11, summer, 200 hours a week, 2 weeks a year", replyNever: ["200 h/wk"] }],
+    expect: {
+      activities: { avery: [] },
+      cards: [],
+      draft: "open",
+      draftCheck: (d) => (d.rows.some((r) => r.fields?.hours_per_week === 200) ? "200 hours a week was kept" : null),
+    },
   }),
   draftCase("drafts-15-the-transcript", "The redacted transcript, replayed", {
     steps: [
@@ -237,6 +245,7 @@ export const DRAFT_CASES = [
         ],
       },
       cards: [{ ...ADD_DONE, reason: "outside-content" }],
+      ignoreReplaced: true,
     },
   }),
   draftCase("drafts-17-a-number-that-isnt-hours", "\"Is her SAT 1450 good for UCLA?\" mid-draft", {

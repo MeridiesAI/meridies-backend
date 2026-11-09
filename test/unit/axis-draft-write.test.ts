@@ -39,7 +39,7 @@ function setup(o: { messages: string[]; draft?: Draft; tainted?: boolean; verdic
   };
   const draft = o.draft ?? emptyDraft();
   const turn: DraftTurn = {
-    draft, verdict: o.verdict ?? "draft", now: NOW, messageId: `m${o.messages.length}`,
+    draft, verdict: o.verdict ?? "draft", now: NOW, messageId: `m${o.messages.length}`, message: o.messages.at(-1),
     sources: (sid) => sourcesFor(request, CONV, sid, { practiceReadsDocuments: async () => true, extract: async () => undefined }),
     studentName: (id) => NAMES[id] ?? "the student", fileNow: o.fileNow ?? false, askedBefore: o.askedBefore ?? false,
   };
@@ -328,4 +328,16 @@ test("a change to a saved activity is named by that activity (finding F)", async
   await draftWrite(s.ctx, s.turn, "application.update_activity", { activity_id: ACT, hours_per_week: 8 });
   await fileIfReady(s.ctx, s.turn, false);
   assert.deepEqual(statusLines(s.draft), ["Waiting for your Confirm: change Code Club on Avery Lee's Activities sheet."]);
+});
+
+test("an organization already in the draft isn't replaced unless the counselor asks to rename it (eval drafts-15)", async () => {
+  const venue = setup({ messages: [DETAILS, "City Library, please add it now"], draft: codeClub() });
+  const out = await draftWrite(venue.ctx, venue.turn, "application.add_activity", { draft_row: "r1", organization: "City Library" });
+  assert.match(out.content, /organization is already 'Code Club'/);
+  assert.equal(venue.draft.rows[0]!.fields.organization, "Code Club");
+  assert.match(statusLines(venue.draft).join("\n"), /Couldn't save Code Club yet: organization: it's already Code Club/);
+
+  const rename = setup({ messages: [DETAILS, "rename it to Coding Club"], draft: codeClub() });
+  await draftWrite(rename.ctx, rename.turn, "application.add_activity", { draft_row: "r1", organization: "Coding Club" });
+  assert.equal(rename.draft.rows[0]!.fields.organization, "Coding Club", "a rename the counselor asked for goes through");
 });

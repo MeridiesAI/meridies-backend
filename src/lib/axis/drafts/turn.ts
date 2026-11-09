@@ -117,6 +117,7 @@ export async function startDraftTurn(o: {
     verdict,
     now,
     messageId: o.messageId,
+    message: content,
     sources: (sid) => sets.get(sid) ?? (sets.set(sid, sourcesFor(request, o.conversationId, sid)), sets.get(sid)!),
     studentName: o.studentName,
     fileNow: isFileNow(content),

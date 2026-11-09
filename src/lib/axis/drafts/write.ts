@@ -43,6 +43,8 @@ const REPLACED = "Replaced by an updated card.";
 const UNRELATED = "there's an open activity draft; ask the counselor to continue it";
 const FULL = "a draft holds 10 activities; file this card first";
 const CLOSING = "Don't say whether anything was saved, tried or needs Confirm; status lines written by the server follow your answer.";
+/** The counselor asks to rename an activity: "rename it to …", "it's called …", "the organization is …". */
+const RENAME = /\b(?:renamed?|call it|it'?s called|called|named|change (?:the |its )?(?:organization|org|club|name)|(?:organization|org|name) (?:is|should be)|instead of)\b/i;
 
 export type DraftTurn = {
   draft: Draft;
@@ -50,6 +52,8 @@ export type DraftTurn = {
   now: Date;
   /** The counselor's message this turn answers (it opens a draft; bare numbers trace from it on). */
   messageId?: string;
+  /** That message's text: an organization already in the draft changes only when it asks for a rename. */
+  message?: string;
   sources: (studentId: string) => SourceSet;
   studentName: (id: string) => string;
   /** The counselor said to file it as is ("add it", "that's all"). */
@@ -226,6 +230,17 @@ async function mergeItem(ctx: OpContext, turn: DraftTurn, sources: SourceSet, op
         const hint = (await sources.hasTranscriptsOnly()) ? `; ${IMAGE_ONLY_HINT}` : "";
         reject(`${provenanceRefusal(field, n.value)}${hint}`, `${Array.isArray(n.value) ? n.value.join(", ") : String(n.value)} isn't in your messages or the student's files`);
       }
+      continue;
+    }
+    // An activity's organization is its name: once the draft has one, a later message replaces it only when the
+    // counselor asks for a rename. A venue ("City Library, please add it now") never overwrites it (spec 1, turn 5).
+    if (field === "organization" && row.op === "add" && typeof row.fields.organization === "string" &&
+        freeTextKey(row.fields.organization) !== freeTextKey(String(n.value)) && !RENAME.test(turn.message ?? "")) {
+      const was = row.fields.organization;
+      reject(
+        `organization is already '${was}'. It changes only when the counselor asks to rename it; a place where the activity happens has no field, so leave it out.`,
+        `it's already ${was}; say "rename it to …" to change it`
+      );
       continue;
     }
     // A card shows every line whole: a description that would make this row's line too long is refused here.
