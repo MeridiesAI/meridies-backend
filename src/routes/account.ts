@@ -10,6 +10,10 @@
  *                                           JSON and a CSV per table (no file bytes; documents listed)
  *   POST   /account/export/drive            a roster summary as one Google Sheet in the caller's Drive
  *   DELETE /account                         delete the caller's own account
+ *   GET    /account/closure                 Leave Meridies: { status: none|pending|on_hold, requestedAt, purgeAfter,
+ *                                           daysLeft, purgeEnabled, blockedReason } (counselor)
+ *   POST   /account/closure                 { confirm: "CLOSE" }: close after 30 days (201; 200 if already pending)
+ *   DELETE /account/closure                 cancel it (the account stays open)
  *
  * Exports read through the caller's RLS-bound client, so each one contains
  * exactly what that person may already see (a student's export can't include
@@ -17,10 +21,14 @@
  * (ai_runs, audit_log) are not part of anyone's record.
  */
 
-import { forgetUser } from "../lib/aiBudget.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { badRequest, conflict, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
+import { env } from "../env.js";
+import { DeletionFailed, blockError, deleteAccount, deletionBlocker, type DeletionSubject } from "../lib/accountDeletion.js";
+import { closureEmail, closureView, isClosureTableMissing, isStalePurging, purgeAfterFrom, purgeFlag, type ClosureRow } from "../lib/accountClosure.js";
+import { sendEmail } from "../lib/email.js";
+import { badRequest, fromPostgrest, HttpError, unavailable } from "../lib/errors.js";
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { profileKeepsSignedAgreements, SIGNED_AGREEMENT_ACCOUNT_MESSAGE } from "../lib/agreements.js";
 import { forgetAxisTrash } from "../lib/axisTrash.js";
@@ -351,57 +359,162 @@ export default async function accountRoutes(app: FastifyInstance) {
   app.delete("/", { preHandler: [app.authenticate, limit("account:delete", 3, 3600)], config: { allowPending: true } }, async (request, reply) => {
     const { confirm } = z.object({ confirm: z.string() }).strict().parse(request.body);
     if (confirm !== "delete my account") throw badRequest('Type "delete my account" to confirm');
-    const me = request.auth.userId;
     const svc = serviceClient();
     if (!svc) throw unavailable("Account deletion needs the service role key");
+    const who = subjectOf(request);
 
-    if (request.profile.role === "counselor") {
-      // In a firm, archived students count too: their meetings, notes and
-      // documents would go with this account, and the firm can transfer them
-      // (Management, caseload transfer). A solo counselor may still archive
-      // and delete; that gap is known (caseload transfer spec §12).
-      const inFirm = Boolean(request.profile.firm_id);
-      let roster = svc.from("profiles").select("id", { count: "exact", head: true }).eq("counselor_id", me);
-      if (!inFirm) roster = roster.is("archived_at", null);
-      const { count, error } = await roster;
-      if (error) throw fromPostgrest(error);
-      if ((count ?? 0) > 0) {
-        const students = `${count} student${count === 1 ? "" : "s"}`;
-        throw conflict(
-          inFirm
-            ? `You still have ${students} on your caseload. Ask a firm owner or admin to transfer them (Management › Transfer caseload).`
-            : `You still have ${students} on your roster. Archive them or hand them to a colleague first.`
-        );
-      }
-      const { data: firm } = await svc.from("firms").select("id").eq("owner_id", me).maybeSingle();
-      if (firm) throw conflict("You own a firm. Hand ownership to someone else before deleting your account.");
-      // An accepted agreement is a permanent record (20261111000010); its acceptance would refuse the cascade.
-      let keeps: boolean;
-      try {
-        keeps = await profileKeepsSignedAgreements(svc, me);
-      } catch (err) {
-        request.log.error({ err }, "account delete: could not check for signed agreements");
-        throw unavailable("Couldn't delete the account right now. Try again shortly.");
-      }
-      if (keeps) throw new HttpError(409, SIGNED_AGREEMENT_ACCOUNT_MESSAGE, "signed_agreements_kept");
-    }
+    // In a firm, archived students count too: their meetings, notes and documents would go with this account, and
+    // the firm can transfer them (Management, caseload transfer). A solo counselor may still archive and delete;
+    // that gap is known (caseload transfer spec §12). The same rules gate a closure and its purge (lib/accountDeletion.ts).
+    const block = await checkedBlocker(svc, who, request);
+    if (block) throw blockError(block);
 
-    // The AxIS trash it made and the trash about it, with the files it kept (the cascade can't reach a row that
-    // only names the account, or remove a Storage object). Refused rather than leave them behind.
     try {
-      await forgetAxisTrash(me, request.log);
+      await deleteAccount(who, request.log, "request");
     } catch (err) {
-      request.log.error({ err }, "account delete: axis trash cleanup failed");
-      throw unavailable("Couldn't delete the account right now. Try again shortly.");
-    }
-    await svc.from("audit_log").insert({ actor_id: null, action: "account.deleted", entity_type: "profile", entity_id: me, metadata: { role: request.profile.role } });
-    // The account's AI budget counters (numbers keyed by its id) go too. Best effort: never what stops a deletion.
-    await forgetUser(me).catch((err) => request.log.warn({ err: err instanceof Error ? err.message : String(err) }, "AI budget rows not removed"));
-    const { error } = await svc.auth.admin.deleteUser(me);
-    if (error) {
-      request.log.error({ status: error.status }, "account delete failed");
+      if (!(err instanceof DeletionFailed)) throw err;
       throw unavailable("Couldn't delete the account right now. Try again shortly.");
     }
     return reply.code(204).send();
   });
+
+  // ---- Leave Meridies: closing with a 30-day grace period (lib/accountClosure.ts) ----
+  //
+  // Counselors only, open to a pending account (it may leave too). Nothing is deleted or disconnected here: the
+  // account keeps working, read and write and with its Google/Microsoft connections, until the purge, which runs only
+  // with ACCOUNT_PURGE_ENABLED=true (and revokes the connections then). The closure row is read and written with the
+  // service role keyed by the caller's verified id (clients have no write grant, and the approval gate hides the row
+  // from a pending counselor's own client). GET's statuses: see ClosureView.
+
+  const closureOpts = (bucket: string, max: number) => ({
+    preHandler: [app.authenticate, requireRole("counselor"), limit(bucket, max, 3600)],
+    config: { allowPending: true },
+  });
+
+  app.get("/closure", { preHandler: [app.authenticate, requireRole("counselor")], config: { allowPending: true } }, async (request) => {
+    const svc = closureService();
+    const row = await readClosure(svc, request.auth.userId);
+    return closureView(row, new Date(), purgeFlag(env.ACCOUNT_PURGE_ENABLED));
+  });
+
+  /**
+   * Ask to close the account. Body `{ confirm: "CLOSE" }`. The DELETE /account preconditions first (409 with their
+   * code). A second request while one is pending answers it again (200, no new email). Otherwise (none, cancelled,
+   * or on hold after the purge found a blocker) it starts a fresh 30 days (201): the row, a confirmation email to the
+   * counselor and an audit row.
+   */
+  app.post("/closure", closureOpts("account:closure", 10), async (request, reply) => {
+    const { confirm } = z.object({ confirm: z.string().max(40) }).strict().parse(request.body);
+    if (confirm !== "CLOSE") throw badRequest('Type "CLOSE" to confirm');
+    const svc = closureService();
+    const me = request.auth.userId;
+    const now = new Date();
+    const enabled = purgeFlag(env.ACCOUNT_PURGE_ENABLED);
+
+    const existing = await readClosure(svc, me);
+    if (existing && (existing.status === "pending" || existing.status === "purging")) {
+      return reply.code(200).send(closureView(existing, now, enabled));
+    }
+
+    const block = await checkedBlocker(svc, subjectOf(request), request);
+    if (block) throw blockError(block);
+
+    const fresh = { requested_at: now.toISOString(), purge_after: purgeAfterFrom(now).toISOString(), status: "pending", cancelled_at: null, last_error: null };
+    let row: ClosureRow | null;
+    if (existing) {
+      // Cancelled, on hold (failed) or finished: start again with new dates. Conditional, so a racing request can't do it twice.
+      const { data, error } = await svc.from("account_closures").update(fresh).eq("counselor_id", me).eq("status", existing.status).select(CLOSURE_COLUMNS).maybeSingle();
+      if (error) throw closureDbError(error);
+      row = data as ClosureRow | null;
+    } else {
+      const { data, error } = await svc.from("account_closures").insert({ counselor_id: me, ...fresh }).select(CLOSURE_COLUMNS).maybeSingle();
+      if (error && error.code !== "23505") throw closureDbError(error);
+      row = (data as ClosureRow | null) ?? null;
+    }
+    // Lost a race with a second request: answer the closure that one opened.
+    if (!row) return reply.code(200).send(closureView(await readClosure(svc, me), now, enabled));
+
+    await audit(svc, me, existing?.status === "failed" ? "account.closure.reopened" : "account.closure.requested", { purgeAfter: row.purge_after });
+    await sendClosureEmail("requested", request, row.purge_after);
+    return reply.code(201).send(closureView(row, now, enabled));
+  });
+
+  /**
+   * Cancel the closure: the account stays open. 404 `no_closure` when none is open; 409 `closure_in_progress` while it
+   * is being deleted, unless that run has been stuck in `purging` for PURGE_RECLAIM_MS (a crash), which may be cancelled.
+   */
+  app.delete("/closure", closureOpts("account:closure-cancel", 10), async (request) => {
+    const svc = closureService();
+    const me = request.auth.userId;
+    const now = new Date();
+    const existing = await readClosure(svc, me);
+    if (!existing || !["pending", "failed", "purging"].includes(existing.status)) {
+      throw new HttpError(404, "There is no account closure to cancel.", "no_closure");
+    }
+    const inProgress = () => new HttpError(409, "Your account is being closed right now and can't be cancelled.", "closure_in_progress");
+    if (existing.status === "purging" && !isStalePurging(existing, now)) throw inProgress();
+    // Conditional on the row as read (status and updated_at), so a purge that claims it in between wins.
+    let q = svc
+      .from("account_closures")
+      .update({ status: "cancelled", cancelled_at: now.toISOString(), last_error: null })
+      .eq("counselor_id", me)
+      .eq("status", existing.status);
+    if (existing.updated_at) q = q.eq("updated_at", existing.updated_at);
+    const { data, error } = await q.select("counselor_id");
+    if (error) throw closureDbError(error);
+    if (!data?.length) throw inProgress();
+    await audit(svc, me, "account.closure.cancelled", {});
+    await sendClosureEmail("cancelled", request, existing.status === "failed" ? null : existing.purge_after);
+    return closureView(null, now, purgeFlag(env.ACCOUNT_PURGE_ENABLED));
+  });
+}
+
+const CLOSURE_COLUMNS = "status, requested_at, purge_after, last_error, updated_at";
+
+const subjectOf = (request: FastifyRequest): DeletionSubject => ({
+  id: request.auth.userId,
+  role: request.profile.role,
+  firm_id: (request.profile.firm_id as string | null | undefined) ?? null,
+});
+
+/** The shared preconditions; a read that fails is a 503, never a guess either way. */
+async function checkedBlocker(svc: SupabaseClient, who: DeletionSubject, request: FastifyRequest) {
+  try {
+    return await deletionBlocker(svc, who);
+  } catch (err) {
+    request.log.error({ err: err instanceof Error ? err.message : String(err) }, "account deletion: precondition check failed");
+    throw unavailable("Couldn't check your account right now. Try again shortly.");
+  }
+}
+
+const closureUnavailable = () => new HttpError(503, "Closing an account isn't switched on yet.", "account_closure_unavailable");
+
+function closureService(): SupabaseClient {
+  const svc = serviceClient();
+  if (!svc) throw closureUnavailable();
+  return svc;
+}
+
+function closureDbError(error: { code?: string; message?: string }): HttpError {
+  return isClosureTableMissing(error) ? closureUnavailable() : fromPostgrest(error);
+}
+
+async function readClosure(svc: SupabaseClient, me: string): Promise<ClosureRow | null> {
+  const { data, error } = await svc.from("account_closures").select(CLOSURE_COLUMNS).eq("counselor_id", me).maybeSingle();
+  if (error) throw closureDbError(error);
+  return (data as ClosureRow | null) ?? null;
+}
+
+async function audit(svc: SupabaseClient, me: string, action: string, metadata: Record<string, unknown>) {
+  await svc.from("audit_log").insert({ actor_id: me, action, entity_type: "profile", entity_id: me, metadata });
+}
+
+/** To the counselor's sign-in email only. Never fails the request: the delivery row records what happened. */
+async function sendClosureEmail(kind: "requested" | "cancelled", request: FastifyRequest, purgeAfter: string | null) {
+  const to = request.profile.email as string | null | undefined;
+  if (!to) return;
+  const m = closureEmail(kind, { purgeAfter, timeZone: (request.profile.timezone as string | null | undefined) ?? null, appUrl: env.APP_URL });
+  await sendEmail({ to, subject: m.subject, html: m.html, text: m.text, template: m.template, recipient_kind: "counselor", recipient_id: request.auth.userId, logger: request.log }).catch(
+    (err) => request.log.warn({ template: m.template, err: err instanceof Error ? err.message : String(err) }, "account closure email failed")
+  );
 }
