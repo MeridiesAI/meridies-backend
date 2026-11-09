@@ -3439,8 +3439,9 @@ step 1's and is never gated.
   counselor's token; only the uploader, only a draft) -> `POST /:id/files`
   (download on the same token, size, sha256, magic bytes, parse and profile;
   a bad file fails by name and the rest go on; up to 20 files and 5,000 rows)
-  -> `POST /:id/plan` (template by header fingerprint, then presets, then the
-  AI fallback; the import moves to `mapping`) -> `PUT /:id/plan` (every edit;
+  -> `POST /:id/plan` (template by header fingerprint, then vendor presets
+  for a tool the headers name, then presets, then the AI fallback; the import
+  moves to `mapping`) -> `PUT /:id/plan` (every edit;
   a plan with problems is stored with them, staging refuses until there are
   none; `saveTemplate: { name }` is "Remember this layout") -> `POST /:id/stage`
   (synchronous, about 30 s for 5,000 rows; a double click gets 409) ->
@@ -3495,6 +3496,15 @@ step 1's and is never gated.
   uploaded documents" switch (`practiceSettings.ts` `DOCUMENT_MODULES`). AI
   cell cleanup (`import-cleanup`) is deferred: a cell that won't clean is a
   manual fix in review.
+- **Vendor presets are unverified guesses** (`VENDOR_PRESETS`, `presets.ts`:
+  College Planner Pro and Counselmore; no real export from either). A file
+  naming one in its headers maps with its table first (only spellings `PRESETS`
+  lacks) as `source: "preset-unverified"`; never a bare GPA, test date, ID or
+  parent column. A saved layout stores `preset`. Re-derive from a real export.
+  **Deploy order:** either order works; the app's label for the new source is
+  preferred first, because an old app draws an empty chip for it. No data
+  effect. **Tests:** `import-plan`, `import-match` (unit) and
+  `imports-vendor-presets.test.mjs` (integration; fixtures are SYNTHETIC).
 - **Sensitive values** (`sensitive.ts`, §7.4): a header naming a never-stored
   category is forced to ignore whoever mapped it (`validatePlan`); an
   SSN-shaped value is dropped and counted; a bare 9-digit value is flagged
