@@ -16,6 +16,8 @@
  *     "$API_URL/internal/events/discover"
  * and monthly, the catalog's campus photos from Wikimedia Commons:
  *     "$API_URL/internal/ingest/college-photos"
+ * and (not created yet; OFF unless ACCOUNT_PURGE_ENABLED=true) daily, closed accounts past their grace period:
+ *     "$API_URL/internal/account-closures/purge"
  * and, per college, cited catalog proposals from the school's own pages (body {"collegeId"} or {"unitid"}):
  *     "$API_URL/internal/catalog/propose"
  */
@@ -28,6 +30,7 @@ import { badRequest, notFound, unauthorized, unavailable } from "../lib/errors.j
 import { runCatalogProposal } from "../lib/catalogProposalsRun.js";
 import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { dispatchDueBlasts } from "../lib/blasts.js";
+import { purgeFlag, runClosurePurge } from "../lib/accountClosure.js";
 import { dispatchDueSequences } from "../lib/pipelineSequences.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { recoverExtractions } from "../lib/documentExtraction.js";
@@ -104,6 +107,29 @@ export default async function internalRoutes(app: FastifyInstance) {
         return { ran: true, ...tally };
       } catch (err) {
         await beat("email-blasts", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
+  /**
+   * Leave Meridies: delete accounts whose 30-day grace period is over (lib/accountClosure.ts), at most 5 a run.
+   * OFF unless ACCOUNT_PURGE_ENABLED is exactly "true": then it touches nothing and says so. When on it re-checks
+   * the DELETE /account preconditions and deletes through that same path. No Railway cron exists for it yet.
+   */
+  app.post(
+    "/account-closures/purge",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!purgeFlag(env.ACCOUNT_PURGE_ENABLED)) return { ran: false, reason: "purge_disabled" };
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "The purge needs the service role key" });
+      try {
+        const outcome = await runClosurePurge(svc, request.log, { enabled: true });
+        if (outcome.ran) await beat("account-closure-purge", outcome.failed === 0, outcome.failed ? `${outcome.failed} failed` : undefined, request.log);
+        return outcome;
+      } catch (err) {
+        await beat("account-closure-purge", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;
       }
     }
