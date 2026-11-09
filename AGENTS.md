@@ -129,7 +129,8 @@ src/
 │   ├── context/           # the AI context layer: allowlist, section loaders, packing, document rule
 │   ├── research/          # research: brief + identity filter, prompts, citation keeper, run, accept, test double
 │   ├── submissionReview.ts # AxIS checks a handed-in file against its task, moves the task, notifies
-│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items)
+│   ├── meetingSummary.ts  # AI meeting-note summaries: body bounds, prompt, cleanSummary (drops unstated figures and invented action items), transcript map-reduce
+│   ├── transcript.ts      # meeting transcripts: VTT/SRT/pasted text to speaker turns, neutral speaker labels, parts for the map-reduce
 │   ├── studentReminders.ts # due-tomorrow reminders on the student's own text/email channels
 │   ├── axis/              # AxIS v2 on Haiku 5.5: understanding in code, direct answers, planner, loop, grounding, memory, fail-safes
 │   │   └── ops/           # what AxIS can change: the operation catalog, run through this API as the counselor
@@ -178,7 +179,7 @@ src/
 │   ├── resources.ts       # /resources    resource library, pins, resource -> deadline, cited Q&A
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
-│   ├── account.ts         # /account      data export (self, a student), account deletion
+│   ├── account.ts         # /account      data export (self, a student, batches of 25, a roster Sheet), account deletion
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
@@ -2459,7 +2460,47 @@ turns action items into tasks through `POST /tasks`, so RLS, limits and notifica
 practice's "AI summaries" switch gates it (`"meeting-summary"` is in `SUMMARY_MODULES`). The essay
 shape test is deliberately not applied: a counselor's meeting record is first person ("I told Maya").
 **Deploy order:** either. `20261028000007` adds the `ai_runs` label; before it, only the audit row is skipped.
-Tests: `test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
+**Transcripts** (`kind: "transcript"`, optional: absent means notes, so old clients are unchanged). The counselor
+pastes a transcript in `rawNotes` or sends the exported file as `file: { name, type?, data }` (base64, at most 2 MB;
+`.vtt`, `.srt`, `.txt`/`.md` or `.docx` through `readTranscriptFile` in `lib/documentText.ts`; the essay readers still
+refuse `.vtt`/`.srt`), never both. This route alone takes a 3 MB body. `lib/transcript.ts` (pure) strips the WebVTT/SRT
+structure (header, NOTE/STYLE/REGION blocks, cue ids, timings with their settings, `<v>`/`<c>`/`<i>` and timestamp
+tags, `{\an8}`, entities, BOM, CRLF), drops caption lines the previous cue already showed, merges a speaker's
+consecutive lines (a repeat is dropped only when the same speaker said it in this cue or the one before). **Who is a
+speaker (heuristic):** a `<v ...>` voice tag (up to 200 characters) always. In a VTT/SRT cue, a leading "label:" of
+up to 80 characters (any letters, CJK included, digits, spaces and `, . ' - ( ) [ ] & / @ _ + | – — ·`) is a speaker
+on its **first** cue when it is short (five words or fewer, separators like "-", "&", "|" not counted: "maya chen",
+"Maya's iPad", "iPhone 12", "Mom and Dad", "Jamal - Lincoln HS", "[Mom]", "李明"), name-shaped (every word outside
+nested parentheses and brackets capitalised, a particle such as de/van/bin, "and", or a number, at most six words:
+"Chen, Maya", "Maya Chen (Lincoln High School student)") or an email; a longer label that isn't name-shaped only when
+it starts two or more cues. Never a whole-label prose heading (Note(s), Agenda, Summary, Remember, Reminder, Total, Key
+Points, Follow Up, Open Questions, Action Items, Next Steps, Deadline(s), Time, Yes, No, Wait, Step/Option/Part/Q/A N,
+day and month names... "Total Recall Productions" is still a name), nor one ending in "!"/"?". The hard rule (a display
+name never reaches the model) outranks prose: a short "The plan: apply early" line is read as a speaker. **It is still
+a heuristic**: a label that fails every rule and starts only one cue reaches the model as text, and names spoken inside
+the talk pass as they do in pasted notes. In pasted text (no timings) it stays conservative: leading timestamps are
+stripped and "label:" is a speaker only when the same label starts two or more lines and is either a short label or
+"Last, First" (one or two capitalised words each side); Otter's "Name  0:03" headers too. **Speaker labels never reach the model**: they are
+display names the meeting tool wrote, not words the counselor typed, so each becomes "Speaker 1", "Speaker 2"... in
+order of first appearance, and only the answer maps them back (`restoreSpeakers`; the legend is returned as
+`transcript.speakers`). Names said inside the talk pass as in notes. Limits: 600,000 characters before cleaning,
+200,000 after (413 `transcript_too_long`), fewer than 20 spoken characters is 400 `transcript_empty`, a wrong file 400
+`transcript_file_type` / `transcript_unreadable`. **Map-reduce** (`summarizeTranscript`): whole sentences packed into
+parts of at most 15,000 characters (a new part prefers a speaker turn past 14,000; a run with no punctuation is cut
+at a space; a part starting mid-turn repeats its label), at most 15 parts; one `runStructured` call per part (three at
+a time, the same tool schema, "part i of n") and one merge call, so at most 16 calls, each through the AI switch, the
+budget gate and its own `ai_runs` row (the 16-call bound, 15 parts + 1 merge, was reviewed and accepted
+2026-11-08). The first failure stops the run (no new part starts, nothing merged, nothing
+stored; the usual 503/429/403). Every answer, each part's and the merge's, goes through `cleanSummary` against the
+**whole** transcript's spoken words (`speakerLabels: true` lets "Speaker 2" through without letting its digit count
+as a stated figure); names put back into the answer are cut to the 4,000-character cap at a sentence end or a space,
+never mid-word. The practice switch is checked before any call, and transcripts are also capped at 20 an hour
+per counselor. The answer adds `transcript: { characters, parts, modelCalls, speakers }`. Transcript text is never
+logged (`serializeReq` in `lib/requestLog.ts` logs no body). **Test double:** `MEETING_SUMMARY_FAKE=fixture`
+(refused outside `NODE_ENV` development and test, like `RESEARCH_FAKE`; CI sets it on the persona API) answers a
+part with its first line and the merge with the parts joined, still through `cleanSummary`, for notes too. The
+notetaker integration stays off; no migration. Tests: `test/unit/transcript-clean.test.ts`,
+`test/unit/meeting-summary.test.ts`, `test/integration/meeting-summary.test.mjs`.
 
 ### The essay restriction is a hard product constraint
 
@@ -3652,6 +3693,45 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
+  **Bulk export** (`lib/studentExport.ts`, `lib/csv.ts`, `lib/driveExport.ts`; no migration):
+  `POST /account/export/students` `{ studentIds }` (1-25 uuids, counselor, approved only like the
+  per-student export) returns, per id on the caller's caseload (`caseloadStudentIds`, past 250 the same
+  rule asked about these ids), the per-student export's JSON, a CSV per table with rows plus `profile`
+  (`toCsv`: RFC 4180, CRLF; any string cell starting with `= + - @`, tab or CR, after leading white space
+  or as a full-width look-alike, gets a leading `'`; typed numbers are left alone) and `documents` (name,
+  kind, path, link). Any other id, another practice's student or a random uuid, is exactly
+  `{ id, status: "not_found" }` and is never read. File bytes are never included (`filesIncluded: false`,
+  `filesNote`). Cost-based limit: one unit per distinct id from 1,000 an hour (40 batches of 25, so a roster of up to 1,000
+  exports in one sitting; the app (11c) can loop the whole roster) (`account:export-batch:<id>`,
+  `consumeUnits`, spent before reading, also when refused: 429 `export_rate_limited` with
+  `retryAfterSeconds` and `Retry-After`, an hour, the window's longest wait); it never touches
+  the per-student export's 60 an hour. **Every export table read is paged** (`lib/pagedRead.ts`:
+  1,000 rows a page in primary-key order, `ORDER_KEYS` for the tables keyed by student, until a short
+  page or 5,000 rows a table), because PostgREST's `max_rows` (1,000) silently cut each read before; at
+  the cap a one-row probe decides, and only a table really cut is listed in `truncated` (in the student's
+  JSON, on the batch entry, and `truncated: [{ id, tables }]` on the batch; the self export lists
+  `roster` / `practice.*`). This applies to all three exports. **Size**: a batch answer is at most
+  20,000 rows and 10 MB of JSON plus CSV. A student over that alone (their read stops early,
+  `pageGuard`) is `{ id, status: "too_large" }` and the batch goes on: **the app (11c) then fetches that
+  student with `GET /account/students/:id/export`**, which has no batch cap (its 60 an hour applies).
+  Students that each fit but not together make the batch 413 `export_too_large`: retry with fewer.
+  Paging stops only on an empty page (never a short one, so a lower `max_rows` can't cut a table), but
+  offset paging is not snapshot-consistent: a row inserted or deleted between pages can be duplicated or
+  missed at a page boundary. **For 11c:** the `GET /account/students/:id/export` fallback and the self
+  export have no size guard (up to 5,000 rows for each of the ~60 tables).
+  `POST /account/export/drive` `{ studentIds }` or `{ scope: "roster-summary" }` (whole caseload, at most
+  250, else 413 `roster_too_large`; 10 an hour) creates ONE Google Sheet "Meridies export <date>" in the caller's Drive under the
+  existing `drive.file` scope (multipart CSV upload converted to Sheets): name, email, grad year,
+  status, counts of colleges, tasks, documents, essays and meetings. `{ webViewLink, title, rows, skipped }`
+  (`skipped`: students whose profile row the caller can't read, left off the Sheet);
+  409 `drive_not_granted` (not connected, reconnect needed, or no drive.file), 502 `drive_failed`, 503
+  `drive_unavailable` (no Google settings). Only the HTTP status is ever logged, never the CSV or a
+  token; no path segment carries a token, so `lib/requestLog.ts` needs nothing. `DRIVE_EXPORT_FAKE=fixture`
+  (development/test only, refused at boot otherwise) stands in for Google from the caller's
+  `integration_tokens` row (`account_email` starting `drive-fail` answers 502). A shared (collaborator)
+  student's profile row is not readable through profiles RLS, so their export has `profile: null` and
+  the Sheet leaves them out (counted in `skipped`). Tests: `test/unit/csv.test.ts`, `export-paging.test.ts`, `student-export-batch.test.ts`,
+  `drive-export.test.ts`, `test/integration/account-export.test.mjs` (API with `DRIVE_EXPORT_FAKE=fixture`).
   `DELETE /account` (body `{"confirm":"delete my account"}`) deletes the auth
   user; a counselor with an active roster or an owned firm is refused, and a
   firm member with any student, archived included, is told to ask an owner or

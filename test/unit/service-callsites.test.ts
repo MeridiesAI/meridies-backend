@@ -94,6 +94,10 @@ const REVIEWED = [
   // the check read on the caller's own client (so it is theirs to see) and the printed values compared. The column
   // has no client grant (20261108000005); the profile write itself runs on the caller's client.
   "lib/handInValues.ts",
+  // lib/driveExport.ts: only the DRIVE_EXPORT_FAKE test double (refused at boot outside development/test) reads the
+  // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
+  // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
+  "lib/driveExport.ts",
   // routes/agreements.ts: the public /agree/:token page (nobody signed in). The hashed token decides; it reads only
   // the agreement that token names, its contact's email, the practice's name and its counselor's email, asks
   // approvedCounselorIds for the agreement's counselor first, and writes only through accept_agreement (EXECUTE to

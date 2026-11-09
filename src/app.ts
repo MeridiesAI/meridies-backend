@@ -6,7 +6,7 @@ import { ZodError } from "zod";
 import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio, trustProxy } from "./env.js";
 import { proxyMismatch, trustProxyOption } from "./lib/proxyTrust.js";
 import { HttpError } from "./lib/errors.js";
-import { loggedUrl, serializeErr } from "./lib/requestLog.js";
+import { serializeErr, serializeReq } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
 import { startExtractionRecovery } from "./lib/documentExtraction.js";
@@ -102,14 +102,7 @@ export function buildApp() {
       // only a redacted message, stack and codes (lib/requestLog.ts).
       serializers: {
         err: serializeErr,
-        req(req) {
-          return {
-            method: req.method,
-            url: loggedUrl(req.url),
-            hostname: req.hostname,
-            remoteAddress: req.ip,
-          };
-        },
+        req: serializeReq,
       },
     },
     // Railway sits behind one proxy, which appends the address it saw to
