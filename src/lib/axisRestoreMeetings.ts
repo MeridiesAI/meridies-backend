@@ -9,7 +9,8 @@
  *      cascade would count too), each with the calendar it was on, and raises its invite sequence above the
  *      cancellation the delete sent (the meetings_ics_sequence trigger won't let a client do that).
  *   2. A meeting still ahead that was on its owner's Google or Microsoft calendar goes back there the way a new
- *      meeting does (`createConferenceEvent`, owner only, with the caller's own token), with its new link.
+ *      meeting does (`createConferenceEvent`, owner only, with the caller's own token), with its new link. If that
+ *      fails, the old link (which died with the deleted event) is cleared, so the invitation carries none.
  *   3. It gets the round a new meeting gets (`prepareInviteRound` with no "before"): invites on, scheduled, not
  *      over, and the same fail-closed rules decide who is emailed. A past meeting sends nothing.
  *
@@ -139,6 +140,19 @@ export async function reinviteRestoredMeetings(
             { provider: plan.provider, err: err instanceof Error ? err.message : "unknown" },
             "restored meeting not put back on the calendar; the invitation still goes"
           );
+        }
+        // Still no event: the delete took the owner's event off the calendar, and its Meet/Teams link with it. The
+        // invitation (and the app) show no link rather than a dead one; the counselor can add a new one. (A
+        // collaborator's delete never touched the owner's calendar, so their restore keeps the link: no plan.put.)
+        if (!row.calendar_event_id && row.join_url) {
+          const { data: cleared, error: clearErr } = await request.db
+            .from("meetings")
+            .update({ join_url: null })
+            .eq("id", m.id)
+            .select("*")
+            .single();
+          if (clearErr || !cleared) log.warn({ code: clearErr?.code }, "restored meeting's old link not cleared");
+          else row = cleared as Row;
         }
       }
 

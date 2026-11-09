@@ -155,12 +155,14 @@ test("a restored future meeting goes back on its calendar with a new link, then 
   assert.equal(s.calls.started, 1);
 });
 
-test("a calendar that can't be reached doesn't stop the invitation", async () => {
+test("a calendar that can't be reached doesn't stop the invitation, and the dead link is dropped", async () => {
+  // The delete took the owner's event (and its Meet/Teams link) off the calendar: no link beats a dead one.
   const { db, writes } = fakeDb({ rpc: [{ id: MEETING, calendarProvider: "google" }], row: meeting() });
   const s = stubs({ createFails: true });
   assert.deepEqual(await reinviteRestoredMeetings(request(db), "action-1", s.deps), { invited: true });
-  assert.deepEqual(writes, []);
-  assert.equal(s.calls.prepared.length, 1);
+  assert.deepEqual(writes, [{ join_url: null }]);
+  const input = s.calls.prepared[0] as { after: { joinUrl: string | null } };
+  assert.equal(input.after.joinUrl, null);
 });
 
 test("an event the meeting couldn't be pointed at is taken off the calendar again", async () => {
@@ -170,12 +172,16 @@ test("an event the meeting couldn't be pointed at is taken off the calendar agai
   assert.deepEqual(s.calls.dropped.map((a) => a.slice(0, 3)), [[ME, "google", "evt-new"]]);
 });
 
-test("another counselor's meeting gets its invitation but no calendar event", async () => {
+test("another counselor's meeting gets its invitation, no calendar event, and keeps its link", async () => {
+  // A collaborator's delete never touched the owner's calendar (routes/meetings.ts dropCalendarEvent skips a
+  // meeting the caller doesn't own), so the owner's event and its link are still there.
   const { db, writes } = fakeDb({ rpc: [{ id: MEETING, calendarProvider: "google" }], row: meeting({ counselor_id: OTHER }) });
   const s = stubs();
   assert.deepEqual(await reinviteRestoredMeetings(request(db), "action-1", s.deps), { invited: true });
   assert.equal(s.calls.created.length, 0);
   assert.deepEqual(writes, []);
+  const input = s.calls.prepared[0] as { after: { joinUrl: string | null } };
+  assert.equal(input.after.joinUrl, "https://meet.google.com/old-link");
 });
 
 test("invites off, or a round with nobody to email, sends nothing and says so", async () => {

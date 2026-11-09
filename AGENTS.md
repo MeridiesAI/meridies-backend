@@ -2286,8 +2286,9 @@ cancellation, so after the restore the undo route asks `axis_trash_restored_meet
 meetings the restore brought back, from the trash rows, each with the calendar it was on) which also raises each
 one's `ics_sequence` above the cancellation's (the `meetings_ics_sequence` trigger wouldn't let a client). A meeting
 still ahead that was on the caller's own Google or Microsoft calendar is put back there the way a new meeting is
-(`createConferenceEvent`, a new link; a failure is logged and the invitation still goes; an event the row couldn't
-be pointed at is deleted again), then it gets a new meeting's round (`prepareInviteRound` with no "before": invites
+(`createConferenceEvent`, a new link; a failure is logged and the invitation still goes, without the old link, which
+died with the deleted event; an event the row couldn't be pointed at is deleted again; a collaborator's restore
+keeps the link, since their delete never touched the owner's calendar), then it gets a new meeting's round (`prepareInviteRound` with no "before": invites
 on, scheduled, not over, the usual fail-closed recipients). The answer adds `invited: true` when a round went out. A
 past meeting, invites off or no one to email sends nothing. It is the counselor's own click on the card; AxIS can't
 call the undo route. Before `20261113000001` (PGRST202) the restore sends nothing, as before; either deploy order, not
