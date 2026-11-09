@@ -107,6 +107,7 @@ src/
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
+│   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
@@ -184,6 +185,7 @@ src/
 │   ├── collegeIntel.ts    # /colleges     AI search, cited research, catalog proposals, student summary
 │   ├── settings.ts        # /settings     Data & privacy (practice_settings)
 │   ├── account.ts         # /account      data export (self, a student, batches of 25, a roster Sheet), account deletion
+│   ├── guardians.ts       # /guardians    the parents directory (read-only list + CSV), counselor
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
@@ -617,6 +619,41 @@ forget it.
   (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/internal/blasts/dispatch"`, every 10-15
   minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. Tests:
   `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`.
+- **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
+  `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
+  counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
+  belongs to, so a consultant can see every parent in one place and download it. **It stores, sends and changes
+  nothing and must not become any of those:** blasts and the composer derive who they reach from the roster at send
+  time on purpose (see Email blasts above), so a curated "parents list" would be a second source of truth that goes
+  stale and emails people who opted out. Don't add a send, a tag, a saved selection or an edit here; those belong on the
+  student page, where the guardian row lives. **Read as the caller** (`request.db`, no service client), scoped by
+  `caseloadStudentIds` (past 250 ids it reads the roster from `profiles` and names its students in chunks of 200),
+  RLS underneath. Query: `q` (100 characters; matches a parent's name or email or the student's name, case and accents
+  ignored, never an id or a phone), `classYear`, `includeArchived=true` (archived students are left out otherwise),
+  `limit` (default 100, max 500), and `cursor` **or** `offset` (not both). Answers `{ guardians: [{ id, name,
+  relationship, email, phone, studentId, studentName, classYear, receivesAlerts, receivesReports }], total, nextCursor,
+  sharedNotShown }`: exactly those keys, so a student's own email, notes and scores never leave. Ordered by the
+  student's surname (the last word of `full_name`, or the part before a comma; a Jr./III is ignored), first names, then
+  the parent's name, ties by id; `nextCursor` is the last row's sort key (an opaque base64url string), so rows added
+  or removed between pages move nothing already read. 60 a minute (`limit("guardians:roster", 60, 60)`, it fans out;
+  `fanout-limits.test.ts` lists both). **A shared student's parents are not listed.** `guardians` RLS lets a
+  collaborator read them, but `profiles` RLS does not let a collaborator read the student's row (the same reason the
+  roster Sheet skips them), so the list can't name the student. They are left out and counted in `sharedNotShown`
+  (0 when none; the CSV carries the same number in an `X-Shared-Not-Shown` response header, since a file has no
+  room for a note and the app fetches it server-side) so the list never silently looks complete. **The count ignores
+  `q`, `classYear` and `includeArchived`**: it is every parent of a student shared with the caller that this list
+  can't show, not "hidden by the filters". App copy should read "N parents of students shared with you that this
+  list can't show", never "N more matching". A firm colleague's unshared students are not in the caseload at all.
+  `q` is only ever a plain substring matched in code (no PostgREST filter, LIKE pattern or regex is built from it), so
+  `x,id.neq.0`, `%`, `*`, `\` and `(` are ordinary characters (tested). The CSV (`text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="meridies-parents-
+  YYYY-MM-DD.csv"` with the UTC date, `Cache-Control: no-store`, no byte-order mark, CRLF) uses the same filters, no
+  paging, and is built with `lib/csv.ts`, so any cell starting with `=`, `+`, `-` or `@` gets a leading apostrophe
+  (a phone number written `+1 555...` therefore shows with one). Over 5,000 rows it answers 413 `roster_too_large`
+  ("more than 5,000 parents for one download", narrow with `classYear` or a search). Separately, a request reads at
+  most 20,000 parents (one allowance across all its chunks, before `q` is applied): past it, the list and the CSV both
+  answer 413 `roster_too_large` with different words ("too many parents to read at once", only `classYear` narrows
+  what is read, since `classYear` and `includeArchived` filter students before their parents are read and `q` does not).
+  10 an hour. Tests: `test/unit/guardian-roster.test.ts`, `test/integration/guardians-roster.test.mjs`.
 - **Seasonal stage emails** (`20261110000003`; `lib/stageTemplates.ts`, `routes/emailTemplates.ts`, `routes/blasts.ts`).
   Nine rough drafts of the mass emails a practice sends through the year (starting the college search, essay ideas,
   a summer plan, essay planning, first drafts, revisions, regular deadlines, wrap-up and financial aid, decisions),
