@@ -2521,11 +2521,24 @@ that go with their parent whoever owns them, such as a student's saved copy of t
 parent does). Rows go back parents first (a row waits for its parent; a pass that puts nothing back is
 `parent-missing`), and a key set null goes back only where nothing was set since. Refusals are 409 with the card's
 sentence (`restoreSentence`), 403 when the caller's access isn't active and 404 when the action isn't theirs; an
-action already restored leaves the card undone. A restore sends nothing and rewrites nothing: 19 triggers on covered
-tables skip while it runs (`meridies.axis_restore = 'on'`, listed in the migration, which stops if one is missing).
-Three rows come back changed so a restore can't undo what happened since: a sequence enrollment comes back `paused`
-at its own step, a school the student enrolled in comes back `accepted` when they've enrolled elsewhere since, and a
-meeting comes back without its calendar pointer (the delete removed the calendar event; invites aren't re-sent).
+action already restored leaves the card undone. A restore rewrites nothing: 19 triggers on covered tables skip while
+it runs (`meridies.axis_restore = 'on'`, listed in the migration, which stops if one is missing). Three rows come back
+changed so a restore can't undo what happened since: a sequence enrollment comes back `paused` at its own step, a
+school the student enrolled in comes back `accepted` when they've enrolled elsewhere since, and a meeting comes back
+without its calendar pointer. **A restore sends nothing, except a meeting's invitation** (Elvin, 11/8;
+`lib/axisRestoreMeetings.ts`, `20261113000001`): the delete took the event off the calendar and emailed a
+cancellation, so after the restore the undo route asks `axis_trash_restored_meetings(action)` (the deleter only; the
+meetings the restore brought back, from the trash rows, each with the calendar it was on) which also raises each
+one's `ics_sequence` above the cancellation's (the `meetings_ics_sequence` trigger wouldn't let a client). A meeting
+still ahead that was on the caller's own Google or Microsoft calendar is put back there the way a new meeting is
+(`createConferenceEvent`, a new link; a failure is logged and the invitation still goes, without the old link, which
+died with the deleted event; an event the row couldn't be pointed at is deleted again; a collaborator's restore
+keeps the link, since their delete never touched the owner's calendar), then it gets a new meeting's round (`prepareInviteRound` with no "before": invites
+on, scheduled, not over, the usual fail-closed recipients). The answer adds `invited: true` when a round went out. A
+past meeting, invites off or no one to email sends nothing. It is the counselor's own click on the card; AxIS can't
+call the undo route. Before `20261113000001` (PGRST202) the restore sends nothing, as before; either deploy order, not
+in `REQUIRED_SCHEMA`. Tests: `test/unit/axis-restore-meetings.test.ts` and the meeting section of
+`test/integration/axis-trash.test.mjs`.
 A document AxIS deletes keeps its Storage object until the trash's purge, which keeps a file any remaining trash row
 still needs. A client can set the database header itself (straight to PostgREST), but that only keeps a copy of its
 own deletes, which only it can restore. Run a restore by hand as `postgres`: `select
@@ -2535,7 +2548,7 @@ make them restorable; a stage's delete moves its cards, so adding a stage has no
 a deleted task, meeting or report is kept and put back, so a reminder already sent isn't sent again. Before the migration a covered delete is refused with "AxIS can't delete things until
 the database update 20261108000003_axis_trash is applied." **Deploy order:** either; not in `REQUIRED_SCHEMA`.
 Tests: `test/unit/axis-trash.test.ts`, `test/integration/axis-trash-db.test.mjs`, `test/integration/axis-trash.test.mjs`
-(every covered op through the API, a caseload move, an expired card, nothing sent).
+(every covered op through the API, a caseload move, an expired card, nothing sent but a restored meeting's invitation).
 
 **Deploy order.** Apply `20261019000001_axis_operations.sql` (widens the
 `axis_actions` type and status checks, payload cap 32 KB). Either order is

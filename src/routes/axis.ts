@@ -48,6 +48,7 @@ import { hasAnthropic } from "../env.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { reinviteRestoredMeetings } from "../lib/axisRestoreMeetings.js";
 import { storableRuns } from "../lib/axis/quotes.js";
 
 const messageSchema = z
@@ -376,7 +377,10 @@ export default async function axisRoutes(app: FastifyInstance) {
         if (answer.reason === "not-approved") throw forbidden(restoreSentence(answer.reason));
         throw conflict(restoreSentence(String(answer.reason ?? "")));
       }
-      return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [] };
+      // A restored meeting sends its invitation again (Elvin, 11/8): the delete emailed a cancellation. Nothing
+      // else a restore brings back sends anything. Never throws; `invited` only when a round went out.
+      const { invited } = await reinviteRestoredMeetings(request, id);
+      return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [], ...(invited ? { invited: true } : {}) };
     }
     let answer: unknown;
     try {
