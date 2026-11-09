@@ -22,6 +22,8 @@ import blastRoutes from "./routes/blasts.js";
 import guardianRoutes from "./routes/guardians.js";
 import chatRoutes from "./routes/chat.js";
 import axisRoutes from "./routes/axis.js";
+import axisEvalRoutes from "./routes/axisEval.js";
+import { evalClockOn } from "./lib/axis/clock.js";
 import collegeRoutes from "./routes/colleges.js";
 import deadlineRoutes from "./routes/deadlines.js";
 import fileRoutes from "./routes/files.js";
@@ -200,6 +202,8 @@ export function buildApp() {
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });
   app.register(axisRoutes, { prefix: "/axis" });
+  // The evals' clock control: only in eval clock mode, which never boots outside a local stack (src/index.ts).
+  if (evalClockOn()) app.register(axisEvalRoutes, { prefix: "/axis/eval" });
   // v10 sync routes: foundations
   // v10 sync routes: overview
   app.register(workItemRoutes, { prefix: "/work-items" });

@@ -164,3 +164,11 @@ test("Jaro-Winkler", () => {
   assert.ok(jaroWinkler("sofia", "sophia") > 0.85);
   assert.ok(jaroWinkler("ethan", "maya") < 0.6);
 });
+
+test("asking AxIS to write an activity description is an essay request; copying one from the resume is a change", () => {
+  const u = (t: string) => understand(t, { chatStudentId: "s1", roster: null, colleges: null, state: null, now: NOW }).intent;
+  assert.equal(u("write a description for it"), "essay");
+  assert.equal(u("rewrite the activity description"), "essay");
+  assert.equal(u("come up with a blurb for her robotics club"), "essay");
+  assert.equal(u("add the description from her resume"), "action");
+});

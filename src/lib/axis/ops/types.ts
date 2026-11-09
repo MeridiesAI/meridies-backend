@@ -88,7 +88,27 @@ export type OpDef<I = any> = {
   snapshot?: (input: I, h: OpHelpers) => Promise<unknown>;
   /** The write that puts this one back, given what the API returned and the snapshot. */
   undo?: (input: I, body: unknown, before: unknown) => UndoStep | null;
+  /** Writes with rows (one card, several items): the card's row view, stored and sent to the app with the card. */
+  rows?: (input: I) => CardRow[];
+  /** The rows the counselor kept on Confirm (by key): the input that runs instead. */
+  select?: (input: I, keys: string[]) => I;
+  /** After Confirm ran: how each row went, by key, from the route's answer. */
+  confirmRows?: (input: I, body: unknown) => RowOutcome[];
 };
+
+/** One row of a card with rows, as the app shows it (a checkbox each). Descriptions by length and source only. */
+export type CardRow = {
+  key: string;
+  label: string;
+  fields: Record<string, string | number | boolean | string[] | null>;
+  sources: Record<string, string>;
+  readAs: Record<string, string>;
+  missing: string[];
+  description: { chars: number; source: string; overLimit: boolean } | null;
+};
+
+/** How one row of a confirmed card went. */
+export type RowOutcome = { key: string; ok: boolean; id?: string; message?: string };
 
 export type OpGroup = {
   /** Catalog heading, e.g. "Deadlines". */

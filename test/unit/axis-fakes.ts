@@ -9,7 +9,11 @@ type Row = Record<string, unknown>;
 type Filter = (r: Row) => boolean;
 
 /** One query the fake ran: what it did and which columns it filtered on (an update's filters say which rows it may touch). */
-export type DbCall = { table: string; op: "select" | "update"; patch?: Row; filters: string[] };
+export type DbCall = { table: string; op: "select" | "update" | "insert" | "delete"; patch?: Row; filters: string[] };
+
+let fakeIds = 0;
+/** A uuid-shaped id, unique within the test process. */
+export const fakeId = () => `00000000-0000-4000-8000-${String(++fakeIds).padStart(12, "0")}`;
 
 /**
  * Columns the fake database doesn't have, as `{ table, column }` rows under "missing:columns". By default
@@ -18,6 +22,10 @@ export type DbCall = { table: string; op: "select" | "update"; patch?: Row; filt
  */
 const DEFAULT_MISSING: Row[] = [{ table: "ai_messages", column: "outside_quotes" }];
 
+let stamps = 0;
+/** A strictly later timestamp on every call. */
+export const nextStamp = () => new Date(Date.UTC(2026, 10, 8, 12, 0, 0) + ++stamps).toISOString();
+
 export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
   return {
     from(table: string) {
@@ -25,6 +33,8 @@ export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
       const filters: Filter[] = [];
       const cols: string[] = [];
       let patch: Row | null = null;
+      let inserting: Row[] | null = null;
+      let deleting = false;
       let orderBy: { col: string; asc: boolean } | null = null;
       let lim: number | null = null;
       let range: [number, number] | null = null;
@@ -40,6 +50,8 @@ export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
           return chain;
         },
         update: (p: Row) => ((patch = p), chain),
+        insert: (r: Row | Row[]) => ((inserting = (Array.isArray(r) ? r : [r]).map((x) => ({ ...x }))), chain),
+        delete: () => ((deleting = true), chain),
         eq: (c: string, v: unknown) => (filters.push((r) => r[c] === v), cols.push(c), chain),
         neq: (c: string, v: unknown) => (filters.push((r) => r[c] !== v), chain),
         in: (c: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[c])), chain),
@@ -70,6 +82,17 @@ export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
         maybeSingle: () => ((single = "maybe"), chain),
         single: () => ((single = "one"), chain),
         then(resolve: (r: unknown) => unknown, reject?: (e: unknown) => unknown) {
+          if (inserting) {
+            const t = (tables[table] ??= []);
+            for (const r of inserting) {
+              r.id ??= fakeId();
+              r.created_at ??= new Date().toISOString();
+              t.push(r);
+            }
+            calls?.push({ table, op: "insert", filters: [] });
+            const out = single ? { data: inserting[0] ?? null, error: null } : { data: inserting, error: null };
+            return Promise.resolve(out).then(resolve, reject);
+          }
           const asked = selected.split(",").map((c) => c.trim());
           const gone = (tables["missing:columns"] ?? DEFAULT_MISSING).find((m) => m.table === table && asked.includes(String(m.column)));
           if (gone) return Promise.resolve({ data: null, error: { code: "42703", message: `column ${table}.${String(gone.column)} does not exist` } }).then(resolve, reject);
@@ -81,7 +104,15 @@ export function fakeDb(tables: Record<string, Row[]>, calls?: DbCall[]) {
           if (range) rows = rows.slice(range[0], range[1] + 1);
           if (lim !== null) rows = rows.slice(0, lim);
           calls?.push({ table, op: patch ? "update" : "select", ...(patch ? { patch } : {}), filters: cols.slice() });
-          if (patch) for (const r of rows) Object.assign(r, patch);
+          if (patch) {
+            // Tables listed under "touch:updated_at" move updated_at on every write, like the set_updated_at trigger.
+            const touch = (tables["touch:updated_at"] ?? []).some((t) => t.table === table);
+            for (const r of rows) Object.assign(r, patch, touch ? { updated_at: nextStamp() } : {});
+          }
+          if (deleting) {
+            tables[table] = (tables[table] ?? []).filter((r) => !rows.includes(r));
+            calls?.push({ table, op: "delete", filters: cols.slice() });
+          }
           let result: unknown;
           if (countMode && head) result = { data: null, count: rows.length, error: null };
           else if (single === "maybe") result = { data: rows[0] ?? null, error: null };
@@ -173,4 +204,24 @@ export function scriptedApi(turns: Turn[]): { api: MessagesApi; calls: Recorded[
     },
   };
   return { api, calls };
+}
+
+// ---- A request that can run operations (app.inject through dispatch) ---------------------------------
+
+export type Injected = { method: string; url: string; payload?: string };
+
+/** fakeRequest plus `server.inject`: every API call AxIS makes is recorded and answered by `answer` (default 200 with an id). */
+export function fakeOpsRequest(tables: Record<string, Row[]>, o: { userId?: string; answer?: (call: Injected) => { status: number; body: unknown } } = {}) {
+  const injected: Injected[] = [];
+  const request = fakeRequest(tables, o.userId) as unknown as Record<string, unknown>;
+  (request.auth as Record<string, unknown>).token = "tok";
+  request.headers = {};
+  request.server = {
+    inject: async (call: Injected) => {
+      injected.push(call);
+      const a = o.answer?.(call) ?? { status: 200, body: { id: fakeId() } };
+      return { statusCode: a.status, body: JSON.stringify(a.body) };
+    },
+  };
+  return { request: request as unknown as FastifyRequest, injected };
 }

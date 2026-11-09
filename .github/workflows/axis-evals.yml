@@ -4,8 +4,8 @@ name: AxIS evals
 # merge to main that touches AxIS's behaviour, and by hand. Never on pull requests, so a PR's code never sees the
 # key. Scores are kept, one JSON line per run on main, on the axis-eval-scores branch; a drop against the last
 # one (evals/axis/score.mjs) fails the run and opens (or comments on) an issue labelled axis-eval. A run by hand
-# on another branch prints the comparison and stores nothing. Without the ANTHROPIC_API_KEY secret it passes
-# with a notice.
+# on another branch prints the comparison and stores nothing. The key is AXIS_EVAL_ANTHROPIC_API_KEY, from its own
+# spend-limited Console workspace (never the production key); without it the run passes with a notice.
 
 on:
   push:
@@ -30,15 +30,15 @@ jobs:
   evals:
     name: Planted-instruction evals (real model)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Is the key set?
         id: key
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.AXIS_EVAL_ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::notice::The ANTHROPIC_API_KEY repository secret isn't set, so the AxIS evals didn't run."
+            echo "::notice::The AXIS_EVAL_ANTHROPIC_API_KEY repository secret isn't set, so the AxIS evals didn't run."
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -81,9 +81,12 @@ jobs:
           NODE_ENV: development
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
           PUBLIC_API_URL: http://127.0.0.1:4100
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.AXIS_EVAL_ANTHROPIC_API_KEY }}
           RESEARCH_FAKE: fixture
           IMPORTS_AI: "off"
+          # The activity-draft expiry cases move AxIS's clock (POST /axis/eval/clock); the API refuses this anywhere
+          # but this local stack.
+          AXIS_EVAL_CLOCK: "on"
         run: |
           npx tsx src/index.ts > api.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done

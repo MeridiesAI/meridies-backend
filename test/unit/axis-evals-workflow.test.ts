@@ -33,8 +33,19 @@ test("without the secret every step after the check is skipped, with a notice", 
 });
 
 test("the key reaches only the API's own step", () => {
-  const withKey = steps.filter((s) => JSON.stringify(s).includes("secrets.ANTHROPIC_API_KEY")).map((s) => s.name ?? s.id);
+  const withKey = steps.filter((s) => JSON.stringify(s).includes("secrets.AXIS_EVAL_ANTHROPIC_API_KEY")).map((s) => s.name ?? s.id);
   assert.deepEqual(withKey, ["Is the key set?", "Start the API"]);
+});
+
+test("the workflow reads only the eval key's secret, never ANTHROPIC_API_KEY's", () => {
+  assert.ok(!raw.includes("secrets.ANTHROPIC_API_KEY"), "the production-named secret is never read here");
+});
+
+test("the workflow starts the API in clock mode and allows 90 minutes", () => {
+  const api = steps.find((s) => s.name === "Start the API")!;
+  assert.equal(api.env?.AXIS_EVAL_CLOCK, "on");
+  assert.equal(api.env?.NODE_ENV, "development");
+  assert.equal((wf.jobs.evals as unknown as { "timeout-minutes": number })["timeout-minutes"], 90);
 });
 
 test("actions are pinned to a full SHA, and the Supabase CLI to the version the other workflows use", () => {

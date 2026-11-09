@@ -67,6 +67,8 @@ const confirmSchema = z
     title: z.string().trim().min(1).max(300).optional(),
     detail: z.string().max(2000).optional(),
     dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    // A card with rows (several activities): the rows the counselor kept. Without it, every row runs.
+    rows: z.array(z.string().regex(/^r([1-9]|10)$/)).min(1).max(10).optional(),
   })
   .strict();
 
@@ -178,7 +180,8 @@ export default async function axisRoutes(app: FastifyInstance) {
 
           // After done nothing may turn the answer into an error: each step is logged and skipped.
           try {
-            await saveState(request, id, turn.state);
+            // A turn with an activity draft saved the state itself, before `done` (lib/axis/drafts/state.ts).
+            if (!turn.stateSaved) await saveState(request, id, turn.state, turn.stateVersion);
             // Only what the code couldn't confirm goes to the adjudicator.
             const { wanted, checks, material, ledger } = turn.verify;
             if (wanted && checks.some((c) => c.status !== "grounded")) {
@@ -262,7 +265,7 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (claimed.type === "operation") {
       let outcome;
       try {
-        outcome = await confirmOperation(request, claimed);
+        outcome = await confirmOperation(request, claimed, { keep: edits.rows });
       } catch (err) {
         // Nothing changed (an outage, a rate limit): release the claim so Confirm can be clicked again.
         await request.db.from("axis_actions").update({ status: "pending", decided_at: null }).eq("id", id).eq("status", "confirmed");
@@ -275,10 +278,11 @@ export default async function axisRoutes(app: FastifyInstance) {
         .update({ status: outcome.status, result: outcome.result })
         .eq("id", id);
       if (saveErr) request.log.warn({ code: saveErr.code }, "axis operation result not saved");
+      const rows = outcome.result.rows ? { rows: outcome.result.rows } : {};
       return {
         id,
         status: outcome.status,
-        result: outcome.result.ok ? { ok: true, undoable: outcome.result.undoable } : { ok: false, message: outcome.result.message },
+        result: outcome.result.ok ? { ok: true, undoable: outcome.result.undoable, ...rows } : { ok: false, message: outcome.result.message, ...rows },
       };
     }
 
@@ -374,15 +378,41 @@ export default async function axisRoutes(app: FastifyInstance) {
       }
       return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [] };
     }
+    let answer: unknown;
     try {
-      await undoOperation(request, row);
+      answer = await undoOperation(request, row);
     } catch (err) {
       // Hand the claim back only if it is still ours.
       await handBack();
       throw err;
     }
+    // A batch Undo keeps rows the counselor edited since they were saved, and says which.
+    const skipped = skippedRows(answer);
+    if (skipped.length) {
+      const deleted = Number((answer as { deleted?: unknown }).deleted ?? 0);
+      if (deleted === 0) {
+        await handBack();
+        throw conflict("Every row was edited after it was saved, so nothing was undone.");
+      }
+      const names = skipped.map((s) => s.organization ?? "a row").join(", ");
+      const message = `Undone, except ${names}: edited after ${skipped.length === 1 ? "it was" : "they were"} saved.`;
+      await request.db
+        .from("axis_actions")
+        .update({ result: { ...((row.result ?? {}) as Record<string, unknown>), message } })
+        .eq("id", id)
+        .then(logSkipped(request.log, "undo note"));
+      return { id, status: "undone", skipped };
+    }
     return { id, status: "undone" };
   });
+}
+
+/** The rows a batch Undo kept because they were edited since they were saved (DELETE /application/activities). */
+function skippedRows(answer: unknown): { id: string; organization: string | null }[] {
+  const list = answer && typeof answer === "object" ? (answer as { skipped?: unknown }).skipped : null;
+  return Array.isArray(list)
+    ? list.filter((s) => s && typeof s === "object").map((s) => ({ id: String((s as Record<string, unknown>).id), organization: typeof (s as Record<string, unknown>).organization === "string" ? ((s as Record<string, unknown>).organization as string) : null }))
+    : [];
 }
 
 /**
@@ -410,6 +440,7 @@ function publicAction(r: Record<string, unknown>) {
     undoable: (status === "executed" || status === "confirmed") && (!!undoStepOf(res) || (isTrashResult(res) && !restoreExpired(res))),
     restoreUntil: isTrashResult(res) && typeof res.restoreUntil === "string" ? res.restoreUntil : null,
     message: typeof res.message === "string" ? res.message : null,
+    ...(Array.isArray(p.rows) ? { rows: p.rows as NonNullable<OperationPayload["rows"]> } : {}),
   };
   return { id: r.id, conversation_id: r.conversation_id, message_id: r.message_id, student_id: r.student_id, type: r.type, payload, status, created_at: r.created_at };
 }

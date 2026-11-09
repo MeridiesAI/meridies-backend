@@ -53,7 +53,7 @@ function secretMatches(presented: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-async function requireCronSecret(request: FastifyRequest): Promise<void> {
+export async function requireCronSecret(request: FastifyRequest): Promise<void> {
   const expected = env.CRON_SECRET;
   if (!expected) throw unavailable("Scheduled jobs are not configured");
 
