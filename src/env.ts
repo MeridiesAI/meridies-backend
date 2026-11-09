@@ -42,6 +42,10 @@ const envSchema = z.object({
   // (POST /internal/account-closures/purge). OFF unless exactly "true" (lib/accountClosure.ts purgeFlag); any
   // other value is off, never a boot error. Not switched on without the owner's explicit OK.
   ACCOUNT_PURGE_ENABLED: blankIsUnset(z.string().optional()),
+  // Agreements (typed-name acceptance, routes/agreements.ts): every route answers
+  // 404 agreements_off unless "true". Stays off in production until the consent
+  // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
+  AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any
@@ -58,6 +62,9 @@ const envSchema = z.object({
   // inbound one starting "[xx] " is read as language xx with the rest as its English. Same rules as RESEARCH_FAKE:
   // only with NODE_ENV development or test, the server refuses to start otherwise (lib/translate.ts).
   TRANSLATE_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for AI meeting summaries (no model): a part's summary is its first line, the merge joins them,
+  // and both still pass cleanSummary. Same rules as RESEARCH_FAKE: development or test only (lib/meetingSummary.ts).
+  MEETING_SUMMARY_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
   // Test double for the Google Sheets export (lib/driveExport.ts): no call to Google. Same rules as TRANSLATE_FAKE.
   DRIVE_EXPORT_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
   // The model that translates a family's messages; defaults to DEEP_MODEL (lib/translate.ts). A model the
@@ -82,6 +89,11 @@ const envSchema = z.object({
   // Tests only, like RESEND_API_BASE: Twilio's REST calls (sending, searching and
   // buying numbers, the Messaging Service) go to this origin. Ignored in production.
   TWILIO_API_BASE: blankIsUnset(z.string().url().optional()),
+  // Tests only: a JSON file { "<counselor id>": [{ "start": ISO, "end": ISO }] } read as each
+  // counselor's calendar busy time for student booking, instead of asking Google or Microsoft.
+  // Allowed only with the raw NODE_ENV development or test; index.ts refuses to start otherwise
+  // (lib/booking.ts bookingBusyFixtureRefusal), the RESEARCH_FAKE / TRANSLATE_FAKE rule.
+  BOOKING_BUSY_FIXTURE: blankIsUnset(z.string().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 

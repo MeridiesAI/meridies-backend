@@ -12,6 +12,7 @@ import {
   resetIntakeFillsWarning,
   type IntakeFill,
 } from "../../src/lib/intakeFills.js";
+import { AI_ALLOWLIST } from "../../src/lib/context/ai-allowlist.js";
 import { ACTIVITY_TYPES } from "../../src/lib/profileUpdates.js";
 import { toSheetActivity, toSheetHonor } from "../../src/lib/studentApplication.js";
 import type { StudentInfo } from "../../src/lib/studentPage.js";
@@ -49,10 +50,26 @@ test("every info-card key the questionnaire marks is a StudentInfo key", () => {
   const keys = new Set(Object.values(INFO_KEY_OF));
   const infoKeys: Array<keyof StudentInfo> = [
     "highSchool", "gradYear", "gpaWeighted", "gpaUnweighted", "classRank", "sat", "act", "firstGen", "intendedMajors",
+    "birthday",
   ];
   assert.deepEqual([...keys].sort(), [...infoKeys].sort());
   assert.equal(INFO_KEY_OF["student_academics.sat_superscore"], "sat");
   assert.equal(INFO_KEY_OF["student_personal_details.citizenship"], undefined, "citizenship is never filled");
+});
+
+test("a birthday the questionnaire filled is marked on the info card, and stays off the AI allowlist", () => {
+  assert.equal(INFO_KEY_OF["student_personal_details.birthday"], "birthday");
+  assert.deepEqual(
+    questionnaireFields([fill({ targetTable: "student_personal_details", field: "birthday" })]),
+    ["birthday"]
+  );
+  assert.deepEqual(
+    questionnaireFields([fill({ targetTable: "student_personal_details", field: "birthday", matchesCurrent: false })]),
+    [],
+    "a birthday the counselor changed since is theirs"
+  );
+  assert.ok(!(AI_ALLOWLIST.student_personal_details as readonly string[]).includes("birthday"),
+    "a minor's date of birth never reaches a model");
 });
 
 test("questionnaireFields keeps only values still as the questionnaire left them, once each", () => {

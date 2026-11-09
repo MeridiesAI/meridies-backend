@@ -5,6 +5,7 @@
  *   npx tsx scripts/ingest/curated-csv.ts --dataset policies --file ./policies.csv
  *   npx tsx scripts/ingest/curated-csv.ts --dataset requirements --file ./common-app-2026-27.csv
  *   npx tsx scripts/ingest/curated-csv.ts --dataset major-admit-rates --file ./uc-fall-2025.csv
+ *   npx tsx scripts/ingest/curated-csv.ts --dataset supplements --file ./supplements-2026-27.csv
  *   ... --dry-run    check the file and report errors without writing
  *
  * Any row with an error stops the load before anything is written: a curated
@@ -13,7 +14,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { mapCuratedCsv, type Dataset } from "../../src/lib/ingest/curated.js";
+import { DATASETS, mapCuratedCsv, type Dataset } from "../../src/lib/ingest/curated.js";
 import { parseCsv } from "../../src/lib/ingest/ipeds.js";
 import { serviceClient } from "../../src/lib/supabase.js";
 
@@ -24,8 +25,8 @@ const arg = (name: string) => {
 const dataset = arg("dataset") as Dataset | undefined;
 const file = arg("file");
 const dryRun = process.argv.includes("--dry-run");
-if (!dataset || !["policies", "requirements", "major-admit-rates"].includes(dataset) || !file) {
-  console.error("Usage: --dataset policies|requirements|major-admit-rates --file <csv> [--dry-run]");
+if (!dataset || !(DATASETS as readonly string[]).includes(dataset) || !file) {
+  console.error(`Usage: --dataset ${DATASETS.join("|")} --file <csv> [--dry-run]`);
   process.exit(1);
 }
 
@@ -73,6 +74,13 @@ if (dataset === "policies") {
 } else if (dataset === "requirements") {
   const rows = ok.map((o) => ({ college_id: ids.get(o.unitid)!, ...o.row }));
   const { error } = await svc.from("college_application_requirements").upsert(rows, { onConflict: "college_id,cycle" });
+  if (error) throw new Error(error.message);
+} else if (dataset === "supplements") {
+  // One prompt per (school, cycle, sort_order) slot, in one statement so a
+  // database refusal writes none of the file. A re-run updates the same rows;
+  // a prompt left out of the file is not deleted (essays may point at it).
+  const rows = ok.map((o) => ({ college_id: ids.get(o.unitid)!, ...o.row }));
+  const { error } = await svc.from("college_supplements").upsert(rows, { onConflict: "college_id,admission_cycle,sort_order" });
   if (error) throw new Error(error.message);
 } else {
   // Replace a school's rows for the entry years in this file.

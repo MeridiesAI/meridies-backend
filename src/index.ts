@@ -1,7 +1,9 @@
 import { buildApp } from "./app.js";
 import { env } from "./env.js";
+import { bookingBusyFixtureRefusal } from "./lib/booking.js";
 import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
 import { researchFakeRefusal } from "./lib/research/bootGuard.js";
+import { meetingSummaryFakeRefusal } from "./lib/meetingSummary.js";
 import { translateFakeRefusal } from "./lib/translate.js";
 import { driveFakeRefusal } from "./lib/driveExport.js";
 
@@ -24,6 +26,13 @@ if (translateRefusal) {
 }
 if (env.TRANSLATE_FAKE) app.log.warn("TRANSLATE_FAKE is on: translations are canned, not a model's");
 
+// And for the meeting-summary double: it would hand a counselor a summary no model wrote.
+const summaryRefusal = meetingSummaryFakeRefusal({ MEETING_SUMMARY_FAKE: env.MEETING_SUMMARY_FAKE, NODE_ENV: process.env.NODE_ENV });
+if (summaryRefusal) {
+  app.log.error(summaryRefusal);
+  process.exit(1);
+}
+if (env.MEETING_SUMMARY_FAKE) app.log.warn("MEETING_SUMMARY_FAKE is on: meeting summaries are canned, not a model's");
 // And for the Drive export double: it would answer a counselor with a Sheet link that doesn't exist.
 const driveRefusal = driveFakeRefusal({ DRIVE_EXPORT_FAKE: env.DRIVE_EXPORT_FAKE, NODE_ENV: process.env.NODE_ENV });
 if (driveRefusal) {
@@ -31,6 +40,13 @@ if (driveRefusal) {
   process.exit(1);
 }
 if (env.DRIVE_EXPORT_FAKE) app.log.warn("DRIVE_EXPORT_FAKE is on: Sheets exports are not sent to Google");
+// And for the booking busy-time stand-in: it would offer students slots over a counselor's real calendar.
+const busyRefusal = bookingBusyFixtureRefusal({ BOOKING_BUSY_FIXTURE: env.BOOKING_BUSY_FIXTURE, NODE_ENV: process.env.NODE_ENV });
+if (busyRefusal) {
+  app.log.error(busyRefusal);
+  process.exit(1);
+}
+if (env.BOOKING_BUSY_FIXTURE) app.log.warn("BOOKING_BUSY_FIXTURE is on: calendar busy time is read from a file, not Google or Microsoft");
 
 await verifyImportWorkerAtBoot(app.log);
 

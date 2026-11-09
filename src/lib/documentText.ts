@@ -131,6 +131,36 @@ export function maxReadBytes(filename: string, mimeType: string | null): number 
   return textKind(filename, mimeType) === "text" ? MAX_TEXT_FILE_BYTES : MAX_DOCUMENT_BYTES;
 }
 
+/** Caption files a meeting tool exports: read as text, cleaned by lib/transcript.ts (not by the essay readers above). */
+const TRANSCRIPT_EXTENSIONS = new Set(["vtt", "srt"]);
+const TRANSCRIPT_MIME = new Set(["text/vtt", "application/x-subrip", "text/srt"]);
+
+export type TranscriptFileRead = { ok: true; text: string } | { ok: false; reason: "type" | "too_large" | "unreadable" };
+
+/**
+ * A meeting transcript file for the meeting summary: .vtt and .srt (as text,
+ * structure kept for the cleaner), plus the essay readers' .txt/.md and .docx.
+ * Anything else (a PDF, an image, a binary) is refused by type. Only the
+ * meeting summary reads these two extensions: isReadableName and
+ * readDocumentText (essays, hand-ins) are unchanged.
+ */
+export function readTranscriptFile(bytes: Buffer, filename: string, mimeType: string | null): TranscriptFileRead {
+  const ext = extensionOf(filename);
+  const caption = TRANSCRIPT_EXTENSIONS.has(ext) || (mimeType !== null && TRANSCRIPT_MIME.has(mimeType));
+  const kind = caption ? "text" : textKind(filename, mimeType);
+  if (kind === null) return { ok: false, reason: "type" };
+  if (kind === "text") {
+    if (bytes.length > MAX_TEXT_FILE_BYTES) return { ok: false, reason: "too_large" };
+    const text = bytes.toString("utf8");
+    // A NUL byte means this is not text, whatever its name says.
+    if (text.includes("\u0000")) return { ok: false, reason: "unreadable" };
+    return { ok: true, text };
+  }
+  if (bytes.length > MAX_DOCUMENT_BYTES) return { ok: false, reason: "too_large" };
+  const text = readDocumentText(bytes, filename, DOCX_MIME);
+  return text === null ? { ok: false, reason: "unreadable" } : { ok: true, text };
+}
+
 export function readDocumentText(bytes: Buffer, filename: string, mimeType: string | null): string | null {
   if (bytes.length > MAX_DOCUMENT_BYTES) return null;
   const kind = textKind(filename, mimeType);

@@ -18,13 +18,16 @@
  *     "$API_URL/internal/ingest/college-photos"
  * and (not created yet; OFF unless ACCOUNT_PURGE_ENABLED=true) daily, closed accounts past their grace period:
  *     "$API_URL/internal/account-closures/purge"
+ * and, per college, cited catalog proposals from the school's own pages (body {"collegeId"} or {"unitid"}):
+ *     "$API_URL/internal/catalog/propose"
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { budgetMode, spendToday } from "../lib/aiBudget.js";
-import { unauthorized, unavailable } from "../lib/errors.js";
+import { badRequest, notFound, unauthorized, unavailable } from "../lib/errors.js";
+import { runCatalogProposal } from "../lib/catalogProposalsRun.js";
 import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { dispatchDueBlasts } from "../lib/blasts.js";
 import { purgeFlag, runClosurePurge } from "../lib/accountClosure.js";
@@ -208,6 +211,37 @@ export default async function internalRoutes(app: FastifyInstance) {
         return reply.code(503).send({ started: false, reason });
       }
       return reply.code(202).send({ started: true });
+    }
+  );
+
+  /**
+   * Cited catalog proposals for ONE college (lib/catalogProposals.ts): its own admissions pages are read, and the
+   * facts whose quote is on the page are written as PENDING catalog_change_proposals for a catalog editor. Nothing
+   * curated is written here. Synchronous (a few pages and one model call); 200 with the run's counts.
+   */
+  app.post(
+    "/catalog/propose",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request) => {
+      const b = z
+        .object({ collegeId: z.string().uuid().optional(), unitid: z.number().int().positive().optional(), dryRun: z.boolean().optional() })
+        .strict()
+        .refine((v) => Boolean(v.collegeId) !== (v.unitid !== undefined), "Pass collegeId or unitid")
+        .parse(request.body ?? {});
+      let collegeId = b.collegeId ?? null;
+      if (!collegeId) {
+        const svc = serviceClient();
+        if (!svc) throw unavailable("Proposals need the service role key");
+        const { data, error } = await svc.from("colleges").select("id").eq("unitid", b.unitid!).maybeSingle();
+        if (error) throw unavailable("The catalog couldn't be read");
+        if (!data) throw notFound("That college isn't in the catalog");
+        collegeId = String(data.id);
+      }
+      const r = await runCatalogProposal(collegeId, { dryRun: b.dryRun ?? false }, request.log);
+      if (r.ok) return r.result;
+      if (r.reason === "not-found") throw notFound(r.message);
+      if (r.reason === "no-website") throw badRequest(r.message);
+      throw unavailable(r.message);
     }
   );
 
