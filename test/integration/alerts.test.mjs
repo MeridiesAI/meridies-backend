@@ -1,7 +1,7 @@
 // Counselor alerts (20261111000003): the settings, the inactivity alert on the scheduled sweep, the essay
 // notice, and the last-active mark. Needs the migration applied and an API with the service role key and
 // CRON_SECRET; no email provider (deliveries record without sending).
-import { API, CRON_SECRET, call, check, sql, sqlAsync, user } from "./harness.mjs";
+import { API, CLIENT, CRON_SECRET, call, check, sql, sqlAsync, user } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -10,7 +10,7 @@ const SECRET = `ESSAY-TEXT-${Math.random().toString(36).slice(2)}`;
 /** The scheduled sweep; another suite's run may hold the lease, so try a few times. */
 async function sweep() {
   for (let i = 0; i < 20; i++) {
-    const r = await fetch(`${API}/internal/accountability/sweep`, { method: "POST", headers: { Authorization: `Bearer ${CRON_SECRET}` } });
+    const r = await fetch(`${API}/internal/accountability/sweep`, { method: "POST", headers: { ...CLIENT, Authorization: `Bearer ${CRON_SECRET}` } });
     if (r.status !== 409) return { status: r.status, body: await r.json().catch(() => ({})) };
     await wait(500);
   }
