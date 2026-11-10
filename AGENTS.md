@@ -2127,6 +2127,19 @@ Spec `docs/superpowers/specs/2026-10-26-roi-kpi-report-design.md`, plan
   (default team@meridiesai.com); keep these emails free of promotion, or set a postal address first.
 - Tests: `test/integration/kpi-*.test.mjs`, `test/unit/kpi-*.test.ts`.
 
+## Web Push (phone alerts)
+
+Migration `20261114000001_web_push.sql`, `src/lib/push.ts`, `src/routes/push.ts`. A device registers with `POST /push`
+(owner-only RLS on `push_subscriptions`; `channel` is `web` now, `fcm`/`apns` reserved for the store apps). A cron,
+`POST /internal/push-dispatch` (every 1-2 minutes, heartbeat `push-dispatch`), pushes each `notifications` row with
+`pushed_at is null`, so every place that writes a notification reaches phones with no change of its own. **Off until
+`VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT` are set** (`npx web-push generate-vapid-keys`): routes answer
+503 `push_unavailable`, the sweep does nothing. **What a lock screen shows is generic by kind, never a title or body**
+(they can name a student or quote their work); making names opt-in is a practice setting that is not built. Only approved
+counselors are pushed; 404/410 devices are deleted; a notification over an hour old is marked handled without a push; more
+than three for one person in a run become one summary. Not done: per-event toggles, the due-tomorrow student reminder and
+meeting-starting-soon pushes (their own sources, not notification rows).
+
 ## Scheduled jobs
 
 The escalation sweep (`runEscalationSweep` in `lib/accountability.ts`) turns red

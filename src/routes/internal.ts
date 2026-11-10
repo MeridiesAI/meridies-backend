@@ -22,6 +22,7 @@
  *     "$API_URL/internal/catalog/propose"
  */
 
+import { dispatchPush } from "../lib/push.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
@@ -64,6 +65,31 @@ export async function requireCronSecret(request: FastifyRequest): Promise<void> 
 }
 
 export default async function internalRoutes(app: FastifyInstance) {
+  /**
+   * Every 1-2 minutes: push each new notification to the recipient's registered devices (lib/push.ts). A no-op
+   * until the VAPID settings and migration 20261114000001 exist.
+   */
+  app.post(
+    "/push-dispatch",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "Push needs the service role key" });
+      try {
+        const tally = await dispatchPush(svc, request.log);
+        if (tally.ran) await beat("push-dispatch", true, undefined, request.log);
+        return tally;
+      } catch (err) {
+        // Before the migration is applied there is nothing to push; that is not a failure.
+        if (isResultsNotApplied(err as { code?: string }) || /read failed \((42P01|42703|PGRST20\d)\)/.test(String((err as Error).message))) {
+          return reply.code(200).send({ ran: false, reason: "Apply 20261114000001_web_push.sql" });
+        }
+        await beat("push-dispatch", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
   /**
    * Every 10-15 minutes: send the Contact Pipeline sequence emails that are due
    * (lib/pipelineSequences.ts). Each enrollment is claimed before it is sent,
