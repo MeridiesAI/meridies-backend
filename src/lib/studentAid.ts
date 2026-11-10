@@ -14,8 +14,10 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { env } from "../env.js";
 import { fromPostgrest } from "./errors.js";
 import { fourPointGpa } from "./gpa.js";
+import { ttlCache } from "./ttlCache.js";
 
 type Row = Record<string, unknown>;
 
@@ -720,7 +722,7 @@ export function classifyScholarships(
  * The national/state catalog: rows with no owner. Read apart from the school rows so a practice's rows can never
  * crowd the catalog out of the read. Before 20261111000006 there is no owner column, and every row is the catalog.
  */
-async function readCatalog(db: SupabaseClient): Promise<Row[]> {
+async function readCatalogUncached(db: SupabaseClient): Promise<Row[]> {
   const scoped = await db
     .from("scholarships")
     .select("*")
@@ -732,6 +734,17 @@ async function readCatalog(db: SupabaseClient): Promise<Row[]> {
   const legacy = await db.from("scholarships").select("*").eq("is_active", true).limit(1000);
   if (legacy.error) throw fromPostgrest(legacy.error);
   return (legacy.data ?? []) as Row[];
+}
+
+/**
+ * Every scan used to re-read up to 1000 catalog rows. The catalog is shared by all practices and changes rarely,
+ * so keep it for a minute by default (per process; SCHOLARSHIP_CATALOG_CACHE_MS). The rows are only read, never changed, by classifyScholarships.
+ */
+let catalogDb: SupabaseClient;
+const catalogCache = ttlCache(env.SCHOLARSHIP_CATALOG_CACHE_MS, () => readCatalogUncached(catalogDb));
+function readCatalog(db: SupabaseClient): Promise<Row[]> {
+  catalogDb = db;
+  return catalogCache.get();
 }
 
 /** Ids per `in (...)` filter, so a long list stays well inside a URL. */

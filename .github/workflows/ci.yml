@@ -152,6 +152,8 @@ jobs:
           DEV_MAIL_URL: http://127.0.0.1:54324
           # Student booking: calendar busy time from a file, not Google/Microsoft; refuses to boot in production.
           BOOKING_BUSY_FIXTURE: /tmp/booking-busy.json
+          # The scholarship scan keeps its catalog read for a minute in production; tests add rows and scan at once.
+          SCHOLARSHIP_CATALOG_CACHE_MS: "0"
         run: |
           echo '{}' > /tmp/booking-busy.json
           npx tsx src/index.ts > api.log 2>&1 &
