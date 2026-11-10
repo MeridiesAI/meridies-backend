@@ -53,19 +53,26 @@ import { loadPracticeSettings } from "../lib/practiceSettings.js";
 import { HAND_INS_PER_STUDENT_DAY, HAND_INS_PER_TASK_HOUR, startSubmissionReview } from "../lib/submissionReview.js";
 import { toTask, toTaskStage, toTrackerCheck } from "../lib/serialize.js";
 import { researchTaskIds } from "../lib/research/origin.js";
+import { assertGpaFitsScale } from "../lib/gpaCheck.js";
+import { isSchemaMissing } from "../lib/axis/failsafe.js";
+import {
+  academicsFor,
+  ACADEMICS_COLUMNS,
+  columnFor,
+  HAND_IN_CHANGED,
+  HAND_IN_KEYS,
+  HAND_IN_VALUES_MISSING,
+  infoPatchFrom,
+  patchValue,
+  stampConfirmed,
+  storedValues,
+  withCurrent,
+  type HandInKey,
+} from "../lib/handInValues.js";
+
+import { isMarkerViolation, TASK_KINDS } from "../lib/taskSets.js";
 
 type Row = Record<string, unknown>;
-
-const TASK_KINDS = [
-  "essay",
-  "common-app-section",
-  "activity-list",
-  "document",
-  "test-registration",
-  "recommendation",
-  "aid-form",
-  "custom",
-] as const;
 
 /** A stage's deadline lands in the existing tracker, so it needs a type. */
 const DEADLINE_TYPE_BY_KIND: Record<string, string> = {
@@ -87,7 +94,7 @@ const stageInput = z
   })
   .strict();
 
-const createTaskBody = z
+export const createTaskBody = z
   .object({
     studentId: z.string().uuid(),
     kind: z.enum(TASK_KINDS).optional(),
@@ -221,16 +228,197 @@ export async function hydrate(
   }
   const trackerBy = new Map<string, Row>();
   for (const t of tracker.data ?? []) trackerBy.set(t.deliverable_id as string, t as Row);
+  // A hand-in's values are shown beside the profile's value now: one academics read, only when a check has values.
+  const academics = await academicsFor(request.db, (tracker.data ?? []) as Row[]);
 
   return tasks.map((t) =>
     toTask(t, {
       stages: stageBy.get(t.id as string) ?? [],
       documents: docBy.get(t.id as string) ?? [],
       tracker: trackerBy.get(t.id as string) ?? null,
+      academics: academics.get(String(t.student_id)) ?? null,
       // Unreadable: every counselor task may be one (AxIS then treats them as outside content).
       ...(request.profile.role === "counselor" ? { fromResearch: t.source !== "student" && (research === null || research.has(t.id as string)) } : {}),
     })
   );
+}
+
+export type CreateTaskInput = z.infer<typeof createTaskBody>;
+
+/** Where a task made from a saved set came from (`deliverables.task_set_id` / `task_set_item_key`). */
+export type TaskSetMarker = { taskSetId: string; itemKey: string };
+
+export type CreateTaskOptions = {
+  marker?: TaskSetMarker;
+  /** Store `notifyEmail` as asked but don't send the email now (a set's apply emails once per student). */
+  skipEmailSend?: boolean;
+};
+
+export type CreatedTask =
+  | {
+      alreadyAssigned: false;
+      taskId: string;
+      task: Row;
+      notification: { email: boolean; sms: SmsNotifyState; error: string | null };
+    }
+  /** Only with a marker: the marker's unique index says this student already has this item (23505). */
+  | { alreadyAssigned: true };
+
+/**
+ * A counselor's assignment, as the Create task button makes it: the task, its stages in order, the
+ * Deadline Command Center mirror, attached documents, the `created` event, then the notification last
+ * so a delivery failure leaves a real task behind. Shared by `POST /tasks` and `POST /task-sets/:id/apply`.
+ *
+ * The CALLER has already checked edit access to `b.studentId` (`resolveStudentId(..., "edit")`); RLS
+ * still applies to every write. With `marker`, a unique violation on the marker's own index is reported
+ * as `alreadyAssigned` rather than thrown; any other violation still throws.
+ */
+export async function createTaskForStudent(
+  request: FastifyRequest,
+  b: CreateTaskInput,
+  { marker, skipEmailSend = false }: CreateTaskOptions = {}
+): Promise<CreatedTask> {
+  const visible = b.visibleToStudent !== false;
+  const kind = b.kind ?? "custom";
+  const stages = b.stages ?? [];
+  // The task's own due date defaults to the last stage's, so a multi-step
+  // task still sorts correctly next to single-deadline work.
+  const stageDates = stages
+    .map((s) => s.dueDate)
+    .filter((d): d is string => Boolean(d))
+    .sort();
+  const dueDate = b.dueDate ?? stageDates.at(-1) ?? null;
+
+  // Documents must be ones the caller can actually see. RLS filters the
+  // read, so a short result means an id that isn't theirs to attach.
+  let documents: Row[] = [];
+  if (b.documentIds?.length) {
+    const { data, error } = await request.db
+      .from("documents")
+      .select("id, filename, title, student_id")
+      .in("id", b.documentIds);
+    if (error) throw fromPostgrest(error);
+    documents = (data ?? []) as Row[];
+    if (documents.length !== b.documentIds.length) {
+      throw badRequest("One of those documents isn't available to attach");
+    }
+    // And about this student: another roster student's file on this task would
+    // reach this student by name, by the tracker and by the assignment email.
+    if (documents.some((d) => d.student_id && d.student_id !== b.studentId)) {
+      throw badRequest("One of those documents belongs to another student");
+    }
+  }
+  if (b.essayId) {
+    const { data: essay } = await request.db.from("essays").select("student_id").eq("id", b.essayId).maybeSingle();
+    if (!essay || essay.student_id !== b.studentId) throw badRequest("That essay isn't this student's");
+  }
+  if (b.studentCollegeId) {
+    const { data: sc } = await request.db.from("student_colleges").select("student_id").eq("id", b.studentCollegeId).maybeSingle();
+    if (!sc || sc.student_id !== b.studentId) throw badRequest("That college isn't on this student's list");
+  }
+
+  const { data: task, error } = await request.db
+    .from("deliverables")
+    .insert({
+      student_id: b.studentId,
+      kind,
+      title: b.title,
+      instructions: b.instructions ?? null,
+      essay_id: b.essayId ?? null,
+      student_college_id: b.studentCollegeId ?? null,
+      target_words: b.targetWords ?? null,
+      due_date: dueDate,
+      status: "not-started",
+      source: "counselor",
+      created_by: request.auth.userId,
+      assigned_by: request.auth.userId,
+      assigned_at: new Date().toISOString(),
+      notify_email: b.notifyEmail ?? true,
+      notify_sms: b.notifySms ?? false,
+      visible_to_student: visible,
+      // Only named when there is one, so the Create task button never reads the set columns.
+      ...(marker ? { task_set_id: marker.taskSetId, task_set_item_key: marker.itemKey } : {}),
+    })
+    .select("*")
+    .single();
+  if (error) {
+    if (marker && isMarkerViolation(error)) return { alreadyAssigned: true };
+    throw fromPostgrest(error);
+  }
+
+  const taskId = task.id as string;
+
+  // Stages, in the order they were given.
+  if (stages.length > 0) {
+    const rows = stages.map((s, i) => ({
+      deliverable_id: taskId,
+      student_id: b.studentId,
+      name: s.name,
+      detail: s.detail ?? null,
+      due_date: s.dueDate ?? null,
+      sequence: i,
+    }));
+    const { error: stageError } = await request.db
+      .from("deliverable_stages")
+      .insert(rows);
+    if (stageError) throw fromPostgrest(stageError);
+  }
+
+  // Mirror dated stages into the existing deadline tracker rather than
+  // standing up a second one the counselor has to check separately. A
+  // hidden task mirrors nothing: deadlines are the student's to read, so
+  // they are made when the task is shared.
+  if (b.syncDeadlines !== false && visible) {
+    await mirrorStageDeadlines(request, {
+      taskId,
+      studentId: b.studentId,
+      title: b.title,
+      kind,
+      instructions: b.instructions ?? null,
+    });
+  }
+
+  if (documents.length > 0) {
+    const { error: linkError } = await request.db.from("deliverable_documents").insert(
+      documents.map((d) => ({
+        deliverable_id: taskId,
+        document_id: d.id as string,
+        student_id: b.studentId,
+        role: "reference",
+        added_by: request.auth.userId,
+      }))
+    );
+    if (linkError) throw fromPostgrest(linkError);
+  }
+
+  await request.db.from("progress_events").insert({
+    student_id: b.studentId,
+    deliverable_id: taskId,
+    entity_type: "deliverable",
+    entity_id: taskId,
+    event: "created",
+    actor_id: request.auth.userId,
+    metadata: marker
+      ? { stages: stages.length, documents: documents.length, taskSetId: marker.taskSetId, taskSetItemKey: marker.itemKey }
+      : { stages: stages.length, documents: documents.length },
+  });
+
+  // Nobody is told about a task the student can't see.
+  const notification = visible
+    ? await notifyAssignment(request, {
+        taskId,
+        studentId: b.studentId,
+        title: b.title,
+        instructions: b.instructions ?? null,
+        dueDate,
+        stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
+        documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
+        email: skipEmailSend ? false : (b.notifyEmail ?? true),
+        sms: b.notifySms ?? false,
+      })
+    : { email: false, sms: "skipped" as SmsNotifyState, error: null };
+
+  return { alreadyAssigned: false, taskId, task: task as Row, notification };
 }
 
 export default async function taskRoutes(app: FastifyInstance) {
@@ -409,148 +597,17 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const b = createTaskBody.parse(request.body);
       await resolveStudentId(request, b.studentId, "edit");
-
-      const visible = b.visibleToStudent !== false;
-      const kind = b.kind ?? "custom";
-      const stages = b.stages ?? [];
-      // The task's own due date defaults to the last stage's, so a multi-step
-      // task still sorts correctly next to single-deadline work.
-      const stageDates = stages
-        .map((s) => s.dueDate)
-        .filter((d): d is string => Boolean(d))
-        .sort();
-      const dueDate = b.dueDate ?? stageDates.at(-1) ?? null;
-
-      // Documents must be ones the caller can actually see. RLS filters the
-      // read, so a short result means an id that isn't theirs to attach.
-      let documents: Row[] = [];
-      if (b.documentIds?.length) {
-        const { data, error } = await request.db
-          .from("documents")
-          .select("id, filename, title, student_id")
-          .in("id", b.documentIds);
-        if (error) throw fromPostgrest(error);
-        documents = (data ?? []) as Row[];
-        if (documents.length !== b.documentIds.length) {
-          throw badRequest("One of those documents isn't available to attach");
-        }
-        // And about this student: another roster student's file on this task would
-        // reach this student by name, by the tracker and by the assignment email.
-        if (documents.some((d) => d.student_id && d.student_id !== b.studentId)) {
-          throw badRequest("One of those documents belongs to another student");
-        }
-      }
-      if (b.essayId) {
-        const { data: essay } = await request.db.from("essays").select("student_id").eq("id", b.essayId).maybeSingle();
-        if (!essay || essay.student_id !== b.studentId) throw badRequest("That essay isn't this student's");
-      }
-      if (b.studentCollegeId) {
-        const { data: sc } = await request.db.from("student_colleges").select("student_id").eq("id", b.studentCollegeId).maybeSingle();
-        if (!sc || sc.student_id !== b.studentId) throw badRequest("That college isn't on this student's list");
-      }
-
-      const { data: task, error } = await request.db
-        .from("deliverables")
-        .insert({
-          student_id: b.studentId,
-          kind,
-          title: b.title,
-          instructions: b.instructions ?? null,
-          essay_id: b.essayId ?? null,
-          student_college_id: b.studentCollegeId ?? null,
-          target_words: b.targetWords ?? null,
-          due_date: dueDate,
-          status: "not-started",
-          source: "counselor",
-          created_by: request.auth.userId,
-          assigned_by: request.auth.userId,
-          assigned_at: new Date().toISOString(),
-          notify_email: b.notifyEmail ?? true,
-          notify_sms: b.notifySms ?? false,
-          visible_to_student: visible,
-        })
-        .select("*")
-        .single();
-      if (error) throw fromPostgrest(error);
-
-      const taskId = task.id as string;
-
-      // Stages, in the order they were given.
-      if (stages.length > 0) {
-        const rows = stages.map((s, i) => ({
-          deliverable_id: taskId,
-          student_id: b.studentId,
-          name: s.name,
-          detail: s.detail ?? null,
-          due_date: s.dueDate ?? null,
-          sequence: i,
-        }));
-        const { error: stageError } = await request.db
-          .from("deliverable_stages")
-          .insert(rows);
-        if (stageError) throw fromPostgrest(stageError);
-      }
-
-      // Mirror dated stages into the existing deadline tracker rather than
-      // standing up a second one the counselor has to check separately. A
-      // hidden task mirrors nothing: deadlines are the student's to read, so
-      // they are made when the task is shared.
-      if (b.syncDeadlines !== false && visible) {
-        await mirrorStageDeadlines(request, {
-          taskId,
-          studentId: b.studentId,
-          title: b.title,
-          kind,
-          instructions: b.instructions ?? null,
-        });
-      }
-
-      if (documents.length > 0) {
-        const { error: linkError } = await request.db.from("deliverable_documents").insert(
-          documents.map((d) => ({
-            deliverable_id: taskId,
-            document_id: d.id as string,
-            student_id: b.studentId,
-            role: "reference",
-            added_by: request.auth.userId,
-          }))
-        );
-        if (linkError) throw fromPostgrest(linkError);
-      }
-
-      await request.db.from("progress_events").insert({
-        student_id: b.studentId,
-        deliverable_id: taskId,
-        entity_type: "deliverable",
-        entity_id: taskId,
-        event: "created",
-        actor_id: request.auth.userId,
-        metadata: { stages: stages.length, documents: documents.length },
-      });
-
-      // Nobody is told about a task the student can't see.
-      const notified = visible
-        ? await notifyAssignment(request, {
-            taskId,
-            studentId: b.studentId,
-            title: b.title,
-            instructions: b.instructions ?? null,
-            dueDate,
-            stages: stages.map((s) => ({ name: s.name, dueDate: s.dueDate ?? null })),
-            documentNames: documents.map((d) => String(d.title ?? d.filename ?? "document")),
-            email: b.notifyEmail ?? true,
-            sms: b.notifySms ?? false,
-          })
-        : { email: false, sms: "skipped" as SmsNotifyState, error: null };
+      const created = await createTaskForStudent(request, b);
+      if (created.alreadyAssigned) throw conflict("That task is already assigned");
 
       const { data: fresh } = await request.db
         .from("deliverables")
         .select("*")
-        .eq("id", taskId)
+        .eq("id", created.taskId)
         .maybeSingle();
 
-      const [dto] = await hydrate(request, [(fresh ?? task) as Row]);
-      return reply.code(201).send({ ...dto, notification: notified });
+      const [dto] = await hydrate(request, [(fresh ?? created.task) as Row]);
+      return reply.code(201).send({ ...dto, notification: created.notification });
     }
   );
 
@@ -1039,8 +1096,97 @@ export default async function taskRoutes(app: FastifyInstance) {
       .order("checked_at", { ascending: false })
       .limit(50);
     if (error) throw fromPostgrest(error);
-    return (data ?? []).map((r) => toTrackerCheck(r as Row));
+    const academics = await academicsFor(request.db, (data ?? []) as Row[]);
+    return (data ?? []).map((r) => toTrackerCheck(r as Row, academics.get(String(r.student_id)) ?? null));
   });
+
+  // ---- Hand-in values (20261108000005; lib/handInValues.ts) -----------------
+  //
+  // The counselor confirms what AxIS copied off a handed-in file, sending each value the card showed with the
+  // profile's value the card showed beside it. A value the profile can take is written only where the profile
+  // still holds that value (apply_hand_in_values, on the counselor's own client, so RLS decides); one edited since
+  // is kept and reported. A value the profile can't take ("AP Biology 5") is confirmed without being saved.
+  const confirmValuesBody = z
+    .object({
+      values: z
+        .array(
+          z
+            .object({
+              key: z.enum(HAND_IN_KEYS as [HandInKey, ...HandInKey[]]),
+              printed: z.string().max(200),
+              profileWas: z.union([z.string().max(200), z.number(), z.null()]),
+            })
+            .strict()
+        )
+        .min(1)
+        .max(4)
+        .refine((vs) => new Set(vs.map((v) => v.key)).size === vs.length, "Name each value once"),
+    })
+    .strict();
+
+  app.post(
+    "/:id/checks/:checkId/values/confirm",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("tasks:confirm-values", 30, 60)] },
+    async (request) => {
+      const { id, checkId } = z.object({ id: z.string().uuid(), checkId: z.string().uuid() }).parse(request.params);
+      const body = confirmValuesBody.parse(request.body);
+      const { data: task, error: taskErr } = await request.db.from("deliverables").select("student_id").eq("id", id).maybeSingle();
+      if (taskErr) throw fromPostgrest(taskErr);
+      if (!task) throw notFound("That task isn't on file");
+      const studentId = await resolveStudentId(request, String(task.student_id), "edit");
+
+      const { data: row, error } = await request.db
+        .from("deliverable_tracker_checks")
+        .select("*")
+        .eq("id", checkId)
+        .eq("deliverable_id", id)
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!row) throw notFound("That check isn't on this task");
+      if (!("extracted_values" in row)) throw new HttpError(503, HAND_IN_VALUES_MISSING, "hand_in_values_unavailable");
+      const stored = storedValues(row.extracted_values) ?? [];
+      const chosen = body.values.map((asked) => ({ asked, value: stored.find((v) => v.key === asked.key) }));
+      if (chosen.some((c) => !c.value || c.value.printed !== c.asked.printed)) throw conflict(HAND_IN_CHANGED);
+      const values = chosen.map((c) => c.value!);
+
+      // The info card's rules, before anything is written or marked.
+      const patch = infoPatchFrom(values);
+      await assertGpaFitsScale(request.db, studentId, {
+        ...(patch.gpaWeighted !== undefined ? { gpaWeighted: patch.gpaWeighted } : {}),
+        ...(patch.gpaUnweighted !== undefined ? { gpaUnweighted: patch.gpaUnweighted } : {}),
+      });
+      const fields = chosen.flatMap((c) => {
+        const column = columnFor(c.value!.key, c.value!.printed);
+        const value = column ? patchValue(patch, column) : undefined;
+        return column && value !== undefined ? [{ key: c.value!.key, column, value, expected: c.asked.profileWas }] : [];
+      });
+
+      let saved: HandInKey[] = [];
+      let kept: { key: HandInKey; current: string | number | null }[] = [];
+      if (fields.length > 0) {
+        const { data: out, error: applyErr } = await request.db.rpc("apply_hand_in_values", {
+          p_student: studentId,
+          p_fields: fields.map(({ column, value, expected }) => ({ column, value, expected })),
+        });
+        if (applyErr) throw isSchemaMissing(applyErr) ? new HttpError(503, HAND_IN_VALUES_MISSING, "hand_in_values_unavailable") : fromPostgrest(applyErr);
+        const answer = (out ?? {}) as { saved?: string[]; kept?: { column?: string; current?: unknown }[] };
+        const savedColumns = new Set(answer.saved ?? []);
+        saved = fields.filter((f) => savedColumns.has(f.column)).map((f) => f.key);
+        kept = (answer.kept ?? []).flatMap((k) => {
+          const f = fields.find((x) => x.column === k.column);
+          const current = typeof k.current === "number" || typeof k.current === "string" ? k.current : null;
+          return f ? [{ key: f.key, current }] : [];
+        });
+      }
+      const unsaveable = values.filter((v) => !fields.some((f) => f.key === v.key)).map((v) => v.key);
+      const next = await stampConfirmed(checkId, stored, [...saved, ...unsaveable], {
+        id: request.auth.userId,
+        name: (request.profile.full_name as string | null | undefined) ?? null,
+      });
+      const { data: academics } = await request.db.from("student_academics").select(ACADEMICS_COLUMNS).eq("student_id", studentId).maybeSingle();
+      return { values: withCurrent(next, (academics as Row | null) ?? null), saved, kept };
+    }
+  );
 
   /**
    * Run the tracker for one task.

@@ -5,7 +5,8 @@
  * code and state there, and nothing in a query string is worth keeping in
  * Railway's logs. Keys stay for debugging. The account review link carries
  * its one-time token in the path (lib/accessReview.ts), so that segment is
- * dropped too, and so is the token of a one-click unsubscribe link.
+ * dropped too, and so is the token of a one-click unsubscribe link and of
+ * a subscribed calendar feed.
  */
 export function loggedUrl(url: string): string {
   const [rawPath, query] = url.split("?", 2);
@@ -15,11 +16,30 @@ export function loggedUrl(url: string): string {
     // carry a long-lived capability token in the path; a log line must not be able to use it.
     .replace(/^\/*(kpi|pipeline)\/unsubscribe\/[^/]*\/?$/, "/$1/unsubscribe/…")
     // The pay link (routes/pay.ts) carries a capability token that never expires.
-    .replace(/^\/*pay\/[^/]*\/?$/, "/pay/…");
+    .replace(/^\/*pay\/[^/]*\/?$/, "/pay/…")
+    // An agreement link (routes/agreements.ts) is the capability to accept it.
+    .replace(/^\/*agree\/[^/]*\/?$/, "/agree/…")
+    // The subscribed calendar feed's URL is its only credential (routes/calendarIcal.ts).
+    .replace(/^\/*calendar\/ical\/[^/]+\/?$/, "/calendar/ical/…");
   const keys = query
     ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
     : "";
   return keys ? `${path}?${keys}` : path;
+}
+
+/**
+ * The `req` serializer for every log line: method, URL (as `loggedUrl` keeps
+ * it), host and address. Never the body or headers: a pasted meeting
+ * transcript or notes (POST /ai/meeting-summary) and every bearer token stay
+ * out of Railway's logs.
+ */
+export function serializeReq(req: { method: string; url: string; hostname: string; ip: string }): {
+  method: string;
+  url: string;
+  hostname: string;
+  remoteAddress: string;
+} {
+  return { method: req.method, url: loggedUrl(req.url), hostname: req.hostname, remoteAddress: req.ip };
 }
 
 /**

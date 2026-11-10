@@ -80,6 +80,26 @@ export async function enforceRateLimit(
   if (!allowed) throw tooManyRequests(message);
 }
 
+/**
+ * A cost-based limit on the same fixed-window counter: spends `units` hits of
+ * `key` at once (one `consumeRateLimit` each, in parallel, so no migration is
+ * needed) and answers whether every one was under `limit`. A refused request
+ * still spends what it asked for, so hammering a full bucket keeps it full.
+ * Never throws on the limiter (it fails open like `consumeRateLimit`); a cost
+ * under 1 is a programming error and throws.
+ */
+export async function consumeUnits(
+  key: string,
+  units: number,
+  limit: number,
+  windowSeconds: number,
+  log?: { warn: (msg: string) => void }
+): Promise<boolean> {
+  if (!Number.isInteger(units) || units < 1) throw new Error(`consumeUnits: cost must be a positive integer, got ${units}`);
+  const results = await Promise.all(Array.from({ length: units }, () => consumeRateLimit(key, limit, windowSeconds, log)));
+  return results.every(Boolean);
+}
+
 export type QuotaMetric =
   | "ai_calls"
   | "ai_input_tokens"

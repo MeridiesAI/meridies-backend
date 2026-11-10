@@ -6,7 +6,7 @@ import { ZodError } from "zod";
 import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio, trustProxy } from "./env.js";
 import { proxyMismatch, trustProxyOption } from "./lib/proxyTrust.js";
 import { HttpError } from "./lib/errors.js";
-import { loggedUrl, serializeErr } from "./lib/requestLog.js";
+import { serializeErr, serializeReq } from "./lib/requestLog.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
 import { startExtractionRecovery } from "./lib/documentExtraction.js";
@@ -19,12 +19,16 @@ import accessReviewRoutes from "./routes/accessReview.js";
 import kpiUnsubscribeRoutes from "./routes/kpiUnsubscribe.js";
 import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
+import guardianRoutes from "./routes/guardians.js";
 import chatRoutes from "./routes/chat.js";
 import axisRoutes from "./routes/axis.js";
+import axisEvalRoutes from "./routes/axisEval.js";
+import { evalClockOn } from "./lib/axis/clock.js";
 import collegeRoutes from "./routes/colleges.js";
 import deadlineRoutes from "./routes/deadlines.js";
 import fileRoutes from "./routes/files.js";
 import firmRoutes from "./routes/firms.js";
+import brandingRoutes from "./routes/branding.js";
 import healthRoutes from "./routes/health.js";
 import intakeRoutes from "./routes/intake.js";
 import accountRoutes from "./routes/account.js";
@@ -32,6 +36,7 @@ import collegeIntelRoutes from "./routes/collegeIntel.js";
 import webhookRoutes from "./routes/webhooks.js";
 import stripeWebhookRoutes from "./routes/stripeWebhook.js";
 import payRoutes from "./routes/pay.js";
+import agreementRoutes from "./routes/agreements.js";
 import resourceRoutes from "./routes/resources.js";
 import searchRoutes from "./routes/search.js";
 import settingsRoutes from "./routes/settings.js";
@@ -73,6 +78,7 @@ import eventRoutes from "./routes/events.js";
 // v10 sync imports: management-pipeline
 import emailTemplateRoutes from "./routes/emailTemplates.js";
 import managementRoutes from "./routes/management.js";
+import taskSetRoutes from "./routes/taskSets.js";
 import pipelineRoutes from "./routes/pipeline.js";
 import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
@@ -80,6 +86,7 @@ import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
+import calendarIcalRoutes from "./routes/calendarIcal.js";
 // SV Demo v2: the student view
 import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
@@ -88,6 +95,10 @@ import resumeRoutes from "./routes/resume.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
+import schoolScholarshipRoutes from "./routes/schoolScholarships.js";
+import bookingRoutes from "./routes/booking.js";
+import pushRoutes from "./routes/push.js";
+import studentBookingRoutes from "./routes/studentBooking.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -96,14 +107,7 @@ export function buildApp() {
       // only a redacted message, stack and codes (lib/requestLog.ts).
       serializers: {
         err: serializeErr,
-        req(req) {
-          return {
-            method: req.method,
-            url: loggedUrl(req.url),
-            hostname: req.hostname,
-            remoteAddress: req.ip,
-          };
-        },
+        req: serializeReq,
       },
     },
     // Railway sits behind one proxy, which appends the address it saw to
@@ -185,7 +189,9 @@ export function buildApp() {
   app.register(taskRoutes, { prefix: "/tasks" });
   app.register(fileRoutes, { prefix: "/files" });
   app.register(blastRoutes, { prefix: "/blasts" });
+  app.register(guardianRoutes, { prefix: "/guardians" });
   app.register(firmRoutes, { prefix: "/firms" });
+  app.register(brandingRoutes, { prefix: "/branding" });
   app.register(opportunityRoutes, { prefix: "/opportunities" });
   app.register(preferenceRoutes, { prefix: "/preference-cards" });
   app.register(meetingRoutes, { prefix: "/meetings" });
@@ -197,6 +203,8 @@ export function buildApp() {
   app.register(aiRoutes, { prefix: "/ai" });
   app.register(chatRoutes, { prefix: "/chat" });
   app.register(axisRoutes, { prefix: "/axis" });
+  // The evals' clock control: only in eval clock mode, which never boots outside a local stack (src/index.ts).
+  if (evalClockOn()) app.register(axisEvalRoutes, { prefix: "/axis/eval" });
   // v10 sync routes: foundations
   // v10 sync routes: overview
   app.register(workItemRoutes, { prefix: "/work-items" });
@@ -229,10 +237,14 @@ export function buildApp() {
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
   // Absolute paths (/pay/:token): the public pay link page.
   app.register(payRoutes);
+  app.register(agreementRoutes);
   app.register(managementRoutes, { prefix: "/management" });
   app.register(emailTemplateRoutes, { prefix: "/email-templates" });
+  app.register(taskSetRoutes, { prefix: "/task-sets" });
   // v10 sync routes: calendar-files-axis
   app.register(calendarRoutes, { prefix: "/calendar" });
+  // Absolute paths (/calendar/ical, /calendar/ical/:token.ics): no prefix.
+  app.register(calendarIcalRoutes);
   // SV Demo v2 routes: the student view. profileUpdateRoutes sits at the root
   // because it also serves the counselor's /students/:id/profile-updates.
   app.register(meRoutes, { prefix: "/me" });
@@ -252,6 +264,11 @@ export function buildApp() {
   app.register(highSchoolProfileRoutes, { prefix: "/high-school-profile" });
   // AI help for the questionnaire's tables (POST /me/intake/fill).
   app.register(intakeFillRoutes);
+  app.register(schoolScholarshipRoutes);
+  // Student self-booking: the counselor's hours and types, the student's slots.
+  app.register(bookingRoutes, { prefix: "/booking" });
+  app.register(pushRoutes, { prefix: "/push" });
+  app.register(studentBookingRoutes, { prefix: "/me/booking" });
   startSweepInterval(app);
   startExtractionRecovery(app);
 

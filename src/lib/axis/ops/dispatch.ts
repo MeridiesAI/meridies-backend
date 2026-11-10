@@ -14,6 +14,7 @@
  *    machine routes) are refused whatever the catalog says;
  *  - a request about an essay never carries prose (the essay guardrail).
  */
+import { markFor } from "./trash.js";
 import type { FastifyRequest } from "fastify";
 import { badRequest, forbidden } from "../../errors.js";
 import type { OpCall } from "./types.js";
@@ -125,7 +126,7 @@ export function assertAllowedCall(call: OpCall): void {
 }
 
 /** The counselor's request, replayed through the API. Never throws for an HTTP status; throws for a refused path. */
-export async function dispatch(request: FastifyRequest, call: OpCall): Promise<Dispatched> {
+export async function dispatch(request: FastifyRequest, call: OpCall, opts: { actionId?: string } = {}): Promise<Dispatched> {
   assertAllowedCall(call);
   const hasBody = call.body !== undefined && call.method !== "GET";
   const res = await request.server.inject({
@@ -135,6 +136,8 @@ export async function dispatch(request: FastifyRequest, call: OpCall): Promise<D
       authorization: `Bearer ${request.auth.token}`,
       // Marks the request as AxIS's in the logs; routes don't branch on it.
       "x-meridies-axis": "1",
+      // A confirmed delete: its rows go to the trash (lib/axis/ops/trash.ts).
+      ...(opts.actionId ? { "x-meridies-axis-mark": markFor(opts.actionId) } : {}),
       // The counselor's address, so request logs and IP-keyed limits see who asked, not 127.0.0.1.
       ...(request.ip ? { "x-forwarded-for": request.ip } : {}),
       ...(request.headers["user-agent"] ? { "user-agent": String(request.headers["user-agent"]) } : {}),

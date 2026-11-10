@@ -15,6 +15,7 @@
  * AxIS change anything without a click, and after five auto writes in one
  * turn, so a runaway loop stops at a card. A turn holds twenty writes at most.
  */
+import { restoreUntil, TRASH_COVERED, TRASH_MISSING, trashReady } from "./trash.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { ZodError } from "zod";
@@ -24,10 +25,13 @@ import { wrapUntrusted } from "../../context/pack.js";
 import { essayShaped, narrativeWords } from "../../proseGuard.js";
 import { assertAllowedCall, counselorMessage, dispatch, failureMessage, isTransient } from "./dispatch.js";
 import { getOp, headingOf, riskOf } from "./registry.js";
-import type { OpCall, OpDef, OpHelpers, UndoStep } from "./types.js";
+import type { CardRow, OpCall, OpDef, OpHelpers, RowOutcome, UndoStep } from "./types.js";
+import { freeBlocks } from "../../context/freeText.js";
 
 export const MAX_WRITES_PER_TURN = 20;
 export const MAX_AUTO_WRITES_PER_TURN = 5;
+/** The longest card line. An auto change's line is clipped to it; a confirm card longer than it is refused, never cut. */
+export const DETAIL_MAX = 1600;
 
 /** Shared by every tool call in one turn (the object is passed by reference). */
 export type TurnBudget = {
@@ -39,16 +43,64 @@ export type TurnBudget = {
   autoWrites: number;
   /** Narrative (first-person, unaddressed) words in the free text this turn filed: the essay guardrail's turn count. */
   proseWords: number;
+  /**
+   * The free-text rule is on (20261108000004 is in, lib/axis/failsafe.ts flagsReady): a read flags the turn only
+   * when what it showed the model holds free text (lib/context/freeText.ts). Off, today's declarations decide.
+   */
+  freeRule: boolean;
+  /**
+   * Under the rule: this turn read student-written short fields (sawShort), or it or the previous turn did
+   * (shortTainted). A short field can still carry a short instruction, so an instant change a student or family
+   * could see waits for a click (spec Known limits); a counselor-only one (COUNSELOR_ONLY) still runs.
+   */
+  sawShort: boolean;
+  shortTainted: boolean;
 };
 
-/** `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history. */
-export const newTurnBudget = (outside = false, inherited = false): TurnBudget => ({
+/**
+ * `outside`: read this turn; `inherited`: the previous turn read some, and its answer is in this turn's history;
+ * `freeRule`: judge reads by the free-text rule; `shortRead` / `shortInherited`: student-written short fields read
+ * this turn / the previous turn (the rule only).
+ */
+export const newTurnBudget = (outside = false, inherited = false, freeRule = false, shortRead = false, shortInherited = false): TurnBudget => ({
   tainted: outside || inherited,
   sawOutside: outside,
   writes: 0,
   autoWrites: 0,
   proseWords: 0,
+  freeRule,
+  sawShort: shortRead,
+  shortTainted: shortRead || shortInherited,
 });
+
+/**
+ * Instant changes no student or family ever sees, and that can't lead to a send: these still run at once after a
+ * turn read a student's short fields. Anything else (a deadline, a task, the college list, a guardian, a pipeline
+ * contact's address, an invitation, a red flag) waits for the counselor's click then. `axis-ops.test.ts` checks
+ * each is a real instant write op.
+ */
+export const COUNSELOR_ONLY: ReadonlySet<string> = new Set([
+  "pins.pin",
+  "pins.unpin",
+  "work_queue.add",
+  "work_queue.update",
+  "calendar.create_event_type",
+  "calendar.update_event_type",
+  "calendar.set_event_type",
+  "templates.create",
+  "templates.update",
+  "colleges.add_webinar_tip",
+  "colleges.update_webinar_tip",
+  "colleges.research_folder",
+  "pipeline.create_stage",
+  "pipeline.update_stage",
+  "pipeline.reorder_stages",
+  "pipeline.move_contact",
+  "pipeline.order_contacts",
+  "events.save",
+  "events.unsave",
+  "meetings.mark_notes_sent",
+]);
 
 /** Narrative words one turn may file across all its changes and drafts (lib/proseGuard.ts). */
 export const TURN_NARRATIVE_CAP = 400;
@@ -92,6 +144,12 @@ export function markOutside(turn: TurnBudget): void {
   turn.sawOutside = true;
 }
 
+/** Marks the turn as having read a student's short fields (under the rule; see TurnBudget.sawShort). */
+export function markShort(turn: TurnBudget): void {
+  turn.sawShort = true;
+  turn.shortTainted = true;
+}
+
 /** Whether a read's answer brings outside text into the turn. Undeclared, or a check that throws: yes. */
 export function readsOutside(def: Pick<OpDef, "outside">, body: unknown): boolean {
   const o = def.outside;
@@ -114,7 +172,15 @@ export type OperationPayload = {
   /** Why an action that normally runs at once is waiting: AxIS read outside content, or made many changes. */
   reason: "outside-content" | "many-changes" | null;
   message?: string | null;
+  /** A confirmed delete kept in the trash: until when its Undo (Restore) works. */
+  restoreUntil?: string | null;
+  /** A card with rows (several activities): one entry per row, for the app's checkboxes. */
+  rows?: CardRow[];
 };
+
+/** A confirmed delete whose rows are in the trash (lib/axis/ops/trash.ts): its Undo is a Restore. */
+export const isTrashResult = (result: unknown): boolean =>
+  !!result && typeof result === "object" && (result as Record<string, unknown>).trash === true;
 
 export type OperationEvent = { id: string; type: "operation"; studentId: string | null; payload: OperationPayload };
 
@@ -129,7 +195,8 @@ export type OpContext = {
   onOperation: (e: OperationEvent) => void;
 };
 
-export type OpOutput = { content: string; isError?: boolean; fresh: boolean };
+/** `freeBlocks`: the free text the answer showed the model (for the quote check), when it read outside content. */
+export type OpOutput = { content: string; isError?: boolean; fresh: boolean; freeBlocks?: { source: string; text: string }[] };
 
 /** The row as it is stored. `input` is only ever read back by Confirm, never sent to the app. */
 export type StoredPayload = Omit<OperationPayload, "status" | "undoable" | "message"> & {
@@ -186,6 +253,7 @@ export function fitPayload(p: StoredPayload): StoredPayload | null {
 }
 
 const notRun = (why: string): OpOutput => ({ content: `Not done: ${why}`, isError: true, fresh: false });
+export const TOO_LONG_FOR_CARD = "it is too long to show whole on a confirmation card. Shorten it (a shorter message, fewer details) and file it again.";
 const STOPPED = "the answer was stopped before this change ran. Nothing was changed.";
 const writeLimit = (): OpOutput => ({
   content: `That's ${MAX_WRITES_PER_TURN} changes in one message, the limit. Stop here and tell the counselor what is left to do.`,
@@ -302,12 +370,22 @@ export async function runRead(ctx: OpContext, name: string, raw: unknown): Promi
   const res = await dispatch(ctx.request, call);
   if (res.status >= 400) return { content: failureMessage(res), isError: true, fresh: false };
   const content = def.reply ? (safelySync(() => def.reply!(res.body, input)) ?? "That lookup's answer couldn't be read.") : "Done.";
-  if (readsOutside(def, res.body)) markOutside(ctx.turn);
-  return { content: content || "Nothing found.", fresh: !!content };
+  // Declared outside: under the free-text rule it flags only when the reply holds free text (a document, a
+  // value over 80 characters), judged on the blocks it actually shows the model.
+  const blocks = readsOutside(def, res.body) ? freeBlocks(content) : [];
+  if (readsOutside(def, res.body) && (!ctx.turn.freeRule || blocks.length > 0)) markOutside(ctx.turn);
+  else if (readsOutside(def, res.body)) markShort(ctx.turn);
+  return { content: content || "Nothing found.", fresh: !!content, freeBlocks: blocks };
 }
 
+/**
+ * How a caller (the activity draft) shapes a write: `outside` marks a card whose values came from someone else's
+ * words (a file, a student document) as outside content, so Confirm all skips it; `onFiled` gets the card's id.
+ */
+export type WriteOptions = { outside?: boolean; onFiled?: (id: string) => void };
+
 /** `perform_action`: run it now, or file it for the counselor's Confirm. */
-export async function runWrite(ctx: OpContext, name: string, raw: unknown): Promise<OpOutput> {
+export async function runWrite(ctx: OpContext, name: string, raw: unknown, opts: WriteOptions = {}): Promise<OpOutput> {
   const def = getOp(name);
   if (!def || def.kind !== "write") return { content: `There is no action called ${name}. Use an action name from the catalog.`, isError: true, fresh: false };
   if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
@@ -333,7 +411,8 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   const described = await safely(() => def.describe?.(input, hDescribe));
   const summary = clipText(typeof described === "string" && described.trim() ? described : def.title, 300);
   const detailLines = await safely(() => def.details?.(input, h));
-  const details = (Array.isArray(detailLines) ? detailLines : []).slice(0, 12).map((d) => clipText(String(d), 1600));
+  const rawDetails = (Array.isArray(detailLines) ? detailLines : []).slice(0, 12).map(String);
+  const details = rawDetails.map((d) => clipText(d, DETAIL_MAX));
 
   // From here to the reservation below nothing awaits, so calls running side by side in one round
   // can't all pass the checks before any of them counts.
@@ -341,26 +420,40 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
   if (ctx.turn.writes >= MAX_WRITES_PER_TURN) return writeLimit();
   let risk = riskOf(def, input);
   let reason: OperationPayload["reason"] = null;
-  if (risk === "auto" && ctx.turn.tainted) {
+  // An instant change turned into a card: the model is told it would normally have run.
+  let flipped = false;
+  const shortStop = ctx.turn.freeRule && ctx.turn.shortTainted && !COUNSELOR_ONLY.has(def.name);
+  if (risk === "auto" && (ctx.turn.tainted || shortStop)) {
     risk = "confirm";
     reason = "outside-content";
+    flipped = true;
   } else if (risk === "auto" && ctx.turn.autoWrites >= MAX_AUTO_WRITES_PER_TURN) {
     risk = "confirm";
     reason = "many-changes";
+    flipped = true;
   }
+  // A card that always asks still says why it is flagged when its values came from outside or its turn read outside
+  // content, so the app's Confirm all leaves it for its own click (security spec 2.1). Every confirm op, not a list: a
+  // card AxIS files after reading a PDF may be what the PDF asked for. A short student field doesn't flag (spec 3).
+  if (risk === "confirm" && reason === null && (opts.outside || ctx.turn.tainted)) reason = "outside-content";
+  // A card the counselor confirms must show every line whole: a line that would be cut is refused, never clipped.
+  if (risk === "confirm" && rawDetails.some((d) => d.length > DETAIL_MAX)) return notRun(TOO_LONG_FOR_CARD);
   ctx.turn.writes++;
   if (risk === "auto") ctx.turn.autoWrites++;
 
   const warning = risk === "confirm" ? (def.warning ?? null) : null;
-  const summaryOutside = ctx.turn.tainted || ctx.turn.sawOutside || (describedFromRead && typeof described === "string" && described.trim() !== "");
-  const stored = fitPayload({ op: def.name, area: headingOf(def.name), summary, details, warning, reason, outside: summaryOutside, input });
+  const summaryOutside =
+    ctx.turn.tainted || ctx.turn.sawOutside || opts.outside === true || (describedFromRead && typeof described === "string" && described.trim() !== "");
+  const rowView = def.rows ? safelySync(() => def.rows!(input)) : null;
+  const stored = fitPayload({
+    op: def.name, area: headingOf(def.name), summary, details, warning, reason, outside: summaryOutside, input, ...(rowView ? { rows: rowView } : {}),
+  });
   if (!stored) return notRun("that change is too large for AxIS to file or record. Nothing was changed; tell the counselor to make it in the app.");
   // A card the counselor confirms must show all of it (a message's whole body): never a trimmed one.
-  if (risk === "confirm" && stored.details !== details) {
-    return notRun("it is too long to show whole on a confirmation card. Shorten it (a shorter message, fewer details) and file it again.");
-  }
+  if (risk === "confirm" && stored.details !== details) return notRun(TOO_LONG_FOR_CARD);
   const show = (status: OperationStatus, undoable: boolean, message: string | null = null): OperationPayload => ({
     op: stored.op, area: stored.area, summary, details: stored.details, warning, reason, status, undoable, message,
+    ...(stored.rows ? { rows: stored.rows } : {}),
   });
 
   if (risk === "confirm") {
@@ -374,8 +467,9 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
         fresh: false,
       };
     }
+    opts.onFiled?.(rec.id);
     if (!ctx.signal.aborted) ctx.onOperation({ id: rec.id, type: "operation", studentId, payload: show("pending", false) });
-    const why = reason === "outside-content" ? " (it would normally run at once, but this turn read outside content)" : reason === "many-changes" ? " (many changes in one message)" : "";
+    const why = !flipped ? "" : reason === "outside-content" ? " (it would normally run at once, but this turn read outside content)" : " (many changes in one message)";
     return {
       content: `Filed for the counselor's confirmation${why}: ${wrapUntrusted("action", summary)}. Card ${rec.id}. It has NOT happened yet; say it is waiting for them to confirm.`,
       fresh: true,
@@ -403,8 +497,8 @@ export async function runWrite(ctx: OpContext, name: string, raw: unknown): Prom
 // ---- The counselor's click ---------------------------------------------------------
 
 export type DecisionResult =
-  | { status: "confirmed"; result: { ok: true; summary: string; undoable: boolean; undo?: UndoStep } }
-  | { status: "failed"; result: { ok: false; message: string } };
+  | { status: "confirmed"; result: { ok: true; summary: string; undoable: boolean; undo?: UndoStep; trash?: true; restoreUntil?: string; rows?: RowOutcome[] } }
+  | { status: "failed"; result: { ok: false; message: string; rows?: RowOutcome[] } };
 
 /** A failure the counselor may simply retry: the route releases its claim and answers with this. */
 export class TransientOperationError extends HttpError {
@@ -418,13 +512,27 @@ export class TransientOperationError extends HttpError {
  * operation must still exist, its stored input must still validate, and the
  * counselor must still be able to edit the student.
  */
-export async function confirmOperation(request: FastifyRequest, row: { student_id: string | null; payload: unknown }): Promise<DecisionResult> {
+export async function confirmOperation(
+  request: FastifyRequest,
+  row: { id?: string; student_id: string | null; payload: unknown },
+  opts: { keep?: string[] } = {}
+): Promise<DecisionResult> {
   const p = (row.payload ?? {}) as Partial<StoredPayload>;
   const def = typeof p.op === "string" ? getOp(p.op) : undefined;
   if (!def || def.kind !== "write") return { status: "failed", result: { ok: false, message: "AxIS can no longer do that. Ask again." } };
+  // A covered delete keeps its rows in the trash; without the trash it doesn't run (the claim is handed back).
+  const trashed = TRASH_COVERED.has(def.name) && typeof row.id === "string";
+  if (trashed && !(await trashReady(request.db))) throw new HttpError(503, TRASH_MISSING, "axis_trash_unavailable");
   const parsed = def.input.safeParse(p.input ?? {});
   if (!parsed.success) return { status: "failed", result: { ok: false, message: "That proposal no longer fits. Ask AxIS again." } };
-  const input = parsed.data as Record<string, unknown>;
+  let input = parsed.data as Record<string, unknown>;
+  // A card with rows: only the rows the counselor kept run, and the result must still be a valid input.
+  if (opts.keep && def.select) {
+    const kept = def.input.safeParse(safelySync(() => def.select!(input, opts.keep!)));
+    // The client's mistake, not the card's: refused before anything runs, and the route hands the claim back.
+    if (!kept.success) throw new HttpError(400, "None of the chosen rows are on this card.");
+    input = kept.data as Record<string, unknown>;
+  }
   try {
     await studentFor({ request }, def, input, "edit");
   } catch (err) {
@@ -442,16 +550,27 @@ export async function confirmOperation(request: FastifyRequest, row: { student_i
   }
   const h = helpers(request, null);
   const before = def.snapshot ? await safely(() => def.snapshot!(input, h)) : undefined;
-  const res = await dispatch(request, call);
+  const res = await dispatch(request, call, trashed ? { actionId: row.id } : {});
   if (isTransient(res.status)) throw new TransientOperationError(counselorMessage(res));
   if (res.status >= 400) return { status: "failed", result: { ok: false, message: counselorMessage(res) } };
   // The change has happened. A throw from here would release the claim and let a second Confirm run it again.
+  if (trashed) {
+    return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: true, trash: true, restoreUntil: restoreUntil(new Date()) } };
+  }
+  const rows = def.confirmRows ? (safelySync(() => def.confirmRows!(input, res.body)) ?? []) : null;
+  // Every row refused: nothing happened, so the card failed (with each row's reason).
+  if (rows && rows.length && rows.every((r) => !r.ok)) {
+    return { status: "failed", result: { ok: false, message: rows[0]!.message ?? "None of the rows could be saved.", rows } };
+  }
   const undo = reversalOf(def, input, res.body, before);
-  return { status: "confirmed", result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}) } };
+  return {
+    status: "confirmed",
+    result: { ok: true, summary: String(p.summary ?? def.title), undoable: !!undo, ...(undo ? { undo } : {}), ...(rows ? { rows } : {}) },
+  };
 }
 
-/** Runs the reversal stored on an executed or confirmed row. Throws an HttpError the route passes on. */
-export async function undoOperation(request: FastifyRequest, row: { result: unknown }): Promise<void> {
+/** Runs the reversal stored on an executed or confirmed row and answers the route's body. Throws an HttpError the route passes on. */
+export async function undoOperation(request: FastifyRequest, row: { result: unknown }): Promise<unknown> {
   const step = undoStepOf(row.result);
   if (!step) throw new HttpError(409, "That change can't be undone from here.");
   const def = getOp(step.op)!;
@@ -460,6 +579,7 @@ export async function undoOperation(request: FastifyRequest, row: { result: unkn
   if (isTransient(res.status)) throw new TransientOperationError(failureMessage(res));
   // 401 would read as "signed out" in the app; the token just authenticated, so it is a refusal like any other.
   if (res.status >= 400) throw new HttpError(res.status === 404 || res.status === 401 ? 409 : res.status, `Couldn't undo: ${failureMessage(res)}`);
+  return res.body;
 }
 
 // ---- What AxIS remembers between turns ----------------------------------------------------

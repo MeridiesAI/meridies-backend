@@ -1,0 +1,166 @@
+name: AxIS evals
+
+# The planted-instruction evals on the real model (evals/axis, AxIS security PR B, spec section 5): after each
+# merge to main that touches AxIS's behaviour, and by hand. Never on pull requests, so a PR's code never sees the
+# key. Scores are kept, one JSON line per run on main, on the axis-eval-scores branch; a drop against the last
+# one (evals/axis/score.mjs) fails the run and opens (or comments on) an issue labelled axis-eval. A run by hand
+# on another branch prints the comparison and stores nothing. The key is AXIS_EVAL_ANTHROPIC_API_KEY, from its own
+# spend-limited Console workspace (never the production key); without it the run passes with a notice.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/lib/axis/**"
+      - "src/lib/context/**"
+      - "src/lib/anthropic.ts"
+      - "src/lib/submissionReview.ts"
+      - "evals/axis/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: axis-evals
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    name: Planted-instruction evals (real model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Is the key set?
+        id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.AXIS_EVAL_ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::The AXIS_EVAL_ANTHROPIC_API_KEY repository secret isn't set, so the AxIS evals didn't run."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.key.outputs.run == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - if: steps.key.outputs.run == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      # The CLI that applies to production (migrations.yml); bump all three together.
+      - if: steps.key.outputs.run == 'true'
+        uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
+        with:
+          version: 2.121.0
+      - if: steps.key.outputs.run == 'true'
+        run: npm ci
+      - if: steps.key.outputs.run == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Start Supabase with every migration
+        if: steps.key.outputs.run == 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/sb" && cd "$RUNNER_TEMP/sb"
+          supabase init --force
+          mkdir -p supabase/migrations
+          cp "$GITHUB_WORKSPACE"/supabase/migrations/*.sql supabase/migrations/
+          supabase start -x studio,imgproxy,edge-runtime,logflare,vector,supavisor
+          supabase status -o env \
+            | grep -E '^(API_URL|ANON_KEY|SERVICE_ROLE_KEY|DB_URL)=' \
+            | sed -e 's/^API_URL=/SUPABASE_URL=/' -e 's/^ANON_KEY=/SUPABASE_ANON_KEY=/' -e 's/^SERVICE_ROLE_KEY=/SUPABASE_SERVICE_ROLE_KEY=/' \
+            | tr -d '"' >> "$GITHUB_ENV"
+
+      - name: Start the API
+        if: steps.key.outputs.run == 'true'
+        env:
+          PORT: "4100"
+          NODE_ENV: development
+          CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
+          PUBLIC_API_URL: http://127.0.0.1:4100
+          ANTHROPIC_API_KEY: ${{ secrets.AXIS_EVAL_ANTHROPIC_API_KEY }}
+          RESEARCH_FAKE: fixture
+          IMPORTS_AI: "off"
+          # The activity-draft expiry cases move AxIS's clock (POST /axis/eval/clock); the API refuses this anywhere
+          # but this local stack.
+          AXIS_EVAL_CLOCK: "on"
+        run: |
+          npx tsx src/index.ts > api.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4100/health >/dev/null && exit 0; sleep 1; done
+          cat api.log; exit 1
+
+      # The scores live on their own branch; the first run starts it.
+      - name: Check out the scores
+        if: steps.key.outputs.run == 'true'
+        run: |
+          if git fetch --quiet origin axis-eval-scores; then
+            git worktree add --detach scores FETCH_HEAD
+            git -C scores switch -c axis-eval-scores
+          else
+            git worktree add --detach scores
+            git -C scores switch --orphan axis-eval-scores
+          fi
+          touch scores/scores.jsonl
+          tail -n 1 scores/scores.jsonl > "$RUNNER_TEMP/previous.json"
+
+      - name: Run the evals
+        id: evals
+        if: steps.key.outputs.run == 'true'
+        env:
+          API_URL: http://127.0.0.1:4100
+          CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
+        run: |
+          store=()
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then store=(--store scores/scores.jsonl); fi
+          set +e
+          npm run eval:axis -- --baseline scores/scores.jsonl "${store[@]}" 2>&1 | tee "$RUNNER_TEMP/eval.log"
+          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the score
+        if: steps.key.outputs.run == 'true' && github.ref == 'refs/heads/main'
+        run: |
+          cd scores
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scores.jsonl
+          git commit --quiet -m "AxIS eval score for ${GITHUB_SHA::7}" || exit 0
+          git push --quiet origin HEAD:axis-eval-scores
+
+      - name: Alert on a drop
+        if: steps.key.outputs.run == 'true' && steps.evals.outputs.status != '0' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "The AxIS evals found a drop after ${GITHUB_SHA::7} (run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            echo
+            echo '```'
+            sed -n '/┌/,$p' "$RUNNER_TEMP/eval.log"
+            echo '```'
+            echo
+            echo "Previous score:"
+            echo '```json'
+            cat "$RUNNER_TEMP/previous.json"
+            echo '```'
+            echo "This score:"
+            echo '```json'
+            tail -n 1 scores/scores.jsonl
+            echo '```'
+          } > "$RUNNER_TEMP/issue.md"
+          gh label create axis-eval --color B60205 --description "AxIS eval drops" --force >/dev/null
+          open=$(gh issue list --label axis-eval --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "AxIS evals dropped after ${GITHUB_SHA::7}" --label axis-eval --body-file "$RUNNER_TEMP/issue.md"
+          fi
+
+      - name: Fail on a drop
+        if: steps.key.outputs.run == 'true' && steps.evals.outputs.status != '0'
+        run: exit 1
+
+      - if: failure()
+        run: cat api.log || true

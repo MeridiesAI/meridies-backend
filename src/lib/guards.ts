@@ -5,6 +5,7 @@
  * both layers run — as AGENTS.md requires.
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { forbidden, fromPostgrest, notFound } from "./errors.js";
 import type { Role } from "./serialize.js";
@@ -13,6 +14,18 @@ export function requireRole(role: Role) {
   return async (request: FastifyRequest, _reply: FastifyReply) => {
     if (request.profile.role !== role) {
       throw forbidden(`Only ${role}s can do that`);
+    }
+  };
+}
+
+/**
+ * For a route both a counselor and a student may use (a student's AI tools): any other role, or none, is refused.
+ * It decides nothing about WHICH student: resolveStudentId still pins a student to themselves.
+ */
+export function requireRoleIn(...roles: Role[]) {
+  return async (request: FastifyRequest, _reply: FastifyReply) => {
+    if (!roles.includes(request.profile.role as Role)) {
+      throw forbidden(`Only ${roles.join(" and ")}s can do that`);
     }
   };
 }
@@ -135,4 +148,35 @@ export async function caseloadStudentIds(request: FastifyRequest): Promise<strin
   for (const r of (own.data ?? []) as Array<{ id: string }>) ids.add(r.id);
   for (const r of (shared.data ?? []) as Array<{ student_id: string }>) ids.add(r.student_id);
   return ids.size > CASELOAD_SCOPE_MAX + 1 ? null : [...ids];
+}
+
+const CASELOAD_PAGE = 1000;
+
+/**
+ * The same caseload as caseloadStudentIds (roster, archived included, the
+ * students shared with them, and themselves: `private.can_view_student`), but
+ * never null: read page by page, whatever its size. For a reader that must
+ * never run unscoped (the calendar feed, which also runs under the service
+ * role for the iCal subscription, where RLS holds nothing). Every read is
+ * keyed by `counselorId` in the query itself, so it is correct on either
+ * client; a failed read throws.
+ */
+export async function fullCaseloadStudentIds(db: SupabaseClient, counselorId: string): Promise<string[]> {
+  const ids = new Set<string>([counselorId]);
+  async function pages(table: "profiles" | "student_collaborators", col: "id" | "student_id") {
+    for (let from = 0; ; from += CASELOAD_PAGE) {
+      const { data, error } = await db
+        .from(table)
+        .select(col)
+        .eq("counselor_id", counselorId)
+        .order(col)
+        .range(from, from + CASELOAD_PAGE - 1);
+      if (error) throw fromPostgrest(error);
+      const rows = (data ?? []) as unknown as Array<Record<string, unknown>>;
+      for (const r of rows) ids.add(String(r[col]));
+      if (rows.length < CASELOAD_PAGE) return;
+    }
+  }
+  await Promise.all([pages("profiles", "id"), pages("student_collaborators", "student_id")]);
+  return [...ids];
 }

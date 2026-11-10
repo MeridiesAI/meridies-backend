@@ -15,6 +15,7 @@
 import { createHmac } from "node:crypto";
 import http from "node:http";
 import { API, CLIENT, call, check, rest, sql, user } from "./harness.mjs";
+import { studentOf } from "./imports-helpers.mjs";
 
 if (process.env.MESSAGING_SUITE !== "1") {
   console.log("SKIP  inbound email suite (set MESSAGING_SUITE=1 with an API started for it)");
@@ -175,6 +176,50 @@ const forge = await rest(C.token, "POST", "/rest/v1/inbound_messages", { channel
 check("a client can't write a reply", forge.status >= 400, String(forge.status));
 const routes = await rest(C.token, "GET", "/rest/v1/messaging_routes?select=token");
 check("a client can't read reply tokens", routes.status >= 400 || (Array.isArray(routes.body) && routes.body.length === 0), JSON.stringify(routes.body));
+
+// ---- a family's reply in another language is translated (needs TRANSLATE_FAKE on the API and here) ---------------
+// The fake reads a leading "[xx] " as the language and the rest as its English; a model does the real thing
+// (lib/inboundTranslate.ts). This checks what is stored, what the counselor is mailed and when nothing is asked.
+if (process.env.TRANSLATE_FAKE === "fixture") {
+  const S = await studentOf(C, "ie-student");
+  const guardianId = await sql(`with g as (insert into public.guardians (student_id, full_name, email) values ('${S.id}', 'Ana Lee', 'ana-${tag}@families.test') returning id) select id from g`);
+  const composed = await call(C.token, "POST", `/communication/${S.id}/messages`, { audience: "parent", channel: "email", subject: "Plan", body: "Hi Ana, a quick update.", overrideQuietHours: true });
+  const stoken = await sql(`select token from public.messaging_routes where student_id = '${S.id}' and guardian_id = '${guardianId}' and party = 'parent'`);
+  check("a composer email to the guardian minted a reply address for the student's family", composed.status === 201 && /^[0-9a-f]{24}$/.test(stoken), `${composed.status} ${stoken}`);
+  const trow = async (id) =>
+    JSON.parse((await sql(`select row_to_json(m) from public.inbound_messages m where provider_message_id = 'resend:${id}'`)) || "null");
+  const fromAna = { from: `Ana Lee <ana-${tag}@families.test>`, subject: "Re: Plan" };
+
+  incoming(`tr-1-${tag}`, stoken, { ...fromAna, text: "[es] Gracias por el recordatorio, lo enviamos el jueves." });
+  const t1 = await webhook(`tr-1-${tag}`);
+  const r1 = await trow(`tr-1-${tag}`);
+  check("a reply in another language is stored", t1.status === 200 && t1.body.stored === true && r1?.student_id === S.id, JSON.stringify(t1));
+  check("with its English, the language it was in, and the translation marked done", r1?.body_en === "Gracias por el recordatorio, lo enviamos el jueves." && r1?.detected_language === "es" && r1?.translation_state === "done" && r1?.translation_attempts === 1, JSON.stringify(r1));
+  check("the counselor's copy carries the English under the original", Number(await sql(`select count(*) from public.message_deliveries where template = 'family-reply-forward' and to_email = '${C.email}' and body like '%In English:%'`)) >= 1);
+  const listed = await call(C.token, "GET", `/communication/${S.id}/replies`);
+  check("the student page lists it with its English and suggests the language", listed.body.replies?.[0]?.bodyEn?.startsWith("Gracias") && listed.body.replies[0].detectedLanguage === "es" && listed.body.suggestedFamilyLanguage === "es", JSON.stringify(listed.body.replies?.[0]));
+
+  incoming(`tr-2-${tag}`, stoken, { ...fromAna, text: "Thanks, see you Thursday." });
+  await webhook(`tr-2-${tag}`);
+  const r2 = await trow(`tr-2-${tag}`);
+  check("a plainly English reply from a family with no language set asks nothing", r2?.translation_state === "skipped" && r2?.body_en === null && r2?.detected_language === null, JSON.stringify(r2));
+
+  await sql(`insert into public.student_alert_prefs (student_id, family_language) values ('${S.id}', 'es') on conflict (student_id) do update set family_language = 'es'`);
+  incoming(`tr-3-${tag}`, stoken, { ...fromAna, text: "Thanks, see you Thursday again." });
+  await webhook(`tr-3-${tag}`);
+  const r3 = await trow(`tr-3-${tag}`);
+  check("once the family has a language, English is checked too, and found to be English", r3?.translation_state === "done" && r3?.detected_language === "en" && r3?.body_en === null, JSON.stringify(r3));
+
+  await sql(`insert into public.practice_settings (counselor_id, ai_summaries) values ('${C.id}', false) on conflict do nothing`);
+  await sql(`update public.practice_settings set ai_summaries = false where counselor_id = '${C.id}'`);
+  incoming(`tr-4-${tag}`, stoken, { ...fromAna, text: "[es] Otra respuesta más." });
+  await webhook(`tr-4-${tag}`);
+  const r4 = await trow(`tr-4-${tag}`);
+  check("with AI summaries off the reply is stored and nothing is sent to a model", r4?.body === "[es] Otra respuesta más." && r4?.translation_state === "skipped" && r4?.body_en === null, JSON.stringify(r4));
+  await sql(`update public.practice_settings set ai_summaries = true where counselor_id = '${C.id}'`);
+} else {
+  console.log("SKIP  reply translation (start the API and this suite with TRANSLATE_FAKE=fixture)");
+}
 
 // ---- a revoked counselor receives nothing ----------------------------------------------------------------
 await sql(`update public.profiles set counselor_approved_at = null where id = '${C.id}'`);

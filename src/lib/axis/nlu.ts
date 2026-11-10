@@ -29,6 +29,7 @@ import {
   type Intent,
 } from "./lexicon.js";
 import { STOPWORDS, splitClauses, tokens } from "./text.js";
+import type { DraftHeader } from "./drafts/state.js";
 
 export type { Intent, Attribute };
 
@@ -38,6 +39,10 @@ export type DialogueState = {
   at: string;
   /** The last turn read outside content: its answer is in the next turn's history, so that turn's changes wait for a click too. */
   outside?: boolean;
+  /** Under the free-text rule: the last turn read a student's short fields, so changes a student or family sees wait too. */
+  short?: boolean;
+  /** The chat's open activity draft: its header (the rows are in ai_conversations.draft_rows; lib/axis/drafts/state.ts). */
+  draft?: DraftHeader;
 };
 
 export type Clause = { text: string; intent: Intent; score: number };

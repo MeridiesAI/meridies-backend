@@ -250,6 +250,16 @@ export const UC_CATEGORIES = ["coursework-other", "educational-prep", "extracurr
 export const GRADES = ["9", "10", "11", "12", "PG"] as const;
 export const TIMINGS = ["school", "break", "year"] as const;
 export const RECOGNITION = ["school", "state-regional", "national", "international"] as const;
+/** The Common App's activity types, as the app's Activities sheet offers them (meridies-app lib/applicationSheets.ts). */
+export const ACTIVITY_TYPES = [
+  "Academic", "Art", "Athletics: Club", "Athletics: JV/Varsity", "Career-Oriented",
+  "Community Service (Volunteer)", "Computer/Technology", "Cultural", "Dance", "Debate/Speech",
+  "Environmental", "Family Responsibilities", "Foreign Exchange", "Journalism/Publication",
+  "Junior R.O.T.C.", "LGBT", "Music: Instrumental", "Music: Vocal", "Religious", "Research",
+  "Robotics", "School Spirit", "Science/Math", "Student Govt./Politics", "Theater/Drama",
+  "Work (paid)", "Other Club/Activity",
+] as const;
+export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 export const UC_LEVELS = ["school", "city-community", "state", "regional", "national", "international"] as const;
 
 /** Where a sheet row came from: typed on the sheet, the questionnaire, an import, or Profile Update. */
@@ -325,6 +335,8 @@ export function toCoherenceReport(r: Row, flags: Row[]) {
     next: arr(r.next_steps),
     flags: flags.map(toFlag),
     createdAt: str(r.created_at),
+    /** Who ran it: the student themself, or their counselor. Derived from who created it, never sent by a client. */
+    ranBy: (r.created_by != null && r.created_by === r.student_id ? "student" : "counselor") as "student" | "counselor",
   };
 }
 
@@ -348,5 +360,7 @@ export function toProgram(r: Row) {
     source: (str(r.source) || "axis") as "catalog" | "axis",
     status: str(r.status),
     assignedTaskId: nstr(r.assigned_task_id),
+    /** Who found it: the student's own search, or the counselor's. No answer (an older database) is the counselor's. */
+    origin: (r.origin === "student" ? "student" : "counselor") as "student" | "counselor",
   };
 }

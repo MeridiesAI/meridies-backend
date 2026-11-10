@@ -26,6 +26,8 @@ import { getConnectors, type ConnectedProvider, type RetrievedChunk } from "./po
 import { fusedSearch, retrievalQueries } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { readsOutside } from "./tools.js";
+import { anyLong, freeBlocks } from "../context/freeText.js";
+import { wrapUntrusted } from "../context/pack.js";
 import { TRUSTED_SECTIONS } from "../context/profiles.js";
 
 export type PlanContext = {
@@ -36,6 +38,8 @@ export type PlanContext = {
   ledger: SourceLedger;
   connected: ConnectedProvider[];
   retrievalReady: boolean;
+  /** The free-text rule is on (20261108000004): a question's record of another student is built short-only. */
+  freeRule?: boolean;
   /** The raw-question search started at the top of the turn. */
   speculative: Promise<RetrievedChunk[]>;
   signal: AbortSignal;
@@ -50,6 +54,13 @@ export type Evidence = {
    * a deadline's or a student-added task's title): every change this turn waits for a click.
    */
   outside: boolean;
+  /**
+   * The narrower rule (lib/context/freeText.ts), used once 20261108000004 is in: a shown block holds free text
+   * (another student's document or long student-written value, a deadline or student task title over 80).
+   */
+  freeText: boolean;
+  /** That free text, for the quote check. */
+  freeBlocks: { source: string; text: string }[];
   /** Everything read, for the grounding index. */
   raw: string[];
   sources: string[];
@@ -62,7 +73,8 @@ export const STEP_TIMEOUT_MS = 2_500;
 
 const UPCOMING_WORDS = /\b(due|deadlines?|coming up|upcoming|next|this week|next week|overdue|behind|schedule|calendar|plan|prioriti[sz]e)\b/;
 
-type Step = { label: string; source: string; run: () => Promise<string | null>; outside?: () => boolean };
+type Free = { source: string; text: string }[];
+type Step = { label: string; source: string; run: () => Promise<string | null>; outside?: () => boolean; free?: () => Free };
 
 function intentsOf(u: Understanding): Set<Intent> {
   return new Set<Intent>([u.intent, ...u.clauses.map((c) => c.intent)]);
@@ -88,6 +100,11 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
     let on = false;
     return { set: (v: boolean) => (on = on || v), get: () => on };
   };
+  // Set by a step with the free text it showed.
+  const freeOf = () => {
+    let blocks: Free = [];
+    return { set: (b: Free) => (blocks = [...blocks, ...b]), get: () => blocks };
+  };
   const intents = intentsOf(u);
   const steps: Step[] = [];
   const passages: string[] = [];
@@ -103,18 +120,21 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
   const change = u.intent === "action";
   for (const s of u.students.filter((x) => x.id !== ctx.chatStudentId).slice(0, 2)) {
     const outside = flag();
+    const free = freeOf();
     steps.push({
       label: `Reading ${plain(s.name, 60)}'s record`,
       source: "Student profile",
       outside: outside.get,
+      free: free.get,
       run: async () => {
         const id = await resolveStudentId(request, s.id, "view");
         // A change only needs to know who the student is: read what the counselor wrote, so the
         // student's own words don't turn the change into a card (as for the chat's own student).
         const c = change
           ? await cachedStudentContext(request, id, TRUSTED_SECTIONS.slice(), true)
-          : await cachedStudentContext(request, id, ["profile", "academics", "personal", "testScores", "colleges", "activities", "awards", "tasks", "deadlines", "meetingNotes"]);
+          : await cachedStudentContext(request, id, ["profile", "academics", "personal", "testScores", "colleges", "activities", "awards", "tasks", "deadlines", "meetingNotes"], false, ctx.freeRule === true);
         outside.set(readsOutside(c));
+        if ((c.freeText?.length ?? 0) > 0) free.set(freeBlocks(c.text));
         return c.text ? `## Record of another student: ${plain(s.name, 60)}\n${c.text}` : null;
       },
     });
@@ -126,20 +146,25 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
     const target = ctx.chatStudentId ?? named;
     const window = u.window ?? { from: null, to: isoDay(new Date(Date.now() + 21 * 86_400_000)), label: "in the next three weeks" };
     const outside = flag();
+    const free = freeOf();
     steps.push({
       label: `Checking what's due ${window.label}`,
       source: "Calendar",
       outside: outside.get,
+      free: free.get,
       run: async () => {
         const id = target ? await resolveStudentId(request, target, "view") : null;
         const items = await upcomingItems(request, { studentId: id, window, meetings: true, roster: ctx.roster, limit: 60 });
         outside.set(items.some((i) => i.outside));
+        // A title or detail over 80 characters, of an item someone other than the counselor wrote, is free text.
+        free.set(items.filter((i) => i.outside && anyLong([i.title, i.detail])).map((i) => ({ source: i.kind, text: `${i.title}${i.detail ? `, ${i.detail}` : ""}` })));
         if (!items.length) return `## Due ${window.label}\nNothing open.`;
         return [
           `## Due ${window.label} (today is ${isoDay()})`,
           ...items.map(
             (i) =>
-              `${i.date}${i.overdue ? " OVERDUE" : ""} ${i.kind}${i.status ? ` [${i.status}]` : ""}${id ? "" : ` · ${plain(ctx.roster.get(i.studentId)?.name ?? "Student", 60)}`} · ${plain(i.title, 120)}${i.detail ? `, ${plain(i.detail, 60)}` : ""}`
+              // Titles and details are the student's words (a deadline, a task they added): in a data block, short or free.
+              `${i.date}${i.overdue ? " OVERDUE" : ""} ${i.kind}${i.status ? ` [${i.status}]` : ""}${id ? "" : ` · ${wrapUntrusted("student", plain(ctx.roster.get(i.studentId)?.name ?? "Student", 60), false)}`} · ${wrapUntrusted(i.kind, `${plain(i.title, 120)}${i.detail ? `, ${plain(i.detail, 60)}` : ""}`, i.outside && anyLong([i.title, i.detail]))}`
           ),
         ].join("\n");
       },
@@ -157,7 +182,8 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
         const ranked = (await loadRosterRisk(request, 14)).slice(0, 8);
         outside.set(ranked.some((r) => r.outside));
         if (!ranked.length) return "## Caseload ranking\nNobody has overdue work, a red flag or a deadline at risk in the next 14 days.";
-        return ["## Caseload ranking (computed: overdue work, deadlines in 14 days, days without activity, red flags)", ...ranked.map((r, i) => `${i + 1}. ${plain(r.name, 60)} (score ${r.score}): ${r.reasons.join("; ")}`)].join("\n");
+        // A reason quotes a title cut to 80 characters (lib/axis/risk.ts): a short field, inside a data block.
+        return ["## Caseload ranking (computed: overdue work, deadlines in 14 days, days without activity, red flags)", ...ranked.map((r, i) => `${i + 1}. ${wrapUntrusted("student", plain(r.name, 60), false)} (score ${r.score}): ${wrapUntrusted("reasons", r.reasons.join("; "), false)}`)].join("\n");
       },
     });
   }
@@ -242,6 +268,7 @@ export async function gatherEvidence(ctx: PlanContext): Promise<Evidence> {
   const skipped: string[] = [];
   const sources = new Set<string>();
   let outside = false;
+  const free: Free = [];
   await Promise.all(
     steps.map(async (s) => {
       ctx.onStep(s.label);
@@ -256,6 +283,7 @@ export async function gatherEvidence(ctx: PlanContext): Promise<Evidence> {
         if (out) {
           blocks.push(out);
           if (s.outside?.()) outside = true;
+          free.push(...(s.free?.() ?? []));
         }
       } catch (err) {
         ctx.request.log.warn({ err: errInfo(err), step: s.label }, "axis evidence step failed");
@@ -270,6 +298,8 @@ export async function gatherEvidence(ctx: PlanContext): Promise<Evidence> {
   return {
     text,
     outside,
+    freeText: free.length > 0,
+    freeBlocks: free,
     raw: [...blocks, ...ctx.ledger.all().map((p) => p.text)],
     sources: [...sources],
     trace,

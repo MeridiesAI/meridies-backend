@@ -39,13 +39,17 @@ import {
   TransientOperationError,
   undoOperation,
   undoStepOf,
+  isTrashResult,
   type OperationPayload,
   type OperationStatus,
 } from "../lib/axis/ops/run.js";
+import { restoreExpired, restoreSentence, TRASH_MISSING } from "../lib/axis/ops/trash.js";
 import { hasAnthropic } from "../env.js";
-import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { reinviteRestoredMeetings } from "../lib/axisRestoreMeetings.js";
+import { storableRuns } from "../lib/axis/quotes.js";
 
 const messageSchema = z
   .object({
@@ -64,6 +68,8 @@ const confirmSchema = z
     title: z.string().trim().min(1).max(300).optional(),
     detail: z.string().max(2000).optional(),
     dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    // A card with rows (several activities): the rows the counselor kept. Without it, every row runs.
+    rows: z.array(z.string().regex(/^r([1-9]|10)$/)).min(1).max(10).optional(),
   })
   .strict();
 
@@ -156,6 +162,9 @@ export default async function axisRoutes(app: FastifyInstance) {
               content: turn.text,
               citations: turn.citations,
               trace: turn.trace,
+              // The runs the answer quoted from free text (lib/axis/quotes.ts), [] when clean. Only once
+              // 20261108000004 is in (quotesChecked), so the column is never named before it exists; capped to fit it.
+              ...(turn.quotesChecked ? { outside_quotes: storableRuns(turn.quotes) } : {}),
               sources: turn.sources,
               ai_run_id: turn.runId,
             })
@@ -172,7 +181,8 @@ export default async function axisRoutes(app: FastifyInstance) {
 
           // After done nothing may turn the answer into an error: each step is logged and skipped.
           try {
-            await saveState(request, id, turn.state);
+            // A turn with an activity draft saved the state itself, before `done` (lib/axis/drafts/state.ts).
+            if (!turn.stateSaved) await saveState(request, id, turn.state, turn.stateVersion);
             // Only what the code couldn't confirm goes to the adjudicator.
             const { wanted, checks, material, ledger } = turn.verify;
             if (wanted && checks.some((c) => c.status !== "grounded")) {
@@ -256,7 +266,7 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (claimed.type === "operation") {
       let outcome;
       try {
-        outcome = await confirmOperation(request, claimed);
+        outcome = await confirmOperation(request, claimed, { keep: edits.rows });
       } catch (err) {
         // Nothing changed (an outage, a rate limit): release the claim so Confirm can be clicked again.
         await request.db.from("axis_actions").update({ status: "pending", decided_at: null }).eq("id", id).eq("status", "confirmed");
@@ -269,10 +279,11 @@ export default async function axisRoutes(app: FastifyInstance) {
         .update({ status: outcome.status, result: outcome.result })
         .eq("id", id);
       if (saveErr) request.log.warn({ code: saveErr.code }, "axis operation result not saved");
+      const rows = outcome.result.rows ? { rows: outcome.result.rows } : {};
       return {
         id,
         status: outcome.status,
-        result: outcome.result.ok ? { ok: true, undoable: outcome.result.undoable } : { ok: false, message: outcome.result.message },
+        result: outcome.result.ok ? { ok: true, undoable: outcome.result.undoable, ...rows } : { ok: false, message: outcome.result.message, ...rows },
       };
     }
 
@@ -339,7 +350,9 @@ export default async function axisRoutes(app: FastifyInstance) {
     if (was !== "executed" && was !== "confirmed") throw conflict(was === "undone" ? "That change was already undone." : "Only a change that went through can be undone.");
     // Before claiming: a row with no reversal (one whose Confirm is still running has none yet) is refused
     // without touching its status, so the claim can't race the Confirm that is about to write its outcome.
-    if (!undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
+    const trash = isTrashResult(row.result);
+    if (!trash && !undoStepOf(row.result)) throw conflict("That change can't be undone from here.");
+    if (trash && restoreExpired(row.result)) throw conflict(restoreSentence("expired"));
     // Claim, so two clicks can't run the reversal twice.
     const { data: claimed, error: claimErr } = await request.db
       .from("axis_actions")
@@ -350,15 +363,60 @@ export default async function axisRoutes(app: FastifyInstance) {
       .maybeSingle();
     if (claimErr) throw actionsError(claimErr);
     if (!claimed) throw conflict("That change was already undone.");
+    const handBack = () => request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
+    if (trash) {
+      // A confirmed delete: the database puts its rows back (axis_trash_restore, 20261108000003), as the counselor.
+      const { data: out, error: restoreErr } = await request.db.rpc("axis_trash_restore", { p_action: id });
+      const answer = (out ?? {}) as { ok?: boolean; reason?: string; restored?: number; paused?: string[] };
+      if (restoreErr || answer.ok !== true) {
+        // Already restored (by hand, or a click that won a race): the card is undone either way.
+        if (!restoreErr && answer.reason === "already") throw conflict(restoreSentence(answer.reason));
+        await handBack();
+        if (restoreErr) throw isSchemaMissing(restoreErr) ? unavailable(TRASH_MISSING) : fromPostgrest(restoreErr);
+        if (answer.reason === "not-yours") throw notFound("That change isn't AxIS's to undo.");
+        if (answer.reason === "not-approved") throw forbidden(restoreSentence(answer.reason));
+        throw conflict(restoreSentence(String(answer.reason ?? "")));
+      }
+      // A restored meeting sends its invitation again (Elvin, 11/8): the delete emailed a cancellation. Nothing
+      // else a restore brings back sends anything. Never throws; `invited` only when a round went out.
+      const { invited } = await reinviteRestoredMeetings(request, id);
+      return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [], ...(invited ? { invited: true } : {}) };
+    }
+    let answer: unknown;
     try {
-      await undoOperation(request, row);
+      answer = await undoOperation(request, row);
     } catch (err) {
       // Hand the claim back only if it is still ours.
-      await request.db.from("axis_actions").update({ status: was }).eq("id", id).eq("status", "undone");
+      await handBack();
       throw err;
+    }
+    // A batch Undo keeps rows the counselor edited since they were saved, and says which.
+    const skipped = skippedRows(answer);
+    if (skipped.length) {
+      const deleted = Number((answer as { deleted?: unknown }).deleted ?? 0);
+      if (deleted === 0) {
+        await handBack();
+        throw conflict("Every row was edited after it was saved, so nothing was undone.");
+      }
+      const names = skipped.map((s) => s.organization ?? "a row").join(", ");
+      const message = `Undone, except ${names}: edited after ${skipped.length === 1 ? "it was" : "they were"} saved.`;
+      await request.db
+        .from("axis_actions")
+        .update({ result: { ...((row.result ?? {}) as Record<string, unknown>), message } })
+        .eq("id", id)
+        .then(logSkipped(request.log, "undo note"));
+      return { id, status: "undone", skipped };
     }
     return { id, status: "undone" };
   });
+}
+
+/** The rows a batch Undo kept because they were edited since they were saved (DELETE /application/activities). */
+function skippedRows(answer: unknown): { id: string; organization: string | null }[] {
+  const list = answer && typeof answer === "object" ? (answer as { skipped?: unknown }).skipped : null;
+  return Array.isArray(list)
+    ? list.filter((s) => s && typeof s === "object").map((s) => ({ id: String((s as Record<string, unknown>).id), organization: typeof (s as Record<string, unknown>).organization === "string" ? ((s as Record<string, unknown>).organization as string) : null }))
+    : [];
 }
 
 /**
@@ -383,8 +441,10 @@ function publicAction(r: Record<string, unknown>) {
     warning: typeof p.warning === "string" ? p.warning : null,
     reason: p.reason === "outside-content" || p.reason === "many-changes" ? p.reason : null,
     status,
-    undoable: (status === "executed" || status === "confirmed") && !!undoStepOf(res),
+    undoable: (status === "executed" || status === "confirmed") && (!!undoStepOf(res) || (isTrashResult(res) && !restoreExpired(res))),
+    restoreUntil: isTrashResult(res) && typeof res.restoreUntil === "string" ? res.restoreUntil : null,
     message: typeof res.message === "string" ? res.message : null,
+    ...(Array.isArray(p.rows) ? { rows: p.rows as NonNullable<OperationPayload["rows"]> } : {}),
   };
   return { id: r.id, conversation_id: r.conversation_id, message_id: r.message_id, student_id: r.student_id, type: r.type, payload, status, created_at: r.created_at };
 }

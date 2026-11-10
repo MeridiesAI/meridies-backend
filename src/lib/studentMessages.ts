@@ -45,6 +45,8 @@ import { badRequest, fromPostgrest, unauthorized, unavailable } from "./errors.j
 import { isCounselorApproved } from "./access.js";
 import { replyAddressFor } from "./replyRouting.js";
 import { consumeRateLimit } from "./limits.js";
+import { isLanguageChoice, languageFromName, type FamilyLanguageChoice, type LanguageCode } from "./languages.js";
+import { isResultsNotApplied } from "./resultsAvailability.js";
 
 type Row = Record<string, unknown>;
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -89,6 +91,33 @@ export async function loadComposerPref(db: SupabaseClient, studentId: string): P
     audience: row.composer_audience === "student" ? "student" : "parent",
     channel: row.composer_channel === "sms" ? "sms" : "email",
   };
+}
+
+/**
+ * What the student's family speaks at home (`student_alert_prefs.family_language`,
+ * 20261110000001): a language code, `en` for English only, or null when nobody has
+ * said. Read apart from `loadComposerPref` so a database without the migration
+ * still answers the composer; null there, never an error.
+ */
+export async function loadFamilyLanguage(db: SupabaseClient, studentId: string): Promise<FamilyLanguageChoice | null> {
+  const { data, error } = await db.from("student_alert_prefs").select("family_language").eq("student_id", studentId).maybeSingle();
+  if (error) {
+    if (isResultsNotApplied(error)) return null;
+    throw fromPostgrest(error);
+  }
+  const v = (data as Row | null)?.family_language;
+  return isLanguageChoice(v) ? v : null;
+}
+
+/**
+ * The home language Financial aid already holds for this student (a name the
+ * counselor picked, "Spanish"), as a code, so the composer can offer it in one
+ * click. A suggestion only: never copied silently. Null when none, or unreadable.
+ */
+export async function loadLanguageSuggestion(db: SupabaseClient, studentId: string): Promise<LanguageCode | null> {
+  const { data, error } = await db.from("scholarship_match_prefs").select("home_language").eq("student_id", studentId).maybeSingle();
+  if (error) return null;
+  return languageFromName((data as Row | null)?.home_language as string | null | undefined);
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +314,10 @@ export type MessageRow = {
   recipients: Recipient[];
   subject: string | null;
   body: string;
+  /** The language the body was translated into, when it was (a column from 20261110000001; absent before it). */
+  translated_to?: string | null;
+  /** The family report this message carries (approve-send, 20261111000013); absent or null for any other message. */
+  family_report_id?: string | null;
 };
 
 export type Attempt = {
@@ -322,7 +355,7 @@ export async function deliverMessage(
   extra: DeliverContext = {}
 ): Promise<DeliveryOutcome> {
   const attempts: Attempt[] = [];
-  const copy = { counselorName, studentName: extra.studentName ?? "" };
+  const copy = { counselorName, studentName: extra.studentName ?? "", translated: !!row.translated_to };
 
   for (const r of row.recipients) {
     const columns = {
@@ -666,8 +699,9 @@ export async function dispatchDueMessages(
     // who may receive it is re-decided now, failing closed: the student must
     // still be this counselor's, a message to the student goes only to their
     // address or phone on file, the parents must still be switched on, each
-    // guardian still on file with alerts on and the same address, and an
-    // alert still clear of the throttle. Anything unreadable holds the send.
+    // guardian still on file with alerts on and the same address (and, for a
+    // family report, reports on), and an alert still clear of the throttle.
+    // Anything unreadable holds the send.
     let recipients: Recipient[];
     try {
       const blocked = await sendBlockedReason(svc, row, settings);
@@ -785,7 +819,27 @@ async function sendBlockedReason(
   const family = await loadFamily(svc, row.student_id);
   const recipients = allowedRecipients(row, { student: null, family });
   if (recipients.length === 0) return "No parent on file still receives messages";
-  return { recipients };
+  if (!row.family_report_id) return { recipients };
+
+  // A family report also needs each guardian's reports switch still on (a read error throws: hold the send).
+  const { data: reportsOn, error: rErr } = await svc
+    .from("guardians")
+    .select("id, receives_reports")
+    .eq("student_id", row.student_id)
+    .in("id", recipients.map((r) => r.id));
+  if (rErr) throw fromPostgrest(rErr);
+  const stillOn = reportRecipientsStillOn(recipients, (reportsOn ?? []) as { id: string; receives_reports: boolean | null }[]);
+  if (stillOn.length === 0) return "No parent still receives family reports: reports were switched off before this went out";
+  return { recipients: stillOn };
+}
+
+/**
+ * The recipients of a family report's message who still receive reports (`guardians.receives_reports`
+ * exactly true). Anyone not in `rows`, or with it off or unknown, is dropped. Pure, so it is unit-tested.
+ */
+export function reportRecipientsStillOn(recipients: Recipient[], rows: { id: string; receives_reports: boolean | null }[]): Recipient[] {
+  const on = new Set(rows.filter((g) => g.receives_reports === true).map((g) => String(g.id)));
+  return recipients.filter((r) => r.kind === "guardian" && on.has(r.id));
 }
 
 /**

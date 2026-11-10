@@ -19,10 +19,11 @@ const common = {
   auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
 } as const;
 
-export function userClient(accessToken: string): SupabaseClient {
+/** `extraHeaders` reach PostgREST as request headers (the AxIS trash mark: lib/axis/ops/trash.ts). */
+export function userClient(accessToken: string, extraHeaders: Record<string, string> = {}): SupabaseClient {
   return createClient(env.SUPABASE_URL, env.SUPABASE_ANON_KEY, {
     ...common,
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    global: { headers: { ...extraHeaders, Authorization: `Bearer ${accessToken}` } },
   });
 }
 

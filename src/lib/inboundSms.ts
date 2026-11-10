@@ -23,6 +23,7 @@ import { isCounselorApproved } from "./access.js";
 import { toE164 } from "./email.js";
 import { pgFailure } from "./errors.js";
 import { forwardToCounselor, stopSequencesOnReply } from "./inboundEmail.js";
+import { copyTranslation, translateStoredReply, type InboundTranslation } from "./inboundTranslate.js";
 import { consumeRateLimit } from "./limits.js";
 
 type Row = Record<string, unknown>;
@@ -161,6 +162,8 @@ export async function handleInboundSms(
 
   let stored = 0;
   let notified = false;
+  // One text is translated once, however many places the number is on file: the first row with a student asks, the rest copy.
+  let translation: InboundTranslation | null = null;
   for (const { owner, key } of targets) {
     const party: "parent" | "student" | null = !owner ? null : owner.kind === "guardian" || owner.kind === "contact-parent" ? "parent" : "student";
     const contactId = owner?.contactId ?? null;
@@ -193,6 +196,15 @@ export async function handleInboundSms(
     if (!inboundId) continue; // a retried webhook
 
     stored += 1;
+
+    // STOP, START and HELP are keywords, not messages: nothing to translate.
+    if (keyword === null && studentId) {
+      if (translation === null) {
+        translation = await translateStoredReply(svc, { inboundId, counselorId, studentId, body, log });
+      } else {
+        await copyTranslation(svc, inboundId, translation, log);
+      }
+    }
     if (contactId) {
       const { error } = await svc.from("pipeline_activities").insert({
         contact_id: contactId,
@@ -215,6 +227,7 @@ export async function handleInboundSms(
         studentName: owner?.kind === "student" ? (owner.name ?? null) : null,
         subject: null,
         body: keyword === "stop" ? `${body}\n\nThey opted out. Meridies will not text this number again unless they reply START.` : body,
+        bodyEn: translation?.bodyEn ?? null,
         contactId,
         studentId,
         log,

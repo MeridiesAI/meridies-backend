@@ -20,8 +20,10 @@
 import fp from "fastify-plugin";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { env } from "../env.js";
+import { readMark } from "../lib/axis/ops/trash.js";
 import { userClient } from "../lib/supabase.js";
 import { blockedAsPending } from "../lib/access.js";
+import { touchLastActive } from "../lib/inactivityAlerts.js";
 import { accountPending, unauthorized } from "../lib/errors.js";
 import type { AuthProfile } from "../lib/serialize.js";
 
@@ -62,7 +64,10 @@ export default fp(async (app) => {
     }
 
     request.auth = { userId, email, token };
-    request.db = userClient(token);
+    // A delete AxIS runs for a confirmed card carries a mark only this process can make; its rows go to the trash.
+    const actionId = readMark(request.headers["x-meridies-axis-mark"]);
+    if (actionId) request.axisActionId = actionId;
+    request.db = actionId ? userClient(token, { "x-meridies-axis-action": actionId }) : userClient(token);
 
     // The role lives in the database, not the token — a token minted before a
     // role change would otherwise keep its old permissions.
@@ -71,7 +76,7 @@ export default fp(async (app) => {
       .select(
         "id, full_name, email, role, role_confirmed, onboarding_step, onboarding_complete, " +
           "counselor_id, firm_id, avatar_url, phone, timezone, title, headline, hometown, " +
-          "high_school, grad_year, counselor_approved_at"
+          "high_school, grad_year, counselor_approved_at, last_active_at"
       )
       .eq("id", userId)
       .maybeSingle();
@@ -92,5 +97,10 @@ export default fp(async (app) => {
     if (blockedAsPending(request.profile, request.routeOptions.config.allowPending)) {
       throw accountPending();
     }
+
+    // The inactivity alert's signal (lib/inactivityAlerts.ts): a student's request marks them active, at
+    // most once an hour, on the service client. Started here and never awaited, so the request doesn't wait
+    // on it and a failed write never fails the request.
+    touchLastActive(request.profile, request.log);
   });
 });

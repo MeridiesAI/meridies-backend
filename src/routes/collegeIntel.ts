@@ -6,7 +6,8 @@
  *                                            school, also proposals where a source and the
  *                                            catalog disagree
  *   GET  /colleges/proposals?status=         proposals the caller made, or all for an editor
- *   POST /colleges/proposals/:id/review      approve (applies it) or reject; editors only
+ *   POST /colleges/proposals/:id/review      approve (applies it) or reject; editors only, one
+ *                                            transaction (review_catalog_proposal)
  *   GET  /colleges/:id/student-summary       counselor bullets for one student, from catalog
  *                                            facts only (no model)
  *
@@ -36,6 +37,9 @@ import { runSearch, studentNumbers } from "./collegesV10.js";
 
 type Row = Record<string, unknown>;
 const uuid = z.string().uuid();
+const PROPOSAL_COLUMNS = "id, college_id, field, current_value, proposed_value, source_url, evidence, status, created_at, reviewed_at, review_note";
+/** A column 20261111000011 adds isn't there yet (Postgres 42703, or PostgREST's schema cache PGRST204). */
+const isMissingColumn = (e: { code?: string }) => e.code === "42703" || e.code === "PGRST204";
 
 export default async function collegeIntelRoutes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
@@ -197,9 +201,19 @@ export default async function collegeIntelRoutes(app: FastifyInstance) {
     const q = z.object({ status: z.enum(["pending", "approved", "rejected"]).optional() }).strict().parse(request.query);
     let builder = request.db
       .from("catalog_change_proposals")
-      .select("id, college_id, field, current_value, proposed_value, source_url, evidence, status, created_at, reviewed_at, review_note, college:colleges(name, slug)");
+      .select(`${PROPOSAL_COLUMNS}, admission_cycle, payload, college:colleges(name, slug)`);
     if (q.status) builder = builder.eq("status", q.status);
-    const { data, error } = await builder.order("created_at", { ascending: false }).limit(200);
+    const first = await builder.order("created_at", { ascending: false }).limit(200);
+    let data = first.data as Row[] | null;
+    let error = first.error;
+    if (error && isMissingColumn(error)) {
+      // Before 20261111000011: the older columns only (no cycle or payload).
+      let older = request.db.from("catalog_change_proposals").select(`${PROPOSAL_COLUMNS}, college:colleges(name, slug)`);
+      if (q.status) older = older.eq("status", q.status);
+      const again = await older.order("created_at", { ascending: false }).limit(200);
+      data = again.data as Row[] | null;
+      error = again.error;
+    }
     if (error) throw fromPostgrest(error);
     return ((data ?? []) as Row[]).map((r) => ({
       id: String(r.id),
@@ -214,6 +228,9 @@ export default async function collegeIntelRoutes(app: FastifyInstance) {
       createdAt: String(r.created_at),
       reviewedAt: (r.reviewed_at as string | null) ?? null,
       reviewNote: (r.review_note as string | null) ?? null,
+      // Cited proposals from a school's own pages (lib/catalogProposals.ts): the cycle, and a supplement's prompt.
+      admissionCycle: (r.admission_cycle as string | null) ?? null,
+      payload: (r.payload as Row | null) ?? null,
     }));
   });
 
@@ -223,6 +240,21 @@ export default async function collegeIntelRoutes(app: FastifyInstance) {
     const { data: editor, error: e1 } = await request.db.from("catalog_editors").select("profile_id").eq("profile_id", request.auth.userId).maybeSingle();
     if (e1) throw fromPostgrest(e1);
     if (!editor) throw forbidden("Only a Meridies catalog editor can review catalog changes");
+
+    // The review in one transaction, as the editor (20261111000011): the row is locked, re-checked, applied to
+    // the curated table with its source and verified time, and stamped reviewed, or none of it.
+    const rpc = await request.db.rpc("review_catalog_proposal", { p_id: id, p_decision: b.decision, p_note: b.note ?? null });
+    if (!rpc.error) {
+      const out = rpc.data as Row;
+      return { id, status: String(out.status) };
+    }
+    if (rpc.error.code === "42501") throw forbidden("Only a Meridies catalog editor can review catalog changes");
+    if (rpc.error.code === "P0002") throw notFound("That proposal doesn't exist");
+    if (rpc.error.code === "55000") throw badRequest("That proposal was already reviewed");
+    if (rpc.error.code === "22023") throw badRequest(rpc.error.message || "That proposal isn't valid");
+    if (rpc.error.code !== "PGRST202") throw fromPostgrest(rpc.error);
+
+    // Before the migration: the older path, for the research route's six fields.
     const svc = serviceClient();
     if (!svc) throw unavailable("Reviewing needs the service role key");
 
@@ -233,7 +265,7 @@ export default async function collegeIntelRoutes(app: FastifyInstance) {
     if (row.status !== "pending") throw badRequest("That proposal was already reviewed");
     const field = String(row.field) as ProposalField;
     const value = String(row.proposed_value);
-    if (!(PROPOSAL_FIELDS[field] as readonly string[]).includes(value)) throw badRequest("That proposal's value isn't allowed");
+    if (!(field in PROPOSAL_FIELDS) || !(PROPOSAL_FIELDS[field] as readonly string[]).includes(value)) throw badRequest("That proposal's value isn't allowed");
 
     if (b.decision === "approve") {
       const now = new Date().toISOString();

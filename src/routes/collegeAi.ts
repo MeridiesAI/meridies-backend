@@ -22,8 +22,10 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { runStructured } from "../lib/anthropic.js";
 import { fromPostgrest, notFound } from "../lib/errors.js";
-import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { requireRole, requireRoleIn, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { requireStudentAiTools } from "../lib/practiceSettings.js";
+import { listChatSystem } from "../lib/studentToolPrompts.js";
 import { roundsFrom } from "../lib/collegesV10.js";
 import { isUpcoming, toHubEvent, toCollegeRef } from "../lib/eventsHub.js";
 import { listCriteriaSchema, loadListSchools } from "./collegesV10.js";
@@ -338,7 +340,8 @@ export default async function collegeAiRoutes(app: FastifyInstance) {
 
   app.post(
     "/college-list-chat",
-    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("college-list-chat")] },
+    // A counselor, or a student whose practice has the AI tools on (resolveStudentId pins them to themselves).
+    { preHandler: [app.authenticate, requireRoleIn("counselor", "student"), requireStudentAiTools, aiLimit("college-list-chat")] },
     async (request) => {
       const view = z
         .object({
@@ -379,12 +382,7 @@ export default async function collegeAiRoutes(app: FastifyInstance) {
         request,
         module: "college-list",
         studentId: b.studentId,
-        system: [
-          "You turn a counselor's request about a college list into ONE structured change. You do not pick schools yourself: a deterministic filter does.",
-          "Actions: refresh (show the next schools in each band), more / fewer (schools per band), closer / farther (halve or double the radius, or set miles), test-optional, set (change majors, sizes, settings, aid, diversity, testOptional), exclude (remove named schools), none (only answer).",
-          `Sizes: Small, Medium, Large, Very large. Settings: Rural, Small city, Major city, Suburban, College town. Aid: No preference, Lenient, Limited. Diversity: No preference, Yes, No.`,
-          "points: one to three short bullets saying what changed, addressed to the counselor. If the request can't be done with these actions, use none and say what you can do.",
-        ].join("\n"),
+        system: listChatSystem(request.profile.role === "student" ? "student" : "counselor"),
         prompt: JSON.stringify({
           request: b.message,
           currentAnswers: b.criteria,

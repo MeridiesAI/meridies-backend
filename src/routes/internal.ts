@@ -16,15 +16,22 @@
  *     "$API_URL/internal/events/discover"
  * and monthly, the catalog's campus photos from Wikimedia Commons:
  *     "$API_URL/internal/ingest/college-photos"
+ * and (not created yet; OFF unless ACCOUNT_PURGE_ENABLED=true) daily, closed accounts past their grace period:
+ *     "$API_URL/internal/account-closures/purge"
+ * and, per college, cited catalog proposals from the school's own pages (body {"collegeId"} or {"unitid"}):
+ *     "$API_URL/internal/catalog/propose"
  */
 
+import { dispatchPush } from "../lib/push.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { env } from "../env.js";
 import { budgetMode, spendToday } from "../lib/aiBudget.js";
-import { unauthorized, unavailable } from "../lib/errors.js";
+import { badRequest, notFound, unauthorized, unavailable } from "../lib/errors.js";
+import { runCatalogProposal } from "../lib/catalogProposalsRun.js";
 import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.js";
 import { dispatchDueBlasts } from "../lib/blasts.js";
+import { purgeFlag, runClosurePurge } from "../lib/accountClosure.js";
 import { dispatchDueSequences } from "../lib/pipelineSequences.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { recoverExtractions } from "../lib/documentExtraction.js";
@@ -47,7 +54,7 @@ function secretMatches(presented: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-async function requireCronSecret(request: FastifyRequest): Promise<void> {
+export async function requireCronSecret(request: FastifyRequest): Promise<void> {
   const expected = env.CRON_SECRET;
   if (!expected) throw unavailable("Scheduled jobs are not configured");
 
@@ -58,6 +65,31 @@ async function requireCronSecret(request: FastifyRequest): Promise<void> {
 }
 
 export default async function internalRoutes(app: FastifyInstance) {
+  /**
+   * Every 1-2 minutes: push each new notification to the recipient's registered devices (lib/push.ts). A no-op
+   * until the VAPID settings and migration 20261114000001 exist.
+   */
+  app.post(
+    "/push-dispatch",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "Push needs the service role key" });
+      try {
+        const tally = await dispatchPush(svc, request.log);
+        if (tally.ran) await beat("push-dispatch", true, undefined, request.log);
+        return tally;
+      } catch (err) {
+        // Before the migration is applied there is nothing to push; that is not a failure.
+        if (isResultsNotApplied(err as { code?: string }) || /read failed \((42P01|42703|PGRST20\d)\)/.test(String((err as Error).message))) {
+          return reply.code(200).send({ ran: false, reason: "Apply 20261114000001_web_push.sql" });
+        }
+        await beat("push-dispatch", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
   /**
    * Every 10-15 minutes: send the Contact Pipeline sequence emails that are due
    * (lib/pipelineSequences.ts). Each enrollment is claimed before it is sent,
@@ -101,6 +133,29 @@ export default async function internalRoutes(app: FastifyInstance) {
         return { ran: true, ...tally };
       } catch (err) {
         await beat("email-blasts", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
+  /**
+   * Leave Meridies: delete accounts whose 30-day grace period is over (lib/accountClosure.ts), at most 5 a run.
+   * OFF unless ACCOUNT_PURGE_ENABLED is exactly "true": then it touches nothing and says so. When on it re-checks
+   * the DELETE /account preconditions and deletes through that same path. No Railway cron exists for it yet.
+   */
+  app.post(
+    "/account-closures/purge",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!purgeFlag(env.ACCOUNT_PURGE_ENABLED)) return { ran: false, reason: "purge_disabled" };
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "The purge needs the service role key" });
+      try {
+        const outcome = await runClosurePurge(svc, request.log, { enabled: true });
+        if (outcome.ran) await beat("account-closure-purge", outcome.failed === 0, outcome.failed ? `${outcome.failed} failed` : undefined, request.log);
+        return outcome;
+      } catch (err) {
+        await beat("account-closure-purge", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;
       }
     }
@@ -182,6 +237,37 @@ export default async function internalRoutes(app: FastifyInstance) {
         return reply.code(503).send({ started: false, reason });
       }
       return reply.code(202).send({ started: true });
+    }
+  );
+
+  /**
+   * Cited catalog proposals for ONE college (lib/catalogProposals.ts): its own admissions pages are read, and the
+   * facts whose quote is on the page are written as PENDING catalog_change_proposals for a catalog editor. Nothing
+   * curated is written here. Synchronous (a few pages and one model call); 200 with the run's counts.
+   */
+  app.post(
+    "/catalog/propose",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request) => {
+      const b = z
+        .object({ collegeId: z.string().uuid().optional(), unitid: z.number().int().positive().optional(), dryRun: z.boolean().optional() })
+        .strict()
+        .refine((v) => Boolean(v.collegeId) !== (v.unitid !== undefined), "Pass collegeId or unitid")
+        .parse(request.body ?? {});
+      let collegeId = b.collegeId ?? null;
+      if (!collegeId) {
+        const svc = serviceClient();
+        if (!svc) throw unavailable("Proposals need the service role key");
+        const { data, error } = await svc.from("colleges").select("id").eq("unitid", b.unitid!).maybeSingle();
+        if (error) throw unavailable("The catalog couldn't be read");
+        if (!data) throw notFound("That college isn't in the catalog");
+        collegeId = String(data.id);
+      }
+      const r = await runCatalogProposal(collegeId, { dryRun: b.dryRun ?? false }, request.log);
+      if (r.ok) return r.result;
+      if (r.reason === "not-found") throw notFound(r.message);
+      if (r.reason === "no-website") throw badRequest(r.message);
+      throw unavailable(r.message);
     }
   );
 

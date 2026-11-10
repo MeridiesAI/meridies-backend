@@ -220,10 +220,7 @@ export const pipeline: OpGroup = {
       input: z.object({ name: stageName.optional(), lifecycle_group: z.enum(LIFECYCLE_GROUPS).optional() }).strict(),
       request: (i) => ({ method: "POST", url: "/pipeline/stages", body: defined({ name: i.name, lifecycleGroup: i.lifecycle_group }) }),
       describe: (i) => `Add stage "${plainText(i.name ?? "New stage", 60)}"${i.lifecycle_group ? ` (${i.lifecycle_group})` : ""} to the Contact Pipeline`,
-      undo: (_i, body) => {
-        const id = idOf(body);
-        return id ? { op: "pipeline.delete_stage", input: { stage_id: id } } : null;
-      },
+      // No Undo: deleting a stage isn't an op (below).
     }),
     op({
       name: "pipeline.create_contact",
@@ -511,29 +508,8 @@ export const pipeline: OpGroup = {
         return n > 0 ? `Sent to ${n} recipient${n === 1 ? "" : "s"}.` : "Nothing was delivered.";
       },
     }),
-    op({
-      name: "pipeline.delete_stage",
-      kind: "write",
-      risk: "confirm",
-      title: "Delete a pipeline stage; its cards move to the stage before it.",
-      doc: "{ stage_id }",
-      input: z.object({ stage_id: uuid }).strict(),
-      request: (i) => ({ method: "DELETE", url: `/pipeline/stages/${seg(i.stage_id)}` }),
-      describe: async (i, h) => {
-        const b = await loadBoard(h);
-        const s = findStage(b, i.stage_id);
-        if (!b || !s) return `Delete ${stageLabel(s)} from the Contact Pipeline`;
-        const at = b.stages.indexOf(s);
-        const target = at === 0 ? b.stages[b.stages.length - 1] : b.stages[at - 1];
-        const n = b.contacts.filter((c) => c.stageId === i.stage_id).length;
-        return `Delete stage ${stageLabel(s)} from the Contact Pipeline${n && target && target !== s ? ` (its ${n} card${n === 1 ? "" : "s"} move to ${stageLabel(target)})` : ""}`;
-      },
-      warning: "The stage is deleted for everyone in the practice; its cards move to the stage before it.",
-      reply: (body) => {
-        const to = str(asRecord(body).movedTo);
-        return to ? `Stage deleted; its cards are now in stage id ${to}.` : "Stage deleted.";
-      },
-    }),
+    // Deleting a stage is not an op: its delete also moves the stage's cards, which the trash can't put back
+    // (lib/axis/ops/trash.ts). The counselor deletes a stage on the board.
     op({
       name: "pipeline.delete_contact",
       kind: "write",

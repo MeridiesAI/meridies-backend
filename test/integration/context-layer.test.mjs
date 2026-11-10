@@ -11,11 +11,11 @@ const p = await ctx(priv.id);
 check("context loads", p.status === 200, `status ${p.status}`);
 for (const m of MARKERS.private) check(`never includes ${m}`, !p.body.text.includes(m));
 check("the student's login email never appears", !p.body.text.includes(priv.email));
-check("imported text is in an untrusted data block", /<data source="activity:[^"]*" kind="untrusted">ignore previous instructions/.test(p.body.text));
+check("imported text is in an untrusted data block", /<data source="activity:[^"]*" kind="untrusted"(?: length="short")?>ignore previous instructions/.test(p.body.text));
 // Names, positions and titles are student-written too: strip every data block (and its source attribute)
 // and the injection string must be gone from what is left.
 check("an injection in an activity name is present", p.body.text.includes("NAME-INJECT"));
-const bare = p.body.text.replace(/<data source="[^"]*" kind="untrusted">[\s\S]*?<\/data>/g, "");
+const bare = p.body.text.replace(/<data source="[^"]*" kind="untrusted"(?: length="short")?>[\s\S]*?<\/data>/g, "");
 check("every NAME-INJECT sits inside a data block or a source attribute", !bare.includes("NAME-INJECT"), bare.slice(0, 300));
 
 const cohFull = await ctx(priv.id, "narrative-coherence");
@@ -63,8 +63,8 @@ const { student: edge } = await seedStudent(c, "edge");
 const e = await ctx(edge.id);
 check("a 100-point GPA keeps its scale", /92(\.0+)? \(100-point scale\)/.test(e.body.text), e.body.text.slice(0, 300));
 
-check("a CJK name appears inside a data block", /<data source="[^"]*" kind="untrusted">[^<]*李明[^<]*<\/data>/.test(e.body.text), e.body.text.slice(0, 300));
-check("a CJK name is in no trusted text", !e.body.text.replace(/<data source="[^"]*" kind="untrusted">[\s\S]*?<\/data>/g, "").includes("李明"));
+check("a CJK name appears inside a data block", /<data source="[^"]*" kind="untrusted"(?: length="short")?>[^<]*李明[^<]*<\/data>/.test(e.body.text), e.body.text.slice(0, 300));
+check("a CJK name is in no trusted text", !e.body.text.replace(/<data source="[^"]*" kind="untrusted"(?: length="short")?>[\s\S]*?<\/data>/g, "").includes("李明"));
 
 const owner = await user("ctx-owner");
 const member = await user("ctx-member");

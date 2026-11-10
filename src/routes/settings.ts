@@ -21,6 +21,8 @@ const patchBody = z
     aiSummaries: z.boolean(),
     autoParseDocuments: z.boolean(),
     studentsSeeSharedReports: z.boolean(),
+    // Off until the practice turns it on; students use the AI tools only while it is.
+    studentAiTools: z.boolean(),
   })
   .partial()
   .strict();
@@ -42,6 +44,8 @@ export default async function settingsRoutes(app: FastifyInstance) {
     if (b.aiSummaries !== undefined) values.ai_summaries = b.aiSummaries;
     if (b.autoParseDocuments !== undefined) values.auto_parse_documents = b.autoParseDocuments;
     if (b.studentsSeeSharedReports !== undefined) values.students_see_shared_reports = b.studentsSeeSharedReports;
+    // Named only when the request names it, so a database without the column still saves every other switch.
+    if (b.studentAiTools !== undefined) values.student_ai_tools = b.studentAiTools;
 
     const { data, error } = row
       ? await request.db.from("practice_settings").update(values).eq("id", String(row.id)).select("*").single()

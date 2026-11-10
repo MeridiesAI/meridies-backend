@@ -29,13 +29,25 @@ import {
   runStructured,
 } from "../lib/anthropic.js";
 import { alignActivities } from "../lib/activityAlignment.js";
-import { buildStudentContext } from "../lib/context/index.js";
+import { buildStudentContext, type StudentContext } from "../lib/context/index.js";
 import { columns } from "../lib/context/ai-allowlist.js";
 import { buildCoherenceMaterial, usableEssay } from "../lib/context/coherenceMaterial.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { essayBodyReadable } from "../lib/context/sections.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
+import { requireStudentAiTools } from "../lib/practiceSettings.js";
+import {
+  activitiesNote,
+  activitiesSystem,
+  coherenceAskSystem,
+  coherenceNext,
+  coherenceSystem,
+  isStudentSafe,
+  rewriteRefusal,
+  studentSafeBullets,
+  type Audience,
+} from "../lib/studentToolPrompts.js";
 import { limit } from "../lib/limits.js";
 import {
   toCoherenceReport,
@@ -182,6 +194,27 @@ const coherenceBody = z
 const coherenceBase = (request: FastifyRequest, studentId: string) =>
   buildStudentContext(request, studentId, "narrative-coherence", { only: ["profile", "personal"] });
 
+/**
+ * A student's own run reads their identity and majors from their own record, on their own client. The context
+ * layer (buildStudentContext) stays the counselor's: a student's session never builds one (spec section 4), and
+ * Coherence only ever asked it for the profile and personal sections, so this is the same two facts, short.
+ */
+async function studentCoherenceBase(
+  request: FastifyRequest,
+  studentId: string
+): Promise<Pick<StudentContext, "text" | "used" | "omitted">> {
+  const { data, error } = await request.db.from("profiles").select("full_name, grad_year, high_school").eq("id", studentId).maybeSingle();
+  if (error) throw fromPostgrest(error);
+  const majors = await intendedMajors(request, studentId, {});
+  const lines = [
+    `Student: ${clip(data?.full_name, 120) || "the student"}`,
+    data?.grad_year ? `Class of ${clip(data.grad_year, 8)}` : null,
+    data?.high_school ? `High school: ${clip(data.high_school, 160)}` : null,
+    majors.length ? `Intended majors: ${majors.slice(0, 6).map((m) => clip(m, 80)).join(", ")}` : null,
+  ].filter((l): l is string => l !== null);
+  return { text: wrapUntrusted("student-record", lines.join("\n"), false), used: [], omitted: [] };
+}
+
 const REWRITE = /\b(rewrite|re-write|write|draft|reword|rephrase|paragraph|fix the essay|polish|edit (it|this|the essay))\b/i;
 
 export default async function applicationAiRoutes(app: FastifyInstance) {
@@ -306,20 +339,18 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.get(
     "/coherence",
-    { preHandler: [app.authenticate, limit("application:coherence", 120, 60)] },
+    // A counselor, or a student whose practice has the AI tools on (resolveStudentId pins them to themselves).
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:coherence", 120, 60)] },
     async (request) => {
       const q = studentQuery.parse(request.query);
-      if (isStudent(request)) throw forbidden("Coherence is your counselor's tool");
       const studentId = await resolveStudentId(request, q.studentId, "view");
       const { docs } = await coherenceDocs(request, studentId);
 
-      const { data: report } = await request.db
-        .from("coherence_reports")
-        .select("*")
-        .eq("student_id", studentId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // The newest report: a counselor's Last report is the newest of either; a student's is the newest THEY ran
+      // (the database says the same, so a counselor's report about them is never read here).
+      let latest = request.db.from("coherence_reports").select("*").eq("student_id", studentId);
+      if (isStudent(request)) latest = latest.eq("created_by", request.auth.userId);
+      const { data: report } = await latest.order("created_at", { ascending: false }).limit(1).maybeSingle();
       let flags: Row[] = [];
       if (report) {
         const { data } = await request.db
@@ -350,8 +381,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         request.db.from("awards").select("name").eq("student_id", studentId).order("sort_order").limit(50),
         request.db.from("student_personal_details").select("intended_majors").eq("student_id", studentId).maybeSingle(),
       ]);
+      // The alignment notes are written to the counselor, so a student's page carries none.
       const alignment =
-        acts.error || honors.error
+        isStudent(request) || acts.error || honors.error
           ? null
           : alignActivities({
               activities: (acts.data ?? []) as Row[],
@@ -370,10 +402,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.post(
     "/coherence",
-    { preHandler: [app.authenticate, aiLimit("narrative-coherence")] },
+    { preHandler: [app.authenticate, requireStudentAiTools, aiLimit("narrative-coherence")] },
     async (request, reply) => {
       const b = coherenceBody.parse(request.body);
-      if (isStudent(request)) throw forbidden("Coherence is your counselor's tool");
+      const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
       const { docs, essays } = await coherenceDocs(request, studentId);
 
@@ -416,7 +448,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       if (sent.activities) read.push("Activities list");
       if (sent.awards) read.push("Awards");
       if (read.length === 0) throw badRequest("No documents are ticked. Pick at least one under Documents.");
-      const base = await coherenceBase(request, studentId);
+      const base = audience === "student" ? await studentCoherenceBase(request, studentId) : await coherenceBase(request, studentId);
       const contextUsed = { used: base.used, omitted: base.omitted };
 
       type Out = {
@@ -429,17 +461,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "narrative-coherence",
         studentId,
         model: DEEP_MODEL,
-        system: [
-          NO_PROSE_SYSTEM,
-          "",
-          "You read the parts of one college application side by side, for the student's counselor.",
-          "Storyline: three short bullets labelled Origin, Through-line, Landing: where the story starts, what carries it, where it should end.",
-          "Flags: contradictions and gaps between the documents (dates, roles, hours, claims that disagree), most serious first. Name both places each one sits.",
-          "Fix: what the student should settle or decide, never the words to write.",
-          "Next: up to three bullets on what the counselor does next.",
-          "Address the counselor; the student's name is in the student record below.",
-          UNTRUSTED_DATA_RULE,
-        ].join("\n"),
+        system: coherenceSystem(audience),
         contextUsage: contextUsed,
         prompt: `${base.text ? `${base.text}\n\n` : ""}Read only these documents:\n${material}`,
         toolName: "coherence_report",
@@ -479,15 +501,15 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         },
       });
 
-      // The guardrail, in code: anything that reads like drafted prose is dropped.
+      // The guardrail, in code: anything that reads like drafted prose is dropped. A student's report is held to one
+      // more rule: nothing in the student's own voice (their report speaks TO them; see isStudentSafe).
+      const keep = audience === "student" ? isStudentSafe : isAdviceNotProse;
       const storyline = (result.storyline ?? [])
-        .filter((s) => ["Origin", "Through-line", "Landing"].includes(s.label) && isAdviceNotProse(s.text))
+        .filter((s) => ["Origin", "Through-line", "Landing"].includes(s.label) && keep(s.text))
         .map((s) => `${s.label}: ${s.text.trim()}`);
-      const flags = (result.flags ?? []).filter(
-        (f) => isAdviceNotProse(f.what) && isAdviceNotProse(f.fix) && isAdviceNotProse(clip(f.where, 200))
-      );
-      const next = enforceNoProse(result.next ?? []).slice(0, 2);
-      next.push(`Bring the report to ${first}'s next meeting and assign each fix as a task with a word budget.`);
+      const flags = (result.flags ?? []).filter((f) => keep(f.what) && keep(f.fix) && keep(clip(f.where, 200)));
+      const next = (audience === "student" ? studentSafeBullets(result.next ?? []) : enforceNoProse(result.next ?? [])).slice(0, 2);
+      next.push(coherenceNext(audience, first));
 
       const { data: report, error } = await request.db
         .from("coherence_reports")
@@ -534,13 +556,13 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
   /** The popup's chat: questions about the report, answered in bullets. */
   app.post(
     "/coherence/ask",
-    { preHandler: [app.authenticate, aiLimit("coherence-ask")] },
+    { preHandler: [app.authenticate, requireStudentAiTools, aiLimit("coherence-ask")] },
     async (request) => {
       const b = z
         .object({ studentId: uuid, reportId: uuid, question: z.string().trim().min(1).max(500) })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden("Coherence is your counselor's tool");
+      const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
       const { data: report } = await request.db
         .from("coherence_reports")
@@ -553,17 +575,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const first = firstName(String(profile?.full_name ?? ""));
 
       // A request for wording gets the questions to ask instead, without a model call.
-      if (REWRITE.test(b.question)) {
-        return {
-          bullets: [
-            "I won't write wording for the essays; the words have to be the student's.",
-            `Ask ${first}: which moment in the statement is the true start of this interest?`,
-            `Ask ${first}: what does the supplement add that the statement doesn't already say?`,
-          ],
-        };
-      }
+      if (REWRITE.test(b.question)) return { bullets: rewriteRefusal(audience, first) };
 
-      const base = await coherenceBase(request, studentId);
+      const base = audience === "student" ? await studentCoherenceBase(request, studentId) : await coherenceBase(request, studentId);
       const contextUsed = { used: base.used, omitted: base.omitted };
       const [{ data: flags }, { data: programs }] = await Promise.all([
         request.db.from("narrative_flags").select("*").eq("report_id", report.id),
@@ -582,13 +596,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "narrative-coherence",
         studentId,
         model: FAST_MODEL,
-        system: [
-          NO_PROSE_SYSTEM,
-          "",
-          "Answer the counselor's question about this Narrative Coherence report only, in at most four bullets.",
-          "If the report doesn't say, answer that it doesn't.",
-          UNTRUSTED_DATA_RULE,
-        ].join("\n"),
+        system: coherenceAskSystem(audience),
         contextUsage: contextUsed,
         prompt: `${base.text ? `${base.text}\n\n` : ""}Report:\n${wrapUntrusted("coherence-report", context.slice(0, 20_000))}\n\nQuestion: ${b.question}`,
         toolName: "coherence_answer",
@@ -599,7 +607,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           required: ["bullets"],
         },
       });
-      const bullets = enforceNoProse(result.bullets ?? []);
+      const bullets = audience === "student" ? studentSafeBullets(result.bullets ?? []) : enforceNoProse(result.bullets ?? []);
       return {
         bullets:
           bullets.length > 0 ? bullets : ["Ask about the storyline, a flag, or activities to add."],
@@ -611,7 +619,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
   /** Mark a flag resolved / dismissed, or record the task it was assigned as. */
   app.patch(
     "/coherence/flags/:id",
-    { preHandler: [app.authenticate, limit("application:flag-update", 120, 60)] },
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:flag-update", 120, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = z
@@ -621,7 +629,6 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden();
       const { data: flag } = await request.db.from("narrative_flags").select("*").eq("id", id).maybeSingle();
       if (!flag) throw notFound();
       await resolveStudentId(request, String(flag.student_id), "edit");
@@ -649,10 +656,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.get(
     "/activities-build",
-    { preHandler: [app.authenticate, limit("application:activities-build", 120, 60)] },
+    // A counselor, or a student whose practice has the AI tools on (resolveStudentId pins them to themselves).
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:activities-build", 120, 60)] },
     async (request) => {
       const q = studentQuery.parse(request.query);
-      if (isStudent(request)) throw forbidden("Activities Build is your counselor's tool");
       const studentId = await resolveStudentId(request, q.studentId, "view");
       const { data: profile } = await request.db.from("profiles").select("hometown, profile").eq("id", studentId).maybeSingle();
       if (!profile) throw notFound("That student isn't on your roster");
@@ -660,14 +667,14 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const { data: acts } = await request.db.from("activities").select("category").eq("student_id", studentId).limit(30);
       const subjects = [...new Set([...majors, ...((acts ?? []) as Row[]).map((a) => String(a.category ?? "").trim()).filter(Boolean)])];
 
-      const { data: last } = await request.db
+      // The last search: a student's is the last THEY ran; a counselor's is the last that wasn't the student's.
+      let lastQuery = request.db
         .from("opportunity_requests")
         .select("id, constraints, created_at")
         .eq("student_id", studentId)
-        .contains("constraints", { tool: "activities-build" })
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .contains("constraints", isStudent(request) ? { tool: "activities-build", ranBy: "student" } : { tool: "activities-build" });
+      if (!isStudent(request)) lastQuery = lastQuery.not("constraints", "cs", JSON.stringify({ ranBy: "student" }));
+      const { data: last } = await lastQuery.order("created_at", { ascending: false }).limit(1).maybeSingle();
       let programs: Row[] = [];
       if (last) {
         const { data } = await request.db
@@ -678,7 +685,16 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           .order("created_at");
         programs = (data ?? []) as Row[];
       }
+      // What was tracked (saved or applied to), whoever found it: the student's own list, and what their counselor sees.
+      const { data: trackedRows } = await request.db
+        .from("opportunity_matches")
+        .select("*")
+        .eq("student_id", studentId)
+        .in("status", ["saved", "applied"])
+        .order("updated_at", { ascending: false })
+        .limit(50);
       return {
+        tracked: ((trackedRows ?? []) as Row[]).map(toProgram),
         defaults: {
           subjects: majors.length > 0 ? majors : subjects.slice(0, 1),
           subjectOptions: subjects,
@@ -698,7 +714,7 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.post(
     "/activities-build",
-    { preHandler: [app.authenticate, aiLimit("activities-build")] },
+    { preHandler: [app.authenticate, requireStudentAiTools, aiLimit("activities-build")] },
     async (request, reply) => {
       const b = z
         .object({
@@ -713,8 +729,11 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden("Activities Build is your counselor's tool");
+      const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
+      // The request is filed under the counselor: the student's own counselor when they run it themself.
+      const counselorId = audience === "student" ? ((request.profile as { counselor_id?: string | null }).counselor_id ?? null) : request.auth.userId;
+      if (!counselorId) throw forbidden("This AI feature isn't available until your counselor's practice is set up.");
       const brief = await studentBrief(request, studentId);
       const near = b.near?.trim() || brief.hometown;
       const onlineOnly = b.format === "Online" || !near;
@@ -728,13 +747,14 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         miles: b.miles,
         durations: b.durations,
         extra: b.extra ?? null,
+        ...(audience === "student" ? { ranBy: "student" } : {}),
       };
 
       const { data: requestRow, error: reqError } = await request.db
         .from("opportunity_requests")
         .insert({
           student_id: studentId,
-          counselor_id: request.auth.userId,
+          counselor_id: counselorId,
           interests: b.subjects.slice(0, 12),
           directions: b.extra ?? null,
           constraints: criteria,
@@ -772,22 +792,13 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "concierge",
         studentId,
         model: DEEP_MODEL,
-        system: [
-          BASE_SYSTEM,
-          "Recommend real, named programs, jobs, labs and volunteer roles the student can actually sign up for.",
-          "If you are not confident a program currently exists and is open to high school students, leave it out. A short honest list beats a long invented one.",
-          "Give the host's official https address only when you are sure of it; otherwise leave url out.",
-          "Deadlines: say what the host publishes (\"Early spring\", \"Rolling\"), never a guessed date.",
-          onlineOnly
-            ? "Only online programs."
-            : `In person within about ${b.miles} miles of ${near}, plus online ones when the format allows.`,
-        ].join("\n"),
+        system: activitiesSystem(audience, { onlineOnly, miles: b.miles, near: near ?? null }),
         prompt: [
           `Subjects: ${b.subjects.join(", ") || "any"}`,
           b.types.length ? `Types: ${b.types.join(", ")}` : "",
           b.durations.length ? `Duration: ${b.durations.join(", ")}` : "",
           `Format: ${b.format}`,
-          b.extra ? `Counselor's note: ${b.extra}` : "",
+          b.extra ? activitiesNote(audience, b.extra) : "",
           catalogRows.length ? `Already found in the Meridies catalog (do not repeat): ${catalogRows.map((c) => c.name).join("; ")}` : "",
           "",
           brief.json,
@@ -855,7 +866,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
           online: c.format === "virtual",
           topics: Array.isArray(c.subject_tags) ? (c.subject_tags as string[]).slice(0, 6) : [],
           source: "catalog",
-          status: "counselor-review",
+          // A counselor's run waits for their review; a student's is theirs to read at once.
+          status: audience === "student" ? "suggested" : "counselor-review",
+          ...(audience === "student" ? { origin: "student" } : {}),
         })),
         ...(result.programs ?? [])
           .filter((p) => clip(p.name, 200) && (PROGRAM_TYPES as readonly string[]).includes(p.type) && (DURATIONS as readonly string[]).includes(p.duration))
@@ -877,8 +890,10 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
             online: Boolean(p.online),
             topics: (p.topics ?? []).map((t) => clip(t, 40)).filter(Boolean).slice(0, 6),
             source: "axis",
-            // Nothing reaches the student until the counselor approves it.
-            status: "counselor-review",
+            // A counselor's run: nothing reaches the student until the counselor approves it. A student's own run
+            // is theirs to read at once, marked as theirs and still carrying the "verify it" badge.
+            status: audience === "student" ? "suggested" : "counselor-review",
+            ...(audience === "student" ? { origin: "student" } : {}),
           })),
       ];
 
@@ -907,25 +922,33 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
 
   app.patch(
     "/activities-build/programs/:id",
-    { preHandler: [app.authenticate, limit("application:program-update", 120, 60)] },
+    { preHandler: [app.authenticate, requireStudentAiTools, limit("application:program-update", 120, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = z
         .object({
-          status: z.enum(["counselor-review", "approved", "dismissed", "saved"]).optional(),
+          status: z.enum(["counselor-review", "approved", "dismissed", "saved", "suggested", "applied"]).optional(),
           assignedTaskId: uuid.nullable().optional(),
         })
         .strict()
         .parse(request.body);
-      if (isStudent(request)) throw forbidden();
-      const { data: match } = await request.db.from("opportunity_matches").select("student_id").eq("id", id).maybeSingle();
+      const self = isStudent(request);
+      // A counselor reviews (counselor-review, approved, dismissed, saved); a student tracks what they found
+      // (suggested, saved, applied, dismissed) and never approves or sends anything.
+      const allowed: readonly string[] = self ? ["suggested", "saved", "applied", "dismissed"] : ["counselor-review", "approved", "dismissed", "saved"];
+      if (b.status !== undefined && !allowed.includes(b.status)) throw badRequest("That isn't a status you can set");
+      const { data: match } = await request.db.from("opportunity_matches").select("*").eq("id", id).maybeSingle();
       if (!match) throw notFound();
       await resolveStudentId(request, String(match.student_id), "edit");
+      // A student changes only what they found themself; a program their counselor sent is read-only to them.
+      if (self && match.origin !== "student") throw forbidden("That program came from your counselor");
       const update: Row = {};
       if (b.status !== undefined) {
         update.status = b.status;
-        update.reviewed_by = request.auth.userId;
-        update.reviewed_at = new Date().toISOString();
+        if (!self) {
+          update.reviewed_by = request.auth.userId;
+          update.reviewed_at = new Date().toISOString();
+        }
       }
       if (b.assignedTaskId !== undefined) {
         if (b.assignedTaskId) {

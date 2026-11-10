@@ -24,7 +24,7 @@ import { resolveStudentId } from "../guards.js";
 import { wrapUntrusted } from "../context/pack.js";
 import type { SectionName } from "../context/profiles.js";
 import type { ContextUsage } from "../context/types.js";
-import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems } from "./data.js";
+import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems, type UpcomingItem } from "./data.js";
 import type { RosterIndex } from "./entities.js";
 import { filterAllowedChunks } from "./guard.js";
 import { clip, type SourceLedger } from "./ledger.js";
@@ -33,7 +33,9 @@ import { getConnectors, getRetrieval, type ConnectedProvider, type RetrievedChun
 import { fusedSearch } from "./retrieval.js";
 import { loadRosterRisk } from "./risk.js";
 import { getOp, READ_OPS, WRITE_OPS } from "./ops/registry.js";
-import { markOutside, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { markOutside, markShort, proseRefusal, runRead, runWrite, type OperationEvent, type TurnBudget } from "./ops/run.js";
+import { ACTIVITY_OPS, draftWrite, type DraftTurn } from "./drafts/write.js";
+import { anyLong, freeBlocks } from "../context/freeText.js";
 
 export type ProposedAction = {
   id: string;
@@ -58,6 +60,8 @@ export type ToolContext = {
   /** Shared by every call in the turn: write counts and whether outside content was read. */
   turn: TurnBudget;
   onOperation: (e: OperationEvent) => void;
+  /** The conversation's activity draft: activity ops are merged into it, never filed directly (lib/axis/drafts). */
+  draft?: DraftTurn;
 };
 
 export type ToolOutput = {
@@ -65,6 +69,8 @@ export type ToolOutput = {
   isError?: boolean;
   /** Brought something new into the turn. Two rounds without anything new end the tool phase. */
   fresh: boolean;
+  /** The free text (lib/context/freeText.ts) this result showed the model, when it read outside content: what an answer may not quote. */
+  freeBlocks?: { source: string; text: string }[];
 };
 
 export type ToolName =
@@ -117,11 +123,13 @@ async function cite(ctx: ToolContext, chunks: RetrievedChunk[], none: string): P
   if (held) notes.push(`${held} result(s) withheld: kept out of AI by the practice's or the file's settings.`);
   if (dropped["other-student"]) notes.push(`${dropped["other-student"]} result(s) skipped: filed under a different student.`);
   if (!kept.length) return { content: [none, ...notes].join("\n"), fresh: false };
-  if (kept.some((c) => OUTSIDE.has(c.source))) markOutside(ctx.turn);
+  const fromOutside = kept.some((c) => OUTSIDE.has(c.source));
+  // A file's or an email's passages are free text under either rule.
+  if (fromOutside) markOutside(ctx.turn);
   const before = ctx.ledger.size;
   const { rendered, skipped } = ctx.ledger.add(kept);
   if (skipped) notes.push(`${skipped} more result(s) not shown: this turn's reading budget is spent.`);
-  return { content: [rendered, ...notes].filter(Boolean).join("\n\n"), fresh: ctx.ledger.size > before };
+  return { content: [rendered, ...notes].filter(Boolean).join("\n\n"), fresh: ctx.ledger.size > before, ...(fromOutside ? { freeBlocks: freeBlocks(rendered) } : {}) };
 }
 
 const searchInput = z.object({ query: z.string().trim().min(2).max(300), k: z.number().int().min(1).max(10).optional() });
@@ -266,10 +274,19 @@ const DEFS: ToolDef[] = [
       if (!target) return { content: "No student given. Use find_student first.", isError: true, fresh: false };
       const id = await resolveStudentId(ctx.request, target, "view");
       const built = await cachedStudentContext(ctx.request, id, ["profile", ...i.sections.filter((s) => s !== "profile")]);
-      // The student's own words or a file's text: from here on a change waits for a click.
-      if (readsOutside(built)) markOutside(ctx.turn);
+      // The student's own words or a file's text: from here on a change waits for a click. Under the free-text
+      // rule only free text does (a document, a value over 80 characters); short fields don't.
+      const outside = readsOutside(built);
+      // Free text in any section read, whatever its outside mark (a Research task's long title is the counselor's section).
+      const free = (built.freeText?.length ?? 0) > 0;
+      if (ctx.turn.freeRule ? free : outside) markOutside(ctx.turn);
+      else if (outside) markShort(ctx.turn);
       const omitted = built.omitted.map((o) => `${o.section} (${o.reason})`).join(", ");
-      return { content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`, fresh: !!built.text };
+      return {
+        content: `${built.text || "Nothing on file for those sections."}${omitted ? `\n\nNot included: ${omitted}.` : ""}`,
+        fresh: !!built.text,
+        freeBlocks: free || outside ? freeBlocks(built.text) : [],
+      };
     },
   },
   {
@@ -292,13 +309,21 @@ const DEFS: ToolDef[] = [
       const student = target ? await resolveStudentId(ctx.request, target, "view") : null;
       const window = { from: null, to: isoDay(new Date(Date.now() + days * 86_400_000)), label: `in the next ${days} days` };
       const items = await upcomingItems(ctx.request, { studentId: student, window, meetings: true, roster: ctx.roster, limit: 80 });
-      // A deadline's title, or a task the student added, is the student's words.
-      if (items.some((it) => it.outside)) markOutside(ctx.turn);
+      // A deadline's title, or a task the student added, is the student's words. Under the free-text rule only a
+      // title or detail over 80 characters flags the turn.
+      const long = (it: UpcomingItem) => it.outside && anyLong([it.title, it.detail]);
+      if (ctx.turn.freeRule ? items.some(long) : items.some((it) => it.outside)) markOutside(ctx.turn);
+      else if (items.some((it) => it.outside)) markShort(ctx.turn);
+      const name = (id: string) => ctx.roster.get(id)?.name ?? "";
       const lines = items.map(
         (it) =>
-          `${it.date}${it.overdue ? " OVERDUE" : ""} ${it.kind}${it.status ? ` [${it.status}]` : ""}${student ? "" : ` ${wrapUntrusted("student", ctx.roster.get(it.studentId)?.name ?? "")}`} ${wrapUntrusted(it.kind, `${it.title}${it.detail ? ` · ${it.detail}` : ""}`)}`
+          `${it.date}${it.overdue ? " OVERDUE" : ""} ${it.kind}${it.status ? ` [${it.status}]` : ""}${student ? "" : ` ${wrapUntrusted("student", name(it.studentId), anyLong([name(it.studentId)]))}`} ${wrapUntrusted(it.kind, `${it.title}${it.detail ? ` · ${it.detail}` : ""}`, long(it))}`
       );
-      return { content: lines.length ? `Today is ${isoDay()}.\n${lines.join("\n")}` : `Nothing open is due ${window.label}.`, fresh: lines.length > 0 };
+      return {
+        content: lines.length ? `Today is ${isoDay()}.\n${lines.join("\n")}` : `Nothing open is due ${window.label}.`,
+        fresh: lines.length > 0,
+        freeBlocks: items.filter(long).map((it) => ({ source: it.kind, text: `${it.title}${it.detail ? ` · ${it.detail}` : ""}` })),
+      };
     },
   },
   {
@@ -316,8 +341,14 @@ const DEFS: ToolDef[] = [
       const { limit } = z.object({ limit: z.number().int().min(1).max(20).optional() }).parse(raw ?? {});
       const ranked = (await loadRosterRisk(ctx.request, 14)).slice(0, limit ?? 8);
       if (!ranked.length) return { content: "Nobody has overdue work, a red flag or a deadline at risk in the next 14 days.", fresh: true };
-      if (ranked.some((r) => r.outside)) markOutside(ctx.turn);
-      return { content: ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name)} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "))}`).join("\n"), fresh: true };
+      // A reason quotes a title cut to 80 characters (lib/axis/risk.ts): a short field, never free text.
+      if (!ctx.turn.freeRule && ranked.some((r) => r.outside)) markOutside(ctx.turn);
+      else if (ranked.some((r) => r.outside)) markShort(ctx.turn);
+      return {
+        content: ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name, anyLong([r.name]))} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "), false)}`).join("\n"),
+        fresh: true,
+        freeBlocks: [],
+      };
     },
   },
   {
@@ -466,6 +497,7 @@ const DEFS: ToolDef[] = [
     },
     run: async (ctx, raw) => {
       const i = z.object({ action: z.string().min(1).max(80), input: z.record(z.unknown()) }).parse(raw);
+      if (ctx.draft && ACTIVITY_OPS.has(i.action)) return draftWrite(opContext(ctx), ctx.draft, i.action, i.input);
       return runWrite(opContext(ctx), i.action, i.input);
     },
   },

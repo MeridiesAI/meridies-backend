@@ -99,7 +99,11 @@ export type AiModule =
   // Application page: where the essay sits in an uploaded file (lib/applicationText.ts), and the Resume adjuster (lib/resumeAdjust.ts).
   | "essay-body" | "resume-adjust"
   // AI help filling the questionnaire's tables from typed words or a photo (lib/intakeFill.ts).
-  | "intake-fill";
+  | "intake-fill"
+  // A message to a family in their own language, and a family's reply back in English (lib/translate.ts); 20261110000002.
+  | "message-translate"
+  // Cited catalog proposals from a school's own pages (lib/catalogProposals.ts); 20261111000011.
+  | "catalog-proposals";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
@@ -151,22 +155,69 @@ function userContent(prompt: string, attachments: AiAttachment[] | undefined): A
   return blocks;
 }
 
-export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
-  const { request, module, studentId } = opts;
-  const actorId = request.auth.userId;
+/**
+ * Who a call is for and where it logs: a request, or a job with no request behind it. A system job has no actor
+ * and spends its own system budget (`subject`).
+ */
+type CallContext = {
+  actorId: string | null;
+  subject?: BudgetSubject;
+  /** Only picks the daily limits (a student's are lower, lib/aiBudget.ts); unset means a counselor's. */
+  role?: "student" | "counselor";
+  log: { warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
+};
 
+export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
+  const { request, ...rest } = opts;
   // The practice's Data & privacy switches come before the budget is spent.
-  await assertAiAllowed(request, module);
+  await assertAiAllowed(request, opts.module);
+  const role = request.profile?.role;
+  return structuredCall(rest, { actorId: request.auth.userId, role: role === "student" || role === "counselor" ? role : undefined, log: request.log });
+}
+
+/**
+ * `runStructured` for work with no request behind it: a webhook storing a
+ * family's reply, a cron retrying one. It reserves against `actorId`'s budget,
+ * writes the same `ai_runs` row and hides provider errors the same way, but it
+ * does NOT check the practice's Data & privacy switches, because there is no
+ * signed-in caller to read them for. The caller must have decided that already
+ * (`studentPracticeSettings`, failing closed) before it spends anything.
+ */
+export async function runStructuredUnattended<T>(
+  opts: Omit<RunOptions<T>, "request"> & { actorId: string; log: CallContext["log"] }
+): Promise<T> {
+  const { actorId, log, ...rest } = opts;
+  return structuredCall(rest, { actorId, log });
+}
+
+/**
+ * `runStructured` for a system job that acts for nobody (no signed-in caller, no practice): the ai_runs row has no
+ * actor and the call spends the job's own system budget plus the company line (lib/aiBudget.ts). There are no
+ * practice switches to read. The caller passes only public facts, never a student's.
+ */
+export async function runSystemStructured<T>(
+  opts: Omit<RunOptions<T>, "request" | "studentId"> & { job: "catalog-proposals"; log: CallContext["log"] }
+): Promise<T> {
+  const { job, log, ...rest } = opts;
+  return structuredCall({ ...rest, studentId: null }, { actorId: null, subject: { system: job }, log });
+}
+
+async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: CallContext): Promise<T> {
+  const { module, studentId } = opts;
+  const { actorId } = ctx;
 
   const model = opts.model ?? FAST_MODEL;
   const maxTokens = opts.maxTokens ?? 2048;
   const content = userContent(opts.prompt, opts.attachments);
   const tools = [{ name: opts.toolName, description: "Return the result in this exact structure.", input_schema: opts.schema as never }];
+  // A programming mistake, not a user error: a call with no actor must name its system budget.
+  const subject: BudgetSubject | null = ctx.subject ?? (actorId ? { userId: actorId, role: ctx.role } : null);
+  if (!subject) throw new Error("structuredCall: no actor and no system budget");
   // Every model call reserves against the budget first (lib/aiBudget.ts) and settles after, whatever happens.
   const hold = await reserve(
-    { userId: actorId },
+    subject,
     { model, maxOutputTokens: maxTokens, promptTokens: estimatePromptTokens({ system: opts.system, tools, messages: [{ role: "user", content }] }), module },
-    request.log
+    ctx.log
   );
   let used: CallUsage | "unused" | null = null;
   let answered = false;
@@ -246,11 +297,11 @@ export async function runStructured<T>(opts: RunOptions<T>): Promise<T> {
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });
     // Log server-side; hand the client something safe with no key hints.
-    request.log.error({ module, err }, "AI call failed");
+    ctx.log.error({ module, err }, "AI call failed");
     if (err && typeof err === "object" && "statusCode" in err) throw err;
     throw unavailable("The AI service is unavailable right now. Try again shortly.");
   } finally {
-    await settle(hold, used, request.log);
+    await settle(hold, used, ctx.log);
   }
 }
 

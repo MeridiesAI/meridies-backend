@@ -98,7 +98,10 @@ check("coherence carries the activity alignment", co.status === 200 && al?.total
 check("hours come from the sheet", by.research?.hoursPerYear === 200 && by.service?.hoursPerYear === 80, JSON.stringify(by));
 check("a bucket with nothing says so", by.competitions?.count === 0 && /competitions/.test(al.notes[0]), JSON.stringify(al.notes));
 check("rows are tied to the declared major", al.majors[0] === "Computer Science" && al.majorLinks.some((l) => l.activity === "Coding Club"), JSON.stringify(al.majorLinks));
-check("a student still can't open Coherence", (await call(Stu.token, "GET", `/application/coherence?studentId=${Stu.id}`)).status === 403);
+// A student runs Coherence only when their practice has switched "Let students use AI tools" on (off here, as it
+// is by default): test/integration/student-ai-tools.test.mjs covers it switched on, including that the student's
+// page carries no alignment, whose notes are written to the counselor.
+check("a student can't open Coherence while the practice's AI tools for students are off", (await call(Stu.token, "GET", `/application/coherence?studentId=${Stu.id}`)).status === 403);
 check("another practice can't read the alignment", [403, 404].includes((await call(X.token, "GET", `/application/coherence?studentId=${Stu.id}`)).status));
 
 console.log(process.exitCode ? "\nSome checks FAILED" : "\nAll checks passed");

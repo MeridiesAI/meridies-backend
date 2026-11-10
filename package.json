@@ -13,7 +13,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
-    "test:integration": "node --import tsx --test test/integration/*.test.mjs",
+    "test:integration": "node scripts/test-integration.mjs",
+    "eval:axis": "node --import tsx evals/axis/run.mjs",
+    "eval:axis:quality": "node --import tsx evals/axis/quality.mjs",
     "test:imports-load": "node test/integration/imports-load.mjs",
     "test:caseload-load": "node test/integration/caseload-transfer-load.mjs",
     "test:perf": "node test/integration/perf-roster.mjs",
@@ -37,11 +39,13 @@
     "sharp": "0.35.5",
     "stripe": "23.0.0",
     "unpdf": "1.8.1",
+    "web-push": "^4.0.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.23.1",
+    "@types/web-push": "^3.6.4",
     "fast-check": "^3.23.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

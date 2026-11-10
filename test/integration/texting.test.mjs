@@ -209,6 +209,26 @@ const composed = await call(C.token, "POST", `/communication/${S.id}/messages`, 
 check("a parent text from the student page works", composed.status === 201 && composed.body.status === "sent", JSON.stringify(composed.body).slice(0, 200));
 check("from the consultant's number to the guardian", messages.at(-1)?.From === NUMBER && messages.at(-1)?.To === "+14155550177" && /^Hi Pat, it's tx-counselor about tx-student2:/.test(messages.at(-1)?.Body ?? ""), JSON.stringify(messages.at(-1)));
 
+// ---- a family's text in another language is translated (needs TRANSLATE_FAKE on the API and here) ---------------------------------
+// The fake reads a leading "[xx] " as the language and the rest as its English (lib/inboundTranslate.ts).
+if (process.env.TRANSLATE_FAKE === "fixture") {
+  const row = async (sid) => JSON.parse((await sql(`select row_to_json(m) from public.inbound_messages m where provider_message_id like 'twilio:${sid}:%' and student_id = '${S.id}'`)) || "null");
+  await sql(`insert into public.student_alert_prefs (student_id, family_language) values ('${S.id}', 'es') on conflict (student_id) do update set family_language = 'es'`);
+  const es = await inbound({ From: "+14155550177", To: NUMBER, Body: "[es] Gracias, Sophia lo envia el jueves.", MessageSid: `SMtr1-${tag}` });
+  const r1 = await row(`SMtr1-${tag}`);
+  check("a guardian's text in another language is stored on the student", es.status === 200 && r1?.party === "parent" && r1?.student_id === S.id, JSON.stringify(r1));
+  check("with its English, the language, and the translation done", r1?.body_en === "Gracias, Sophia lo envia el jueves." && r1?.detected_language === "es" && r1?.translation_state === "done", JSON.stringify(r1));
+  check("the counselor's copy of the text carries the English", Number(await sql(`select count(*) from public.message_deliveries where template = 'family-text-forward' and to_email = '${C.email}' and body like '%In English:%'`)) >= 1);
+
+  await inbound({ From: "+14155550177", To: NUMBER, Body: "STOP", MessageSid: `SMtr2-${tag}` });
+  const r2 = await row(`SMtr2-${tag}`);
+  check("STOP is a keyword, not a message: nothing is translated", r2 && r2.translation_state === null && r2.body_en === null, JSON.stringify(r2));
+  await inbound({ From: "+14155550177", To: NUMBER, Body: "start", MessageSid: `SMtr3-${tag}` });
+  check("START likewise", (await row(`SMtr3-${tag}`))?.translation_state === null);
+} else {
+  console.log("SKIP  text translation (start the API and this suite with TRANSLATE_FAKE=fixture)");
+}
+
 // ---- a failed save gives the number back ---------------------------------------------------------------------------------------------
 const D = await user("tx-buyer2");
 await sql(`insert into public.consultant_phone_numbers (counselor_id, phone_e164, twilio_sid) values ('${D.id}', '+14155550112', 'PN${"9".repeat(32)}') on conflict do nothing`);

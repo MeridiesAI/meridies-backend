@@ -28,6 +28,8 @@ import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
 import { resultsUnavailable } from "../lib/resultsAvailability.js";
 import { getRemoteFile, exportGoogleDocText } from "../lib/suiteApi.js";
+import { essayBodyChanged } from "../lib/inactivity.js";
+import { noticeEssayEdit } from "../lib/essayNotice.js";
 import {
   catalogDeadline,
   ESSAY_SELECT,
@@ -350,6 +352,18 @@ export const honorBody = z
     sort_order: z.number().int().min(0).max(999),
   })
   .partial()
+  .strict();
+
+/** POST /application/activities/batch: up to 10 sheet rows for one student. */
+export const activityBatchBody = z.object({ studentId: z.string().uuid(), rows: z.array(activityBody).min(1).max(10) }).strict();
+
+/** DELETE /application/activities?studentId=&ids=a,b&onlyUnedited=true */
+const activityBatchDeleteQuery = z
+  .object({
+    studentId: z.string().uuid(),
+    ids: z.string().transform((s) => s.split(",").map((x) => x.trim())).pipe(z.array(z.string().uuid()).min(1).max(10)),
+    onlyUnedited: z.enum(["true", "false"]).optional(),
+  })
   .strict();
 
 function capRows(table: "activities" | "awards") {
@@ -768,6 +782,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from("essays").insert(insert).select(ESSAY_SELECT).single();
       if (error) throw fromPostgrest(error);
       await logEssayProgress(request, studentId, data as Row, "insert");
+      if (essayBodyChanged(null, insert.body as string | null | undefined)) void noticeEssayEdit(request, studentId, String((data as Row).id));
       return reply.code(201).send(essayDto(request, data as Row));
     }
   );
@@ -778,11 +793,12 @@ export default async function applicationRoutes(app: FastifyInstance) {
     async (request) => {
       const { id } = idParam.parse(request.params);
       const b = essayPatchBody.parse(request.body);
+      // The body is read only to tell the counselor it changed (lib/essayNotice.ts); it is never logged.
       const { data: current, error: readError } = await request.db
         .from("essays")
-        .select("student_id")
+        .select(b.body !== undefined ? "student_id, body" : "student_id")
         .eq("id", id)
-        .maybeSingle();
+        .maybeSingle<Row>();
       if (readError) throw fromPostgrest(readError);
       if (!current) throw notFound();
       const studentId = await resolveStudentId(request, String(current.student_id), "edit");
@@ -807,7 +823,10 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from("essays").update(update).eq("id", id).select(ESSAY_SELECT).maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound();
-      if (b.body !== undefined) await logEssayProgress(request, studentId, data as Row, "update");
+      if (b.body !== undefined) {
+        await logEssayProgress(request, studentId, data as Row, "update");
+        if (essayBodyChanged(current.body as string | null, b.body)) void noticeEssayEdit(request, studentId, id);
+      }
       return essayDto(request, data as Row);
     }
   );
@@ -868,7 +887,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       if (b.essayId) {
         const { data, error: curError } = await request.db
           .from("essays")
-          .select("id, student_id, essay_kind")
+          .select("id, student_id, essay_kind, body")
           .eq("id", b.essayId)
           .maybeSingle();
         if (curError) throw fromPostgrest(curError);
@@ -896,6 +915,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         if (error) throw fromPostgrest(error);
         if (!data) throw notFound();
         await logEssayProgress(request, studentId, data as Row, "update");
+        if (essayBodyChanged(current?.body as string | null, update.body as string)) void noticeEssayEdit(request, studentId, b.essayId);
         return reply.code(200).send(essayDto(request, data as Row));
       }
 
@@ -921,6 +941,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { data, error } = await request.db.from("essays").insert(insert).select(ESSAY_SELECT).single();
       if (error) throw fromPostgrest(error);
       await logEssayProgress(request, studentId, data as Row, "insert");
+      if (essayBodyChanged(null, insert.body as string)) void noticeEssayEdit(request, studentId, String((data as Row).id));
       return reply.code(201).send(essayDto(request, data as Row));
     }
   );
@@ -1173,6 +1194,50 @@ export default async function applicationRoutes(app: FastifyInstance) {
     toDto: toSheetActivity,
     beforeWrite: capRows("activities"),
     idempotent: true,
+  });
+
+  // Several rows at once, each answered on its own (an AxIS card with a row per activity): a row the cap or the
+  // database refuses fails alone and the rest still save. Rows go in order, so the cap counts the earlier ones.
+  app.post("/activities/batch", { preHandler: [app.authenticate, limit("activities:batch", 60, 60)] }, async (request) => {
+    const { studentId, rows } = activityBatchBody.parse(request.body);
+    const student = await resolveStudentId(request, studentId, "edit");
+    const cap = capRows("activities");
+    const results: ({ ok: true; id: string } | { ok: false; message: string })[] = [];
+    for (const row of rows) {
+      try {
+        const values: Row = { ...row };
+        await cap(request, student, values, "insert");
+        const { data, error } = await request.db.from("activities").insert({ ...values, student_id: student }).select("id").single();
+        if (error) throw fromPostgrest(error);
+        results.push({ ok: true, id: String((data as Row).id) });
+      } catch (err) {
+        // Earlier rows are already saved: a failure is this row's answer, never the whole request's.
+        if (!(err instanceof HttpError && err.statusCode < 500)) request.log.error({ err: serializeErr(err) }, "activity batch row failed");
+        results.push({ ok: false, message: err instanceof HttpError && err.statusCode < 500 ? err.message : "That row couldn't be saved right now." });
+      }
+    }
+    return { results };
+  });
+
+  // Several of a student's rows at once (the Undo of a batch card). With onlyUnedited, a row changed since it was
+  // saved (its updated_at moved past created_at) is kept and listed, so an Undo never throws away an edit.
+  app.delete("/activities", { preHandler: [app.authenticate, limit("activities:batch-delete", 60, 60)] }, async (request) => {
+    const q = activityBatchDeleteQuery.parse(request.query);
+    const student = await resolveStudentId(request, q.studentId, "edit");
+    const { data, error } = await request.db
+      .from("activities")
+      .select("id, organization, created_at, updated_at")
+      .eq("student_id", student)
+      .in("id", q.ids);
+    if (error) throw fromPostgrest(error);
+    const found = (data ?? []) as Row[];
+    const edited = (r: Row) => q.onlyUnedited === "true" && String(r.updated_at) !== String(r.created_at);
+    const skipped = found.filter(edited).map((r) => ({ id: String(r.id), organization: typeof r.organization === "string" ? r.organization : null }));
+    const ids = found.filter((r) => !edited(r)).map((r) => String(r.id));
+    if (!ids.length) return { deleted: 0, skipped };
+    const del = await request.db.from("activities").delete().eq("student_id", student).in("id", ids).select("id");
+    if (del.error) throw fromPostgrest(del.error);
+    return { deleted: (del.data ?? []).length, skipped };
   });
   registerCollection(app, {
     path: "honors",

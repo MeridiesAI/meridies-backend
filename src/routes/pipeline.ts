@@ -35,6 +35,7 @@ import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/err
 import { requireRole } from "../lib/guards.js";
 import { activeStudentMessage, isValidPhone, missingForActiveStudent } from "../lib/contactRules.js";
 import { createInvitation } from "../lib/invites.js";
+import { contactHasSignedAgreement, isSignedAgreementRestrict, SIGNED_AGREEMENT_CONTACT_MESSAGE } from "../lib/agreements.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { deriveAccount, formatUsd, PAYMENT_METHODS, planInvoice, planLine, planPayment, totals, type AccountDTO } from "../lib/payments.js";
 import {
@@ -823,8 +824,13 @@ export default async function pipelineRoutes(app: FastifyInstance) {
   app.delete("/contacts/:id", { preHandler: write("pipeline:contacts") }, async (request, reply) => {
     const { id } = idParam.parse(request.params);
     await loadContactRow(request, id);
+    // A signed agreement is a permanent record (20261111000010): say so, rather than blame billing.
+    if (await contactHasSignedAgreement(request.db, id)) {
+      throw new HttpError(409, SIGNED_AGREEMENT_CONTACT_MESSAGE, "agreement_on_file");
+    }
     const { error } = await request.db.from("pipeline_contacts").delete().eq("id", id);
     if (error) {
+      if (isSignedAgreementRestrict(error)) throw new HttpError(409, SIGNED_AGREEMENT_CONTACT_MESSAGE, "agreement_on_file");
       if (error.code === "23503") {
         throw conflict("This family has invoices or payments on file, so the contact stays.");
       }

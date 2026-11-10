@@ -9,6 +9,7 @@
  */
 
 import { accessStatusOf, type AccessStatus } from "./access.js";
+import { storedValues, withCurrent } from "./handInValues.js";
 
 export type Role = "student" | "counselor";
 
@@ -32,6 +33,8 @@ export type Profile = {
   grad_year: string | null;
   profile: Record<string, unknown> | null;
   counselor_approved_at: string | null;
+  /** Stamped at most hourly on a student's requests (lib/inactivityAlerts.ts). */
+  last_active_at?: string | null;
 };
 
 /** `request.profile`: the row `authenticate` loads, without the `profile` jsonb. */
@@ -183,6 +186,9 @@ export const toFamilyReport = (r: Row) => ({
   highlights: (r.highlights as string[]) ?? [],
   body: str(r.body),
   status: str(r.status),
+  /** The week a weekly digest covers (null for other kinds). */
+  periodStart: r.period_start ? str(r.period_start) : null,
+  periodEnd: r.period_end ? str(r.period_end) : null,
 });
 
 export const toSchoolReframing = (r: Row) => ({
@@ -297,7 +303,7 @@ export const toTaskDocument = (r: Row) => {
  */
 export const toTask = (
   r: Row,
-  extras: { stages?: Row[]; documents?: Row[]; tracker?: Row | null; fromResearch?: boolean } = {}
+  extras: { stages?: Row[]; documents?: Row[]; tracker?: Row | null; academics?: Row | null; fromResearch?: boolean } = {}
 ) => ({
   id: str(r.id),
   studentId: str(r.student_id),
@@ -336,12 +342,16 @@ export const toTask = (
   updatedAt: nstr(r.updated_at),
   stages: (extras.stages ?? []).map(toTaskStage),
   documents: (extras.documents ?? []).map(toTaskDocument),
-  tracker: extras.tracker ? toTrackerCheck(extras.tracker) : null,
+  tracker: extras.tracker ? toTrackerCheck(extras.tracker, extras.academics) : null,
   /** Counselor reads only: accepted from a Research suggestion (its title is the research model's). */
   ...(extras.fromResearch !== undefined ? { fromResearch: extras.fromResearch } : {}),
 });
 
-export const toTrackerCheck = (r: Row) => ({
+/**
+ * `values`: what AxIS copied off a handed-in file, each unverified until a counselor confirms it, with the
+ * profile's value now (`academics`, the student's student_academics row). Null before 20261108000005.
+ */
+export const toTrackerCheck = (r: Row, academics?: Row | null) => ({
   id: str(r.id ?? r.check_id),
   deliverableId: str(r.deliverable_id),
   documentId: nstr(r.document_id),
@@ -354,6 +364,7 @@ export const toTrackerCheck = (r: Row) => ({
   findings: Array.isArray(r.findings) ? (r.findings as string[]) : [],
   source: str(r.source) as "system" | "ai" | "counselor",
   checkedAt: nstr(r.checked_at),
+  values: ((v) => (v ? withCurrent(v, academics ?? null) : null))(storedValues(r.extracted_values)),
 });
 
 export const toFolder = (r: Row) => ({
@@ -471,6 +482,12 @@ export const toBlast = (r: Row) => ({
   audienceLabel: nstr(r.audience_label),
   // Absent until 20261030000001: a blast then is the students it reached, sent once.
   recipientType: (r.recipient_type === "parents" ? "parents" : "students") as "students" | "parents",
+  // The classes the filters name ("2027"), so a queued seasonal blast can say who it is for.
+  classYears: Array.isArray((r.filters as { classYears?: unknown } | null)?.classYears)
+    ? ((r.filters as { classYears: unknown[] }).classYears.map((y) => String(y)))
+    : ([] as string[]),
+  // The seasonal draft it was queued from; absent until 20261110000003.
+  templateId: nstr(r.source_template_id),
   scheduledFor: nstr(r.scheduled_for),
   repeatYearly: r.repeat_yearly === true,
   channel: str(r.channel) as "email" | "sms" | "both",

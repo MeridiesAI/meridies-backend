@@ -505,7 +505,9 @@ export function brandedEmail(t: BrandedEmail): string {
     .filter(Boolean)
     .map(
       (p) =>
-        `<p style="margin:16px 0 0;font-size:15px;line-height:1.6;color:#334b3f;">${escapeHtml(
+        // dir="auto": each paragraph reads in its own direction, so an Arabic, Urdu or Persian translation sits right-to-left
+        // above its English. pre-line keeps a message's single line breaks ("• item" lists, sign-offs).
+        `<p dir="auto" style="margin:16px 0 0;font-size:15px;line-height:1.6;color:#334b3f;white-space:pre-line;">${escapeHtml(
           p
         )}</p>`
     )
@@ -513,7 +515,7 @@ export function brandedEmail(t: BrandedEmail): string {
 
   const bullets = t.bullets?.length
     ? `<ul style="margin:16px 0 0;padding-left:20px;font-size:15px;line-height:1.6;color:#334b3f;">${t.bullets
-        .map((b) => `<li style="margin:6px 0;">${escapeHtml(b)}</li>`)
+        .map((b) => `<li dir="auto" style="margin:6px 0;">${escapeHtml(b)}</li>`)
         .join("")}</ul>`
     : "";
 
@@ -550,7 +552,7 @@ export function brandedEmail(t: BrandedEmail): string {
             <div style="font-size:14px;font-weight:600;letter-spacing:0.02em;color:#176b45;text-transform:uppercase;">Meridies</div>
           </td></tr>
           <tr><td style="padding:8px 32px 0;">
-            <h1 style="margin:0;font-size:22px;line-height:1.25;color:#10291f;">${escapeHtml(
+            <h1 dir="auto" style="margin:0;font-size:22px;line-height:1.25;color:#10291f;">${escapeHtml(
               t.heading
             )}</h1>
             ${paragraphs}

@@ -14,6 +14,11 @@ export type StudentContext = ContextUsage & {
    * tasks judged per row). Empty for a trustedOnly build. Never sent to a client.
    */
   outside: string[];
+  /**
+   * The used sections that carry free text (lib/context/freeText.ts): the narrower rule a turn is flagged by once
+   * 20261108000004 is in. Empty for a shortOnly or trustedOnly build.
+   */
+  freeText: string[];
   studentName: string | null;
   /** Untrusted student text (names, schools, hometown): wrap with wrapUntrusted before it enters a prompt. */
   facts: {

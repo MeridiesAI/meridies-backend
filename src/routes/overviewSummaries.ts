@@ -76,14 +76,14 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
       const scholarshipRows = await (async () => {
         const wide = await db
           .from("scholarship_matches")
-          .select("student_id, status, amount_cents, awarded_cents, deadline")
+          .select("student_id, name, status, amount_cents, awarded_cents, deadline")
           .in("student_id", ids)
           .limit(20_000);
         if (!wide.error) return (wide.data ?? []) as Row[];
         if (!isResultsNotApplied(wide.error)) throw fromPostgrest(wide.error);
         const narrow = await db
           .from("scholarship_matches")
-          .select("student_id, status, amount_cents, deadline")
+          .select("student_id, name, status, amount_cents, deadline")
           .in("student_id", ids)
           .limit(20_000);
         if (narrow.error) throw fromPostgrest(narrow.error);
@@ -118,12 +118,44 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
         if (status !== "not-started") cur.inPlay += 1;
         resultsBy.set(id, cur);
       }
+      // The Overview's per-student dropdown: awards won from the tracker (a name and a total; the tracker
+      // stores neither a school nor a per-year figure) and scholarships on award letters (a school and one
+      // academic year's amount). Kept apart and never added together, so nothing is counted twice.
+      const AWARD_LIST_CAP = 25;
+      const wonBy = new Map<string, { name: string; cents: number }[]>();
+      const bySchoolBy = new Map<string, { school: string; name: string; perYearCents: number }[]>();
+      // One row per award letter. The letter's own scholarships_cents is the figure the aid comparator and the
+      // manual award-letter form use (that form saves a total and no line items), so it comes first; when it is
+      // empty the scholarship line items are added up instead. A letter's name is its one scholarship line's
+      // label, else "Scholarships".
+      const letters = await db
+        .from("award_letters")
+        .select("student_id, school_name, scholarships_cents, award_letter_items(label, category, amount_cents)")
+        .in("student_id", ids)
+        .limit(5000);
+      // Detail only: a failed read leaves the dropdown without school rows, it never fails the page.
+      if (letters.error) request.log.warn({ code: letters.error.code }, "overview: award letter scholarships unavailable");
+      for (const r of (letters.error ? [] : letters.data ?? []) as Row[]) {
+        const school = String(r.school_name ?? "").trim();
+        if (!school) continue;
+        const lines = ((r.award_letter_items ?? []) as Row[]).filter((i) => i.category === "scholarship" && (num(i.amount_cents) ?? 0) > 0);
+        const fromLines = lines.reduce((sum, i) => sum + (num(i.amount_cents) ?? 0), 0);
+        const cents = (num(r.scholarships_cents) ?? 0) > 0 ? (num(r.scholarships_cents) as number) : fromLines;
+        if (cents <= 0) continue;
+        const id = String(r.student_id);
+        const name = lines.length === 1 && String(lines[0].label ?? "").trim() ? String(lines[0].label).trim() : "Scholarships";
+        bySchoolBy.set(id, [...(bySchoolBy.get(id) ?? []), { school, name, perYearCents: cents }]);
+      }
       const scholarshipsBy = new Map<string, { wonCents: number; openCount: number; nextDeadline: string | null }>();
       for (const r of scholarshipRows) {
         const id = String(r.student_id);
         const cur = scholarshipsBy.get(id) ?? { wonCents: 0, openCount: 0, nextDeadline: null };
         const status = String(r.status);
-        if (status === "awarded") cur.wonCents += num(r.awarded_cents) ?? num(r.amount_cents) ?? 0;
+        if (status === "awarded") {
+          const cents = num(r.awarded_cents) ?? num(r.amount_cents) ?? 0;
+          cur.wonCents += cents;
+          if (cents > 0) wonBy.set(id, [...(wonBy.get(id) ?? []), { name: String(r.name ?? "Scholarship"), cents }]);
+        }
         if (status === "saved" || status === "applying") {
           cur.openCount += 1;
           const d = r.deadline ? String(r.deadline) : null;
@@ -197,7 +229,17 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
             waiting: resultsBy.get(id)?.waiting ?? 0,
             enrolledName: resultsBy.get(id)?.enrolledName ?? null,
           },
-          scholarships: scholarshipsBy.get(id) ?? { wonCents: 0, openCount: 0, nextDeadline: null },
+          scholarships: {
+            ...(scholarshipsBy.get(id) ?? { wonCents: 0, openCount: 0, nextDeadline: null }),
+            // What sits behind the Won figure and the award letters, for the card's dropdown. Largest first
+            // for the tracker, by school then name for the letters.
+            awards: {
+              won: [...(wonBy.get(id) ?? [])].sort((a, b) => b.cents - a.cents).slice(0, AWARD_LIST_CAP),
+              bySchool: [...(bySchoolBy.get(id) ?? [])]
+                .sort((a, b) => a.school.localeCompare(b.school, "en-US") || a.name.localeCompare(b.name, "en-US"))
+                .slice(0, AWARD_LIST_CAP),
+            },
+          },
           polygon: axesBy.get(id) ?? [],
           nextMeeting: m
             ? { id: String(m.id), title: String(m.title), startsAt: String(m.starts_at), mode: String(m.mode) }

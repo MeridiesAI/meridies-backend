@@ -30,6 +30,7 @@ import { HttpError, badRequest, fromPostgrest, notFound } from "../lib/errors.js
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { hiddenByCounselor, visibilityOf } from "../lib/polygonVisibility.js";
+import { studentAiToolsEnabled } from "../lib/practiceSettings.js";
 import {
   applyInfoPatch,
   infoPatchSchema,
@@ -129,6 +130,14 @@ export default async function meRoutes(app: FastifyInstance) {
       const info = await applyInfoPatch(request, request.auth.userId, patch);
       return overview(request, info);
     }
+  );
+
+  // Whether the student's practice lets its students use the AI tools. Read-only and never an error:
+  // the app hides the tools on false, and the tool routes check the same switch themselves.
+  app.get(
+    "/ai-tools",
+    { preHandler: [...student, limit("me:ai-tools", 240, 60)] },
+    async (request) => ({ enabled: await studentAiToolsEnabled(request) })
   );
 
   app.get(

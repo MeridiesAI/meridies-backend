@@ -38,6 +38,14 @@ const envSchema = z.object({
   // Time saved: activity heartbeats are recorded only when "true". Stays off in
   // production until the privacy policy line about time tracking is live.
   KPI_TRACKING_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Leave Meridies: the purge that deletes closed accounts after their 30-day grace period
+  // (POST /internal/account-closures/purge). OFF unless exactly "true" (lib/accountClosure.ts purgeFlag); any
+  // other value is off, never a boot error. Not switched on without the owner's explicit OK.
+  ACCOUNT_PURGE_ENABLED: blankIsUnset(z.string().optional()),
+  // Agreements (typed-name acceptance, routes/agreements.ts): every route answers
+  // 404 agreements_off unless "true". Stays off in production until the consent
+  // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
+  AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any
@@ -50,6 +58,22 @@ const envSchema = z.object({
   // development or test; the server refuses to start otherwise, and warns
   // whenever it is on (lib/research/bootGuard.ts).
   RESEARCH_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for message translation (no model): an outbound message comes back as "[es] <text>", and an
+  // inbound one starting "[xx] " is read as language xx with the rest as its English. Same rules as RESEARCH_FAKE:
+  // only with NODE_ENV development or test, the server refuses to start otherwise (lib/translate.ts).
+  TRANSLATE_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Eval-only: AxIS's clock can be moved forward through POST /axis/eval/clock (the real-model evals' draft expiry
+  // cases). The server refuses to start with it unless NODE_ENV isn't production and SUPABASE_URL is a local stack
+  // (lib/axis/clock.ts).
+  AXIS_EVAL_CLOCK: blankIsUnset(z.enum(["on"]).optional()),
+  // Test double for AI meeting summaries (no model): a part's summary is its first line, the merge joins them,
+  // and both still pass cleanSummary. Same rules as RESEARCH_FAKE: development or test only (lib/meetingSummary.ts).
+  MEETING_SUMMARY_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for the Google Sheets export (lib/driveExport.ts): no call to Google. Same rules as TRANSLATE_FAKE.
+  DRIVE_EXPORT_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // The model that translates a family's messages; defaults to DEEP_MODEL (lib/translate.ts). A model the
+  // private.ai_prices table doesn't price is charged at the table's highest rates, so add its row first.
+  TRANSLATE_MODEL: blankIsUnset(z.string().min(5).max(80).optional()),
 
   // Outbound email (student invitations). Optional: without the key, invite
   // creation still works but the email is skipped and logged, rather than
@@ -69,8 +93,19 @@ const envSchema = z.object({
   // Tests only, like RESEND_API_BASE: Twilio's REST calls (sending, searching and
   // buying numbers, the Messaging Service) go to this origin. Ignored in production.
   TWILIO_API_BASE: blankIsUnset(z.string().url().optional()),
+  // Tests only: a JSON file { "<counselor id>": [{ "start": ISO, "end": ISO }] } read as each
+  // counselor's calendar busy time for student booking, instead of asking Google or Microsoft.
+  // Allowed only with the raw NODE_ENV development or test; index.ts refuses to start otherwise
+  // (lib/booking.ts bookingBusyFixtureRefusal), the RESEARCH_FAKE / TRANSLATE_FAKE rule.
+  BOOKING_BUSY_FIXTURE: blankIsUnset(z.string().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
+
+  // Web Push (VAPID). Optional: unset, push routes answer 503 push_unavailable and the sweep does nothing.
+  // Generate once with `npx web-push generate-vapid-keys`; the subject is a mailto: or https: contact.
+  VAPID_PUBLIC_KEY: blankIsUnset(z.string().min(40).optional()),
+  VAPID_PRIVATE_KEY: blankIsUnset(z.string().min(20).optional()),
+  VAPID_SUBJECT: blankIsUnset(z.string().regex(/^(mailto:|https:\/\/)/, "VAPID_SUBJECT must be a mailto: or https: URL").optional()),
 
   // Outbound SMS (Twilio REST, no SDK). Optional: without a complete set, an
   // SMS is recorded as `queued` in message_deliveries and never claimed sent.
@@ -144,8 +179,15 @@ const envSchema = z.object({
   // The AI budget gate (lib/aiBudget.ts, 20261108000002): every model call reserves against these and settles
   // after. Per user: calls and estimated spend per UTC day, output and weighted input tokens per calendar month.
   // Company-wide: estimated spend per UTC day; at it, all AI pauses until midnight UTC.
+  // How long the scholarship scan keeps the shared catalog it read, in milliseconds (0 = read every time).
+  // The integration suite sets 0: its tests add catalog rows and scan straight away.
+  SCHOLARSHIP_CATALOG_CACHE_MS: blankIsUnset(z.coerce.number().int().min(0).max(3_600_000).default(60_000)),
   AI_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(300)),
   AI_USER_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(10)),
+  // A student's own daily limits are lower than a counselor's, so many students can't crowd the shared company
+  // ceiling out from under the counselors (students use AI tools only when their practice has turned them on).
+  AI_STUDENT_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(1)),
+  AI_STUDENT_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(40)),
   AI_MONTHLY_OUTPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(5_000_000)),
   AI_MONTHLY_INPUT_TOKENS: blankIsUnset(z.coerce.number().int().min(1).default(100_000_000)),
   AI_DAILY_CEILING_USD: blankIsUnset(z.coerce.number().positive().default(100)),
@@ -209,6 +251,8 @@ export const twilioBase = twilioOverride ?? "https://api.twilio.com";
 export const twilioMessagingBase = twilioOverride ?? "https://messaging.twilio.com";
 /** Resend's API origin. Only a non-production process may point it elsewhere. */
 export const resendBase = ((env.NODE_ENV === "production" ? undefined : env.RESEND_API_BASE) ?? "https://api.resend.com").replace(/\/+$/, "");
+/** Web Push needs all three VAPID settings. */
+export const hasPush = Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY && env.VAPID_SUBJECT);
 export const hasCronSecret = Boolean(env.CRON_SECRET);
 export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
 /** Card payments need both Stripe keys, the service role (webhook, pay page) and a public API origin (pay links). */

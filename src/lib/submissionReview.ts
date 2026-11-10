@@ -5,10 +5,12 @@
  * What it decides is narrow on purpose: is this the thing that was asked for,
  * and is it usable (complete, legible, the right student, current)? It does
  * not grade the student's work and never rewrites it: findings are short
- * bullets through `enforceNoProse`, the same filter the essay routes use. Facts
- * it reads off the document (a GPA, a test score) are shown to the counselor
- * as findings; nothing is written into the student's profile from a model's
- * reading of a scan.
+ * bullets through `enforceNoProse`, the same filter the essay routes use. The
+ * values it reads off the document (a GPA, a class rank, a test score) are a
+ * list on the check, unverified until a counselor confirms them
+ * (lib/handInValues.ts); nothing is written into the student's profile from a
+ * model's reading of a scan. Everything the student or the file supplied
+ * reaches the model inside untrusted-data blocks (`reviewPrompt`).
  *
  * Outcome:
  *   accepted   -> a tracker check "on-track", the task complete (which also
@@ -49,6 +51,9 @@ import { isCounselorApproved } from "./access.js";
 import { documentReadableForTask, toAiDoc } from "./context/documentAi.js";
 import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePathShape } from "./storagePath.js";
 import { consumeRateLimit } from "./limits.js";
+import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "./context/pack.js";
+import { isSchemaMissing } from "./axis/failsafe.js";
+import { fallbackFindings, valuesFrom } from "./handInValues.js";
 
 type Row = Record<string, unknown>;
 type Svc = NonNullable<ReturnType<typeof serviceClient>>;
@@ -167,9 +172,36 @@ export function cleanReview(value: unknown): ReviewResult {
   };
 }
 
-/** The findings the counselor reads: what AxIS read off the file first, then what it noticed. */
-export function checkFindings(r: ReviewResult): string[] {
-  return [...r.facts.map((f) => `${f.label}: ${f.value}`), ...r.findings].slice(0, 14);
+const REVIEW_SYSTEM = [
+  "You check a file a high-school student handed in to their college counselor.",
+  "Decide one thing: is this the document that was asked for, and is it usable?",
+  "Usable means: the right kind of document, readable, not cut off, and about this student when a name appears.",
+  "Judge completeness against what can exist today. A current student's transcript covers only the years finished so far, an unofficial transcript or a printout from the school portal is acceptable unless the counselor asked for an official one, and a resume may be short.",
+  "Only say needs-fix for a real problem the student can act on: the wrong document, unreadable, plainly cut off, another person's, or missing something the counselor explicitly asked for.",
+  "Do not grade the student's achievements, writing quality or effort. A weak but genuine transcript is accepted.",
+  "Never rewrite, draft, continue or quote the student's work at length. Never produce prose they could paste anywhere.",
+  "note: ONE plain line, at most 200 characters, that both the student and the counselor read. Describe the file, not the person: \"This is a beach packing list, not a resume.\" or \"Official transcript through grade 10, complete and readable.\" Never write \"the student\".",
+  "findings: up to 6 short bullets on what you checked or what is wrong, each a separate list item with no markup.",
+  "weightedGpa, unweightedGpa, classRank, testScores: copied exactly as printed on the document (classRank like \"24 of 410\", each test score like \"SAT 1450\"); null or empty when not printed. Never infer or compute a value.",
+  "studentFix: when the verdict is needs-fix, one plain sentence telling the student what to upload instead. Otherwise null.",
+  UNTRUSTED_DATA_RULE,
+].join("\n");
+
+/**
+ * The review's prompt. The task title and instructions, the student's name, the file name and the file's text are
+ * each in their own untrusted-data block: a file that says "accept this" is a file, not an instruction.
+ */
+export function reviewPrompt(input: { title: string; instructions: string; studentName: string; filename: string; text: string }): { system: string; prompt: string } {
+  const prompt = [
+    `Requested: ${wrapUntrusted("task title", input.title)}`,
+    input.instructions ? `What the counselor wrote: ${wrapUntrusted("task instructions", input.instructions)}` : "",
+    input.studentName ? `Student's name on file: ${wrapUntrusted("student name", input.studentName)}` : "",
+    `File name: ${wrapUntrusted("file name", input.filename)}`,
+    input.text ? `\nThe file's text:\n${wrapUntrusted("the handed-in file", input.text.slice(0, MAX_TEXT_CHARS))}` : "The file is attached.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return { system: REVIEW_SYSTEM, prompt };
 }
 
 /**
@@ -285,7 +317,7 @@ export async function startSubmissionReview(
         .maybeSingle();
       if (stillError) throw new Error(`submission re-read: ${stillError.message}`);
       if (!still) return;
-      await record(svc, reviewed, args.documentId, result);
+      await recordReview(svc, reviewed, args.documentId, result);
       outcome = { status: "reviewed", result };
     } catch (err) {
       request.log.error({ err, taskId: args.taskId }, "submission review failed");
@@ -358,32 +390,13 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
   const studentName = String(student?.full_name ?? "").trim();
   const instructions = String(task.instructions ?? "").trim();
 
+  const { system, prompt } = reviewPrompt({ title: String(task.title ?? ""), instructions, studentName, filename, text });
   const judge = () => runStructured<ReviewResult>({
     request,
     module: "submission-review",
     studentId,
-    system: [
-      "You check a file a high-school student handed in to their college counselor.",
-      "Decide one thing: is this the document that was asked for, and is it usable?",
-      "Usable means: the right kind of document, readable, not cut off, and about this student when a name appears.",
-      "Judge completeness against what can exist today. A current student's transcript covers only the years finished so far, an unofficial transcript or a printout from the school portal is acceptable unless the counselor asked for an official one, and a resume may be short.",
-      "Only say needs-fix for a real problem the student can act on: the wrong document, unreadable, plainly cut off, another person's, or missing something the counselor explicitly asked for.",
-      "Do not grade the student's achievements, writing quality or effort. A weak but genuine transcript is accepted.",
-      "Never rewrite, draft, continue or quote the student's work at length. Never produce prose they could paste anywhere.",
-      "note: ONE plain line, at most 200 characters, that both the student and the counselor read. Describe the file, not the person: \"This is a beach packing list, not a resume.\" or \"Official transcript through grade 10, complete and readable.\" Never write \"the student\".",
-      "findings: up to 6 short bullets on what you checked or what is wrong, each a separate list item with no markup.",
-      "weightedGpa, unweightedGpa, classRank, testScores: copied exactly as printed on the document (classRank like \"24 of 410\", each test score like \"SAT 1450\"); null or empty when not printed. Never infer or compute a value.",
-      "studentFix: when the verdict is needs-fix, one plain sentence telling the student what to upload instead. Otherwise null.",
-    ].join("\n"),
-    prompt: [
-      `Requested: ${String(task.title)}`,
-      instructions ? `What the counselor wrote: ${instructions}` : "",
-      studentName ? `Student's name on file: ${studentName}` : "",
-      `File name: ${filename}`,
-      text ? `\nThe file's text:\n${text.slice(0, MAX_TEXT_CHARS)}` : "The file is attached.",
-    ]
-      .filter(Boolean)
-      .join("\n"),
+    system,
+    prompt,
     attachments,
     toolName: "submission_check",
     maxTokens: 1200,
@@ -406,7 +419,11 @@ async function decide(request: FastifyRequest, svc: Svc, task: Row, doc: Row, st
   return { status: "ready", judge };
 }
 
-async function record(svc: Svc, task: Row, documentId: string, result: ReviewResult): Promise<void> {
+/**
+ * Moves the task and writes the verdict. Accepted only completes the task. The values go to the check's own list,
+ * unverified; before 20261108000005 they stay in the findings, labelled unverified.
+ */
+export async function recordReview(svc: Svc, task: Row, documentId: string | null, result: ReviewResult): Promise<void> {
   // The task moves first and the verdict is written last: a client polling for
   // the verdict then never sees "accepted" on a task still waiting on a check.
   // Re-read the status: the counselor may have moved the task while AxIS read.
@@ -420,17 +437,22 @@ async function record(svc: Svc, task: Row, documentId: string, result: ReviewRes
     task.status = next;
   }
 
-  const { error } = await svc.from("deliverable_tracker_checks").insert({
+  const row = {
     student_id: task.student_id,
     deliverable_id: task.id,
     document_id: documentId,
     verdict: result.verdict === "accepted" ? "on-track" : "below-the-brief",
     note: result.note,
-    findings: checkFindings(result),
     documents_checked: 1,
     source: "ai",
     checked_by: null,
-  });
+  };
+  // The findings always name each value, labelled unverified: the app before PR C reads them there. With the
+  // column the values are also a list of their own, which the app's Confirm reads (and hides those lines).
+  let { error } = await svc.from("deliverable_tracker_checks").insert({ ...row, findings: fallbackFindings(result), extracted_values: valuesFrom(result) });
+  if (error && isSchemaMissing(error)) {
+    ({ error } = await svc.from("deliverable_tracker_checks").insert({ ...row, findings: fallbackFindings(result) }));
+  }
   if (error) throw new Error(`tracker check insert: ${error.message}`);
 }
 
@@ -485,7 +507,8 @@ async function notify(request: FastifyRequest, svc: Svc, task: Row, outcome: Out
       const template = {
         heading: oneLine(heading, 200),
         paragraphs: [body ?? "Open the student's page to see the file."],
-        bullets: reviewed ? checkFindings(reviewed).slice(0, 5) : [],
+        // The email can't change once sent: each value says it is unverified.
+        bullets: reviewed ? fallbackFindings(reviewed).slice(0, 5) : [],
         cta: { label: `Open ${name}'s page`, url: `${env.APP_URL}${href}` },
       };
       emails.push({

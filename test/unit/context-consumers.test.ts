@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { CHAT_TOOLS, buildSystemPrompt } from "../../src/lib/chat.js";
 import { selectSections } from "../../src/lib/context/index.js";
 import { UNTRUSTED_DATA_RULE } from "../../src/lib/context/pack.js";
+import { coherenceAskSystem, coherenceSystem } from "../../src/lib/studentToolPrompts.js";
 
 const src = (p: string) => readFileSync(p, "utf8");
 
@@ -34,12 +35,21 @@ test("every model call in /ai that reads a student's text carries the untrusted-
   assert.equal(occurrences("src/routes/ai.ts"), 9);
 });
 test("both coherence calls carry the rule and the layer's context", () => {
+  // The system prompts live in lib/studentToolPrompts.ts (one per audience: the counselor's and the student's), so a
+  // call carries the rule through them; what matters is that EVERY prompt they can produce includes it.
+  const helpers = ["coherenceSystem(", "coherenceAskSystem("];
   for (const nth of [0, 1]) {
     const c = callSource("src/routes/applicationAi.ts", "narrative-coherence", nth);
-    assert.ok(c.includes("UNTRUSTED_DATA_RULE"), `coherence call ${nth} lost UNTRUSTED_DATA_RULE`);
+    assert.ok(c.includes("UNTRUSTED_DATA_RULE") || c.includes(helpers[nth]!), `coherence call ${nth} lost UNTRUSTED_DATA_RULE`);
     assert.ok(c.includes("contextUsage"), `coherence call ${nth} lost contextUsage`);
   }
-  assert.equal(occurrences("src/routes/applicationAi.ts"), 2);
+  for (const audience of ["counselor", "student"] as const) {
+    assert.ok(coherenceSystem(audience).includes(UNTRUSTED_DATA_RULE), `the ${audience}'s coherence prompt lost UNTRUSTED_DATA_RULE`);
+    assert.ok(coherenceAskSystem(audience).includes(UNTRUSTED_DATA_RULE), `the ${audience}'s coherence follow-up prompt lost UNTRUSTED_DATA_RULE`);
+  }
+  // The two coherence prompts moved to lib/studentToolPrompts.ts (checked above, for both audiences), so this route
+  // names the rule nowhere itself; a new inline use here is a new prompt that should be reviewed like those.
+  assert.equal(occurrences("src/routes/applicationAi.ts"), 0);
   assert.ok(src("src/lib/chat.ts").includes("UNTRUSTED_DATA_RULE"));
 });
 
