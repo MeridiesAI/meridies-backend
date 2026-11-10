@@ -18,7 +18,11 @@
  * Exports read through the caller's RLS-bound client, so each one contains
  * exactly what that person may already see (a student's export can't include
  * their counselor's private notes; the counselor's can). Operational logs
- * (ai_runs, audit_log) are not part of anyone's record.
+ * (ai_runs, audit_log) are not part of anyone's record. AxIS chats are
+ * (lib/axisChatExport.ts): the caller's own, all of them in their own export
+ * (`practice.axisChats`... for a counselor, `records.axis_chats`... for a
+ * student) and those about the student in a student's export, with the text
+ * read from each attached file; never a file's bytes.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -32,6 +36,7 @@ import { badRequest, fromPostgrest, HttpError, unavailable } from "../lib/errors
 import { caseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { consumeUnits, limit } from "../lib/limits.js";
 import { sheetClient, sheetTitle } from "../lib/driveExport.js";
+import { CHAT_PARTS, readAxisChats, type ChatScope } from "../lib/axisChatExport.js";
 import { ReadStopped, orderKeysFor, readPaged } from "../lib/pagedRead.js";
 import {
   BATCH_EXPORT_UNITS_PER_HOUR,
@@ -94,12 +99,14 @@ function readTable(
 }
 
 /**
- * A student's record as the caller sees it. `onPage` (the batch's `pageGuard`) sees every page and may stop
- * the read by throwing ReadStopped. `truncated` lists tables past the per-table cap, only when there are any.
+ * A student's record as the caller sees it, with the caller's AxIS chats in `chats` (lib/axisChatExport.ts).
+ * `onPage` (the batch's `pageGuard`) sees every page and may stop the read by throwing ReadStopped. `truncated`
+ * lists tables past the per-table cap (or a chat part past its budget), only when there are any.
  */
-async function exportStudent(request: FastifyRequest, studentId: string, onPage?: (rows: Row[]) => void) {
-  const [profile, ...tables] = await Promise.all([
+async function exportStudent(request: FastifyRequest, studentId: string, chats: ChatScope, onPage?: (rows: Row[]) => void) {
+  const [profile, chatParts, ...tables] = await Promise.all([
     request.db.from("profiles").select("*").eq("id", studentId).maybeSingle(),
+    readAxisChats(request.db, chats, onPage),
     ...STUDENT_RECORD_TABLES.map((t) => readTable(request, t, "student_id", studentId, onPage)),
   ]);
   if (profile.error) throw fromPostgrest(profile.error);
@@ -113,6 +120,12 @@ async function exportStudent(request: FastifyRequest, studentId: string, onPage?
     else if (r.rows.length) records[name] = r.rows;
     if (!r.error && r.truncated) truncated.push(name);
   });
+  for (const part of CHAT_PARTS) {
+    const r = chatParts[part.table];
+    if (r.error) skipped.push(part.record);
+    else if (r.rows.length) records[part.record] = r.rows;
+    if (!r.error && r.truncated) truncated.push(part.record);
+  }
   return { profile: profile.data, records, notIncluded: skipped, ...(truncated.length ? { truncated } : {}) };
 }
 
@@ -172,7 +185,8 @@ export default async function accountRoutes(app: FastifyInstance) {
     const me = request.auth.userId;
     reply.header("Content-Disposition", `attachment; filename="meridies-export-${new Date().toISOString().slice(0, 10)}.json"`);
     if (request.profile.role === "student") {
-      return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, me)) };
+      // Their own chats, all of them: a student's (from before chats were counselor-only) usually name no student.
+      return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, me, { owner: me })) };
     }
     // Each list is paged (PostgREST's max_rows would cut it at 1,000) up to the per-table cap.
     const truncated: string[] = [];
@@ -182,7 +196,7 @@ export default async function accountRoutes(app: FastifyInstance) {
       if (r.truncated) truncated.push(label);
       return r.rows;
     };
-    const [profile, roster, workItems, contacts, activities, followups, templates, resources, invitations] = await Promise.all([
+    const [profile, roster, workItems, contacts, activities, followups, templates, resources, invitations, chats] = await Promise.all([
       request.db.from("profiles").select("*").eq("id", me).maybeSingle(),
       readTable(request, "profiles", "counselor_id", me, undefined, "id, full_name, email, profile, archived_at, created_at"),
       own("counselor_work_items", "practice.workItems"),
@@ -194,10 +208,18 @@ export default async function accountRoutes(app: FastifyInstance) {
       own("email_templates", "practice.emailTemplates"),
       own("library_resources", "practice.resources"),
       own("invitations", "practice.invitations"),
+      // Every AxIS chat of theirs, with each attached file's text (lib/axisChatExport.ts).
+      readAxisChats(request.db, { owner: me }),
     ]);
     if (profile.error) throw fromPostgrest(profile.error);
     if (roster.error) throw fromPostgrest(roster.error as { code?: string });
     if (roster.truncated) truncated.unshift("roster");
+    const axis: Record<string, Row[] | null> = {};
+    for (const part of CHAT_PARTS) {
+      const r = chats[part.table];
+      axis[part.practice] = r.error ? null : r.rows;
+      if (!r.error && r.truncated) truncated.push(`practice.${part.practice}`);
+    }
     return {
       exportedAt: new Date().toISOString(),
       kind: "counselor",
@@ -211,6 +233,7 @@ export default async function accountRoutes(app: FastifyInstance) {
         emailTemplates: templates,
         resources,
         invitations,
+        ...axis,
       },
       ...(truncated.length ? { truncated } : {}),
       // A student's full record is its own export: GET /account/students/:id/export.
@@ -224,7 +247,8 @@ export default async function accountRoutes(app: FastifyInstance) {
       const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
       const sid = await resolveStudentId(request, id, "view");
       reply.header("Content-Disposition", `attachment; filename="meridies-student-${sid}.json"`);
-      return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, sid)) };
+      const chats = { owner: request.auth.userId, student: sid };
+      return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, sid, chats)) };
     }
   );
 
@@ -260,7 +284,7 @@ export default async function accountRoutes(app: FastifyInstance) {
       // primary counselor read it); their records still come through the caller's RLS.
       let exported;
       try {
-        exported = await exportStudent(request, id, pageGuard(MAX_BATCH_ROWS, MAX_BATCH_BYTES));
+        exported = await exportStudent(request, id, { owner: me, student: id }, pageGuard(MAX_BATCH_ROWS, MAX_BATCH_BYTES));
       } catch (err) {
         if (!(err instanceof ReadStopped)) throw err;
         done.set(id, { id, status: "too_large" });
