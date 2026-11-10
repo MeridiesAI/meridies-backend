@@ -124,22 +124,27 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
       const AWARD_LIST_CAP = 25;
       const wonBy = new Map<string, { name: string; cents: number }[]>();
       const bySchoolBy = new Map<string, { school: string; name: string; perYearCents: number }[]>();
-      const letterItems = await db
-        .from("award_letter_items")
-        .select("student_id, label, amount_cents, award_letters(school_name)")
+      // One row per award letter. The letter's own scholarships_cents is the figure the aid comparator and the
+      // manual award-letter form use (that form saves a total and no line items), so it comes first; when it is
+      // empty the scholarship line items are added up instead. A letter's name is its one scholarship line's
+      // label, else "Scholarships".
+      const letters = await db
+        .from("award_letters")
+        .select("student_id, school_name, scholarships_cents, award_letter_items(label, category, amount_cents)")
         .in("student_id", ids)
-        .eq("category", "scholarship")
-        .gt("amount_cents", 0)
         .limit(5000);
       // Detail only: a failed read leaves the dropdown without school rows, it never fails the page.
-      if (letterItems.error) request.log.warn({ code: letterItems.error.code }, "overview: award letter scholarships unavailable");
-      for (const r of (letterItems.error ? [] : letterItems.data ?? []) as Row[]) {
-        const letter = Array.isArray(r.award_letters) ? r.award_letters[0] : r.award_letters;
-        const school = String((letter as Row | null | undefined)?.school_name ?? "").trim();
-        const cents = num(r.amount_cents);
-        if (!school || cents === null) continue;
+      if (letters.error) request.log.warn({ code: letters.error.code }, "overview: award letter scholarships unavailable");
+      for (const r of (letters.error ? [] : letters.data ?? []) as Row[]) {
+        const school = String(r.school_name ?? "").trim();
+        if (!school) continue;
+        const lines = ((r.award_letter_items ?? []) as Row[]).filter((i) => i.category === "scholarship" && (num(i.amount_cents) ?? 0) > 0);
+        const fromLines = lines.reduce((sum, i) => sum + (num(i.amount_cents) ?? 0), 0);
+        const cents = (num(r.scholarships_cents) ?? 0) > 0 ? (num(r.scholarships_cents) as number) : fromLines;
+        if (cents <= 0) continue;
         const id = String(r.student_id);
-        bySchoolBy.set(id, [...(bySchoolBy.get(id) ?? []), { school, name: String(r.label ?? "Scholarship"), perYearCents: cents }]);
+        const name = lines.length === 1 && String(lines[0].label ?? "").trim() ? String(lines[0].label).trim() : "Scholarships";
+        bySchoolBy.set(id, [...(bySchoolBy.get(id) ?? []), { school, name, perYearCents: cents }]);
       }
       const scholarshipsBy = new Map<string, { wonCents: number; openCount: number; nextDeadline: string | null }>();
       for (const r of scholarshipRows) {
