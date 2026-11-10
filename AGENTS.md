@@ -123,6 +123,7 @@ src/
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
 │   ├── accountClosure.ts  # Leave Meridies: 30-day grace dates, the closure DTO and emails, the purge (off by default)
+│   ├── axisChatExport.ts  # AxIS chats in the data exports: the caller's own, four parts, file text budgeted
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── catalogProposals.ts # cited proposals from a school's own pages: page picking, quote grounding, fact keys (+ Run, Fake)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
@@ -3926,6 +3927,23 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
+  **AxIS chats** (`lib/axisChatExport.ts`; no migration) are in all three exports, in four parts: the chat
+  (`ai_conversations`), its messages, its action cards (`axis_actions`) and its attached files, each file row with
+  the text the server read from it (`extracted_text`, `extract_kind`, `extract_cut`; never the file's bytes). Every
+  chat table is owner-only, so an export only ever holds the caller's own chats: the self export has all of them
+  (`practice.axisChats`, `axisChatMessages`, `axisChatActions`, `axisChatFiles` for a counselor; `records.axis_chats`,
+  `axis_chat_messages`, `axis_chat_actions`, `axis_chat_files` for a student, whose chats predate `20261024000051`),
+  and a student's export (per student and each batch entry, so the app's zip gets one CSV per part) has the caller's
+  chats whose `student_id` is that student, the rule of the app's chat list for a student. That is the student a
+  chat was last about, so a chat filed under one student can mention another the counselor sees. A student's own
+  export never holds their counselor's chats about them. Rows are as stored, read in pages: the chats by owner (and
+  student) named in the query, then the child parts by their chats' ids (`conversation_id`, indexed on each), 100 ids
+  a query under one row cap per part (`readByChats`), so the read never walks other users' rows; ordered oldest chat
+  first with each chat's rows together.
+  File rows are read 50 a page and their text is budgeted (`FILE_TEXT_BUDGET`, 20 MB of UTF-8, over by at most a
+  page): past it the files part stops (`readPaged`'s `stop`) and is listed in `truncated`. The app needs no change:
+  its PDF and Word files read every key of `records` / `practice` (titled "Axis chats" and so on until it names them).
+  Test: `test/integration/account-export-axis.test.mjs`, `test/unit/axis-chat-export.test.ts`.
   **Bulk export** (`lib/studentExport.ts`, `lib/csv.ts`, `lib/driveExport.ts`; no migration):
   `POST /account/export/students` `{ studentIds }` (1-25 uuids, counselor, approved only like the
   per-student export) returns, per id on the caller's caseload (`caseloadStudentIds`, past 250 the same
