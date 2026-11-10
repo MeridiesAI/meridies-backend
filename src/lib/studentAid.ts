@@ -14,6 +14,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { env } from "../env.js";
 import { fromPostgrest } from "./errors.js";
 import { fourPointGpa } from "./gpa.js";
 import { ttlCache } from "./ttlCache.js";
@@ -737,11 +738,10 @@ async function readCatalogUncached(db: SupabaseClient): Promise<Row[]> {
 
 /**
  * Every scan used to re-read up to 1000 catalog rows. The catalog is shared by all practices and changes rarely,
- * so keep it for a minute (per process). The rows are only read, never changed, by classifyScholarships.
+ * so keep it for a minute by default (per process; SCHOLARSHIP_CATALOG_CACHE_MS). The rows are only read, never changed, by classifyScholarships.
  */
-const CATALOG_TTL_MS = 60_000;
 let catalogDb: SupabaseClient;
-const catalogCache = ttlCache(CATALOG_TTL_MS, () => readCatalogUncached(catalogDb));
+const catalogCache = ttlCache(env.SCHOLARSHIP_CATALOG_CACHE_MS, () => readCatalogUncached(catalogDb));
 function readCatalog(db: SupabaseClient): Promise<Row[]> {
   catalogDb = db;
   return catalogCache.get();

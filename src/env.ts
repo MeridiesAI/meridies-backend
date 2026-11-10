@@ -179,6 +179,9 @@ const envSchema = z.object({
   // The AI budget gate (lib/aiBudget.ts, 20261108000002): every model call reserves against these and settles
   // after. Per user: calls and estimated spend per UTC day, output and weighted input tokens per calendar month.
   // Company-wide: estimated spend per UTC day; at it, all AI pauses until midnight UTC.
+  // How long the scholarship scan keeps the shared catalog it read, in milliseconds (0 = read every time).
+  // The integration suite sets 0: its tests add catalog rows and scan straight away.
+  SCHOLARSHIP_CATALOG_CACHE_MS: blankIsUnset(z.coerce.number().int().min(0).max(3_600_000).default(60_000)),
   AI_DAILY_CALLS: blankIsUnset(z.coerce.number().int().min(1).default(300)),
   AI_USER_DAILY_USD: blankIsUnset(z.coerce.number().positive().default(10)),
   // A student's own daily limits are lower than a counselor's, so many students can't crowd the shared company
