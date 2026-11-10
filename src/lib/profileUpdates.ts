@@ -58,7 +58,7 @@ export const ACTIVITY_TYPES = [
 export const LIMITS = { position: 50, organization: 100, description: 150, honorTitle: 100 } as const;
 
 export const MAX_THREAD_MESSAGES = 40;
-const MAX_SHEET_ROWS = 30;
+export const MAX_SHEET_ROWS = 30;
 
 export type Kind = "activity" | "honor";
 type Grade = (typeof GRADES)[number];

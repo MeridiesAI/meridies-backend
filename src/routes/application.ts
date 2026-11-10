@@ -21,9 +21,11 @@ import { collegeLogoUrls } from "../lib/collegeLogos.js";
 import { essayOnly, readStoredText } from "../lib/applicationText.js";
 import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
-import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
+import { hasAnthropic } from "../env.js";
+import { importActivitiesFromDocument } from "../lib/activityImport.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
-import { resolveStudentId } from "../lib/guards.js";
+import { requireRoleIn, resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
 import { resultsUnavailable } from "../lib/resultsAvailability.js";
@@ -1218,6 +1220,24 @@ export default async function applicationRoutes(app: FastifyInstance) {
     }
     return { results };
   });
+
+  // An uploaded activity list becomes Activities rows: AxIS reads the file and adds what the sheet doesn't already
+  // hold (source 'ai', capped at 30 rows, nothing existing changed). The app calls it after an upload of that kind.
+  app.post(
+    "/activities/import-from-document",
+    {
+      preHandler: [
+        app.authenticate,
+        requireRoleIn("counselor", "student"),
+        limit("activities:import-document", 20, 3600, "That's a lot of activity lists. Try again in an hour."),
+      ],
+    },
+    async (request) => {
+      const { documentId } = z.object({ documentId: z.string().uuid() }).strict().parse(request.body);
+      if (!hasAnthropic) throw unavailable("AI features aren't configured yet. Set ANTHROPIC_API_KEY.");
+      return importActivitiesFromDocument(request, documentId);
+    }
+  );
 
   // Several of a student's rows at once (the Undo of a batch card). With onlyUnedited, a row changed since it was
   // saved (its updated_at moved past created_at) is kept and listed, so an Undo never throws away an edit.

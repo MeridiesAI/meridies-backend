@@ -16,6 +16,7 @@ import type { FastifyRequest } from "fastify";
 import { FAST_MODEL, runStructured, type AiAttachment } from "./anthropic.js";
 import { textOf } from "./documentExtraction.js";
 import { badRequest, fromPostgrest, notFound } from "./errors.js";
+import { resolveStudentId } from "./guards.js";
 import { cleanProposals, DOCUMENT_PROPOSALS_SCHEMA, DOCUMENT_PROPOSALS_SYSTEM, type Proposal } from "./profileUpdates.js";
 import { downloadCapped } from "./storageDownload.js";
 import { DOCUMENTS_BUCKET, isDocumentsBucket, isSafeStoragePathShape } from "./storagePath.js";
@@ -31,10 +32,16 @@ function sheetLike(filename: string, mime: string | null): boolean {
 }
 
 export async function proposalsFromDocument(request: FastifyRequest, documentId: string): Promise<Proposal[]> {
-  const studentId = request.auth.userId;
   const { data: doc, error } = await request.db.from("documents").select("*").eq("id", documentId).maybeSingle();
   if (error) throw fromPostgrest(error);
-  if (!doc || doc.student_id !== studentId) throw notFound("That file isn't in your documents");
+  if (!doc || !doc.student_id) throw notFound("That file isn't in your documents");
+  // A student reads only their own file; a counselor reads a student they may edit (the rows go onto that student's sheet).
+  const studentId = String(doc.student_id);
+  if (request.profile.role === "student") {
+    if (studentId !== request.auth.userId) throw notFound("That file isn't in your documents");
+  } else {
+    await resolveStudentId(request, studentId, "edit");
+  }
 
   const svc = serviceClient();
   const reads = svc ? await documentReadingAllowed(svc, studentId) : false;

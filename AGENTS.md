@@ -1069,7 +1069,15 @@ the database (`20261010*`):
   student's own files (PDF, image, .docx/.txt, .xlsx/.csv in the capped parse
   process; the hand-in's document rules and byte cap) and returns proposed
   rows, storing nothing; `POST /profile-updates/file { draft }` files one the
-  student confirmed, under the same checks.
+  student confirmed, under the same checks. **An uploaded activity list fills the sheet by itself**
+  (`POST /application/activities/import-from-document { documentId }`, a student or a counselor who can edit the
+  student, 20 an hour; `lib/activityImport.ts`): the app calls it right after an upload whose kind is `activity-list`.
+  It reads the file with `proposalsFromDocument` (same gates: the practice's document-reading switch, keep-out, a
+  readable format) and writes the activities it finds as `source = 'ai'` rows, **adding only what the sheet doesn't
+  already hold** (same organization, and the same position or one unstated), never changing or removing a row,
+  stopping at 30 rows (a full sheet answers before any model call). Honors in the list are not written. No
+  `profile_updates` log row (that table's insert policy is the student's own). Answers `{ added, skippedDuplicates, full }`;
+  a refusal reads as a 400 in words. Test: `test/unit/activity-import.test.ts`.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
