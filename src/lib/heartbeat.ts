@@ -17,7 +17,8 @@ export type Job =
   | "kpi-monthly"
   | "pipeline-sequences"
   | "email-blasts"
-  | "account-closure-purge";
+  | "account-closure-purge"
+  | "push-dispatch";
 
 export async function beat(job: Job, ok: boolean, error?: string, log?: { warn: (o: object, m?: string) => void }) {
   const svc = serviceClient();

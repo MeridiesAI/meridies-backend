@@ -97,6 +97,7 @@ import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
 import schoolScholarshipRoutes from "./routes/schoolScholarships.js";
 import bookingRoutes from "./routes/booking.js";
+import pushRoutes from "./routes/push.js";
 import studentBookingRoutes from "./routes/studentBooking.js";
 
 export function buildApp() {
@@ -266,6 +267,7 @@ export function buildApp() {
   app.register(schoolScholarshipRoutes);
   // Student self-booking: the counselor's hours and types, the student's slots.
   app.register(bookingRoutes, { prefix: "/booking" });
+  app.register(pushRoutes, { prefix: "/push" });
   app.register(studentBookingRoutes, { prefix: "/me/booking" });
   startSweepInterval(app);
   startExtractionRecovery(app);

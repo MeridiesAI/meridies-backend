@@ -101,6 +101,12 @@ const envSchema = z.object({
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
 
+  // Web Push (VAPID). Optional: unset, push routes answer 503 push_unavailable and the sweep does nothing.
+  // Generate once with `npx web-push generate-vapid-keys`; the subject is a mailto: or https: contact.
+  VAPID_PUBLIC_KEY: blankIsUnset(z.string().min(40).optional()),
+  VAPID_PRIVATE_KEY: blankIsUnset(z.string().min(20).optional()),
+  VAPID_SUBJECT: blankIsUnset(z.string().regex(/^(mailto:|https:\/\/)/, "VAPID_SUBJECT must be a mailto: or https: URL").optional()),
+
   // Outbound SMS (Twilio REST, no SDK). Optional: without a complete set, an
   // SMS is recorded as `queued` in message_deliveries and never claimed sent.
   // A sender is either a number (E.164) or a Messaging Service; the service
@@ -242,6 +248,8 @@ export const twilioBase = twilioOverride ?? "https://api.twilio.com";
 export const twilioMessagingBase = twilioOverride ?? "https://messaging.twilio.com";
 /** Resend's API origin. Only a non-production process may point it elsewhere. */
 export const resendBase = ((env.NODE_ENV === "production" ? undefined : env.RESEND_API_BASE) ?? "https://api.resend.com").replace(/\/+$/, "");
+/** Web Push needs all three VAPID settings. */
+export const hasPush = Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY && env.VAPID_SUBJECT);
 export const hasCronSecret = Boolean(env.CRON_SECRET);
 export const hasScorecard = Boolean(env.SCORECARD_API_KEY);
 /** Card payments need both Stripe keys, the service role (webhook, pay page) and a public API origin (pay links). */
