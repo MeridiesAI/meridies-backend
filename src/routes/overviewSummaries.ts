@@ -76,14 +76,14 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
       const scholarshipRows = await (async () => {
         const wide = await db
           .from("scholarship_matches")
-          .select("student_id, status, amount_cents, awarded_cents, deadline")
+          .select("student_id, name, status, amount_cents, awarded_cents, deadline")
           .in("student_id", ids)
           .limit(20_000);
         if (!wide.error) return (wide.data ?? []) as Row[];
         if (!isResultsNotApplied(wide.error)) throw fromPostgrest(wide.error);
         const narrow = await db
           .from("scholarship_matches")
-          .select("student_id, status, amount_cents, deadline")
+          .select("student_id, name, status, amount_cents, deadline")
           .in("student_id", ids)
           .limit(20_000);
         if (narrow.error) throw fromPostgrest(narrow.error);
@@ -118,12 +118,39 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
         if (status !== "not-started") cur.inPlay += 1;
         resultsBy.set(id, cur);
       }
+      // The Overview's per-student dropdown: awards won from the tracker (a name and a total; the tracker
+      // stores neither a school nor a per-year figure) and scholarships on award letters (a school and one
+      // academic year's amount). Kept apart and never added together, so nothing is counted twice.
+      const AWARD_LIST_CAP = 25;
+      const wonBy = new Map<string, { name: string; cents: number }[]>();
+      const bySchoolBy = new Map<string, { school: string; name: string; perYearCents: number }[]>();
+      const letterItems = await db
+        .from("award_letter_items")
+        .select("student_id, label, amount_cents, award_letters(school_name)")
+        .in("student_id", ids)
+        .eq("category", "scholarship")
+        .gt("amount_cents", 0)
+        .limit(5000);
+      // Detail only: a failed read leaves the dropdown without school rows, it never fails the page.
+      if (letterItems.error) request.log.warn({ code: letterItems.error.code }, "overview: award letter scholarships unavailable");
+      for (const r of (letterItems.error ? [] : letterItems.data ?? []) as Row[]) {
+        const letter = Array.isArray(r.award_letters) ? r.award_letters[0] : r.award_letters;
+        const school = String((letter as Row | null | undefined)?.school_name ?? "").trim();
+        const cents = num(r.amount_cents);
+        if (!school || cents === null) continue;
+        const id = String(r.student_id);
+        bySchoolBy.set(id, [...(bySchoolBy.get(id) ?? []), { school, name: String(r.label ?? "Scholarship"), perYearCents: cents }]);
+      }
       const scholarshipsBy = new Map<string, { wonCents: number; openCount: number; nextDeadline: string | null }>();
       for (const r of scholarshipRows) {
         const id = String(r.student_id);
         const cur = scholarshipsBy.get(id) ?? { wonCents: 0, openCount: 0, nextDeadline: null };
         const status = String(r.status);
-        if (status === "awarded") cur.wonCents += num(r.awarded_cents) ?? num(r.amount_cents) ?? 0;
+        if (status === "awarded") {
+          const cents = num(r.awarded_cents) ?? num(r.amount_cents) ?? 0;
+          cur.wonCents += cents;
+          if (cents > 0) wonBy.set(id, [...(wonBy.get(id) ?? []), { name: String(r.name ?? "Scholarship"), cents }]);
+        }
         if (status === "saved" || status === "applying") {
           cur.openCount += 1;
           const d = r.deadline ? String(r.deadline) : null;
@@ -197,7 +224,17 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
             waiting: resultsBy.get(id)?.waiting ?? 0,
             enrolledName: resultsBy.get(id)?.enrolledName ?? null,
           },
-          scholarships: scholarshipsBy.get(id) ?? { wonCents: 0, openCount: 0, nextDeadline: null },
+          scholarships: {
+            ...(scholarshipsBy.get(id) ?? { wonCents: 0, openCount: 0, nextDeadline: null }),
+            // What sits behind the Won figure and the award letters, for the card's dropdown. Largest first
+            // for the tracker, by school then name for the letters.
+            awards: {
+              won: [...(wonBy.get(id) ?? [])].sort((a, b) => b.cents - a.cents).slice(0, AWARD_LIST_CAP),
+              bySchool: [...(bySchoolBy.get(id) ?? [])]
+                .sort((a, b) => a.school.localeCompare(b.school, "en-US") || a.name.localeCompare(b.name, "en-US"))
+                .slice(0, AWARD_LIST_CAP),
+            },
+          },
           polygon: axesBy.get(id) ?? [],
           nextMeeting: m
             ? { id: String(m.id), title: String(m.title), startsAt: String(m.starts_at), mode: String(m.mode) }

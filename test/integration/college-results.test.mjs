@@ -107,6 +107,20 @@ check("the student lists their scholarships", list.status === 200 && list.body.s
 await sql(`update public.student_colleges set status = 'waitlisted' where id = '${bu}'`);
 await call(s.token, "PATCH", `/aid/scholarships/${sch}`, { status: "awarded" });
 await sql(`update public.profiles set grad_year = '2027' where id = '${s.id}'`);
+
+// Award letters feed the card's dropdown: a scholarship line on a letter is one academic year at that school.
+// A grant is not a scholarship, and a zero line says nothing, so neither shows.
+const letter = async (student, schoolName) =>
+  sql(`with r as (insert into public.award_letters (student_id, school_name) values ('${student.id}', '${schoolName}') returning id) select id from r`);
+const item = (letterId, student, label, category, cents) =>
+  sql(`insert into public.award_letter_items (award_letter_id, student_id, label, category, amount_cents) values ('${letterId}', '${student.id}', '${label}', '${category}', ${cents})`);
+const emory = await letter(s, "Emory University");
+await item(emory, s, "Emory Scholars", "scholarship", 1000000);
+await item(emory, s, "Emory Grant", "grant", 500000);
+const bostonU = await letter(s, "Boston University");
+await item(bostonU, s, "Trustee Scholarship", "scholarship", 2000000);
+await item(bostonU, s, "Zero line", "scholarship", 0);
+
 const sum = await call(c.token, "GET", "/overview/student-summaries");
 const mine = (sum.body ?? []).find((x) => x.studentId === s.id);
 check("the Overview summaries carry results", sum.status === 200 && mine?.results?.accepted === 2 && mine?.results?.waitlisted === 1, JSON.stringify(mine?.results));
@@ -114,8 +128,23 @@ check("…the final choice", mine?.results?.enrolledName === "Michigan");
 check("…what the student typed for 'applying to'", mine?.collegesPlanned === 9 && mine?.applying === 9);
 check("…scholarship money won", mine?.scholarships?.wonCents === 250000, JSON.stringify(mine?.scholarships));
 check("…and the class year to group by", mine?.gradYear === "2027");
+const bySchool = mine?.scholarships?.awards?.bySchool ?? [];
+check(
+  "…each school's scholarship per year, by school, grants and zero lines left out",
+  bySchool.length === 2 &&
+    bySchool[0].school === "Boston University" && bySchool[0].name === "Trustee Scholarship" && bySchool[0].perYearCents === 2000000 &&
+    bySchool[1].school === "Emory University" && bySchool[1].name === "Emory Scholars" && bySchool[1].perYearCents === 1000000,
+  JSON.stringify(bySchool)
+);
+const won = mine?.scholarships?.awards?.won ?? [];
+check(
+  "…the awards won from the tracker by name, without touching the Won total",
+  won.length === 1 && won[0].name === "Ithaca Rotary Club Scholarship" && won[0].cents === 250000 && mine.scholarships.wonCents === 250000,
+  JSON.stringify(won)
+);
 const quiet = (sum.body ?? []).find((x) => x.studentId === s2.id);
 check("a student with nothing recorded reads zeros", quiet?.results?.accepted === 0 && quiet?.scholarships?.wonCents === 0 && quiet?.collegesPlanned === null);
+check("…and has no awards to list", quiet?.scholarships?.awards?.won?.length === 0 && quiet?.scholarships?.awards?.bySchool?.length === 0);
 
 // ---- the database says the same --------------------------------------------
 
