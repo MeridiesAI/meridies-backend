@@ -1529,9 +1529,11 @@ and `requirements` (`[{ id, label, done }]`). "Applying to N" is `student_person
 `503 college_results_unavailable`; the summaries read the new columns separately so they degrade, never fail.
 `scholarships.awards` is what the Overview's per-student dropdown shows, and it is detail only (a failed read leaves it
 empty, never fails the page): `won` is the tracker's awarded rows by name (`{ name, cents }`; the tracker stores no
-school and no per-year figure, so neither is claimed) and `bySchool` is the scholarship lines on the student's award
-letters (`{ school, name, perYearCents }`: a letter line is one academic year at that school; grants and zero lines are
-left out). The two lists are never added together and `wonCents` is still the tracker's alone. At most 25 of each per student.
+school and no per-year figure, so neither is claimed) and `bySchool` is one row per award letter with a scholarship
+(`{ school, name, perYearCents }`: one academic year at that school). The figure is the letter's own `scholarships_cents`
+(what the manual award-letter form saves: a total and no line items, and what the comparator uses), else its scholarship
+line items added up; a letter with one scholarship line is named by it, otherwise "Scholarships". Grants and zeros are left
+out. The two lists are never added together and `wonCents` is still the tracker's alone. At most 25 of each per student.
 
 ### School-specific scholarships (`20261111000006`)
 
