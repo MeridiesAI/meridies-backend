@@ -621,8 +621,11 @@ forget it.
   blast_schedule_unavailable` and the cron answer nothing to do until it is applied; a blast sent now still
   works (stored as a `selection`). Then add the Railway cron service
   (`curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$API_URL/internal/blasts/dispatch"`, every 10-15
-  minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. Tests:
-  `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`.
+  minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. **Every family gets a
+  message of its own** (`deliverBlast` calls `sendEmail` once per address: one `to`, no cc/bcc), so a family never sees
+  who else the consultant works with; don't batch the sends. Tests:
+  `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`, `test/integration/blasts-separate.test.mjs`
+  (checks the real To/Cc/Bcc in Mailpit, for a send now and the cron).
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
