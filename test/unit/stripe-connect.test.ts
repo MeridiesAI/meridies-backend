@@ -110,12 +110,13 @@ test("a changed Refund object re-reads its charge", () => {
 test("account.updated sets the flags; a deauthorization turns them off", () => {
   assert.deepEqual(
     planStripeEvent(event("account.updated", { id: ACCT, object: "account", charges_enabled: true, payouts_enabled: false, details_submitted: true })),
-    { kind: "account", eventId: "evt_1", account: ACCT, chargesEnabled: true, payoutsEnabled: false, detailsSubmitted: true }
+    { kind: "account", eventId: "evt_1", account: ACCT, source: "updated", chargesEnabled: true, payoutsEnabled: false, detailsSubmitted: true }
   );
   assert.deepEqual(planStripeEvent(event("account.application.deauthorized", { id: "ca_1", object: "application" })), {
     kind: "account",
     eventId: "evt_1",
     account: ACCT,
+    source: "deauthorized",
     chargesEnabled: false,
     payoutsEnabled: false,
     detailsSubmitted: false,

@@ -21,6 +21,8 @@
  * paid toward the package, so the invoice it paid reads as owed again.
  */
 
+import type { CardDisputeDTO, CardFailureDTO } from "./cardIssues.js";
+
 type Row = Record<string, unknown>;
 
 export type PaymentMethod = "card" | "ach" | "check" | "zelle" | "other";
@@ -44,6 +46,8 @@ export type InvoiceDTO = {
   /** Derived: how much of the amount due the payments have settled. */
   paidCents: number;
   state: InvoiceState;
+  /** The latest card payment that failed on this invoice while it is still owed (lib/cardIssues.ts); null otherwise. */
+  cardFailure?: CardFailureDTO | null;
 };
 
 export type PaymentDTO = {
@@ -59,6 +63,8 @@ export type PaymentDTO = {
   refundedCents: number;
   /** Taken through a Stripe pay link (recorded by the webhook, can't be removed here). */
   viaStripe: boolean;
+  /** A dispute the family opened with their bank on this card payment (lib/cardIssues.ts); null otherwise. */
+  dispute?: CardDisputeDTO | null;
 };
 
 export type RefundDTO = { id: string; amountCents: number; refundedOn: string; note: string | null; createdAt: string };

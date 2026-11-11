@@ -11,8 +11,10 @@
  *
  * Idempotency: a payment is keyed by its PaymentIntent (a unique index), so a
  * repeated or out-of-order `checkout.session.completed` records it once; a
- * refund writes Stripe's own running total (`charge.amount_refunded`), so a
- * repeated `charge.refunded` can't count it twice.
+ * refund writes Stripe's own running total (`charge.amount_refunded`, re-read
+ * from Stripe by the route), so a repeated `charge.refunded` can't count it
+ * twice; a failed payment or a dispute (`card-failure`, `dispute`) is one
+ * `pipeline_card_issues` row per event id (lib/cardIssues.ts), never a payment.
  */
 
 import { HttpError } from "./errors.js";
@@ -115,17 +117,166 @@ export type StripeAction =
   | { kind: "refund"; eventId: string; account: string; chargeId: string; paymentIntentId: string | null; refundedCents: number; meridies: boolean }
   /** A Refund object changed (one failed or was cancelled): re-read its charge for the running total. */
   | { kind: "refund-recheck"; eventId: string; account: string; chargeId: string }
-  | { kind: "account"; eventId: string; account: string; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }
+  /** `updated` is re-read from Stripe by the route (events arrive in any order); `deauthorized` is final. */
+  | { kind: "account"; eventId: string; account: string; source: "updated" | "deauthorized"; chargesEnabled: boolean; payoutsEnabled: boolean; detailsSubmitted: boolean }
+  /**
+   * A card payment on a Meridies pay link failed (payment_intent.payment_failed,
+   * or checkout.session.async_payment_failed). Nothing was paid: it is noted on
+   * the invoice (lib/cardIssues.ts), never recorded as a payment.
+   */
+  | {
+      kind: "card-failure";
+      eventId: string;
+      account: string;
+      invoiceId: string;
+      contactId: string | null;
+      practiceId: string | null;
+      paymentIntentId: string | null;
+      amountCents: number | null;
+      reasonCode: string | null;
+      reason: string;
+      created: number;
+    }
+  /** charge.dispute.*: the family disputed a card payment with their bank. A flag on the payment, not a refund. */
+  | {
+      kind: "dispute";
+      eventId: string;
+      account: string;
+      disputeId: string;
+      chargeId: string | null;
+      paymentIntentId: string | null;
+      amountCents: number | null;
+      reason: string | null;
+      status: string;
+      created: number;
+    }
   | { kind: "ignore"; eventId: string; reason: string };
 
-/** Read a verified event. Anything that isn't a Meridies pay-link payment, refund or account change is ignored. */
-export function planStripeEvent(event: StripeEventLike): StripeAction {
+/** What a failure says when Stripe gives no words of its own. */
+export const FAILED_CARD_REASON = "The card payment didn't go through.";
+export const FAILED_ASYNC_REASON = "The bank payment didn't go through.";
+
+/** Stripe's codes are snake_case words; anything else isn't kept. */
+const CODE = /^[a-z0-9_]{1,80}$/;
+const code = (v: unknown): string | null => {
+  const s = str(v);
+  return s && CODE.test(s) ? s : null;
+};
+/** Stripe's human message: one line, no markup, at most 300 characters. */
+const words = (v: unknown): string | null => {
+  const s = str(v);
+  if (!s) return null;
+  const clean = s.replace(/[\u0000-\u001f<>]/g, " ").replace(/\s+/g, " ").trim();
+  return clean ? clean.slice(0, 300) : null;
+};
+const cents = (v: unknown): number | null => {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 && n <= 100_000_000 ? n : null;
+};
+
+/** Whether the platform key is a live key (sk_live_ / rk_live_); null without one. */
+export function keyLivemode(secretKey: string | null | undefined): boolean | null {
+  if (!secretKey) return null;
+  return /^(sk|rk)_live_/.test(secretKey);
+}
+
+/**
+ * Read a verified event. Anything that isn't a Meridies pay-link payment, a
+ * failed one, a refund, a dispute or an account change is ignored.
+ *
+ * `livemode` is the platform key's mode: a Connect endpoint in live mode also
+ * receives connected accounts' test-mode events (Stripe's Connect webhooks
+ * docs), and a test payment must never count as money. An event of the other
+ * mode is ignored.
+ */
+export function planStripeEvent(event: StripeEventLike, opts: { livemode?: boolean | null } = {}): StripeAction {
   const eventId = event.id;
   const o = obj(event.data?.object);
   const account = str(event.account);
   const ignore = (reason: string): StripeAction => ({ kind: "ignore", eventId, reason });
+  if (typeof opts.livemode === "boolean" && typeof event.livemode === "boolean" && event.livemode !== opts.livemode) {
+    return ignore(event.livemode ? "a live-mode event on a test-mode key" : "a test-mode event on a live-mode key");
+  }
+  const created = Number(event.created) || Math.floor(Date.now() / 1000);
+  const meridiesIds = (meta: Obj) => {
+    const contactId = str(meta[META_CONTACT]);
+    const practiceId = str(meta[META_PRACTICE]);
+    return {
+      contactId: contactId && UUID.test(contactId) ? contactId : null,
+      practiceId: practiceId && UUID.test(practiceId) ? practiceId : null,
+    };
+  };
 
   switch (event.type) {
+    case "payment_intent.payment_failed": {
+      // A card declined on Checkout: the session stays open (the family can try another card), and this fires.
+      if (!account || !ACCOUNT_ID.test(account)) return ignore("not from a connected account");
+      const meta = obj(o.metadata);
+      const invoiceId = str(meta[META_INVOICE]);
+      if (!invoiceId || !UUID.test(invoiceId)) return ignore("not a Meridies pay link");
+      const paymentIntentId = str(o.id);
+      if (!paymentIntentId) return ignore("no PaymentIntent");
+      const err = obj(o.last_payment_error);
+      return {
+        kind: "card-failure",
+        eventId,
+        account,
+        invoiceId,
+        ...meridiesIds(meta),
+        paymentIntentId,
+        amountCents: cents(o.amount),
+        reasonCode: code(err.decline_code) ?? code(err.code),
+        reason: words(err.message) ?? FAILED_CARD_REASON,
+        created,
+      };
+    }
+    case "checkout.session.async_payment_failed": {
+      // A delayed method (a bank debit) that failed after Checkout completed. Pay links take cards only today.
+      if (!account || !ACCOUNT_ID.test(account)) return ignore("not from a connected account");
+      const meta = obj(o.metadata);
+      const invoiceId = str(meta[META_INVOICE]);
+      if (!invoiceId || !UUID.test(invoiceId)) return ignore("not a Meridies pay link");
+      if (o.mode !== "payment") return ignore("not a one-time payment");
+      return {
+        kind: "card-failure",
+        eventId,
+        account,
+        invoiceId,
+        ...meridiesIds(meta),
+        paymentIntentId: ref(o.payment_intent),
+        amountCents: cents(o.amount_total),
+        reasonCode: "async_payment_failed",
+        reason: FAILED_ASYNC_REASON,
+        created,
+      };
+    }
+    case "checkout.session.expired":
+      // Opened and left unpaid for 24 hours. Nothing was charged and nothing is owed differently; the pay link still works.
+      return ignore("checkout expired unpaid");
+    case "charge.dispute.created":
+    case "charge.dispute.updated":
+    case "charge.dispute.closed":
+    case "charge.dispute.funds_withdrawn":
+    case "charge.dispute.funds_reinstated": {
+      if (!account || !ACCOUNT_ID.test(account)) return ignore("not from a connected account");
+      const disputeId = str(o.id);
+      const paymentIntentId = ref(o.payment_intent);
+      const chargeId = ref(o.charge);
+      if (!disputeId) return ignore("no dispute");
+      if (!paymentIntentId && !chargeId) return ignore("no charge");
+      return {
+        kind: "dispute",
+        eventId,
+        account,
+        disputeId,
+        chargeId,
+        paymentIntentId,
+        amountCents: cents(o.amount),
+        reason: code(o.reason),
+        status: code(o.status) ?? "needs_response",
+        created,
+      };
+    }
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded": {
       if (!account || !ACCOUNT_ID.test(account)) return ignore("not from a connected account");
@@ -153,7 +304,7 @@ export function planStripeEvent(event: StripeEventLike): StripeAction {
         amountCents,
         paymentIntentId,
         sessionId,
-        created: Number(event.created) || Math.floor(Date.now() / 1000),
+        created,
       };
     }
     case "charge.refunded": {
@@ -186,6 +337,7 @@ export function planStripeEvent(event: StripeEventLike): StripeAction {
         kind: "account",
         eventId,
         account: id,
+        source: "updated",
         chargesEnabled: o.charges_enabled === true,
         payoutsEnabled: o.payouts_enabled === true,
         detailsSubmitted: o.details_submitted === true,
@@ -194,7 +346,7 @@ export function planStripeEvent(event: StripeEventLike): StripeAction {
     case "account.application.deauthorized": {
       // The practice disconnected Meridies from its Stripe dashboard: no more pay links.
       if (!account || !ACCOUNT_ID.test(account)) return ignore("no account");
-      return { kind: "account", eventId, account, chargesEnabled: false, payoutsEnabled: false, detailsSubmitted: false };
+      return { kind: "account", eventId, account, source: "deauthorized", chargesEnabled: false, payoutsEnabled: false, detailsSubmitted: false };
     }
     default:
       return ignore(`unhandled ${event.type}`);
@@ -226,7 +378,7 @@ export type RecordCheck =
  * practice that issued the invoice, and the metadata agrees with the invoice.
  */
 export function checkPaymentTarget(
-  action: Extract<StripeAction, { kind: "record-payment" }>,
+  action: { account: string; contactId: string | null; practiceId: string | null },
   invoice: InvoiceForPayment,
   practiceAccountId: string | null
 ): RecordCheck {
