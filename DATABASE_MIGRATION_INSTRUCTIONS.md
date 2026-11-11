@@ -403,6 +403,8 @@ KPI / Time saved files (`20261027000001`-`06`) and the 10/28 files (`20261028000
 | `20261116000001_caseload_transfer_storage_owner.sql` | Caseload transfer re-points the moved files' `storage.objects` owner (and backfills transfers already run), moves a student-linked pipeline contact's creator, and Remove hands a leaving member's firm pipeline stages and contacts to the owner. Without it the old counselor keeps listing, downloading and deleting the moved files through Storage, and closing their account can delete pipeline contacts the firm still uses. Either deploy order; replaces `transfer_caseload` (after `20261024000082`) and `remove_firm_member` (after `20261023030003`) with the same signatures and grants |
 | `20261117000001_family_visibility.sql` | What a student's parents receive: `student_alert_prefs.parents_get_tasks`, `parents_get_colleges`, `parents_get_essays` (boolean, not null, default true), the counselor's per-student switches for what Meridies sends a family on its own (the weekly report's sections, the escalation sweep's parent alert). Defaults are today's behaviour. No new policy or grant: the table's counselor-write / student-read policies and table-level grants cover the new columns. Without it `GET /accountability/family-visibility` answers `available: false` (everything on) and the PUT answers 503 `family_visibility_unavailable`. Either deploy order; not in REQUIRED_SCHEMA |
 | `20261118000001_booking_page_link.sql` | Two booking / invite fixes. (1) `booking_settings.booking_page_url` (text, null, CHECK: https on `calendar.app.google/` or `calendar.google.com/calendar/` only, at most 500) and `booking_page_mode` (`alongside` \| `instead`, default `alongside`): the counselor's linked Google Calendar booking page. Without it `GET /booking/settings` answers `bookingPageReady: false`, a PUT naming the fields answers 503 `booking_page_unavailable`, and students see no "Book on …'s calendar" link. No new policy or grant (owner-only `booking_settings` covers them). (2) Re-creates `private.meetings_ics_sequence()` (same language, SECURITY INVOKER, search_path and grants; the trigger and its axis-restore WHEN clause untouched) so SEQUENCE also rises when only `guardians_invited` changes; without it a guardian taken off and put back gets a REQUEST at the same SEQUENCE as their CANCEL. Either deploy order; not in REQUIRED_SCHEMA |
+| `20261118000002_pipeline_card_issues.sql` | Failed card payments and disputes in the Payment Tracker: `pipeline_card_issues`, one row per Stripe event (`payment_intent.payment_failed`, `checkout.session.async_payment_failed`, `charge.dispute.*`), service role writes, `crm_can_bill` reads. Without it the webhook notes them in `audit_log` (`pipeline.card_payment_failed` / `pipeline.card_dispute`) and answers 200, and invoices carry `cardFailure: null` (section below). Either deploy order; not in REQUIRED_SCHEMA |
+| `20261118000003_card_issues_axis_trash.sql` | `pipeline_card_issues` joins the AxIS trash (rule `parent` on `contact_id`), so a restored contact gets its failed-payment and dispute rows back. After `20261118000002`; skipped without the trash migration; not in REQUIRED_SCHEMA |
 
 Apply them through the Apply migrations workflow (manual mode: apply on, confirm the newest version the plan lists) after a backup.
 
@@ -992,8 +994,10 @@ Card payments also need, outside the database: `STRIPE_SECRET_KEY`, `STRIPE_WEBH
 `SUPABASE_SERVICE_ROLE_KEY` and `PUBLIC_API_URL` on Railway, Connect enabled on the Meridies Stripe
 account, and a Connect webhook endpoint ("Events on connected accounts") at
 `<PUBLIC_API_URL>/webhooks/stripe` for `checkout.session.completed`,
-`checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.refund.updated`,
-`account.updated` and `account.application.deauthorized`.
+`checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
+`checkout.session.expired`, `payment_intent.payment_failed`, `charge.refunded`, `charge.refund.updated`,
+`charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`, `account.updated` and
+`account.application.deauthorized`.
 
 ```sql
 select count(*) = 3 from pg_tables
@@ -1002,4 +1006,29 @@ select count(*) = 6 from information_schema.columns
  where table_schema = 'public' and table_name = 'pipeline_payments'
    and column_name in ('via_stripe', 'refunded_cents', 'stripe_payment_intent_id', 'stripe_checkout_session_id', 'stripe_charge_id', 'invoice_id');  -- true
 select prosrc like '%refunded_cents%' from pg_proc where proname = 'pipeline_credit_available';  -- true
+```
+
+## Failed card payments and disputes: `20261118000002`
+
+New table `pipeline_card_issues`: one row per Stripe event (`stripe_event_id` unique, so a redelivery
+adds nothing) for a failed card payment (`kind = 'payment_failed'`, from `payment_intent.payment_failed`
+or `checkout.session.async_payment_failed`, with Stripe's `reason_code` and `reason`) or a dispute
+(`kind = 'dispute'`, from `charge.dispute.*`, with the card payment it is about and its
+`dispute_status`). Neither is money: nothing in `pipeline_payments` changes, and the tracker derives
+what to show on every read (`lib/cardIssues.ts`). RLS: select for whoever may bill the family
+(`private.crm_can_bill`); no client write grant (the webhook writes with the service role); the
+approval gate. Nothing is dropped and no existing row is touched. Apply after `20261102000001`
+(filename order; it references `pipeline_payments` and `pipeline_invoices`).
+
+Either order with the code (the code shipped first, in #156). Code first: the probe
+(`cardIssuesReady`, re-asked every 30 s) finds the table missing, the webhook writes an `audit_log` row
+instead (`pipeline.card_payment_failed` / `pipeline.card_dispute`, entity the invoice) and answers
+200, and invoices carry `cardFailure: null`. Those `audit_log` rows are not backfilled. Migration
+first: no build before #156 reads the table. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select to_regclass('public.pipeline_card_issues') is not null;  -- true
+select relrowsecurity from pg_class where oid = 'public.pipeline_card_issues'::regclass;  -- true
+select privilege_type from information_schema.role_table_grants
+ where table_schema = 'public' and table_name = 'pipeline_card_issues' and grantee = 'authenticated';  -- SELECT only
 ```
