@@ -402,6 +402,7 @@ KPI / Time saved files (`20261027000001`-`06`) and the 10/28 files (`20261028000
 | `20261115000001_audit_guards.sql` | Security audit 2026-11-05 guards, each already enforced by the API: the documents bucket and `documents` rows refuse SVG/HTML by stored type or name; a pipeline contact's `owner_id` changes only by its owner, the solo counselor or a firm admin; the client INSERT grant on `profiles` is revoked; `pipeline_sequences` inserts name the caller's own workspace. Without it only the API-side checks hold |
 | `20261116000001_caseload_transfer_storage_owner.sql` | Caseload transfer re-points the moved files' `storage.objects` owner (and backfills transfers already run), moves a student-linked pipeline contact's creator, and Remove hands a leaving member's firm pipeline stages and contacts to the owner. Without it the old counselor keeps listing, downloading and deleting the moved files through Storage, and closing their account can delete pipeline contacts the firm still uses. Either deploy order; replaces `transfer_caseload` (after `20261024000082`) and `remove_firm_member` (after `20261023030003`) with the same signatures and grants |
 | `20261117000001_family_visibility.sql` | What a student's parents receive: `student_alert_prefs.parents_get_tasks`, `parents_get_colleges`, `parents_get_essays` (boolean, not null, default true), the counselor's per-student switches for what Meridies sends a family on its own (the weekly report's sections, the escalation sweep's parent alert). Defaults are today's behaviour. No new policy or grant: the table's counselor-write / student-read policies and table-level grants cover the new columns. Without it `GET /accountability/family-visibility` answers `available: false` (everything on) and the PUT answers 503 `family_visibility_unavailable`. Either deploy order; not in REQUIRED_SCHEMA |
+| `20261118000002_pipeline_card_issues.sql` | Failed card payments and disputes in the Payment Tracker: `pipeline_card_issues`, one row per Stripe event (`payment_intent.payment_failed`, `checkout.session.async_payment_failed`, `charge.dispute.*`), service role writes, `crm_can_bill` reads. Without it the webhook notes them in `audit_log` (`pipeline.card_payment_failed` / `pipeline.card_dispute`) and answers 200, and invoices carry `cardFailure: null` (section below). Either deploy order; not in REQUIRED_SCHEMA |
 
 Apply them through the Apply migrations workflow (manual mode: apply on, confirm the newest version the plan lists) after a backup.
 
@@ -991,8 +992,10 @@ Card payments also need, outside the database: `STRIPE_SECRET_KEY`, `STRIPE_WEBH
 `SUPABASE_SERVICE_ROLE_KEY` and `PUBLIC_API_URL` on Railway, Connect enabled on the Meridies Stripe
 account, and a Connect webhook endpoint ("Events on connected accounts") at
 `<PUBLIC_API_URL>/webhooks/stripe` for `checkout.session.completed`,
-`checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.refund.updated`,
-`account.updated` and `account.application.deauthorized`.
+`checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
+`checkout.session.expired`, `payment_intent.payment_failed`, `charge.refunded`, `charge.refund.updated`,
+`charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`, `account.updated` and
+`account.application.deauthorized`.
 
 ```sql
 select count(*) = 3 from pg_tables
@@ -1001,4 +1004,29 @@ select count(*) = 6 from information_schema.columns
  where table_schema = 'public' and table_name = 'pipeline_payments'
    and column_name in ('via_stripe', 'refunded_cents', 'stripe_payment_intent_id', 'stripe_checkout_session_id', 'stripe_charge_id', 'invoice_id');  -- true
 select prosrc like '%refunded_cents%' from pg_proc where proname = 'pipeline_credit_available';  -- true
+```
+
+## Failed card payments and disputes: `20261118000002`
+
+New table `pipeline_card_issues`: one row per Stripe event (`stripe_event_id` unique, so a redelivery
+adds nothing) for a failed card payment (`kind = 'payment_failed'`, from `payment_intent.payment_failed`
+or `checkout.session.async_payment_failed`, with Stripe's `reason_code` and `reason`) or a dispute
+(`kind = 'dispute'`, from `charge.dispute.*`, with the card payment it is about and its
+`dispute_status`). Neither is money: nothing in `pipeline_payments` changes, and the tracker derives
+what to show on every read (`lib/cardIssues.ts`). RLS: select for whoever may bill the family
+(`private.crm_can_bill`); no client write grant (the webhook writes with the service role); the
+approval gate. Nothing is dropped and no existing row is touched. Apply after `20261102000001`
+(filename order; it references `pipeline_payments` and `pipeline_invoices`).
+
+Either order with the code (the code shipped first, in #156). Code first: the probe
+(`cardIssuesReady`, re-asked every 30 s) finds the table missing, the webhook writes an `audit_log` row
+instead (`pipeline.card_payment_failed` / `pipeline.card_dispute`, entity the invoice) and answers
+200, and invoices carry `cardFailure: null`. Those `audit_log` rows are not backfilled. Migration
+first: no build before #156 reads the table. Not in `REQUIRED_SCHEMA`.
+
+```sql
+select to_regclass('public.pipeline_card_issues') is not null;  -- true
+select relrowsecurity from pg_class where oid = 'public.pipeline_card_issues'::regclass;  -- true
+select privilege_type from information_schema.role_table_grants
+ where table_schema = 'public' and table_name = 'pipeline_card_issues' and grantee = 'authenticated';  -- SELECT only
 ```

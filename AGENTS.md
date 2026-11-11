@@ -286,7 +286,10 @@ added NOT VALID; it fails if any row breaks the rule, so run
 rule in code either way),
 CSV import extras on invitations (`20261029000003`), card payments
 (`20261102000001`: without it `GET /pipeline/stripe` answers `configured:
-false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`)
+false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`),
+failed card payments and disputes (`20261118000002`: without it the Stripe
+webhook notes them in `audit_log` and the tracker shows no failure line,
+`cardIssuesReady`)
 and the 2026-11-05 audit's database guards (`20261115000001`: SVG/HTML kept
 out of the documents bucket by stored type, a pipeline contact's owner
 changed only by its owner or a firm admin, no client INSERT on `profiles`;
@@ -561,8 +564,8 @@ forget it.
   refund and changes nothing that counts (a lost dispute is the counselor's to
   record). `checkout.session.expired` does nothing (an abandoned Checkout; the
   pay link still works). Both are kept one row per Stripe event in
-  `pipeline_card_issues` (event id unique), a **proposed migration not yet in
-  this repo** (the SQL is in the PR that added this): until it is applied
+  `pipeline_card_issues` (event id unique; migration `20261118000002`, select
+  via `crm_can_bill`, service-role writes only): until it is applied
   (`cardIssuesReady`) the webhook writes an `audit_log` row instead
   (`pipeline.card_payment_failed` / `pipeline.card_dispute`, entity the invoice)
   and answers 200, and the tracker shows nothing new. Derived on every read
