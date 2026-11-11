@@ -29,6 +29,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail, sendSms } from "../lib/email.js";
+import { billToOf, invoiceStatus, readPractice, renderInvoiceEmail, type InvoiceStatus, type PracticeIdentity } from "../lib/invoiceDocument.js";
 import { contactTextBody, guardianFootnote } from "../lib/parentCopy.js";
 import { replyAddressFor } from "../lib/replyRouting.js";
 import { badRequest, conflict, forbidden, HttpError, notFound } from "../lib/errors.js";
@@ -415,6 +416,9 @@ async function loadAccount(request: FastifyRequest, contactId: string): Promise<
 
 type InvoiceDraft = {
   label: string;
+  /** The package it bills: the invoice's one line item. */
+  packageName: string;
+  issuedOn: string;
   grossCents: number;
   creditAppliedCents: number;
   alreadyPaidCents: number;
@@ -442,45 +446,72 @@ async function senderFields(
   return { fromName: request.profile.full_name ?? null, ...(replyTo ? { replyTo } : {}) };
 }
 
-function invoiceEmail(contact: Row, draft: InvoiceDraft, number: string | null, senderName: string | null, payLink: string | null = null) {
+/** The practice an invoice to this contact comes from (its firm, or its solo counselor). */
+function practiceOf(request: FastifyRequest, contact: Row): Promise<PracticeIdentity> {
+  const counselorId = String(contact.counselor_id);
+  const firmId = (contact.firm_id as string | null) ?? null;
+  // A solo counselor's own name is already on the request; anyone else's is read.
+  const own = !firmId && counselorId === request.auth.userId ? request.profile.full_name ?? null : null;
+  return readPractice(request.db, { firmId, counselorId }, own);
+}
+
+/**
+ * The invoice email, the same for the preview and the send: the invoice
+ * document (lib/invoiceDocument.ts) with every figure as the draft states it.
+ * A pay link adds a "Pay by card" button.
+ */
+function invoiceEmail(
+  contact: Row,
+  draft: InvoiceDraft,
+  number: string | null,
+  senderName: string | null,
+  practice: PracticeIdentity,
+  status: InvoiceStatus,
+  payLink: string | null = null
+) {
   const to = String(contact.parent_email || contact.student_email || "");
-  const name = String(contact.student_name ?? "").trim();
-  const lines = [`${draft.label}${name ? ` for ${name}` : ""}: ${formatUsd(draft.grossCents)}.`];
-  if (draft.creditAppliedCents > 0) lines.push(`Credit applied: −${formatUsd(draft.creditAppliedCents)}.`);
-  if (draft.alreadyPaidCents > 0) lines.push(`Already paid: −${formatUsd(draft.alreadyPaidCents)}.`);
-  lines.push(`Amount due: ${formatUsd(draft.amountDueCents)}, by ${draft.dueOn}.`);
-  if (draft.plan) lines.push(draft.plan);
-  if (draft.amountDueCents === 0) lines.push("Your credit covers this invoice in full. There's nothing to pay.");
-  const cta = payLink && draft.amountDueCents > 0 ? { label: "Pay by card", url: payLink } : undefined;
-  if (cta) lines.push("You can pay by card with the button below. The payment goes straight to the practice.");
-  lines.push("Reply to this email with any questions about the invoice.");
   const toParent = Boolean(contact.parent_email);
-  const template = {
-    heading: number ? `Invoice ${number}` : "Invoice",
-    paragraphs: lines,
-    ...(cta ? { cta } : {}),
+  const { html, text } = renderInvoiceEmail({
+    practice,
+    number,
+    issuedOn: draft.issuedOn,
+    dueOn: draft.dueOn,
+    billTo: billToOf(contact),
+    lines: [{ description: draft.packageName, detail: draft.label, amountCents: draft.grossCents }],
+    subtotalCents: draft.grossCents,
+    creditAppliedCents: draft.creditAppliedCents,
+    alreadyPaidCents: draft.alreadyPaidCents,
+    amountDueCents: draft.amountDueCents,
+    status,
+    payUrl: payLink,
+    plan: draft.plan,
     footnote: toParent
       ? guardianFootnote(senderName)
       : senderName
         ? `Sent by ${senderName} through Meridies.`
         : "Sent through Meridies.",
-  };
+  });
   return {
     to,
     recipientKind: contact.parent_email ? ("guardian" as const) : ("student" as const),
     subject: `Invoice${number ? ` ${number}` : ""}: ${formatUsd(draft.amountDueCents)} due ${draft.dueOn}`,
-    html: brandedEmail(template),
-    text: brandedText(template),
+    html,
+    text,
   };
 }
 
+/** A new invoice's status: nothing left to ask is paid (as deriveAccount will read it), else due. */
+const draftStatus = (d: InvoiceDraft): InvoiceStatus => (d.amountDueCents <= 0 ? "paid" : "due");
+
 /** Plan an invoice for this account, or the 409 that says why it can't be sent. */
-function draftInvoice(account: AccountDTO, credits: boolean, b: { label: string; amountCents: number; dueOn: string }): InvoiceDraft {
+function draftInvoice(account: AccountDTO, credits: boolean, b: { label: string; amountCents: number; dueOn: string }, issuedOn: string): InvoiceDraft {
   // Without the migration no credit can be recorded against an invoice.
   const plan = planInvoice(credits ? account : { ...account, creditCents: 0 }, b.amountCents);
   if (!plan.ok) throw new HttpError(409, plan.reason, plan.code);
   return {
     label: b.label,
+    packageName: account.packageName,
+    issuedOn,
     grossCents: plan.grossCents,
     creditAppliedCents: plan.creditAppliedCents,
     alreadyPaidCents: plan.alreadyPaidCents,
@@ -514,6 +545,16 @@ async function payLinkIfCards(request: FastifyRequest, invoice: Row, owedCents: 
   } catch (err) {
     request.log.warn({ err: serializeErr(err) }, "pipeline: could not make a pay link");
     return null;
+  }
+}
+
+/** Whether an invoice from this practice would carry a pay link (the Send preview's button). Mints nothing. */
+async function takesCards(request: FastifyRequest, practiceId: string): Promise<boolean> {
+  try {
+    if (!(await stripeConfigured(request.db))) return false;
+    return (await practiceAccount(request.db, practiceId))?.charges_enabled === true;
+  } catch {
+    return false;
   }
 }
 
@@ -1051,13 +1092,19 @@ export default async function pipelineRoutes(app: FastifyInstance) {
    */
   app.get("/payments", { preHandler: read("pipeline:payments") }, async (request) => {
     const ws = await loadWorkspace(request);
+    // Whose invoices these are: the header every invoice view draws (additive).
+    const practice = await readPractice(
+      request.db,
+      { firmId: ws.firmId, counselorId: request.auth.userId },
+      ws.firmId ? null : request.profile.full_name ?? null
+    );
     let cq = request.db.from("pipeline_contacts").select("id, student_name, owner_id");
     cq = ws.firmId ? cq.eq("firm_id", ws.firmId) : cq.is("firm_id", null).eq("counselor_id", request.auth.userId);
     const contacts = await cq.limit(2000);
     if (contacts.error) throw crmError(contacts.error);
     const ids = ((contacts.data ?? []) as Row[]).map((r) => String(r.id));
     if (ids.length === 0) {
-      return { today: todayIn(request.profile.timezone), accounts: [], totals: totals([]), unbilled: [], canBillAll: ws.isAdmin };
+      return { today: todayIn(request.profile.timezone), accounts: [], totals: totals([]), unbilled: [], canBillAll: ws.isAdmin, practice };
     }
 
     const credits = await paymentCreditsReady(request);
@@ -1094,7 +1141,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       .filter((c) => !billed.has(String(c.id)) && (ws.isAdmin || c.owner_id === request.auth.userId))
       .map((c) => ({ contactId: String(c.id), studentName: String(c.student_name ?? "") }));
 
-    return { today, accounts, totals: totals(accounts), unbilled, canBillAll: ws.isAdmin };
+    return { today, accounts, totals: totals(accounts), unbilled, canBillAll: ws.isAdmin, practice };
   });
 
   /** Set up (or change) a family's package. */
@@ -1154,9 +1201,12 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const b = invoiceBody.strict().parse(request.body);
       const contact = await loadContactRow(request, id);
       const account = await requireAccount(request, id);
-      if (b.dueOn < todayIn(request.profile.timezone)) throw badRequest("The due date has already passed");
-      const draft = draftInvoice(account, await paymentCreditsReady(request), b);
-      const mail = invoiceEmail(contact, draft, null, request.profile.full_name ?? null);
+      const today = todayIn(request.profile.timezone);
+      if (b.dueOn < today) throw badRequest("The due date has already passed");
+      const draft = draftInvoice(account, await paymentCreditsReady(request), b, today);
+      const practiceId = String(contact.firm_id ?? contact.counselor_id);
+      const [practice, cards] = await Promise.all([practiceOf(request, contact), takesCards(request, practiceId)]);
+      const mail = invoiceEmail(contact, draft, null, request.profile.full_name ?? null, practice, draftStatus(draft));
       return {
         to: mail.to || null,
         subject: mail.subject,
@@ -1165,6 +1215,12 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         creditAppliedCents: draft.creditAppliedCents,
         alreadyPaidCents: draft.alreadyPaidCents,
         amountDueCents: draft.amountDueCents,
+        // The invoice as the family will see it (additive; an older app ignores these).
+        practice,
+        issuedOn: today,
+        packageName: draft.packageName,
+        plan: draft.plan,
+        payByCard: cards && draft.amountDueCents > 0,
       };
     }
   );
@@ -1185,7 +1241,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const today = todayIn(request.profile.timezone);
       if (b.dueOn < today) throw badRequest("The due date has already passed");
       const credits = await paymentCreditsReady(request);
-      const draft = draftInvoice(account, credits, b);
+      const draft = draftInvoice(account, credits, b, today);
 
       const { data, error } = await request.db
         .from("pipeline_invoices")
@@ -1207,7 +1263,8 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       let emailSent = false;
       const to = String(contact.parent_email || contact.student_email || "");
       const payLink = b.send && to ? await payLinkIfCards(request, invoice, draft.amountDueCents) : null;
-      const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null, payLink);
+      const practice = await practiceOf(request, contact);
+      const mail = invoiceEmail(contact, draft, String(invoice.number), request.profile.full_name ?? null, practice, draftStatus(draft), payLink);
       if (b.send && to) {
         const sent = await sendEmail({
           ...(await senderFields(request, id, contact.parent_email ? "parent" : "student")),
@@ -1328,6 +1385,8 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         .sort((a, b) => a.issuedOn.localeCompare(b.issuedOn) || a.number.localeCompare(b.number, undefined, { numeric: true }));
       const draft: InvoiceDraft = {
         label: dto.label,
+        packageName: account.packageName,
+        issuedOn: dto.issuedOn,
         grossCents: dto.amountCents,
         creditAppliedCents: dto.creditAppliedCents,
         alreadyPaidCents: dto.paidCents,
@@ -1335,7 +1394,8 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         dueOn: dto.dueOn,
         plan: planLine(account, live.findIndex((i) => i.id === id) + 1),
       };
-      const mail = invoiceEmail(contact, draft, dto.number, request.profile.full_name ?? null, payLink);
+      const practice = await practiceOf(request, contact);
+      const mail = invoiceEmail(contact, draft, dto.number, request.profile.full_name ?? null, practice, invoiceStatus(dto.state), payLink);
       const sent = await sendEmail({
         ...(await senderFields(request, String(contact.id), contact.parent_email ? "parent" : "student")),
         to,
