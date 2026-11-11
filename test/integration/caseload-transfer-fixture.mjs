@@ -9,7 +9,8 @@
 //   custom subfolder, a link, tasks with stages, a college list with recommendations
 //   and results, essays with versions and marks, a scheduled and a sent message, a
 //   queued parent alert, open My Work Queue items, an upcoming calendar entry and a
-//   Management task. The first student also became a student from a pipeline contact.
+//   Management task. The first student also became a student from a pipeline contact
+//   on a stage A set up, and A has another lead on it.
 //
 // Every account's address ends in @transfer-test.local, so a seeded firm is easy to find
 // and `cleanupFirm` removes it.
@@ -190,8 +191,11 @@ export async function seedFirm({ studentCount = 10, run = `${Date.now()}` } = {}
   const contactId = await one(`with c as (insert into public.pipeline_contacts (firm_id, counselor_id, stage_id, owner_id, student_name, parent_email)
     values ('${firmId}', '${A.id}', '${stageId}', '${A.id}', '${q(students[0].name)}', 'lead-${run}@${DOMAIN}') returning id) select id from c`);
   await sql(`update public.pipeline_contacts set student_id = '${students[0].id}' where id = '${contactId}'`);
+  // And a lead A is still working, not a student yet.
+  const leadId = await one(`with c as (insert into public.pipeline_contacts (firm_id, counselor_id, stage_id, owner_id, student_name, parent_email)
+    values ('${firmId}', '${A.id}', '${stageId}', '${A.id}', 'Rosa Lead', 'lead2-${run}@${DOMAIN}') returning id) select id from c`);
 
-  return { run, firmId, O, A, B, bOwn, students, contactId };
+  return { run, firmId, O, A, B, bOwn, students, contactId, leadId, stageId };
 }
 
 /** Every row about these students, by table, that `u` can read through PostgREST (RLS). */

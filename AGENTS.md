@@ -288,7 +288,9 @@ false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`)
 and the 2026-11-05 audit's database guards (`20261115000001`: SVG/HTML kept
 out of the documents bucket by stored type, a pipeline contact's owner
 changed only by its owner or a firm admin, no client INSERT on `profiles`;
-the API enforces each already).
+the API enforces each already), and caseload transfer's Storage owner and
+pipeline hand-over (`20261116000001`: without it the old counselor keeps
+Storage access to moved files, see "Caseload transfer").
 None is in `REQUIRED_SCHEMA`; each feature degrades without its file, never
 500s (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
 writing new features that way: a migration lands minutes from its code in
@@ -3985,14 +3987,17 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `@transfer-test.local`, removed at the end), moves one student, a split and
   the rest, and checks table by table that the receiver reads and edits what
   the old counselor could and the old counselor reads nothing (API 404,
-  PostgREST empty), then hands over a student-less consultant's pipeline with
-  `one_person` + `removeAfter` and closes their account. **Known gap:** the
-  moved files' `storage.objects.owner_id` stays the uploader's, and the
-  bucket's select/delete policies honour it, so the old counselor can still
-  list, download and delete them after the transfer, even after leaving the
-  firm. The fix is a migration (`transfer_caseload` re-pointing the objects,
-  plus a backfill); the test logs `KNOWN GAP` until the function touches
-  `storage.objects`, then asserts it.
+  PostgREST empty), then removes the student-less consultant with a plain
+  Remove (their pipeline goes to the owner) and closes their account.
+- **Storage follows the files** (`20261116000001`). The documents bucket's
+  select/delete policies honour `storage.objects.owner_id`, so the transfer
+  re-points the objects of the documents it moves (the migration backfills
+  earlier transfers): the old counselor can't list, download, sign or delete
+  them afterwards. Step l) also moves a student-linked firm contact's creator
+  (`counselor_id`, which cascades on account deletion), and
+  `remove_firm_member` hands a leaving member's firm pipeline stages and the
+  contacts they made or own to the firm owner (counted in the
+  `firm.member_removed` audit row).
 - **Temporary delegation** is specified in the spec (§13) and not built.
 
 ## Teams, guardians, delivery status, data rights, monitoring
