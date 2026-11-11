@@ -36,6 +36,10 @@ security definer
 set search_path to 'private', 'public'
 as $$
 begin
+  -- An AxIS restore puts the deleted row back exactly as it was, so who added it is kept.
+  if current_setting('meridies.axis_restore', true) = 'on' then
+    return new;
+  end if;
   if new.student_id = (select auth.uid()) then
     new.alerts_enabled := false;
   end if;
