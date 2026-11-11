@@ -133,6 +133,8 @@ src/
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
 │   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
 │   ├── listLearning.ts    # list-builder learning: what Build College Lists showed and what was added/removed/recommended (service role, never awaited)
+│   ├── listContract.ts    # the list-match contract: core features, opportunity categories, card -> feature map, match and learning numbers (definitions only)
+│   ├── embeddings.ts      # in-process text embeddings (Supabase/gte-small, 384, fp32) for college_opportunities; model downloaded on first use
 │   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
@@ -2000,10 +2002,10 @@ distance, size, control, admit rate, test policy, net price at an income band,
 majors, HBCU/HSI/women's/religious, setting, fit) and pages. Fit
 (reach/target/likely) is `studentOdds` in SQL and is labelled a Meridies
 estimate. `GET /colleges/search` keeps its array response; the total and next
-cursor are the `X-Total-Count` / `X-Next-Cursor` headers. No embeddings: the AI
-rule is Anthropic only. (`college_opportunities.embedding`, `vector(384)`, exists
-since `20261119000001` but nothing fills it yet: what makes those vectors is an
-open decision against this rule, see "List-builder learning".)
+cursor are the `X-Total-Count` / `X-Next-Cursor` headers. Search uses no
+embeddings. (`college_opportunities.embedding`, `vector(384)`, since
+`20261119000001`, is filled by the in-process model in `lib/embeddings.ts`, the one
+exception to the Anthropic-only rule; see "List-builder learning".)
 
 ### Resource library and curated datasets
 
@@ -2618,11 +2620,27 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
   signed-in user, written by service_role only, like `college_site_info`.
 - **Deploy order:** either, for both files; not in `REQUIRED_SCHEMA`. Without them the list builder and every list
   write work as before and log nothing. Tests: `test/unit/list-learning.test.ts`, `test/integration/list-learning.test.mjs`.
+- **The match contract** (`lib/listContract.ts`, no migration): the ten `CORE_FEATURES` (`college_core_features.feature_key`;
+  `universal` ones only help a match, `taste` ones follow the student's preference), `OPPORTUNITY_CATEGORIES` with prior
+  weights, `CARD_FEATURE_MAP` (preference card key -> feature and sign; the sign follows the card's situation, so the
+  `housing` card, "guaranteed for one year only", is -1 on `residential`), `MATCH_CONFIG` and `LEARNING_CONFIG`.
+  Definitions only; nothing reads them yet. Keys are stored, so add, never rename. `test/unit/list-contract.test.ts`
+  checks every mapped card exists in the seed (`20261105000006`).
+- **Embeddings** (`lib/embeddings.ts`): `embed(texts)` runs `Supabase/gte-small` in process with
+  `@huggingface/transformers` (mean pooling, unit length, 384 numbers, the `college_opportunities.embedding` size).
+  **fp32 on purpose**: the 8-bit model's vectors shift with the rest of the batch. Input past 512 tokens (about 400
+  words) is cut off silently. The model (about 130 MB) downloads from the Hugging Face Hub on first use into
+  `node_modules/@huggingface/transformers/.cache` (lost on each Railway deploy); `warmEmbeddings()` loads it and never
+  throws, but nothing calls it at boot yet. `.npmrc` sets `onnxruntime-node-install=skip` so installs on Linux don't
+  download onnxruntime's CUDA libraries. `test/unit/embeddings.test.ts` is the one unit test that uses the network.
 
 ## Anthropic / AI rules
 
 **All product AI goes through Anthropic.** No other providers unless the team
-explicitly decides otherwise.
+explicitly decides otherwise. The one decided exception (2026-11-11): text
+embeddings for college matching run in this process (`lib/embeddings.ts`,
+open-weights `Supabase/gte-small`). No text leaves the server; only the model's
+weights are downloaded from Hugging Face. Generation stays Anthropic only.
 
 - **Speed first** — counselors use these live, in session with a family
 - **Default model:** `claude-haiku-4-5` (`FAST_MODEL` in `lib/anthropic.ts`)
