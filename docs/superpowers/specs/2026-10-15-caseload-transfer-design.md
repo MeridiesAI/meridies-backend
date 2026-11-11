@@ -3,7 +3,9 @@
 Status: v1 built (backend). Temporary delegation specified, deferred (§13).
 Migrations: `20261023030001_caseload_transfer.sql`,
 `20261023030002_caseload_transfer_functions.sql`,
-`20261023030003_remove_firm_member_caseload.sql`.
+`20261023030003_remove_firm_member_caseload.sql`, then
+`20261024000082` (files by student) and `20261116000001` (Storage owner,
+pipeline creator, pipeline hand-over on removal).
 Code: `src/lib/caseloadTransfer.ts`, `src/routes/management.ts`,
 `src/routes/firms.ts`, `src/routes/account.ts`, `src/lib/studentPage.ts`.
 
@@ -104,7 +106,10 @@ under it, found by a recursive walk on `parent_id`), with every document and
 document link in that subtree or about the student that the old counselor
 owns. If the receiver somehow already owns a student folder for that student,
 the old folder's contents and subfolders move into it and the old folder is
-deleted. A document imported from the old counselor's Google Drive or OneDrive
+deleted. The Storage objects of the moved documents get the receiver as
+their owner (`storage.objects.owner_id`, which the bucket's policies
+honour), so the old counselor can't read or delete them afterwards. A
+document imported from the old counselor's Google Drive or OneDrive
 keeps its stored copy; its live pointer (`external_provider`,
 `external_file_id`, `external_drive_id`) is cleared, because the receiver's
 account can't read the old counselor's drive. It is counted under "Needs
@@ -278,7 +283,10 @@ with students is refused: "Ask a firm owner or admin to transfer your
 students or release them to you". Removal also deletes the member's
 collaborator grants on the firm's students, and, when students are released,
 the firm colleagues' grants on those students. It clears the firm's default
-receiver if it named the member, and writes a `firm.member_removed` audit row.
+receiver if it named the member, hands the firm pipeline stages they made and
+the firm contacts they made or own to the firm owner (so closing their
+account later deletes none of them), and writes a `firm.member_removed` audit
+row.
 The 1-argument function is dropped so PostgREST never sees two candidates; the
 old call `{ p_profile }` resolves to the new one with release off. AxIS's
 `firm.remove_member` never passes the flag, so AxIS can never release
@@ -364,6 +372,12 @@ as today.
   deletion; a consultant with only archived students transferred, then
   removed; removal refused, released, and allowed after a transfer; the
   student page with the transfer tables absent.
+- Access (`test/integration/caseload-transfer-access.test.mjs`, fixture
+  `caseload-transfer-fixture.mjs`): a realistic firm moved one student, a split
+  and the rest; per table, the receiver reads and edits what the old counselor
+  could, and the old counselor reads nothing; a student-less consultant's
+  pipeline handed to the owner on a plain removal, and the old counselor
+  shut out of the moved Storage objects (`20261116000001`).
 - Load (`test/integration/caseload-transfer-load.mjs`): 500 students in one
   call inside the statement timeout.
 - Existing: `imports-*.test.mjs`, `approval-db.test.mjs`, `hardening.test.mjs`.

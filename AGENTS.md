@@ -290,7 +290,9 @@ false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`)
 and the 2026-11-05 audit's database guards (`20261115000001`: SVG/HTML kept
 out of the documents bucket by stored type, a pipeline contact's owner
 changed only by its owner or a firm admin, no client INSERT on `profiles`;
-the API enforces each already).
+the API enforces each already), and caseload transfer's Storage owner and
+pipeline hand-over (`20261116000001`: without it the old counselor keeps
+Storage access to moved files, see "Caseload transfer").
 None is in `REQUIRED_SCHEMA`; each feature degrades without its file, never
 500s (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
 writing new features that way: a migration lands minutes from its code in
@@ -4054,6 +4056,25 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
 - **Hand-kept table list.** `caseload-transfer.test.mjs` fails when a new
   cascading counselor-owned column appears on a student table that the
   transfer doesn't handle and that isn't on its "stays" list. Decide it there.
+- **Both consultants' view.** `caseload-transfer-access.test.mjs` builds a
+  realistic firm (`caseload-transfer-fixture.mjs`: ten students with guardians,
+  notes, meetings, Storage files in the student folder and a subfolder, tasks
+  with stages, a college list with recommendations and a result, essays with
+  versions and marks, scheduled sends, a pipeline contact; every address
+  `@transfer-test.local`, removed at the end), moves one student, a split and
+  the rest, and checks table by table that the receiver reads and edits what
+  the old counselor could and the old counselor reads nothing (API 404,
+  PostgREST empty), then removes the student-less consultant with a plain
+  Remove (their pipeline goes to the owner) and closes their account.
+- **Storage follows the files** (`20261116000001`). The documents bucket's
+  select/delete policies honour `storage.objects.owner_id`, so the transfer
+  re-points the objects of the documents it moves (the migration backfills
+  earlier transfers): the old counselor can't list, download, sign or delete
+  them afterwards. Step l) also moves a student-linked firm contact's creator
+  (`counselor_id`, which cascades on account deletion), and
+  `remove_firm_member` hands a leaving member's firm pipeline stages and the
+  contacts they made or own to the firm owner (counted in the
+  `firm.member_removed` audit row).
 - **Temporary delegation** is specified in the spec (§13) and not built.
 
 ## Teams, guardians, delivery status, data rights, monitoring
@@ -4302,7 +4323,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
   `-retention`, `-guard`, `-security`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`),
   `caseload-transfer` (every persona, every table that follows a student,
-  removal, the firm setting), `regex-dos` (the regular-expression attacks:
+  removal, the firm setting), `caseload-transfer-access` (a realistic firm moved
+  in three steps, seen as the old and the new counselor), `regex-dos` (the regular-expression attacks:
   a student's document, a Mass invite paste, an import file and its header
   row, a .docx that inflates to 19 MB and a 10 MB .txt registered with no
   size, each read six times at once; `/health` keeps answering while each
