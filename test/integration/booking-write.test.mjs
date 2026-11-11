@@ -303,6 +303,11 @@ check("…nor any email", (await sql(`select count(*) from message_deliveries wh
 const slotStill = starts(await slots(s2, video.id, 12)).some((s) => same(s, at(12, 9)));
 check("…so the slot is still offered", slotStill);
 
+// An in-person type goes on the connected calendar too (a plain event), so the same failing grant stops it the same way.
+const failedInPerson = await book(sa, checkIn.id, at(12, 10));
+check("an in-person booking whose calendar write fails is 503 calendar_write_failed", failedInPerson.status === 503 && failedInPerson.body.code === "calendar_write_failed", JSON.stringify(failedInPerson.body));
+check("…and leaves no meeting behind", (await sql(`select count(*) from meetings where counselor_id='${A.id}' and starts_at='${at(12, 10)}'`)) === "0");
+
 const withEvent = await sql(`insert into meetings (student_id, counselor_id, title, mode, starts_at, ends_at, status, calendar_provider, calendar_event_id, join_url)
   values ('${sa.id}', '${A.id}', 'On calendar', 'google-meet', '${at(13, 9)}', '${at(13, 9, 30)}', 'scheduled', 'google', 'evt-bkw-1', 'https://meet.google.com/abc-defg-hij') returning id`).then((o) => o.split("\n")[0]);
 const failedMove = await call(sa.token, "PATCH", `/me/booking/${withEvent}`, { startsAt: at(13, 10) });
