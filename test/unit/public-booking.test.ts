@@ -453,6 +453,32 @@ test("public bookings show on the counselor's whole calendar as '<type> with <na
   assert.equal(scoped.items.length, 0, "one student's calendar has no public bookings");
 });
 
+test("a public booking on Google carries its event page (htmlLink) in the app's feed only, never another provider's", async () => {
+  resetPublicBookingReady();
+  const base = { counselor_id: COUNSELOR, type_name: "Check-in", name: "Maria Lopez", email: "maria@example.com", phone: null, note: null, status: "scheduled" };
+  const { db } = fakeDb({
+    public_bookings: [
+      { ...base, id: "pbg", starts_at: "2027-01-05T09:00:00Z", ends_at: "2027-01-05T09:30:00Z", calendar_provider: "google", calendar_event_id: "evt123" },
+      { ...base, id: "pbm", starts_at: "2027-01-06T09:00:00Z", ends_at: "2027-01-06T09:30:00Z", calendar_provider: "microsoft", calendar_event_id: "AAMk" },
+      { ...base, id: "pbn", starts_at: "2027-01-07T09:00:00Z", ends_at: "2027-01-07T09:30:00Z", calendar_provider: null, calendar_event_id: null },
+    ],
+  });
+  const q = { from: "2027-01-01", to: "2027-01-31", tz: "UTC", includeDone: true, includeCancelled: false };
+  let reads = 0;
+  const googleAccountEmail = async () => (reads++, "jane@school.org");
+  const out = await buildCalendarFeed({ db, ownerId: COUNSELOR, role: "counselor", caseload: [], googleAccountEmail }, q);
+  const byRef = new Map(out.items.map((i) => [i.ref, i]));
+  const link = byRef.get("pbg")!.htmlLink!;
+  assert.ok(link.startsWith("https://www.google.com/calendar/event?eid="));
+  assert.equal(Buffer.from(new URL(link).searchParams.get("eid")!, "base64url").toString(), "evt123 jane@school.org");
+  assert.equal(byRef.get("pbm")!.htmlLink, null);
+  assert.equal(byRef.get("pbn")!.htmlLink, null);
+  assert.equal(reads, 1, "the address is read once per feed");
+
+  const ical = await buildCalendarFeed({ db, ownerId: COUNSELOR, role: "counselor", caseload: [] }, q);
+  assert.ok(ical.items.every((i) => !("htmlLink" in i)), "without the lookup (the iCal feed) there is no link field");
+});
+
 // ---- what is sent ----------------------------------------------------------------------------------
 
 const saved: Row = {

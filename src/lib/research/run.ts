@@ -22,7 +22,7 @@ import { repeatsFor, type RepeatOf } from "./repeats.js";
 import { fakeSeam } from "./fake.js";
 import {
   buildMatchPrompt, buildResearchQuestion, dropStudentInfoInSuggestions, replaceWhysNamingStudent, MATCH_SCHEMA, MATCH_SYSTEM, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
-  validatePicks, type RecommendationDraft, type ResearchCandidate,
+  sourcesByTitle, validatePicks, type RecommendationDraft, type ResearchCandidate,
 } from "./prompt.js";
 
 export type Feature = ResearchBrief["feature"];
@@ -32,7 +32,7 @@ export type RecommendationDto = {
   feature: string;
   title: string;
   why: string;
-  details: { deadline?: string; cost?: string; effort?: string; collegeId?: string; verify: true };
+  details: { deadline?: string; cost?: string; effort?: string; fit?: "reach" | "target" | "likely"; collegeId?: string; verify: true };
   sources: { url: string; title: string | null; checkedAt: string }[];
   status: "suggested" | "accepted" | "dismissed";
   acceptedAs: { type: "student_college" | "task"; id: string } | null;
@@ -104,7 +104,7 @@ const rawEnv = (): FakeEnv => ({ RESEARCH_FAKE: env.RESEARCH_FAKE, NODE_ENV: pro
 type Row = Record<string, unknown>;
 
 /** What a run did at each step: numbers only, logged with the run id and never any text. */
-export type RunCounts = { parts: number; objects: number; parsed: number; kept: number; picked: number; stored: number };
+export type RunCounts = { parts: number; objects: number; parsed: number; recovered: number; kept: number; picked: number; stored: number };
 
 const WEEK_MS = 7 * 86_400_000;
 
@@ -296,7 +296,11 @@ export async function runResearch(
     }
 
     // 8. Keep only what was really seen in this run, isn't blocked and still answers.
-    const { candidates, objects } = parseCandidatesCounted(result.parts);
+    // A college whose citation the API couldn't attach may take a page the run saw titled with its name (`recovered`).
+    const pages = result.seenPages ?? [];
+    const { candidates, objects, recovered } = parseCandidatesCounted(result.parts, {
+      ...(feature === "college_list" && pages.length ? { fallbackSources: (title: string) => sourcesByTitle(title, pages) } : {}),
+    });
     const kept = await keepCandidates(candidates, result, blocked, seam.check);
 
     // 9. Match: a cheap model picks the fits. Nothing to match means an empty, successful run.
@@ -332,7 +336,7 @@ export async function runResearch(
       const order = new Map(drafts.map((d, i) => [d.title, i]));
       recommendations.sort((a, b) => (order.get(a.title) ?? 0) - (order.get(b.title) ?? 0));
     }
-    const counts: RunCounts = { parts: result.parts.length, objects, parsed: candidates.length, kept: kept.length, picked: drafts.length, stored: recommendations.length };
+    const counts: RunCounts = { parts: result.parts.length, objects, parsed: candidates.length, recovered, kept: kept.length, picked: drafts.length, stored: recommendations.length };
     request.log.info({ runId, counts }, "research run counts");
     await finish("succeeded", null, expiryFor(counts));
     // The run is paid for and stored; a failed repeat read must not lose it. Accept still refuses a repeat on its own.

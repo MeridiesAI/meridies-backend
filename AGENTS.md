@@ -76,6 +76,7 @@ src/
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
+│   ├── calendarLink.ts    # the Google event's page (htmlLink) computed from the stored id + the connected address
 │   ├── bookingSlots.ts    # student booking: free slots from weekly hours, busy time, buffer, notice (pure, DST-safe)
 │   ├── booking.ts         # student booking: settings/types DTOs, the student's counselor, slots with busy time
 │   ├── bookingWrite.ts    # student booking: book / reschedule / cancel rules and write order (injected I/O)
@@ -1053,7 +1054,14 @@ forget it.
   charged, and a meeting whose own student isn't on its owner's caseload
   sends nothing and charges nothing. A new route that calls a provider about
   a stored row, or charges a limit keyed by a stored owner, checks ownership
-  the same way. **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
+  the same way. **The event's link** (`lib/calendarLink.ts`, no migration): `/meetings` answers carry `htmlLink`,
+  Google's event page `https://www.google.com/calendar/event?eid=<base64url("<eventId> <calendarId>")>`, computed
+  because nothing stores Google's own `htmlLink`. Every event is made on `calendars/primary`, whose id is the
+  connected account's address (`integration_tokens.account_email`; "primary" means nothing inside an eid), so the
+  link is only given to the meeting's owner (the eid spells out their address; a collaborator or student gets null and
+  the app opens that day), only for `calendar_provider` google, and null with no stored address. Outlook's `webLink`
+  isn't stored, so Outlook meetings have none. Tests: `test/unit/calendar-link.test.ts`.
+  **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
   own book / move / cancel acts on their counselor's calendar with the counselor's token.
 - **Student self-booking, part 1** (`20261111000001`; `lib/bookingSlots.ts`, `lib/booking.ts`, `routes/booking.ts`,
   `routes/studentBooking.ts`, `listBusy` in `lib/suiteApi.ts`). `booking_settings` (one row per counselor: `enabled`,
@@ -1208,8 +1216,9 @@ forget it.
   `cancelled_at`), no anon or student access, approval gate; `manage_token_hash` is reserved for a later "manage my
   booking" link and nothing writes it yet. **The calendar feed**: the counselor's whole calendar (not one student's)
   carries each as kind `meeting`, `id` `meeting:<booking id>`, title "<type> with <name>", `studentId: null`,
-  `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`); the subscribed iCal feed
-  says only "Meeting". **The counselor cancels one** (`lib/publicBookingCancel.ts`, routes in `routes/booking.ts`, no migration):
+  `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`) and, in the app's feed,
+  `htmlLink` (its Google event page, `lib/calendarLink.ts`; null on Outlook or with no event); the subscribed iCal
+  feed says only "Meeting". **The counselor cancels one** (`lib/publicBookingCancel.ts`, routes in `routes/booking.ts`, no migration):
   `GET /booking/public/:id` -> `{ booking: { id, typeName, mode, name, email, phone, note, startsAt, endsAt, status,
   joinUrl, calendarProvider, contactId, cancelledAt, createdAt } }` (the caller's own row on their own client, else 404
   `booking_not_found`); `POST /booking/public/:id/cancel` (counselor only, 60 an hour) -> `{ booking, calendarRemoved }`:
@@ -3782,9 +3791,43 @@ column and tables.
   API splits one answer into text blocks at citation boundaries, so
   `parseCandidates` joins the blocks in order and gives each JSON candidate
   object the citations of every block that overlaps it; an object that overlaps
-  no citation is dropped. At most 8 candidates and 5 sources each. Colleges
-  search the official-site allowlist (`researchDomains`); activities search the
-  open web minus the blocklist.
+  no citation is dropped, with one exception for colleges: the model often
+  writes its citation into the JSON as text, which the API can't attach, so a
+  college object with no citation takes up to two pages the run really saw
+  (search results and fetches, `extractSeenPages` -> `ResearchResult.seenPages`)
+  whose title, or a part of it split at " | ", " - ", ": ", starts with the
+  college's whole name of two or more words (`sourcesByTitle`; "State
+  University" never takes a "Ball State University" page). Those still go
+  through the keeper below; the run logs how many were `recovered`.
+  Before the JSON is read, the model's own markup is
+  taken out of the joined text (`stripModelMarkupMapped`, spans mapped back to
+  the original): citation wrappers it wrote as text (`<cite index="3-1">…</cite>`,
+  or `<cite index=\"3-1\">` escaped inside a JSON string, which the API can't
+  turn into a citation), other stray XML-like tags and `[S1]` markers; the words
+  inside a tag stay. Bare quotes in such a tag used to break the object, so the
+  candidate was lost; escaped ones were stored and shown ("Cost: <cite …>There
+  is no application fee.</cite>"). `cleanText` applies the same rule to every
+  stored field (title, summary, why, deadline, cost, source titles), and
+  `20261122000031_research_strip_model_markup.sql` cleans rows stored before
+  (and the task or list row an accept made from them). `RESEARCH_FAKE`'s
+  `fixture:markup` focus returns candidates written that way.
+  At most 8
+  candidates and 5 sources each. Colleges search the official-site allowlist
+  (`researchDomains`); activities search the open web minus the blocklist.
+- **A balanced list.** The college ask wants about a third reach, target and
+  likely, judged against the brief's GPA and test bands (highly selective
+  reach and target schools when the bands are high), spread across the country
+  with two or three near the brief's region; "options near the region are
+  welcome" is said only for activities. The match step keeps every reasonable
+  candidate (drops only clear misfits or schools already on the list), and may
+  set `fit` (reach / target / likely, optional in `MATCH_SCHEMA`); a valid fit is
+  stored in `details.fit` and accepting a college puts it on the list row's fit
+  tag. Spend: no new model call, no change to searches, fetches, turns, model
+  or effort; the research prompt grows by about 120 tokens and each pick by a
+  few output tokens.
+- **Link checks run at once** (`LINK_CHECKS` = 6 at a time, each distinct page
+  once): one check can take its 10-second timeout, and checking one after
+  another made a run with a few slow sites wait most of a minute.
 - **Before anything is stored** (`validatePicks`): a pick must name a real,
   unused candidate and have an effort of low, medium or high; `why` is at most
   200 characters and two sentences, otherwise the pick is dropped whole (never
@@ -3820,7 +3863,7 @@ column and tables.
   match step or the reason checks) is stored as `succeeded` with an empty list
   but expires at once, so the next request runs again. Each run logs its counts
   with the run id (numbers only): answer parts, candidate objects found,
-  candidates parsed, kept by the keeper, picked, stored. The scanner steps into an
+  candidates parsed, recovered by title, kept by the keeper, picked, stored. The scanner steps into an
   object with no string `title`, so a `{"candidates":[...]}` wrapper yields its
   inner candidates. Failed and discarded runs are never served.
 - **Recommendations.** `recommendations` and `research_runs` are readable by a
