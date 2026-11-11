@@ -47,7 +47,7 @@ const password = `Pw-${tag}-long-enough`;
 // What the counselor has on Maya: a task, a college, an essay with words that must never reach a parent, a meeting.
 await sql(`insert into public.deliverables (student_id, kind, title, status, due_date, visible_to_student) values
   ('${s.id}', 'custom', 'Request transcript ${tag}', 'in-progress', current_date - 3, true),
-  ('${s.id}', 'custom', 'Hidden counselor task ${tag}', 'not-started', current_date + 3, false)`);
+  ('${s.id}', 'custom', 'HIDDEN-counselor task ${tag}', 'not-started', current_date + 3, false)`);
 await sql(`insert into public.student_colleges (student_id, name, round, status, deadline, notes) values ('${s.id}', 'Brown University', 'ED', 'in-progress', current_date + 20, 'COUNSELOR NOTE ${tag}')`);
 await sql(`insert into public.essays (student_id, title, prompt, body, school, word_count, word_limit, status, essay_kind) values ('${s.id}', 'SECRET TITLE ${tag}', 'SECRET PROMPT', 'SECRET ESSAY TEXT ${tag}', 'Brown University', 4, 250, 'drafting', 'supplement')`);
 await sql(`insert into public.meetings (student_id, counselor_id, title, mode, starts_at, ends_at, status, guardians_invited, join_url) values
@@ -95,7 +95,7 @@ check("children: Maya, with her counselor", kids.status === 200 && kids.body?.ch
 let view = await call(pTok, "GET", `/parent/children/${s.id}`);
 const text = JSON.stringify(view.body);
 check("view: tasks, colleges, essays and meetings", view.status === 200 && Boolean(view.body?.sections?.tasks && view.body.sections.colleges && view.body.sections.essays && view.body.sections.meetings), text.slice(0, 200));
-check("…the task the student sees, overdue; never the hidden one", view.body?.sections?.tasks?.open?.some((t) => t.title === `Request transcript ${tag}` && t.overdue === true) && !text.includes(`Hidden counselor task ${tag}`));
+check("…the task the student sees, overdue; never the hidden one", view.body?.sections?.tasks?.open?.some((t) => t.title === `Request transcript ${tag}` && t.overdue === true) && !text.includes(`HIDDEN-counselor task ${tag}`));
 check("…essay progress as counts and status only: no title, prompt or text", view.body?.sections?.essays?.[0]?.words === 4 && view.body.sections.essays[0].label === "Supplement" && !text.includes("SECRET"));
 check("…the college list without the counselor's notes", view.body?.sections?.colleges?.[0]?.name === "Brown University" && !text.includes("COUNSELOR NOTE"));
 check("…a meeting's title and link only when the parents are invited", text.includes(`Family meeting ${tag}`) && !text.includes(`Private planning ${tag}`) && !text.includes("meet.example"));
