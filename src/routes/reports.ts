@@ -24,6 +24,13 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { loadAlertPrefs } from "../lib/accountability.js";
+import {
+  applyToWeeklyReport,
+  FAMILY_LABELS,
+  labelList,
+  loadFamilyVisibility,
+  type FamilyCategory,
+} from "../lib/familyVisibility.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, tooManyRequests } from "../lib/errors.js";
 import {
   emailBodyOf,
@@ -241,17 +248,26 @@ export default async function reportRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
       await resolveStudentId(request, owner, "edit");
-      const report = await loadReport(request, id);
-      const { plan, studentName } = await recipientPlan(request, owner);
-      const messages = reportMessages(report, plan.recipients, { counselorName: request.profile.full_name ?? null, studentName });
+      const stored = await loadReport(request, id);
+      const [{ plan, studentName }, sendable] = await Promise.all([recipientPlan(request, owner), asTheFamilyReceivesIt(request, stored)]);
+      const report = sendable.report;
+      const messages = sendable.nothingLeft
+        ? []
+        : reportMessages(report, plan.recipients, { counselorName: request.profile.full_name ?? null, studentName });
       return {
         reportId: id,
         status: report.status,
-        canSend: report.status === "draft" && plan.recipients.length > 0,
+        canSend: report.status === "draft" && plan.recipients.length > 0 && !sendable.nothingLeft,
         recipients: plan.recipients,
         skipped: plan.skipped,
         skippedGuardians: plan.skippedGuardians,
         messages,
+        // What the parents receive: the kinds left out of this report, and whether anything is left to send.
+        familyVisibility: {
+          available: sendable.available,
+          leftOut: sendable.leftOut.map((c) => ({ category: c, label: FAMILY_LABELS[c] })),
+          nothingLeft: sendable.nothingLeft,
+        },
       };
     }
   );
@@ -271,8 +287,18 @@ export default async function reportRoutes(app: FastifyInstance) {
       z.object({ confirm: z.literal(true) }).strict().parse(request.body);
       const owner = await ownerOf(request, "family_reports", id, "That report doesn't exist");
       await resolveStudentId(request, owner, "edit");
-      const report = await loadReport(request, id);
-      if (report.status !== "draft") throw notDraft(report.status);
+      const stored = await loadReport(request, id);
+      if (stored.status !== "draft") throw notDraft(stored.status);
+      // What the parents receive is decided now, from the switches as they are (a read error refuses the send).
+      const sendable = await asTheFamilyReceivesIt(request, stored);
+      if (sendable.nothingLeft) {
+        throw new HttpError(
+          409,
+          `Everything in this report is switched off for the parents (${labelList(sendable.leftOut)}), so there is nothing to send`,
+          "report_nothing_to_send"
+        );
+      }
+      const report = sendable.report;
 
       // The dispatcher sends a message only for the student's own counselor, so only they may approve one.
       const { plan, counselorId } = await recipientPlan(request, owner);
@@ -412,12 +438,26 @@ export default async function reportRoutes(app: FastifyInstance) {
   );
 }
 
-type ReportRow = { id: string; status: string; title: string; summary: string | null; body: string | null };
+type ReportRow = { id: string; student_id: string; status: string; kind: string | null; title: string; summary: string | null; body: string | null };
+
+/**
+ * The report as this family may receive it now. A weekly report is the digest's text with the kinds switched off in
+ * what the parents receive left out (lib/familyVisibility.ts; every switch on: the text untouched). Any other
+ * report was written or edited by the counselor, so it goes as written. Throws on a read error (fail closed).
+ */
+async function asTheFamilyReceivesIt(
+  request: FastifyRequest,
+  report: ReportRow
+): Promise<{ report: ReportRow; leftOut: FamilyCategory[]; nothingLeft: boolean; available: boolean }> {
+  if (report.kind !== "weekly") return { report, leftOut: [], nothingLeft: false, available: true };
+  const state = await loadFamilyVisibility(request.db, report.student_id);
+  return { ...applyToWeeklyReport(report, state.visibility), available: state.available };
+}
 
 async function loadReport(request: FastifyRequest, id: string): Promise<ReportRow> {
   const { data, error } = await request.db
     .from("family_reports")
-    .select("id, status, title, summary, body")
+    .select("id, student_id, status, kind, title, summary, body")
     .eq("id", id)
     .maybeSingle();
   if (error) throw fromPostgrest(error);
