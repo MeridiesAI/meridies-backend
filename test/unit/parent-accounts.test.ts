@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { blockedAsParent } from "../../src/lib/access.js";
 import {
+  EMAIL_TAKEN,
+  claimDecision,
   hashInviteToken,
+  isFreshAccount,
+  maskEmail,
   hintOf,
   isInviteToken,
   newInviteToken,
@@ -166,4 +170,62 @@ test("the request gate: a parent account opens only routes that say allowParent"
   assert.equal(blockedAsParent({ role: "parent" }, true), false);
   assert.equal(blockedAsParent({ role: "student" }, undefined), false);
   assert.equal(blockedAsParent({ role: "counselor" }, undefined), false);
+});
+
+test("Google on the parent path: the masked address", () => {
+  assert.equal(maskEmail("Maria.Lopez@Gmail.com"), "m***@gmail.com");
+  assert.equal(maskEmail("a@b.co"), "a***@b.co");
+  assert.equal(maskEmail("nonsense"), "that address");
+  assert.equal(maskEmail(null), "that address");
+});
+
+test("Google on the parent path: who is redeemed, who is refused, and which accounts are taken back", () => {
+  const now = Date.parse("2026-11-12T12:00:00Z");
+  const good = { valid: true, reason: null, email: "ana@gmail.com", hasAccount: false };
+  const fresh = {
+    role: "student", roleConfirmed: false, counselorId: null, firmId: null, onboardingStep: 0, onboardingComplete: false,
+    authEmail: "ANA@gmail.com", emailVerified: true, createdAt: "2026-11-12T11:58:00Z", hasToken: true, preview: good, now,
+  };
+  assert.deepEqual(claimDecision(fresh), { kind: "redeem" }, "a new Google user with the invited address, any case");
+
+  const other = claimDecision({ ...fresh, authEmail: "someone.else@gmail.com" });
+  assert.equal(other.kind, "refuse");
+  if (other.kind === "refuse") {
+    assert.equal(other.code, "invite_email_mismatch");
+    assert.equal(other.message, "This invite was sent to a***@gmail.com. Sign in with that Google account, or use email and password.");
+    assert.equal(other.maskedEmail, "a***@gmail.com");
+    assert.equal(other.deleteFresh, true, "the stray account the path made is taken back");
+  }
+  const unverified = claimDecision({ ...fresh, emailVerified: false });
+  assert.equal(unverified.kind === "refuse" && unverified.code, "invite_email_mismatch", "an unverified address never counts");
+
+  const student = claimDecision({ ...fresh, roleConfirmed: true, onboardingComplete: true });
+  assert.ok(student.kind === "refuse" && student.code === "email_taken" && student.message === EMAIL_TAKEN && !student.deleteFresh, "a student's account: the password path's refusal, never deleted");
+  const counselor = claimDecision({ ...fresh, role: "counselor", roleConfirmed: true });
+  assert.ok(counselor.kind === "refuse" && counselor.code === "email_taken" && !counselor.deleteFresh);
+  const otherStudent = claimDecision({ ...fresh, roleConfirmed: true, authEmail: "kid@gmail.com" });
+  assert.ok(otherStudent.kind === "refuse" && otherStudent.code === "invite_email_mismatch" && !otherStudent.deleteFresh, "an established account is never deleted");
+
+  assert.deepEqual(claimDecision({ ...fresh, role: "parent", roleConfirmed: true }), { kind: "parent" });
+  assert.deepEqual(claimDecision({ ...fresh, role: "parent", roleConfirmed: true, hasToken: false, preview: null }), { kind: "parent" }, "a parent signing in later");
+
+  const used = claimDecision({ ...fresh, preview: { valid: false, reason: "used", email: null, hasAccount: true } });
+  assert.ok(used.kind === "refuse" && used.code === "invite_used" && used.deleteFresh, "single use");
+  const expired = claimDecision({ ...fresh, preview: { valid: false, reason: "expired", email: null, hasAccount: false } });
+  assert.ok(expired.kind === "refuse" && expired.status === 410);
+
+  const noInvite = claimDecision({ ...fresh, hasToken: false, preview: null });
+  assert.ok(noInvite.kind === "refuse" && noInvite.code === "no_parent_account" && noInvite.deleteFresh, "a new Google user from the login page's Parent card: no account is left behind");
+});
+
+test("only an account the path itself just made counts as fresh", () => {
+  const now = Date.parse("2026-11-12T12:00:00Z");
+  const base = { role: "student", roleConfirmed: false, counselorId: null, firmId: null, onboardingStep: 0, onboardingComplete: false, createdAt: "2026-11-12T11:50:00Z", now };
+  assert.equal(isFreshAccount(base), true);
+  assert.equal(isFreshAccount({ ...base, createdAt: "2026-11-12T11:40:00Z" }), false, "older than 15 minutes");
+  assert.equal(isFreshAccount({ ...base, onboardingStep: 1 }), false, "started onboarding");
+  assert.equal(isFreshAccount({ ...base, counselorId: "c" }), false);
+  assert.equal(isFreshAccount({ ...base, roleConfirmed: true }), false);
+  assert.equal(isFreshAccount({ ...base, createdAt: null }), false);
+  assert.equal(isFreshAccount({ ...base, createdAt: "2026-11-12T12:10:00Z" }), false, "a clock in the future isn't trusted");
 });

@@ -18,7 +18,10 @@ import { brandedEmail, brandedText, sendEmail } from "./email.js";
 import { HttpError, fromPostgrest } from "./errors.js";
 import { normEmail } from "./parentCopy.js";
 import {
+  EMAIL_TAKEN,
   PARENT_INVITE_TEMPLATE,
+  claimDecision,
+  isFreshAccount,
   PASSWORD_MIN,
   hashInviteToken,
   hintOf,
@@ -243,7 +246,7 @@ export async function redeemParentInvite(args: {
   if (created.error || !created.data.user) {
     const e = created.error as { status?: number; code?: string; message?: string } | null;
     if (e?.code === "email_exists" || e?.status === 422 && /already/i.test(e?.message ?? "")) {
-      throw new HttpError(409, "That address already has a Meridies account. Sign in with it, or ask for a different email.", "email_taken");
+      throw new HttpError(409, EMAIL_TAKEN, "email_taken");
     }
     if (e?.code === "weak_password" || /password/i.test(e?.message ?? "")) {
       throw new HttpError(400, oneLine(e?.message, 200) || "Choose a stronger password.", "weak_password");
@@ -267,3 +270,85 @@ export async function redeemParentInvite(args: {
   return { email };
 }
 
+
+// ---- Google on the parent path ------------------------------------------------------------------------------------
+
+export type ClaimResult =
+  | { outcome: "parent" }
+  | { outcome: "refused"; status: number; code: string; message: string; maskedEmail?: string; signedOut: boolean };
+
+/**
+ * A signed-in OAuth user (Google) arriving on the parent path, with the invitation that rode the round trip in an
+ * httpOnly cookie (or none, from the login page's Parent card). `claimDecision` decides; this does the reads and the
+ * one write. The address compared is the auth user's own, read with the service role, with the provider's
+ * verification (`email_confirmed_at`); `parent_invite_redeem` checks it again in its transaction.
+ *
+ * AUTHORIZATION: the service role reads only the CALLER's auth user (their verified id from the JWT), redeems an
+ * invitation for that same id (the function refuses anything but a matching, verified, role-less account), and
+ * deletes the caller's own account only when the parent path itself just made it (`isFreshAccount`: no role, nothing
+ * in it, under 15 minutes old), so a refused Google sign-in never leaves a stray account to be onboarded as a student.
+ */
+export async function claimParentInvite(args: {
+  userId: string;
+  profile: { role: string; role_confirmed: boolean; counselor_id: string | null; firm_id?: string | null; onboarding_step: number; onboarding_complete: boolean };
+  token: string | null;
+  anon: SupabaseClient;
+  log?: Log;
+  now?: number;
+  deps?: { svc?: SupabaseClient | null };
+}): Promise<ClaimResult> {
+  const svc = args.deps?.svc !== undefined ? args.deps.svc : serviceClient();
+  if (!svc) throw parentAccountsUnavailable();
+  const { data: au, error: auErr } = await svc.auth.admin.getUserById(args.userId);
+  if (auErr || !au?.user) {
+    args.log?.error({ status: auErr?.status }, "parent claim: auth user unreadable");
+    throw new HttpError(503, "Couldn't check your account right now. Try again.", "parent_signup_failed");
+  }
+  const preview = args.token ? await previewParentInvite(args.anon, args.token) : null;
+  const p = args.profile;
+  const input = {
+    role: p.role,
+    roleConfirmed: p.role_confirmed === true,
+    counselorId: p.counselor_id ?? null,
+    firmId: p.firm_id ?? null,
+    onboardingStep: Number(p.onboarding_step ?? 0),
+    onboardingComplete: p.onboarding_complete === true,
+    authEmail: au.user.email ?? null,
+    emailVerified: Boolean(au.user.email_confirmed_at),
+    createdAt: au.user.created_at ?? null,
+    hasToken: Boolean(args.token),
+    preview,
+    now: args.now ?? Date.now(),
+  };
+  const decision = claimDecision(input);
+  if (decision.kind === "parent") return { outcome: "parent" };
+
+  const takeBack = async () => {
+    const { error } = await svc.auth.admin.deleteUser(args.userId);
+    if (error) args.log?.error({ status: error.status }, "parent claim: a fresh account wasn't taken back");
+    return !error;
+  };
+
+  if (decision.kind === "refuse") {
+    const signedOut = decision.deleteFresh ? await takeBack() : false;
+    const { kind: _kind, deleteFresh: _d, ...rest } = decision;
+    return { outcome: "refused", ...rest, signedOut };
+  }
+
+  const { error } = await svc.rpc("parent_invite_redeem", { p_token_hash: hashInviteToken(args.token as string), p_user: args.userId });
+  if (error) {
+    if (parentSchemaMissing(error)) throw parentAccountsUnavailable();
+    const hint = hintOf(error);
+    const w = (hint && REDEEM_WORDS[hint]) || null;
+    args.log?.warn({ code: error.code, hint }, "parent claim: redeem refused");
+    const fresh = isFreshAccount(input) ? await takeBack() : false;
+    return {
+      outcome: "refused",
+      status: w?.status ?? 503,
+      code: hint ? `invite_${hint}` : "parent_signup_failed",
+      message: w?.message ?? "Couldn't make your parent account right now. Try again in a few minutes.",
+      signedOut: fresh,
+    };
+  }
+  return { outcome: "parent" };
+}
