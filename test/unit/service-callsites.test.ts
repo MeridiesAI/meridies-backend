@@ -105,6 +105,17 @@ const REVIEWED = [
   // address of the caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request
   // value) after asking isCounselorApproved, and writes or reads only inbound_messages rows keyed by the caller's id.
   "lib/studentToCounselor.ts",
+  // lib/parentInvites.ts (parent accounts, 20261123000002): only redeemParentInvite, from the public POST
+  // /parent-invites/accept. It acts for no counselor. It creates an auth user for exactly the address the
+  // database's parent_invite_preview returned for that token's hash (the token only reached that inbox), then calls
+  // parent_invite_redeem (EXECUTE to service_role only), which re-checks everything in one transaction; on any
+  // refusal it deletes that just-made user. No client id reaches the service role.
+  "lib/parentInvites.ts",
+  // lib/parentToCounselor.ts: inside a parent account's own request (authenticate + requireRole("parent"),
+  // allowParent). The counselor is the one parent_children returned on the caller's own client (the live guardian
+  // link), asked isCounselorApproved before reading their address; it writes or reads only inbound_messages rows
+  // whose provider_message_id carries the caller's own id.
+  "lib/parentToCounselor.ts",
   // lib/axisTrash.ts: acts for no counselor. The hourly purge (from the scheduled sweep) deletes trash rows past
   // 30 days; account deletion (DELETE /account, the caller's own id) deletes the trash it made and about it. Both
   // remove only the student-documents objects the database hands back as needed by nothing.
