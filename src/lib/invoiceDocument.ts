@@ -65,7 +65,7 @@ export type InvoiceEmailAgreement = { title: string; url: string | null };
 export const AGREEMENT_LINK_OMITTED = "[private agreement link omitted]";
 
 /**
- * The agreement block's words (NEEDS LEGAL REVIEW with the rest of the agreement copy). The family is
+ * The agreement block's words (reviewed 2026-11-11 with the rest of the agreement copy). The family is
  * asked to read the agreement first and then pay: the agreement says what the invoice is for, so it
  * comes before the Pay by card button. Paying never depends on accepting.
  */

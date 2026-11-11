@@ -629,8 +629,8 @@ forget it.
   refuses an accepted one); `agreement_acceptances` is not captured because its RESTRICT means it never reaches the
   trash. Text only (no PDF; `storage_path`
   stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
-  unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
-  'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open
+  unless `AGREEMENTS_ENABLED=true`. The consent wording passed legal review on 2026-11-11 (`AGREEMENT_CONSENT_VERSION =
+  'v1-2026-11-11'`); a changed sentence needs a new version. Open
   decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
   the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
   `test/integration/agreements.test.mjs` (CI runs the API with the switch on).

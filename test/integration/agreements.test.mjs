@@ -96,7 +96,7 @@ const bodyText = `1. Fees: $4,000 for the senior year.\r\n2. Terms <script>alert
 const created = await call(S.token, "POST", "/agreements", { contactId: contact.id, title, bodyText });
 check("a counselor creates a draft for their contact", created.status === 201 && created.body.status === "draft", JSON.stringify(created.body));
 check("the body hash is the sha256 of the exact text", created.body.bodySha256 === sha(bodyText), created.body.bodySha256);
-check("the consent version is the placeholder", created.body.consentVersion === "v0-PLACEHOLDER");
+check("the consent version is the reviewed one", created.body.consentVersion === "v1-2026-11-11");
 const A = created.body.id;
 
 const forged = await rest(S.token, "POST", "/rest/v1/agreements", { counselor_id: S.id, contact_id: contact.id, title: "F", body_text: "F", consent_version: "v", body_sha256: "0".repeat(64) });
@@ -196,7 +196,7 @@ check("the signer's name is escaped on the page", !accept.text.includes("<b>Pat<
 const row = JSON.parse(await sql(`select row_to_json(a) from public.agreement_acceptances a where agreement_id='${A}'`) || "null");
 check("exactly one acceptance", await sql(`select count(*) from public.agreement_acceptances where agreement_id='${A}'`) === "1");
 check("with the typed name, the contact's email and the body hash", row?.signer_name === "<b>Pat</b> Agree" && row?.signer_email === parentEmail && row?.body_sha256 === sha(bodyText), JSON.stringify(row));
-check("the IP, the user agent and the consent version", row?.ip === MY_IP && row?.user_agent === UA && row?.consent_version === "v0-PLACEHOLDER", JSON.stringify(row));
+check("the IP, the user agent and the consent version", row?.ip === MY_IP && row?.user_agent === UA && row?.consent_version === "v1-2026-11-11", JSON.stringify(row));
 check("and a certificate that says what it is", /Typed-name acceptance; not a certified electronic signature\./.test(row?.certificate_text ?? "") && (row?.certificate_text ?? "").includes(`Document SHA-256: ${sha(bodyText)}`) && (row?.certificate_text ?? "").includes(`IP address: ${MY_IP}`));
 check("the agreement is accepted", await sql(`select status from public.agreements where id='${A}'`) === "accepted");
 check("an audit_log row with the address", await sql(`select count(*) from public.audit_log where entity_id='${A}' and action='agreement.accepted' and ip='${MY_IP}' and user_agent='${UA}'`) === "1");
