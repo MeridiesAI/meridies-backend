@@ -33,6 +33,7 @@ import { DOCUMENTS_BUCKET, isActiveContentFile, isDocumentsBucket, isSafeStorage
 import { assertPathClaimable, removeDeletedDocumentObject } from "../lib/documentClaim.js";
 import { toDocument, toDocumentLink, toFolder } from "../lib/serialize.js";
 import { DOCUMENT_BUCKET, extractionState, requestExtraction } from "../lib/documentExtraction.js";
+import { kindOfGuess, sortBytes, sortStoredObject, SORT_MAX_BYTES } from "../lib/documentSort.js";
 import {
   ensurePracticeFolders,
   findOrCreateChild,
@@ -410,6 +411,31 @@ export default async function fileRoutes(app: FastifyInstance) {
   });
 
   /**
+   * Files auto-sort, before filing: the file's bytes (application/octet-stream, up to 10 MB; an empty body sorts
+   * by the name alone) and `?filename=&mimeType=`. Answers the guess from its name and printed text
+   * (`lib/documentGuess.ts`, no model): `{ kind, basis, matched, textFound, keepOut }`, `kind` null when unsure.
+   * Nothing is stored; the bytes are read in memory and dropped. The filing popup pre-selects this category and
+   * the counselor can change it.
+   */
+  app.register(async (scope) => {
+    scope.addContentTypeParser("application/octet-stream", { parseAs: "buffer", bodyLimit: SORT_MAX_BYTES }, (_req, body, done) =>
+      done(null, body)
+    );
+    scope.post(
+      "/documents/guess",
+      { bodyLimit: SORT_MAX_BYTES, preHandler: [app.authenticate, limit("documents:guess", 120, 60)] },
+      async (request) => {
+        const q = z
+          .object({ filename: z.string().trim().min(1).max(300), mimeType: z.string().trim().max(200).optional() })
+          .strict()
+          .parse(request.query);
+        const body = Buffer.isBuffer(request.body) ? request.body : Buffer.alloc(0);
+        return sortBytes(new Uint8Array(body.buffer, body.byteOffset, body.byteLength), q.filename, q.mimeType ?? null);
+      }
+    );
+  });
+
+  /**
    * Register a document already in Supabase Storage. The upload itself goes
    * straight from the client to Storage under the caller's own token; this row
    * is the metadata, the filing, and the AI-availability switch.
@@ -457,10 +483,17 @@ export default async function fileRoutes(app: FastifyInstance) {
       // every roster student, so an upload never lands nowhere.
       else if (studentId) folderId = await studentFolderId(request, studentId);
 
+      // Auto-sort: an upload that names no kind (My documents, a hand-in, the Profile Update paperclip) is filed
+      // under the guess from its name and printed text (lib/documentSort.ts, no model), read back on the caller's
+      // own client. A sensitive guess (financial, IEP/504) comes kept out of AI unless the caller said otherwise.
+      const guess = b.kind === undefined ? await sortStoredObject(request.db, DOCUMENTS_BUCKET, b.storagePath, b.filename, b.mimeType ?? null) : null;
+      const kind = b.kind ?? (guess ? kindOfGuess(guess) : "other");
+      const availableToLlm = b.availableToLlm ?? !(guess?.keepOut ?? false);
+
       // A counselor's upload has a confirmed type (kind_confirmed defaults to true), so its text is
       // queued for AI now, as confirming a type does. A student's own upload isn't: the queue columns
       // are the counselor's side in the database, and the counselor confirming its type queues it.
-      const queueText = request.profile.role === "counselor" && (b.availableToLlm ?? true);
+      const queueText = request.profile.role === "counselor" && availableToLlm;
 
       const { data, error } = await request.db
         .from("documents")
@@ -475,9 +508,9 @@ export default async function fileRoutes(app: FastifyInstance) {
           description: b.description ?? null,
           mime_type: b.mimeType ?? null,
           size_bytes: b.sizeBytes ?? null,
-          kind: b.kind ?? "other",
+          kind,
           source: "upload",
-          available_to_llm: b.availableToLlm ?? true,
+          available_to_llm: availableToLlm,
           ai_access: b.aiAccess ?? "default",
           ferpa_waived: b.ferpaWaived ?? false,
           uploaded_by: request.auth.userId,
@@ -498,7 +531,7 @@ export default async function fileRoutes(app: FastifyInstance) {
           entity_id: data.id as string,
           event: "uploaded",
           actor_id: request.auth.userId,
-          metadata: isRestrictedDocument({ kind: b.kind ?? "other", ferpa_waived: b.ferpaWaived ?? false }) ? {} : { filename: b.filename },
+          metadata: isRestrictedDocument({ kind, ferpa_waived: b.ferpaWaived ?? false }) ? {} : { filename: b.filename },
         });
       }
 
