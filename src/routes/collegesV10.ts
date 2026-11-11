@@ -44,7 +44,7 @@ import { lookUpLogoOnly, lookUpMediaSoon } from "../lib/collegeMediaLookup.js";
 import { lookUpCollege } from "../lib/collegeLookup.js";
 import { runCollegeLookup } from "../lib/collegeLookupRun.js";
 import { SITE_INFO_COLUMNS, buildSiteInfo, toSiteInfo, type AiCall, type SiteInfoRow } from "../lib/collegeSiteInfo.js";
-import { fetchSitePage } from "../lib/links.js";
+import { fetchSitePage, fileKindOf, linkError, normalizeLink } from "../lib/links.js";
 import { supabasePhotoStore } from "../lib/ingest/collegePhotos.js";
 import { wikimediaClient } from "../lib/ingest/wikimedia.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -1012,21 +1012,39 @@ export default async function collegeV10Routes(app: FastifyInstance) {
    * no school is named). This resolves the folder; the client then adds the
    * link (POST /files/links) or uploads the file (POST /files/documents) into
    * it, so the existing read, LLM-availability and storage rules apply.
+   *
+   * A link is checked here first (lib/links.ts: the address rules, nothing fetched)
+   * and refused with its reason's `code` before any folder is made; a link to a
+   * file (a PDF, a Word file) is refused too, since the Add a file button beside
+   * the box is the way in for those. `url` answers the link as it will be stored.
    */
   app.post("/research/folder", { preHandler: [...counselor, limit("colleges:research:file", 60, 60)] }, async (request) => {
     const b = z
       .object({
-        url: z.string().trim().min(4).max(2000).optional(),
+        // Loose here so normalizeLink can say what's wrong (empty, too long) in words.
+        url: z.string().max(20_000).optional(),
         filename: z.string().trim().min(1).max(300).optional(),
       })
       .strict()
-      .refine((x) => x.url || x.filename, "Give a link or a file name")
+      .refine((x) => x.url !== undefined || x.filename, "Give a link or a file name")
       .parse(request.body);
+
+    let url: string | null = null;
+    if (b.url !== undefined) {
+      url = (await normalizeLink(b.url)).url;
+      const kind = fileKindOf(url);
+      if (kind) {
+        throw linkError(
+          "link_not_page",
+          `That link is ${kind}, not a web page. Download it and use Add a file, so AxIS can read it.`
+        );
+      }
+    }
 
     const { data: catalog, error } = await request.db.from("colleges").select("id, name, aka, website").limit(5000);
     if (error) throw fromPostgrest(error);
     const school = schoolIn(
-      b.url ?? b.filename ?? "",
+      url ?? b.filename ?? "",
       ((catalog ?? []) as Row[]).map((c) => ({
         id: String(c.id),
         name: String(c.name),
@@ -1045,6 +1063,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       parentFolderId: String(root.id),
       parentFolderName: String(root.name),
       created,
+      url,
     };
   });
 
