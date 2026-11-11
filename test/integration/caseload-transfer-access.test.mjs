@@ -13,8 +13,19 @@
 // Then A, with no students left, is removed with a plain Remove: the pipeline stage
 // and lead A made go to the firm owner (20261116000001), the contact a student came
 // from already went to its receiver, and closing A's account takes none of them.
-import { ANON, SB, check, call, rest, sql } from "./harness.mjs";
+import { ANON, SB, check, call as rawCall, rest, sql } from "./harness.mjs";
 import { cleanupFirm, seedFirm, signIn, storageAccess, visible } from "./caseload-transfer-fixture.mjs";
+
+// caseload-transfer.test.mjs, in the same run, hides caseload_transfer_students for a moment
+// (rename + schema reload) to check the "isn't switched on yet" answer. A transfer route
+// that lands in that window answers 503 caseload_transfer_unavailable: wait it out.
+async function call(token, method, path, body) {
+  for (let i = 0; ; i++) {
+    const r = await rawCall(token, method, path, body);
+    if (!(r.status === 503 && r.body?.code === "caseload_transfer_unavailable") || i >= 30) return r;
+    await new Promise((done) => setTimeout(done, 1000));
+  }
+}
 
 const firm = await seedFirm({ studentCount: 10 });
 const { A, B, O, students } = firm;
