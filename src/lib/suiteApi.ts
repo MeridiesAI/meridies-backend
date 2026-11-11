@@ -663,6 +663,66 @@ export async function createConferenceEvent(
   return { eventId: ev.id, joinUrl };
 }
 
+/**
+ * Put a meeting with no conference (in person, phone) on the counselor's own
+ * calendar: a plain event, no attendees, `sendUpdates=none` on Google, so the
+ * provider emails nobody (invites are Meridies' own). Used by student booking
+ * (lib/bookingCalendar.ts), so an in-person or phone booking shows on the
+ * counselor's Google / Outlook calendar like a Meet one does.
+ */
+export async function createPlainCalendarEvent(
+  ownerId: string,
+  provider: SuiteProvider,
+  input: CalendarEventInput & { location?: string | null },
+  log: Log
+): Promise<{ eventId: string }> {
+  const location = input.location?.trim() || undefined;
+  if (provider === "google") {
+    const { res } = await call(
+      ownerId,
+      provider,
+      "https://www.googleapis.com/calendar/v3/calendars/primary/events?sendUpdates=none",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          summary: input.title,
+          description: input.description ?? undefined,
+          location,
+          start: { dateTime: new Date(input.startsAt).toISOString() },
+          end: { dateTime: new Date(input.endsAt).toISOString() },
+        }),
+      },
+      GOOGLE_CALENDAR
+    );
+    if (!res.ok) throw providerFailure(provider, res, log, "calendar event");
+    const ev = (await res.json()) as GoogleEvent;
+    if (!ev.id) throw unavailable("Google didn't return the new event");
+    return { eventId: ev.id };
+  }
+  const { res } = await call(
+    ownerId,
+    provider,
+    "https://graph.microsoft.com/v1.0/me/events",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subject: input.title,
+        body: { contentType: "text", content: input.description ?? "" },
+        start: graphDateTime(input.startsAt),
+        end: graphDateTime(input.endsAt),
+        ...(location ? { location: { displayName: location } } : {}),
+      }),
+    },
+    { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
+  );
+  if (!res.ok) throw providerFailure(provider, res, log, "calendar event");
+  const ev = (await res.json()) as { id?: string };
+  if (!ev.id) throw unavailable("Microsoft didn't return the new event");
+  return { eventId: ev.id };
+}
+
 export async function updateCalendarEvent(
   ownerId: string,
   provider: SuiteProvider,

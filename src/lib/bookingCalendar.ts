@@ -28,6 +28,7 @@ import { HttpError } from "./errors.js";
 import { GOOGLE_SCOPE, MICROSOFT_SCOPE, type SuiteProvider } from "./oauth.js";
 import {
   createConferenceEvent,
+  createPlainCalendarEvent,
   deleteCalendarEvent,
   updateCalendarEvent,
   type CalendarEventInput,
@@ -40,12 +41,15 @@ export type BookingParties = { counselorId: string; studentId: string };
 
 export type BookingProviderDeps = {
   create: (ownerId: string, provider: SuiteProvider, input: CalendarEventInput, log: Log) => Promise<{ eventId: string; joinUrl: string }>;
+  /** A plain event, for a mode with no conference (in person, phone). */
+  createPlain: (ownerId: string, provider: SuiteProvider, input: CalendarEventInput, log: Log) => Promise<{ eventId: string }>;
   update: (ownerId: string, provider: SuiteProvider, eventId: string, change: Partial<CalendarEventInput>, log: Log) => Promise<void>;
   remove: (ownerId: string, provider: SuiteProvider, eventId: string, log: Log) => Promise<void>;
 };
 
 const realDeps: BookingProviderDeps = {
   create: createConferenceEvent,
+  createPlain: createPlainCalendarEvent,
   update: updateCalendarEvent,
   remove: deleteCalendarEvent,
 };
@@ -108,6 +112,25 @@ export async function createBookingProviderEvent(
   if (meeting.calendar_event_id) throw new Error("booking calendar: the meeting already has an event");
   const created = await deps.create(expected.counselorId, provider, input, log);
   return { provider, ...created };
+}
+
+/**
+ * A plain event (no conference) on the counselor's calendar for an in-person or phone
+ * meeting the student just reserved: the same checks as createBookingProviderEvent.
+ */
+export async function createBookingPlainEvent(
+  meeting: Row,
+  expected: BookingParties,
+  provider: SuiteProvider,
+  input: CalendarEventInput,
+  log: Log,
+  deps: BookingProviderDeps = realDeps
+): Promise<{ provider: SuiteProvider; eventId: string }> {
+  assertParties(meeting, expected);
+  if (meeting.booked_by_student !== true) throw new Error("booking calendar: only a meeting the student reserved");
+  if (meeting.calendar_event_id) throw new Error("booking calendar: the meeting already has an event");
+  const created = await deps.createPlain(expected.counselorId, provider, input, log);
+  return { provider, eventId: created.eventId };
 }
 
 /** Move the meeting's existing event on the counselor's calendar. */

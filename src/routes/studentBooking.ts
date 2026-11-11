@@ -44,6 +44,7 @@ import { z } from "zod";
 import { activeTypes, bookingUnavailable, slotsFor, studentBookingContext, studentBookingTypes, type StudentBookingContext } from "../lib/booking.js";
 import {
   counselorCalendarConnected,
+  createBookingPlainEvent,
   createBookingProviderEvent,
   moveBookingProviderEvent,
   removeBookingProviderEvent,
@@ -221,6 +222,14 @@ function bookingIo(request: FastifyRequest, ctx: Ctx): BookingIo {
           throw err;
         }
       },
+      async createPlain(meeting, provider, input) {
+        try {
+          return await createBookingPlainEvent(meeting, parties, provider, input, log);
+        } catch (err) {
+          log.warn({ provider, status: err instanceof HttpError ? err.statusCode : null, code: err instanceof HttpError ? err.code : null }, "booking: calendar event not created");
+          throw err;
+        }
+      },
       async move(meeting, change) {
         try {
           await moveBookingProviderEvent(meeting, parties, change, log);
@@ -355,6 +364,7 @@ export default async function studentBookingRoutes(app: FastifyInstance) {
         mode: m.mode,
         typeName: type.name,
         conference: out.conference,
+        calendar: out.calendar,
         invites: out.invites,
       });
     }
