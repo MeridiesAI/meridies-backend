@@ -4,7 +4,7 @@
  * {counselor}'s calendar", beside Meridies' own booking or instead of it.
  *
  * Stored on `booking_settings` (`booking_page_url`, `booking_page_mode`), which
- * a migration adds; until it is applied (`bookingPageReady` false) no query
+ * `20261118000001_booking_page_link.sql` adds; until it is applied (`bookingPageReady` false) no query
  * names those columns, a save naming them is 503 `booking_page_unavailable`,
  * and students see no link.
  *
