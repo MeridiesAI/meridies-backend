@@ -364,6 +364,13 @@ as today.
   deletion; a consultant with only archived students transferred, then
   removed; removal refused, released, and allowed after a transfer; the
   student page with the transfer tables absent.
+- Access (`test/integration/caseload-transfer-access.test.mjs`, fixture
+  `caseload-transfer-fixture.mjs`): a realistic firm moved one student, a split
+  and the rest; per table, the receiver reads and edits what the old counselor
+  could, and the old counselor reads nothing; a student-less consultant's
+  pipeline handed over on removal. It reports the Storage owner gap (the old
+  counselor keeps reading the moved objects) until a migration re-points
+  `storage.objects.owner_id`.
 - Load (`test/integration/caseload-transfer-load.mjs`): 500 students in one
   call inside the statement timeout.
 - Existing: `imports-*.test.mjs`, `approval-db.test.mjs`, `hardening.test.mjs`.

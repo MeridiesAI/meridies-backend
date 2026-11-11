@@ -3977,6 +3977,22 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
 - **Hand-kept table list.** `caseload-transfer.test.mjs` fails when a new
   cascading counselor-owned column appears on a student table that the
   transfer doesn't handle and that isn't on its "stays" list. Decide it there.
+- **Both consultants' view.** `caseload-transfer-access.test.mjs` builds a
+  realistic firm (`caseload-transfer-fixture.mjs`: ten students with guardians,
+  notes, meetings, Storage files in the student folder and a subfolder, tasks
+  with stages, a college list with recommendations and a result, essays with
+  versions and marks, scheduled sends, a pipeline contact; every address
+  `@transfer-test.local`, removed at the end), moves one student, a split and
+  the rest, and checks table by table that the receiver reads and edits what
+  the old counselor could and the old counselor reads nothing (API 404,
+  PostgREST empty), then hands over a student-less consultant's pipeline with
+  `one_person` + `removeAfter` and closes their account. **Known gap:** the
+  moved files' `storage.objects.owner_id` stays the uploader's, and the
+  bucket's select/delete policies honour it, so the old counselor can still
+  list, download and delete them after the transfer, even after leaving the
+  firm. The fix is a migration (`transfer_caseload` re-pointing the objects,
+  plus a backfill); the test logs `KNOWN GAP` until the function touches
+  `storage.objects`, then asserts it.
 - **Temporary delegation** is specified in the spec (§13) and not built.
 
 ## Teams, guardians, delivery status, data rights, monitoring
@@ -4225,7 +4241,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `imports-step2-api`, `-rls`, `-malicious`, `-dedupe`, `-invites`,
   `-retention`, `-guard`, `-security`, with the API on `IMPORTS_ROLLOUT=all IMPORTS_AI=off`),
   `caseload-transfer` (every persona, every table that follows a student,
-  removal, the firm setting), `regex-dos` (the regular-expression attacks:
+  removal, the firm setting), `caseload-transfer-access` (a realistic firm moved
+  in three steps, seen as the old and the new counselor), `regex-dos` (the regular-expression attacks:
   a student's document, a Mass invite paste, an import file and its header
   row, a .docx that inflates to 19 MB and a 10 MB .txt registered with no
   size, each read six times at once; `/health` keeps answering while each
