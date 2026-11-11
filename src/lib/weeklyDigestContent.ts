@@ -171,6 +171,17 @@ function capped(lines: string[]): string[] {
   return [...lines.slice(0, DIGEST_LIST_MAX), `- and ${lines.length - DIGEST_LIST_MAX} more`];
 }
 
+/**
+ * The first words of each section of the digest's body, which is also how a section is found again when what a
+ * family receives leaves it out at send time (lib/familyVisibility.ts). Change one here and both follow.
+ */
+export const DIGEST_HEADERS = {
+  finished: "Finished this week (",
+  upcoming: "Coming up or overdue:",
+  collegeDeadlines: "College deadlines in the next two weeks:",
+  essays: "Essays (word counts only):",
+} as const;
+
 /** The digest for one student's week, or null when there is nothing to report. */
 export function buildWeeklyDigest(input: DigestInput): WeeklyDigest | null {
   const { week } = input;
@@ -186,13 +197,13 @@ export function buildWeeklyDigest(input: DigestInput): WeeklyDigest | null {
 
   if (input.completed.length) {
     sections.push(
-      [`Finished this week (${input.completed.length}):`, ...capped(input.completed.map((t) => `- ${oneLine(t.title, TITLE_MAX)}`))].join("\n")
+      [`${DIGEST_HEADERS.finished}${input.completed.length}):`, ...capped(input.completed.map((t) => `- ${oneLine(t.title, TITLE_MAX)}`))].join("\n")
     );
   }
   if (overdue.length || dueSoon.length) {
     sections.push(
       [
-        "Coming up or overdue:",
+        DIGEST_HEADERS.upcoming,
         ...capped([
           ...overdue.map((t) => `- Overdue since ${shortDay(t.due_date)}: ${oneLine(t.title, TITLE_MAX)}`),
           ...dueSoon.map((t) => `- Due ${shortDay(t.due_date)}: ${oneLine(t.title, TITLE_MAX)}`),
@@ -202,12 +213,12 @@ export function buildWeeklyDigest(input: DigestInput): WeeklyDigest | null {
   }
   if (deadlines.length) {
     sections.push(
-      ["College deadlines in the next two weeks:", ...capped(deadlines.map((d) => `- ${oneLine(d.name, TITLE_MAX)}: ${shortDay(d.date)}`))].join("\n")
+      [DIGEST_HEADERS.collegeDeadlines, ...capped(deadlines.map((d) => `- ${oneLine(d.name, TITLE_MAX)}: ${shortDay(d.date)}`))].join("\n")
     );
   }
   const essayLines = essays.map((e) => `${e.label}: ${e.words} words, ${signed(e.delta)} this week`);
   if (essays.length) {
-    sections.push(["Essays (word counts only):", ...capped(essayLines.map((l) => `- ${l}`))].join("\n"));
+    sections.push([DIGEST_HEADERS.essays, ...capped(essayLines.map((l) => `- ${l}`))].join("\n"));
   }
 
   const counts: string[] = [];

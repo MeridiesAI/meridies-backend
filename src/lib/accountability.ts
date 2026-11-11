@@ -12,6 +12,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "./errors.js";
 import { unsignedAvatarUrl } from "./studentAvatar.js";
+import { loadFamilyVisibility } from "./familyVisibility.js";
+
+/**
+ * Why the sweep sent no alert: the counselor switched tasks off in what the parents receive. A literal, not built
+ * from FAMILY_LABELS: familyVisibility.ts reaches this module through weeklyDigestContent.ts, so its constants
+ * aren't ready while this one is (the unit test checks the two agree).
+ */
+export const TASKS_OFF_REASON = "Tasks and overdue work are switched off for the parents, so no alert went to them";
 
 /**
  * Anything carrying a Supabase client. A `FastifyRequest` satisfies it (its
@@ -538,10 +546,24 @@ export async function runEscalationSweep(
       }
 
       // Throws on a prefs read error (fail closed) — caught below as a hold.
-      const recipients = await resolveAlertRecipients(ctx, studentId);
+      let recipients = await resolveAlertRecipients(ctx, studentId);
       if (recipients.blockedReason) {
         skipped.push({ id: flagId, reason: recipients.blockedReason });
         continue;
+      }
+
+      // What the parents receive (lib/familyVisibility.ts): an automatic alert about stalled work is "tasks", so
+      // with tasks switched off the parents are left off it (the student still gets their copy). Throws on a read
+      // error: held below, never sent to the parents by default.
+      if (recipients.guardianId) {
+        const { visibility } = await loadFamilyVisibility(ctx.db, studentId);
+        if (!visibility.tasks) {
+          if (!recipients.copyStudent) {
+            skipped.push({ id: flagId, reason: TASKS_OFF_REASON });
+            continue;
+          }
+          recipients = { ...recipients, guardianId: null };
+        }
       }
 
       // Claim the flag before queueing anything. A counselor's click and the

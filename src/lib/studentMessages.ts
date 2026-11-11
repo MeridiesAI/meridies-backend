@@ -47,6 +47,7 @@ import { replyAddressFor } from "./replyRouting.js";
 import { consumeRateLimit } from "./limits.js";
 import { isLanguageChoice, languageFromName, type FamilyLanguageChoice, type LanguageCode } from "./languages.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
+import { labelList, loadFamilyVisibility, revealsHidden, type FamilyCategory } from "./familyVisibility.js";
 
 type Row = Record<string, unknown>;
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
@@ -830,7 +831,21 @@ async function sendBlockedReason(
   if (rErr) throw fromPostgrest(rErr);
   const stillOn = reportRecipientsStillOn(recipients, (reportsOn ?? []) as { id: string; receives_reports: boolean | null }[]);
   if (stillOn.length === 0) return "No parent still receives family reports: reports were switched off before this went out";
+
+  // A weekly report was filtered for what the parents receive when it was approved; a kind switched off since
+  // then holds too. Both reads throw on error (hold the send).
+  const hidden = await weeklyReportHides(svc, row);
+  if (hidden.length > 0) return `${labelList(hidden)} switched off for the parents before this went out`;
   return { recipients: stillOn };
+}
+
+/** The kinds this report message still carries that are now switched off; [] for any report that isn't weekly. */
+async function weeklyReportHides(svc: SupabaseClient, row: MessageRow): Promise<FamilyCategory[]> {
+  const { data: report, error } = await svc.from("family_reports").select("kind").eq("id", String(row.family_report_id)).maybeSingle();
+  if (error) throw fromPostgrest(error);
+  if ((report as Row | null)?.kind !== "weekly") return [];
+  const { visibility } = await loadFamilyVisibility(svc, row.student_id);
+  return revealsHidden(row.body, visibility);
 }
 
 /**

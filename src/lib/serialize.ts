@@ -11,6 +11,7 @@
 import { accessStatusOf, type AccessStatus } from "./access.js";
 import { storedValues, withCurrent } from "./handInValues.js";
 import { unsignedAvatarUrl } from "./studentAvatar.js";
+import type { FamilyVisibilityState } from "./familyVisibility.js";
 
 export type Role = "student" | "counselor";
 
@@ -748,6 +749,14 @@ export const toAlertPref = (r: Row) => ({
   note: nstr(r.note),
   updatedBy: nstr(r.updated_by),
   updatedAt: nstr(r.updated_at),
+});
+
+/** What a student's parents receive (lib/familyVisibility.ts), as the app reads it. */
+export const toFamilyVisibility = (studentId: string, s: FamilyVisibilityState) => ({
+  studentId,
+  available: s.available,
+  categories: { ...s.visibility },
+  updatedAt: s.updatedAt,
 });
 
 export const toStudentStatus = (r: Row) => ({
