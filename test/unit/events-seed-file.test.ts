@@ -13,8 +13,8 @@ const seedFiles = readdirSync(dataDir)
   .filter((f) => /^events-.+\.csv$/.test(f))
   .sort();
 
-test("events seed: the fall 2026 file is checked in and listed in the README", () => {
-  assert.ok(seedFiles.includes("events-2026-fall.csv"), `found: ${seedFiles.join(", ") || "none"}`);
+test("events seed: the 2026-27 file is checked in and listed in the README", () => {
+  assert.ok(seedFiles.includes("events-2026-27.csv"), `found: ${seedFiles.join(", ") || "none"}`);
   const readme = readFileSync(new URL("README.md", dataDir), "utf8");
   for (const f of seedFiles) assert.ok(readme.includes(`\`${f}\``), `${f} is not listed in scripts/ingest/data/README.md`);
 });
@@ -29,21 +29,26 @@ for (const file of seedFiles) {
     assert.equal(ok.length, rows().length, "every row mapped");
   });
 
-  test(`events seed (${file}): conferences for counselors, each on the organizer's own https page`, () => {
+  test(`events seed (${file}): each row on the organizer's own https page, with its source and the day it was read`, () => {
     const raw = rows();
     const { ok } = mapEventsCsv(raw);
     for (const { row, line } of ok) {
       const where = `line ${line} (${row.name})`;
-      assert.equal(row.kind, "conference", where);
-      assert.equal(row.audience, "counselor", where);
-      assert.equal(row.photo_key, "conference", where);
-      assert.deepEqual(row.topics, ["practice"], where);
+      // Counselor events are counselors'; a college fair is for students and families too.
+      assert.ok(["conference", "workshop", "webinar", "college-fair"].includes(row.kind), `${where}: kind ${row.kind}`);
+      assert.equal(row.audience, row.kind === "college-fair" ? "everyone" : "counselor", where);
+      assert.equal(row.photo_key, row.kind, `${where}: photo_key should match the kind`);
+      assert.ok(row.topics.length > 0, `${where}: give at least one topic`);
       assert.equal(row.source, "csv", where);
 
-      const url = new URL(row.url);
-      assert.equal(url.protocol, "https:", `${where}: url must be https`);
-      assert.ok(url.pathname.replace(/\/+$/, "") !== "", `${where}: url must be the event's page, not a homepage`);
-      assert.ok(!/(^|\.)example\.(org|com)$/.test(url.hostname), `${where}: placeholder url`);
+      for (const [col, value] of [["url", row.url], ["source_url", row.source_url]] as const) {
+        const url = new URL(value);
+        assert.equal(url.protocol, "https:", `${where}: ${col} must be https`);
+        assert.ok(url.pathname.replace(/\/+$/, "") !== "", `${where}: ${col} must be the event's page, not a homepage`);
+        assert.ok(!/(^|\.)example\.(org|com)$/.test(url.hostname), `${where}: placeholder ${col}`);
+      }
+      assert.match(row.last_verified_at, /^\d{4}-\d{2}-\d{2}T00:00:00Z$/, `${where}: checked_on`);
+      assert.ok(row.last_verified_at.slice(0, 10) <= row.start_date, `${where}: checked after the event started? then it has no business in the file`);
 
       // A blank place would load as the loader's "Online" default, which is wrong for an in-person event.
       assert.ok((raw[line - 2]?.place ?? "").trim() !== "", `${where}: place is blank (it would load as "Online")`);
