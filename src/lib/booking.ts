@@ -24,6 +24,7 @@ import { isResultsNotApplied } from "./resultsAvailability.js";
 import { busyReconnectNeeded, busyUnavailable, listBusy } from "./suiteApi.js";
 import { serviceClient } from "./supabase.js";
 import { SUITE_PROVIDERS, type SuiteProvider } from "./oauth.js";
+import { BOOKING_PAGE_COLUMNS, bookingPageReady, storedBookingPage, type BookingPageMode } from "./bookingPage.js";
 
 type Row = Record<string, unknown>;
 
@@ -32,6 +33,10 @@ export type BookingMode = (typeof BOOKING_MODES)[number];
 
 export const SETTINGS_COLUMNS =
   "counselor_id, enabled, time_zone, weekly_hours, min_notice_hours, max_days_ahead, buffer_minutes, cancel_cutoff_hours, students_can_reschedule, created_at, updated_at";
+/** The settings columns to read: the booking-page pair only once its migration is in (lib/bookingPage.ts). */
+export function settingsColumns(pageReady: boolean): string {
+  return pageReady ? `${SETTINGS_COLUMNS}, ${BOOKING_PAGE_COLUMNS}` : SETTINGS_COLUMNS;
+}
 export const TYPE_COLUMNS = "id, counselor_id, name, duration_minutes, mode, active, sort_order, created_at, updated_at";
 
 /** What a counselor who never saved settings has: the table's defaults. */
@@ -95,11 +100,28 @@ export type BookingSettingsDto = {
   cancelCutoffHours: number;
   studentsCanReschedule: boolean;
   updatedAt: string | null;
+  /** The booking-page columns exist (lib/bookingPage.ts); false: the link can't be saved yet. */
+  bookingPageReady: boolean;
+  /** The counselor's Google Calendar booking page, or null. */
+  bookingPageUrl: string | null;
+  /** alongside: students see Meridies booking and the page; instead: only the page. */
+  bookingPageMode: BookingPageMode;
 };
 
-export function toSettings(r: Row | null): BookingSettingsDto {
+/**
+ * Whether Meridies' own booking takes new bookings and moves: switched on, and not
+ * replaced by the counselor's Google booking page (`instead`). A cancel needs neither.
+ */
+export function meridiesBookingOn(row: Row): boolean {
+  if (row.enabled !== true) return false;
+  const page = storedBookingPage(row.booking_page_url, row.booking_page_mode);
+  return !(page && page.mode === "instead");
+}
+
+export function toSettings(r: Row | null, pageReady = false): BookingSettingsDto {
   const row: Row = r ?? { ...DEFAULT_SETTINGS };
   const hours = row.weekly_hours && typeof row.weekly_hours === "object" && !Array.isArray(row.weekly_hours) ? row.weekly_hours : {};
+  const page = storedBookingPage(row.booking_page_url, row.booking_page_mode);
   return {
     saved: Boolean(r),
     enabled: row.enabled === true,
@@ -111,6 +133,9 @@ export function toSettings(r: Row | null): BookingSettingsDto {
     cancelCutoffHours: num(row.cancel_cutoff_hours, DEFAULT_SETTINGS.cancel_cutoff_hours),
     studentsCanReschedule: row.students_can_reschedule !== false,
     updatedAt: r && r.updated_at ? str(r.updated_at) : null,
+    bookingPageReady: pageReady,
+    bookingPageUrl: page?.url ?? null,
+    bookingPageMode: page?.mode ?? (row.booking_page_mode === "instead" ? "instead" : "alongside"),
   };
 }
 
@@ -154,7 +179,7 @@ export function bookingGate(i: {
   requireEnabled: boolean;
 }): { ok: true; settings: BookingSettingsDto } | { ok: false; reason: "not_available" } {
   if (!i.approved || !i.settingsRow) return { ok: false, reason: "not_available" };
-  if (i.requireEnabled && i.settingsRow.enabled !== true) return { ok: false, reason: "not_available" };
+  if (i.requireEnabled && !meridiesBookingOn(i.settingsRow)) return { ok: false, reason: "not_available" };
   return { ok: true, settings: toSettings(i.settingsRow) };
 }
 
@@ -175,7 +200,8 @@ export async function studentBookingContext(
   if (!counselorId) return { ok: false, reason: "no_counselor" };
   if (!(await isCounselorApproved(svc, counselorId))) return { ok: false, reason: "not_available" };
 
-  const { data, error } = await svc.from("booking_settings").select(SETTINGS_COLUMNS).eq("counselor_id", counselorId).maybeSingle();
+  const pageReady = await bookingPageReady(svc);
+  const { data, error } = await svc.from("booking_settings").select(settingsColumns(pageReady)).eq("counselor_id", counselorId).maybeSingle();
   if (error) throw fromPostgrest(error);
   const gate = bookingGate({ approved: true, settingsRow: (data as Row | null) ?? null, requireEnabled: opts.requireEnabled });
   if (!gate.ok) return gate;
@@ -195,8 +221,13 @@ export type BookingUnavailableReason = "counselor_unavailable" | "not_set_up" | 
  *
  *   counselor_unavailable  no counselor, or not approved: nothing more (the account's state isn't told)
  *   not_set_up             approved, never saved booking settings
- *   paused                 settings saved, `enabled` off (a cancel still works: routes/studentBooking.ts)
+ *   paused                 settings saved, `enabled` off, or the counselor's Google booking page replaces
+ *                          Meridies booking (`instead`); a cancel still works (routes/studentBooking.ts)
  *   no_types               on, but no active meeting type
+ *
+ * `bookingPage` (the counselor's Google Calendar booking page and their name, for "Book on
+ * {name}'s calendar") is there whenever an approved counselor with a settings row linked one,
+ * whatever the reason: it is how they asked to be booked.
  */
 export type BookingTypesAnswer = {
   available: boolean;
@@ -205,6 +236,7 @@ export type BookingTypesAnswer = {
   types: MeetingTypeDto[];
   cutoffHours?: number;
   studentsCanChange?: boolean;
+  bookingPage?: { url: string; counselorName: string | null };
 };
 
 export function bookingTypesAnswer(i: {
@@ -212,13 +244,17 @@ export function bookingTypesAnswer(i: {
   approved: boolean;
   settingsRow: Row | null;
   types: MeetingTypeDto[];
+  counselorName?: string | null;
 }): BookingTypesAnswer {
   const none = (reason: BookingUnavailableReason) => ({ available: false, reason, timeZone: null, types: [] as MeetingTypeDto[] });
   if (!i.hasCounselor || !i.approved) return none("counselor_unavailable");
   if (!i.settingsRow) return none("not_set_up");
   const settings = toSettings(i.settingsRow);
-  const rules = { cutoffHours: settings.cancelCutoffHours, studentsCanChange: settings.studentsCanReschedule };
-  if (!settings.enabled) return { ...none("paused"), ...rules };
+  const page = settings.bookingPageUrl
+    ? { bookingPage: { url: settings.bookingPageUrl, counselorName: (i.counselorName ?? "").trim().slice(0, 120) || null } }
+    : {};
+  const rules = { cutoffHours: settings.cancelCutoffHours, studentsCanChange: settings.studentsCanReschedule, ...page };
+  if (!meridiesBookingOn(i.settingsRow)) return { ...none("paused"), ...rules };
   if (i.types.length === 0) return { ...none("no_types"), ...rules };
   return { available: true, reason: null, timeZone: settings.timeZone, types: i.types, ...rules };
 }
@@ -233,11 +269,18 @@ export async function studentBookingTypes(request: FastifyRequest): Promise<Book
   if (!(await isCounselorApproved(svc, counselorId))) {
     return bookingTypesAnswer({ hasCounselor: true, approved: false, settingsRow: null, types: [] });
   }
-  const { data, error } = await svc.from("booking_settings").select(SETTINGS_COLUMNS).eq("counselor_id", counselorId).maybeSingle();
+  const pageReady = await bookingPageReady(svc);
+  const { data, error } = await svc.from("booking_settings").select(settingsColumns(pageReady)).eq("counselor_id", counselorId).maybeSingle();
   if (error) throw fromPostgrest(error);
   const settingsRow = (data as Row | null) ?? null;
-  const types = settingsRow?.enabled === true ? await activeTypes(svc, counselorId) : [];
-  return bookingTypesAnswer({ hasCounselor: true, approved: true, settingsRow, types });
+  const types = settingsRow && meridiesBookingOn(settingsRow) ? await activeTypes(svc, counselorId) : [];
+  let counselorName: string | null = null;
+  if (settingsRow && storedBookingPage(settingsRow.booking_page_url, settingsRow.booking_page_mode)) {
+    // Only for the link's words; a failed read just leaves the name out.
+    const { data: who } = await svc.from("profiles").select("full_name").eq("id", counselorId).maybeSingle();
+    counselorName = typeof (who as Row | null)?.full_name === "string" ? ((who as Row).full_name as string) : null;
+  }
+  return bookingTypesAnswer({ hasCounselor: true, approved: true, settingsRow, types, counselorName });
 }
 
 /** The counselor's active meeting types, in their order. */

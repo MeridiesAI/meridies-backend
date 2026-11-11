@@ -5,7 +5,9 @@
  * counselor reads and writes their own rows and nobody else's.
  *
  *   GET    /booking/settings        hours, zone, notice, buffer, cutoff, switches (defaults when never saved)
- *   PUT    /booking/settings        save any of them (weekly hours checked in full, zone must be IANA)
+ *   PUT    /booking/settings        save any of them (weekly hours checked in full, zone must be IANA), and the
+ *                                    Google Calendar booking page link (`bookingPageUrl`, `bookingPageMode`:
+ *                                    lib/bookingPage.ts; 503 `booking_page_unavailable` before its migration)
  *   GET    /booking/types           the counselor's meeting types, active or not
  *   POST   /booking/types           add one (name, 15-180 minutes, google-meet | teams | in-person | phone)
  *   PATCH  /booking/types/:id
@@ -19,12 +21,13 @@ import { z } from "zod";
 import {
   BOOKING_MODES,
   requireBookingReady,
-  SETTINGS_COLUMNS,
+  settingsColumns,
   toMeetingType,
   toSettings,
   TYPE_COLUMNS,
 } from "../lib/booking.js";
 import { parseWeeklyHours } from "../lib/bookingSlots.js";
+import { BOOKING_PAGE_MODES, bookingPageReady, bookingPageUnavailable, parseBookingPageUrl } from "../lib/bookingPage.js";
 import { isTimeZone } from "../lib/calendarFeed.js";
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
@@ -44,6 +47,9 @@ const settingsBody = z
     bufferMinutes: z.number().int().min(0).max(240),
     cancelCutoffHours: z.number().int().min(0).max(720),
     studentsCanReschedule: z.boolean(),
+    /** The counselor's Google Calendar booking page (lib/bookingPage.ts); null or "" removes it. */
+    bookingPageUrl: z.string().max(2000).nullable(),
+    bookingPageMode: z.enum(BOOKING_PAGE_MODES),
   })
   .partial()
   .strict();
@@ -65,13 +71,14 @@ export default async function bookingRoutes(app: FastifyInstance) {
 
   app.get("/settings", { preHandler: counselor }, async (request) => {
     await requireBookingReady(request.db);
+    const pageReady = await bookingPageReady(request.db);
     const { data, error } = await request.db
       .from("booking_settings")
-      .select(SETTINGS_COLUMNS)
+      .select(settingsColumns(pageReady))
       .eq("counselor_id", request.auth.userId)
       .maybeSingle();
     if (error) throw fromPostgrest(error);
-    return toSettings((data as Row | null) ?? null);
+    return toSettings((data as unknown as Row | null) ?? null, pageReady);
   });
 
   app.put(
@@ -81,8 +88,21 @@ export default async function bookingRoutes(app: FastifyInstance) {
       const b = settingsBody.parse(request.body ?? {});
       if (Object.keys(b).length === 0) throw badRequest("Nothing to change");
       await requireBookingReady(request.db);
+      const pageReady = await bookingPageReady(request.db);
+      const namesPage = b.bookingPageUrl !== undefined || b.bookingPageMode !== undefined;
+      if (namesPage && !pageReady) throw bookingPageUnavailable();
 
       const row: Row = { counselor_id: request.auth.userId };
+      if (b.bookingPageUrl !== undefined) {
+        const raw = b.bookingPageUrl?.trim() ?? "";
+        if (raw === "") row.booking_page_url = null;
+        else {
+          const page = parseBookingPageUrl(raw);
+          if (!page.ok) throw badRequest(page.message);
+          row.booking_page_url = page.value;
+        }
+      }
+      if (b.bookingPageMode !== undefined) row.booking_page_mode = b.bookingPageMode;
       if (b.weeklyHours !== undefined) {
         const hours = parseWeeklyHours(b.weeklyHours);
         if (!hours.ok) throw badRequest(hours.message);
@@ -111,10 +131,10 @@ export default async function bookingRoutes(app: FastifyInstance) {
       const { data, error } = await request.db
         .from("booking_settings")
         .upsert(row, { onConflict: "counselor_id" })
-        .select(SETTINGS_COLUMNS)
+        .select(settingsColumns(pageReady))
         .single();
       if (error) throw fromPostgrest(error);
-      return toSettings(data as Row);
+      return toSettings(data as unknown as Row, pageReady);
     }
   );
 
