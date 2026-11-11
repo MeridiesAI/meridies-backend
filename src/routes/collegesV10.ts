@@ -45,7 +45,8 @@ import { lookUpLogoOnly, lookUpMediaSoon } from "../lib/collegeMediaLookup.js";
 import { lookUpCollege } from "../lib/collegeLookup.js";
 import { runCollegeLookup } from "../lib/collegeLookupRun.js";
 import { SITE_INFO_COLUMNS, buildSiteInfo, toSiteInfo, type AiCall, type SiteInfoRow } from "../lib/collegeSiteInfo.js";
-import { fetchSitePage, fileKindOf, linkError, normalizeLink } from "../lib/links.js";
+import { fetchPageMeta, fetchSitePage, fileKindOf, linkError, normalizeLink } from "../lib/links.js";
+import { schoolForResearch } from "../lib/collegeMatch.js";
 import { supabasePhotoStore } from "../lib/ingest/collegePhotos.js";
 import { wikimediaClient } from "../lib/ingest/wikimedia.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -72,7 +73,6 @@ import {
   searchQuery,
   type SearchQuery,
   safeIlikeTerm,
-  schoolIn,
   searchRank,
   sizeLabel,
   toAdmittedProfile,
@@ -426,6 +426,22 @@ async function explainPicks(
 }
 
 const PER_TIER_MAX = 12;
+
+/** How long filing a link waits for its page's title before filing it by its address alone. */
+const TITLE_FETCH_MS = 6_000;
+
+/** A page's title through the SSRF-safe reader, or null on any failure or after `ms`. */
+async function pageTitleWithin(url: string, ms: number): Promise<string | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([fetchPageMeta(url).then((m) => m.title, () => null), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export default async function collegeV10Routes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
@@ -1014,10 +1030,14 @@ export default async function collegeV10Routes(app: FastifyInstance) {
    * link (POST /files/links) or uploads the file (POST /files/documents) into
    * it, so the existing read, LLM-availability and storage rules apply.
    *
-   * A link is checked here first (lib/links.ts: the address rules, nothing fetched)
+   * A link is checked here first (lib/links.ts: the address rules, before anything is fetched)
    * and refused with its reason's `code` before any folder is made; a link to a
    * file (a PDF, a Word file) is refused too, since the Add a file button beside
    * the box is the way in for those. `url` answers the link as it will be stored.
+   *
+   * The school (lib/collegeMatch.ts): the link's host (the school's site or a subdomain, or a known
+   * admissions site such as mitadmissions.org), a name or alias in the address, and only when those find
+   * nothing, the page's title, fetched through the same SSRF-safe reader for at most 6 seconds.
    */
   app.post("/research/folder", { preHandler: [...counselor, limit("colleges:research:file", 60, 60)] }, async (request) => {
     const b = z
@@ -1044,8 +1064,14 @@ export default async function collegeV10Routes(app: FastifyInstance) {
 
     const { data: catalog, error } = await request.db.from("colleges").select("id, name, aka, website").limit(5000);
     if (error) throw fromPostgrest(error);
-    const school = schoolIn(
-      url ?? b.filename ?? "",
+    const school = await schoolForResearch(
+      {
+        url,
+        filename: b.filename ?? null,
+        // Only when the address names no school: the page's own title ("MIT First-Year Application
+        // Deadlines & Requirements"). Bounded, and a failure is just no title (the link is still filed).
+        pageTitle: url ? () => pageTitleWithin(url, TITLE_FETCH_MS) : undefined,
+      },
       ((catalog ?? []) as Row[]).map((c) => ({
         id: String(c.id),
         name: String(c.name),
