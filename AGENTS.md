@@ -1880,10 +1880,10 @@ distance, size, control, admit rate, test policy, net price at an income band,
 majors, HBCU/HSI/women's/religious, setting, fit) and pages. Fit
 (reach/target/likely) is `studentOdds` in SQL and is labelled a Meridies
 estimate. `GET /colleges/search` keeps its array response; the total and next
-cursor are the `X-Total-Count` / `X-Next-Cursor` headers. No embeddings: the AI
-rule is Anthropic only. (`college_opportunities.embedding`, `vector(384)`, exists
-since `20261119000001` but nothing fills it yet: what makes those vectors is an
-open decision against this rule, see "List-builder learning".)
+cursor are the `X-Total-Count` / `X-Next-Cursor` headers. Search uses no
+embeddings. (`college_opportunities.embedding`, `vector(384)`, since
+`20261119000001`, is filled by the in-process model in `lib/embeddings.ts`, the one
+exception to the Anthropic-only rule; see "List-builder learning".)
 
 ### Resource library and curated datasets
 
@@ -2515,7 +2515,10 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
 ## Anthropic / AI rules
 
 **All product AI goes through Anthropic.** No other providers unless the team
-explicitly decides otherwise.
+explicitly decides otherwise. The one decided exception (2026-11-11): text
+embeddings for college matching run in this process (`lib/embeddings.ts`,
+open-weights `Supabase/gte-small`). No text leaves the server; only the model's
+weights are downloaded from Hugging Face. Generation stays Anthropic only.
 
 - **Speed first** — counselors use these live, in session with a family
 - **Default model:** `claude-haiku-4-5` (`FAST_MODEL` in `lib/anthropic.ts`)
