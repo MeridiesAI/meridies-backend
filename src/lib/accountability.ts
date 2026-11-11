@@ -11,6 +11,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fromPostgrest } from "./errors.js";
+import { unsignedAvatarUrl } from "./studentAvatar.js";
 
 /**
  * Anything carrying a Supabase client. A `FastifyRequest` satisfies it (its
@@ -291,7 +292,7 @@ export async function buildBehindList(
       return {
         studentId: sid,
         fullName: s.full_name as string,
-        avatarUrl: (s.avatar_url as string | null) ?? null,
+        avatarUrl: unsignedAvatarUrl(s.avatar_url),
         stalled,
         openRedFlags: flagCount.get(sid) ?? 0,
         overdueDeadlines: overdueCount.get(sid) ?? 0,

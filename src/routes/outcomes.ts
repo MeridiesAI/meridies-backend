@@ -16,6 +16,7 @@ import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib
 import { assertCanEditStudent, assertCanViewStudent, requireRole } from "../lib/guards.js";
 import { fourPointGpa } from "../lib/gpa.js";
 import { limit } from "../lib/limits.js";
+import { unsignedAvatarUrl } from "../lib/studentAvatar.js";
 import {
   HOOKS,
   OUTCOME_COLUMNS,
@@ -291,7 +292,7 @@ function toAlum(r: Row, photos: Map<string, CollegePhotoRow> = new Map()) {
     studentId: String(r.student_id),
     name: s.full_name ? String(s.full_name) : null,
     email: s.email ? String(s.email) : null,
-    avatarUrl: s.avatar_url ? String(s.avatar_url) : null,
+    avatarUrl: unsignedAvatarUrl(s.avatar_url),
     gradYear: s.grad_year ? String(s.grad_year) : null,
     highSchool: s.high_school ? String(s.high_school) : null,
     cycle: String(r.cycle),
