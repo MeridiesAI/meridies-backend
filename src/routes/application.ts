@@ -27,6 +27,7 @@ import { serializeErr } from "../lib/requestLog.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
+import { logChoice, type ChoiceSource } from "../lib/listLearning.js";
 import { resultsUnavailable } from "../lib/resultsAvailability.js";
 import { getRemoteFile, exportGoogleDocText } from "../lib/suiteApi.js";
 import { essayBodyChanged } from "../lib/inactivity.js";
@@ -152,7 +153,10 @@ const isStudent = (request: FastifyRequest) => request.profile.role === "student
 
 /**
  * Put a school on a list. Used by "Add" and by accepting a recommendation, so
- * both dedupe the same way: by catalog identity, then by name.
+ * both dedupe the same way: by catalog identity, then by name. Every add is
+ * logged for list-builder learning (lib/listLearning.ts, never awaited) as
+ * `opts.choice` (default "manual"; AxIS's requests read "axis" whatever is
+ * passed); null means the caller logs it, as a batch.
  */
 export async function addToList(
   request: FastifyRequest,
@@ -165,7 +169,8 @@ export async function addToList(
     status?: (typeof STATUSES)[number];
     intendedMajor?: string | null;
     deadline?: string | null;
-  }
+  },
+  opts: { choice?: ChoiceSource | null } = {}
 ): Promise<Row> {
   let catalog: Row | null = null;
   if (input.collegeId) {
@@ -213,6 +218,9 @@ export async function addToList(
 
   const { data, error } = await request.db.from("student_colleges").insert(insert).select(LIST_SELECT).single();
   if (error) throw fromPostgrest(error);
+  if (opts.choice !== null) {
+    void logChoice(request, { studentId, collegeId: (data as Row).college_id as string | null, action: "added", source: opts.choice ?? "manual" });
+  }
   return data as Row;
 }
 
@@ -543,8 +551,17 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       const current = await loadListRow(request, id);
       await resolveStudentId(request, String(current.student_id), "edit");
-      const { error } = await request.db.from("student_colleges").delete().eq("id", id);
+      const { data: gone, error } = await request.db.from("student_colleges").delete().eq("id", id).select("id");
       if (error) throw fromPostgrest(error);
+      // Logged only when a row really went (RLS turns a refused delete into zero rows, not an error).
+      if ((gone ?? []).length > 0) {
+        void logChoice(request, {
+          studentId: String(current.student_id),
+          collegeId: (current.college_id as string | null) ?? null,
+          action: "removed",
+          source: "manual",
+        });
+      }
       return { deleted: true };
     }
   );
@@ -587,6 +604,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
           .select("*")
           .single();
         if (error) throw fromPostgrest(error);
+        void logChoice(request, { studentId, collegeId: b.collegeId ?? null, action: "recommended", source: "manual" });
         return reply.code(200).send(toRecommendation(data as Row));
       }
 
@@ -604,6 +622,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         .select("*")
         .single();
       if (error) throw fromPostgrest(error);
+      void logChoice(request, { studentId, collegeId: b.collegeId ?? null, action: "recommended", source: "manual" });
       return reply.code(201).send(toRecommendation(data as Row));
     }
   );

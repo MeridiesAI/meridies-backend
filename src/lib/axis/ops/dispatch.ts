@@ -134,7 +134,8 @@ export async function dispatch(request: FastifyRequest, call: OpCall, opts: { ac
     url: call.url,
     headers: {
       authorization: `Bearer ${request.auth.token}`,
-      // Marks the request as AxIS's in the logs; routes don't branch on it.
+      // Marks the request as AxIS's in the logs. Routes never branch on it for access; list-builder learning
+      // (lib/listLearning.ts) reads it only to label a choice "axis".
       "x-meridies-axis": "1",
       // A confirmed delete: its rows go to the trash (lib/axis/ops/trash.ts).
       ...(opts.actionId ? { "x-meridies-axis-mark": markFor(opts.actionId) } : {}),

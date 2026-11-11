@@ -99,6 +99,8 @@ export type CollectionOptions<T extends ZodTypeAny> = {
     row: Record<string, unknown>,
     action: "insert" | "update"
   ) => Promise<void>;
+  /** Called after a delete landed, with the deleted row (all its columns). Must not throw. */
+  afterDelete?: (request: FastifyRequest, studentId: string, row: Record<string, unknown>) => void;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -293,10 +295,15 @@ export function registerCollection<T extends ZodTypeAny>(
       await opts.beforeDelete?.(request, existing.student_id as string, id);
       await withinLimit();
 
-      const { data: removed, error } = await request.db.from(table).delete().eq("id", id).select("id");
+      const { data: removed, error } = await request.db
+        .from(table)
+        .delete()
+        .eq("id", id)
+        .select(opts.afterDelete ? "*" : "id");
       if (error) throw fromPostgrest(error);
       // RLS filters a delete the caller may not make down to zero rows; that is not a success.
       if (!removed || removed.length === 0) throw notFound();
+      opts.afterDelete?.(request, existing.student_id as string, removed[0] as unknown as Record<string, unknown>);
       return { deleted: true };
     }
   );

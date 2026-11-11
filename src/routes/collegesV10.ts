@@ -39,6 +39,7 @@ import { HttpError, badRequest, fromPostgrest, notFound, unavailable } from "../
 import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { requireRole, requireRoleIn, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { logChoices, logImpressions } from "../lib/listLearning.js";
 import { collegeLogoUrls, loadCollegeLogos, logoUrlOf } from "../lib/collegeLogos.js";
 import { lookUpLogoOnly, lookUpMediaSoon } from "../lib/collegeMediaLookup.js";
 import { lookUpCollege } from "../lib/collegeLookup.js";
@@ -1134,10 +1135,13 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     );
 
     const perTier = b.perTier ?? 4;
-    const tiers = (["reach", "target", "likely"] as const).map((fit) => {
+    const bands = (["reach", "target", "likely"] as const).map((fit) => {
       const all = picks.filter((p) => p.fit === fit);
       const start = all.length > perTier ? (b.offset ?? 0) % all.length : 0;
       const shown = [...all.slice(start), ...all.slice(0, start)].slice(0, perTier);
+      return { fit, all, start, shown };
+    });
+    const tiers = bands.map(({ fit, all, shown }) => {
       return {
         fit,
         heading: fit === "likely" ? "Safety" : fit === "reach" ? "Reach" : "Target",
@@ -1167,6 +1171,20 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       const shown = picks.filter((p) => tiers.some((t) => t.schools.some((x) => x.collegeId === p.school.collegeId)));
       why = await explainPicks(request, b.studentId, student, shown);
     }
+
+    // What this answer shows, for list-builder learning (lib/listLearning.ts). Never awaited, never throws.
+    void logImpressions(request, {
+      studentId: b.studentId,
+      criteria: b.criteria as ListCriteria,
+      relaxed,
+      view: { offset: b.offset ?? 0, perTier, excluded: b.exclude ?? [] },
+      curatedIds: new Set(curated.map((s) => s.collegeId)),
+      bands: bands.map(({ fit, all, start, shown }) => ({
+        fit,
+        total: all.length,
+        shown: shown.map((pick, i) => ({ pick, bandRank: ((start + i) % all.length) + 1 })),
+      })),
+    });
 
     return {
       student: { id: b.studentId, fullName: student.fullName },
@@ -1202,7 +1220,8 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       const skipped: { collegeId: string; reason: "already-on-list" | "not-found" }[] = [];
       for (const collegeId of [...new Set(b.collegeIds)]) {
         try {
-          const row = await addToList(request, studentId, { collegeId, status: STAGE_STATUS.interested });
+          // Logged below as one batch, source list_builder.
+          const row = await addToList(request, studentId, { collegeId, status: STAGE_STATUS.interested }, { choice: null });
           added.push({ rowId: String(row.id), collegeId });
         } catch (err) {
           if (err instanceof HttpError && err.statusCode === 409) skipped.push({ collegeId, reason: "already-on-list" });
@@ -1212,6 +1231,11 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       }
 
       if (added.length) {
+        // For list-builder learning (lib/listLearning.ts), one batch. Never awaited, never throws.
+        void logChoices(
+          request,
+          added.map((a) => ({ studentId, collegeId: a.collegeId, action: "added" as const, source: "list_builder" as const }))
+        );
         // The tag is a nicety on top of a school that is already on the list: if reading the numbers fails the
         // schools stay, untagged, and the counselor can set it.
         try {

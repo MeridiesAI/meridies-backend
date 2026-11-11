@@ -37,6 +37,11 @@ const REVIEWED = [
   // lib/studentListFit.ts, which sets ONE column, `fit`, on the rows that request just inserted (keyed on the row,
   // the student and added_by = the student). The tag is computed from the student's own numbers; nothing in the
   // request chooses it (the body is strict). The database refuses a student-set fit, which is why the server writes it.
+  // lib/listLearning.ts: list-builder learning (20261119000001), inside the caller's own request after its route
+  // authorized them (resolveStudentId, or the row their own RLS client just wrote or deleted). The service role only
+  // reads the student's counselor's firm and its exclude_from_learning flag, reads that student's own impression rows,
+  // and inserts rows of ids and labels into the two logging tables, which no client can read or write. It acts for
+  // no counselor outside their request, returns nothing to the client, and writes nothing a user can see.
   // lib/imports/files.ts, mapping.ts, stage.ts: the import worker inside an approved counselor's own
   // request (authenticate + requireRole ran), p_actor = that counselor; every function re-checks
   // private.can_manage_import (which asks the approval gate). lib/imports/retention.ts: the sweep acts
@@ -174,7 +179,7 @@ const REVIEWED = [
   "lib/booking.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/drafts/state.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
-  "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
+  "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/listLearning.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
