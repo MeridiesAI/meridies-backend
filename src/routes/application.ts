@@ -8,7 +8,7 @@
  *   Essays         GET /essays, POST /essays, PATCH/DELETE /essays/:id,
  *                  POST /essays/from-document, POST /essays/sync,
  *                  POST /supplement-docs (a real Google Doc per school)
- *   Sheets         GET /sheets, CRUD /activities and /honors
+ *   Sheets         GET /sheets, CRUD /activities and /honors, POST /activities/from-document
  *
  * The AI pieces (AxIS recommended schools, Narrative Coherence, Activities
  * Build) live in routes/applicationAi.ts under the same prefix.
@@ -16,6 +16,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { activityProposalsFromDocument } from "../lib/activityListImport.js";
 import { registerCollection } from "../lib/collection.js";
 import { collegeLogoUrls } from "../lib/collegeLogos.js";
 import { essayOnly, readStoredText } from "../lib/applicationText.js";
@@ -1283,6 +1284,20 @@ export default async function applicationRoutes(app: FastifyInstance) {
     beforeWrite: capRows("activities"),
     idempotent: true,
   });
+
+  // An activity list in the student's Files, offered to this sheet (lib/activityListImport.ts): proposed rows
+  // only, nothing stored. A spreadsheet with the Common App's columns is read without a model; any other file goes
+  // to AxIS (Profile Updates' reader, its usual gates). The counselor adds each row they confirm (POST
+  // /activities, or /activities/batch); the student files theirs through Profile Updates.
+  app.post(
+    "/activities/from-document",
+    { preHandler: [app.authenticate, limit("activities:from-document", 20, 60)] },
+    async (request) => {
+      const b = z.object({ studentId: uuid.optional(), documentId: uuid }).strict().parse(request.body);
+      const student = await resolveStudentId(request, b.studentId, "edit");
+      return activityProposalsFromDocument(request, student, b.documentId);
+    }
+  );
 
   // Several rows at once, each answered on its own (an AxIS card with a row per activity): a row the cap or the
   // database refuses fails alone and the rest still save. Rows go in order, so the cap counts the earlier ones.

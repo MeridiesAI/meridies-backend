@@ -340,7 +340,14 @@ export function startExtractionRecovery(app: FastifyInstance): void {
   });
 }
 
-/** Text for the type guess only: first pages of a PDF (jumps the queue, gives up after 5 s), or a text file. Never stored. */
+/** Rows of a spreadsheet the type guess reads: its header and the first few entries are enough. */
+export const GUESS_SHEET_ROWS = 40;
+
+/**
+ * Text for the type guess only: first pages of a PDF (jumps the queue, gives up after 5 s), a text file, the
+ * start of a CSV (read here, it is plain text) or the first rows of a workbook (in the capped parse process, as
+ * every workbook is). Never stored.
+ */
 export async function guessText(bytes: Uint8Array, mimeType: string, filename: string): Promise<string | null> {
   const kind = extractorFor(mimeType, filename);
   if (kind === "pdf") {
@@ -348,5 +355,14 @@ export async function guessText(bytes: Uint8Array, mimeType: string, filename: s
     return r.ok ? r.text.slice(0, GUESS_TEXT_LIMIT) : null;
   }
   if (kind === "text") return readDocumentText(Buffer.from(bytes), filename, mimeType)?.slice(0, GUESS_TEXT_LIMIT) ?? null;
+  if (kind === "sheet") {
+    if (/\.csv$/i.test(filename) || (mimeType ?? "").toLowerCase() === "text/csv") {
+      return Buffer.from(bytes.subarray(0, GUESS_TEXT_LIMIT * 2)).toString("utf8").slice(0, GUESS_TEXT_LIMIT);
+    }
+    const parsed = await parseInWorker(bytes, filename, { maxRows: GUESS_SHEET_ROWS, timeoutMs: 5_000 });
+    if (!parsed.ok) return null;
+    const lines = parsed.sheets.flatMap((s) => [s.headers.join(", "), ...s.rows.map((r) => r.join(", "))]);
+    return lines.join("\n").slice(0, GUESS_TEXT_LIMIT);
+  }
   return null;
 }
