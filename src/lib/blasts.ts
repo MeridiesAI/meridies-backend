@@ -44,20 +44,82 @@ const MAX_YEARS_AHEAD = 5;
 
 const list = (max: number, len: number) => z.array(z.string().trim().min(1).max(len)).max(max).default([]);
 
-/** Class year, colleges applying to, application status; each narrows the one before. */
+/**
+ * Financial aid status, as the Financial aid page shows it: the FAFSA's status
+ * or the CSS Profile's (`student_aid_profiles.fafsa_status` / `css_status`).
+ * Status only, never anything from inside the form (backend AGENTS "FAFSA:
+ * status and due date, nothing else").
+ */
+export const FAFSA_STATUSES = ["not-started", "in-progress", "submitted"] as const;
+export const CSS_STATUSES = ["not-started", "in-progress", "submitted", "not-required", "not-applicable"] as const;
+/**
+ * A student with no `student_aid_profiles` row: nobody has recorded anything.
+ * The Financial aid page reads that as "Not started"; the filter keeps it apart
+ * so "is none of Not started" can't quietly keep or drop students nobody looked at.
+ */
+export const NO_AID_STATUS = "none";
+export type AidForm = "fafsa" | "css";
+export const AID_STATUSES: Record<AidForm, readonly string[]> = { fafsa: FAFSA_STATUSES, css: CSS_STATUSES };
+
+/** "FAFSA status is any of / is none of …": one form, include or exclude, one or more statuses. */
+export const aidFilterInput = z
+  .object({
+    form: z.enum(["fafsa", "css"]),
+    mode: z.enum(["include", "exclude"]),
+    statuses: z
+      .array(z.enum([...CSS_STATUSES, NO_AID_STATUS]))
+      .min(1)
+      .max(CSS_STATUSES.length + 1)
+      .transform((v) => [...new Set(v)]),
+  })
+  .strict()
+  .superRefine((f, ctx) => {
+    const allowed = new Set<string>([...AID_STATUSES[f.form], NO_AID_STATUS]);
+    for (const v of f.statuses) {
+      if (!allowed.has(v)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["statuses"], message: `'${v}' isn't a ${f.form === "fafsa" ? "FAFSA" : "CSS Profile"} status` });
+    }
+  });
+
+export type AidFilter = z.infer<typeof aidFilterInput>;
+
+/** Whether one student's recorded status (null: no aid record) passes the filter. */
+export function aidMatches(f: AidFilter, status: string | null | undefined): boolean {
+  const hit = f.statuses.includes((status ?? NO_AID_STATUS) as AidFilter["statuses"][number]);
+  return f.mode === "include" ? hit : !hit;
+}
+
+const AID_LABELS: Record<string, string> = {
+  "not-started": "Not started",
+  "in-progress": "In progress",
+  submitted: "Submitted",
+  "not-required": "Not required",
+  "not-applicable": "Not applicable",
+  [NO_AID_STATUS]: "nothing recorded",
+};
+
+/** "FAFSA: Submitted" or "FAFSA: not In progress, nothing recorded". */
+export function aidLabel(f: AidFilter): string {
+  const form = f.form === "fafsa" ? "FAFSA" : "CSS Profile";
+  const values = f.statuses.map((v) => AID_LABELS[v] ?? v).join(", ");
+  return `${form}: ${f.mode === "exclude" ? "not " : ""}${values}`;
+}
+
+/** Class year, colleges applying to, application status, financial aid status; each narrows the one before. */
 export const audienceInput = z
   .object({
     recipientType: z.enum(["students", "parents"]).default("students"),
     classYears: list(20, 10),
     colleges: list(50, 200),
     statuses: list(12, 40),
+    /** Financial aid status (FAFSA or CSS Profile), include or exclude. Omitted: no aid filter. */
+    aid: aidFilterInput.optional(),
     /** The students left ticked inside the filters. Omitted: everyone the filters match. */
     studentIds: z.array(z.string().uuid()).max(MAX_RECIPIENTS).optional(),
   })
   .strict();
 
 export type Audience = z.infer<typeof audienceInput>;
-export type Filters = Pick<Audience, "classYears" | "colleges" | "statuses">;
+export type Filters = Pick<Audience, "classYears" | "colleges" | "statuses" | "aid">;
 
 export type Recipient = {
   studentId: string;
@@ -128,6 +190,16 @@ async function applyFilters(db: SupabaseClient, roster: Row[], f: Filters): Prom
     );
     rows = rows.filter((r) => matched.has(String(r.id)));
   }
+  if (f.aid && rows.length) {
+    const aid = f.aid;
+    const column = aid.form === "fafsa" ? "fafsa_status" : "css_status";
+    const profiles = await inChunks<Row>(
+      rows.map((r) => String(r.id)),
+      (chunk) => db.from("student_aid_profiles").select(`student_id, ${column}`).in("student_id", chunk).limit(5000)
+    );
+    const status = new Map(profiles.map((p) => [String(p.student_id), p[column] == null ? null : String(p[column])]));
+    rows = rows.filter((r) => aidMatches(aid, status.get(String(r.id)) ?? null));
+  }
   return rows;
 }
 
@@ -137,6 +209,7 @@ function labelFor(a: Audience, students: number): string {
     a.classYears.length ? `Class of ${a.classYears.join(", ")}` : "",
     a.colleges.length ? `Applying to ${a.colleges.join(", ")}` : "",
     a.statuses.length ? `Status: ${a.statuses.join(", ")}` : "",
+    a.aid ? aidLabel(a.aid) : "",
   ].filter(Boolean);
   const base = (parts.join(" · ") || "Entire roster").slice(0, 150);
   const who = a.recipientType === "parents" ? "Parents · " : "";
@@ -438,11 +511,27 @@ export function nextYear(iso: string, timezone: string | null | undefined): stri
 
 export type BlastTally = { sent: number; held: number; failed: number; skipped: number };
 
-const filtersOf = (r: Row): Filters => {
-  const f = (r.filters ?? {}) as Partial<Filters>;
+/**
+ * A stored blast's filters (`email_blasts.filters`). An aid filter that no
+ * longer reads is `null`, never dropped: dropping it would widen who the
+ * blast reaches.
+ */
+export const filtersOf = (r: Row): Filters | null => {
+  const f = (r.filters ?? {}) as Record<string, unknown>;
   const strings = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
-  return { classYears: strings(f.classYears), colleges: strings(f.colleges), statuses: strings(f.statuses) };
+  const out: Filters = { classYears: strings(f.classYears), colleges: strings(f.colleges), statuses: strings(f.statuses) };
+  if (f.aid != null) {
+    const aid = aidFilterInput.safeParse(f.aid);
+    if (!aid.success) return null;
+    out.aid = aid.data;
+  }
+  return out;
 };
+
+/** What `email_blasts.filters` stores: the aid filter only when there is one, so a blast without it reads as before. */
+export function storedFilters(f: Filters) {
+  return { classYears: f.classYears, colleges: f.colleges, statuses: f.statuses, ...(f.aid ? { aid: f.aid } : {}) };
+}
 
 /**
  * Send every scheduled blast whose time has come. Service-role client: who it
@@ -510,9 +599,17 @@ export async function dispatchDueBlasts(svc: SupabaseClient, logger: Log, max = 
         .maybeSingle();
       if (claim.error || !claim.data) continue;
 
+      const filters = filtersOf(blast);
+      if (!filters) {
+        // Fail closed: a filter we can't read must not become "everyone".
+        await svc.from("email_blasts").update({ status: "failed", claimed_at: null, sent_at: now.toISOString() }).eq("id", id);
+        logger.error({ blast: id }, "email blast: stored aid filter unreadable");
+        tally.failed += 1;
+        continue;
+      }
       const { recipients } = await resolveAudience(svc, counselorId, {
         recipientType: blast.recipient_type === "parents" ? "parents" : "students",
-        ...filtersOf(blast),
+        ...filters,
         studentIds: Array.isArray(blast.student_ids) && blast.student_ids.length ? (blast.student_ids as string[]) : undefined,
       });
       const reached = recipients.filter((r) => r.email);
