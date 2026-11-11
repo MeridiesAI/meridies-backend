@@ -15,7 +15,7 @@
  */
 
 import type { FastifyRequest } from "fastify";
-import { DEEP_MODEL, FAST_MODEL } from "./anthropic.js";
+import { DEEP_MODEL, FAST_MODEL, type AiModule } from "./anthropic.js";
 import { plainGradYear, plainName } from "./context/identity.js";
 import { anyLong } from "./context/freeText.js";
 import { researchTaskIds } from "./research/origin.js";
@@ -40,6 +40,8 @@ export type ChatTool = {
   needsStudent: boolean;
   /** Haiku by default; the harder analytical tools earn Sonnet. */
   model: string;
+  /** The Data & privacy switch this tool answers to, when it does the work of a gated route. */
+  gate?: AiModule;
   /** The tool-specific system guidance, appended to BASE_CHAT_SYSTEM. */
   guidance: string;
 };
@@ -141,6 +143,8 @@ export const CHAT_TOOLS: Record<ChatToolKey, ChatTool> = {
     badge: "PR",
     needsStudent: true,
     model: FAST_MODEL,
+    // The same read as POST /ai/profile-summary, so the practice's AI summaries switch governs it.
+    gate: "profile-summary",
     guidance: [
       "Focus: whole-profile synthesis. Give the counselor a crisp read of this",
       "student's strengths, gaps, and the one or two highest-leverage moves right",

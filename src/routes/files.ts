@@ -536,6 +536,11 @@ export default async function fileRoutes(app: FastifyInstance) {
       } else if (existing.owner_id !== request.auth.userId) {
         throw notFound("That document isn't on file");
       }
+      // A student re-typing a counselor's upload about them (financial -> other) would lift
+      // the sensitive-kind exclusion on the next hand-in; the type of what they didn't upload stays.
+      if (b.kind !== undefined && request.profile.role === "student" && existing.owner_id !== request.auth.userId) {
+        throw forbidden("Only the person who uploaded this file can change its type");
+      }
 
       const target = b.folderId ? await assertFileableFolder(request, b.folderId) : null;
       if (target) await assertSameStudentTree(request, target, existing.student_id as string | null);
@@ -696,6 +701,11 @@ export default async function fileRoutes(app: FastifyInstance) {
         await resolveStudentId(request, existing.student_id as string, "edit");
       } else if (existing.owner_id !== request.auth.userId) {
         throw notFound("That document isn't on file");
+      }
+      // A student deletes their own uploads; a counselor's file about them (a transcript,
+      // a recommendation) is not theirs to remove, object included.
+      if (request.profile.role === "student" && existing.owner_id !== request.auth.userId) {
+        throw forbidden("Only the person who uploaded this file can delete it");
       }
 
       const { data: gone, error } = await request.db.from("documents").delete().eq("id", id).select("id");

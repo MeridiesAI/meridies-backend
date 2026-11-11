@@ -64,6 +64,10 @@ const REVIEWED = [
   // request; it asks approvedCounselorIds before finalizing or emailing anyone, and reads/writes only kpi_*
   // rows plus recipients' sign-in emails. routes/kpiUnsubscribe.ts: public, the hashed token decides; it only
   // switches that one row's monthly_email off.
+  // routes/preferences.ts: inside an approved counselor's own request (authenticate; the role is re-read per
+  // request), reads only counselor_note of the catalog preference_cards rows the caller's RLS client already
+  // returned, by id. No caller-supplied id, no student data; a follow-up migration takes the column out of
+  // the client SELECT grant.
   // routes/pipelineUnsubscribe.ts: public, the hashed token decides; it only stamps that one contact's
   // email_opted_out_at. The sequence dispatcher (lib/pipelineSequences.ts) is handed its client by the
   // cron route in routes/internal.ts and asks approvedCounselorIds before sending for anyone.
@@ -161,7 +165,7 @@ const REVIEWED = [
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

@@ -107,6 +107,17 @@ export default async function payRoutes(app: FastifyInstance) {
     const { token } = request.params as { token: string };
     const { paid } = (request.query ?? {}) as { paid?: string };
     if (paid === "1" && PAY_TOKEN.test(token)) {
+      // Only a link that exists gets the thank-you page: a made-up token
+      // otherwise gives anyone a Meridies-hosted "your payment went through".
+      const svc = serviceClient();
+      let known = false;
+      try {
+        known = Boolean(svc && (await stripeReady(svc)) && (await invoiceForToken(svc, token)));
+      } catch (err) {
+        request.log.error({ err: serializeErr(err) }, "pay: could not load the invoice");
+        return page(reply, 503, UNAVAILABLE);
+      }
+      if (!known) return page(reply, 404, INVALID);
       return page(reply, 200, "<h1>Thank you</h1><p>Your payment went through. It can take a minute to show on the invoice, and Stripe emails your receipt.</p>");
     }
     let r: Ready;

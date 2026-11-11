@@ -278,9 +278,13 @@ on existing rows (`20261104000001` VALIDATEs the constraint `20261029000002`
 added NOT VALID; it fails if any row breaks the rule, so run
 `scripts/migrations/gpa-scale-violations.sql` first; the routes apply the same
 rule in code either way),
-CSV import extras on invitations (`20261029000003`) and card payments
+CSV import extras on invitations (`20261029000003`), card payments
 (`20261102000001`: without it `GET /pipeline/stripe` answers `configured:
-false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`).
+false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`)
+and the 2026-11-05 audit's database guards (`20261115000001`: SVG/HTML kept
+out of the documents bucket by stored type, a pipeline contact's owner
+changed only by its owner or a firm admin, no client INSERT on `profiles`;
+the API enforces each already).
 None is in `REQUIRED_SCHEMA`; each feature degrades without its file, never
 500s (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
 writing new features that way: a migration lands minutes from its code in

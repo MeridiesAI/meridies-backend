@@ -477,6 +477,17 @@ export const LOOKUP_FRESH_DAYS = 7;
 const RETRY_AFTER_MS = 6 * 3600 * 1000;
 /** At most this many lookups at a time per instance. */
 const MAX_IN_FLIGHT = 3;
+/**
+ * How many page loads a day may queue lookups for one account (routes/events.ts,
+ * routes/myEvents.ts). A lookup is up to four Sonnet turns with web search on the
+ * events-discovery system budget; without this, one student listing a few hundred
+ * colleges and polling their Events tab could drain the month's budget for everyone.
+ */
+export const LOOKUPS_PER_USER_PER_DAY = 10;
+/** And per instance, however many accounts ask: the weekly job keeps its own share. */
+const USER_LOOKUPS_PER_DAY = 60;
+let userLookupDay = 0;
+let userLookupsToday = 0;
 
 const attempted = new Map<string, number>();
 let inFlight = 0;
@@ -499,6 +510,11 @@ export function lookUpSoon(colleges: DiscoveryCollege[], log: Log): DiscoveryCol
   if (!svc || !hasAnthropic) return [];
   const now = Date.now();
   const started: DiscoveryCollege[] = [];
+  const day = Math.floor(now / 86_400_000);
+  if (day !== userLookupDay) {
+    userLookupDay = day;
+    userLookupsToday = 0;
+  }
   for (const c of colleges) {
     if (!collegeHost(c.website)) continue;
     const last = attempted.get(c.id);
@@ -507,6 +523,8 @@ export function lookUpSoon(colleges: DiscoveryCollege[], log: Log): DiscoveryCol
       if (queue.some((q) => q.id === c.id) || last > now - 5 * 60_000) started.push(c);
       continue;
     }
+    if (userLookupsToday >= USER_LOOKUPS_PER_DAY) continue;
+    userLookupsToday += 1;
     attempted.set(c.id, now);
     queue.push(c);
     started.push(c);
