@@ -9,8 +9,9 @@
  *
  * Both write with the service client (the tables have no client grants), and store ids, numbers and fixed labels
  * only: no name and no free text about the student (the criteria's majors become the fields the ranking matched on,
- * its origin only whether one was set). A student whose counselor's firm has `exclude_from_learning` (our team, demo
- * and test firms) is skipped entirely; so is any student whose firm can't be read (fail closed).
+ * its origin only whether one was set). A student whose counselor, or whose counselor's firm, has
+ * `exclude_from_learning` (our team, demo and test accounts) is skipped entirely, and so is anything a flagged
+ * counselor does on a student shared with them; so is any student whose flags can't be read (fail closed).
  *
  * They never throw and never hold the request up: call sites don't await them (`void logChoice(...)`); the returned
  * promise always resolves, with how many rows were written (tests read it). Every failure is a warning in the log.
@@ -45,7 +46,8 @@ export type LearnRequest = Pick<FastifyRequest, "auth" | "profile" | "log" | "he
 /** Tests inject the client and the clock; production takes `serviceClient()` and the wall clock. */
 export type LearnDeps = { svc?: Svc | null; now?: () => Date };
 
-export const LEARNING_MIGRATION = "20261119000001_list_builder_learning";
+/** What the logging needs in the database: the tables and the firm flag, then the counselor flag. */
+export const LEARNING_MIGRATIONS = ["20261119000001_list_builder_learning", "20261120000001_list_learning_counselor_exclude"];
 /** How far back a choice looks for the impression that showed the school. */
 export const CHOICE_LOOKBACK_DAYS = 30;
 /** The chat's dropped schools kept on an impression's criteria (the count is always kept). */
@@ -63,7 +65,7 @@ function paused(now: Date): boolean {
 
 function pause(now: Date, log: Log): void {
   pausedUntil = now.getTime() + PAUSE_MS;
-  log.warn({ migration: LEARNING_MIGRATION }, "List-builder learning isn't logged: its tables are missing. Trying again in 5 minutes.");
+  log.warn({ migrations: LEARNING_MIGRATIONS }, "List-builder learning isn't logged: its database update isn't applied. Trying again in 5 minutes.");
 }
 
 /** Tests only. */
@@ -92,18 +94,27 @@ export function isAxisRequest(request: Pick<FastifyRequest, "headers">): boolean
 type Practice = { firmId: string | null } | "excluded" | "missing";
 
 /**
- * The student's practice: their counselor's firm (null for a solo counselor, or no counselor). "excluded" when that
- * firm has opted out of learning; "missing" when the flag isn't there (the migration isn't applied). A read error
- * throws, and the caller logs nothing.
+ * The student's practice, and whether learning may log it. The firm is the student's counselor's (null for a solo
+ * counselor, or no counselor). "excluded" when the student's counselor, the acting counselor (a student shared with
+ * them) or the counselor's firm is flagged `exclude_from_learning`, or the firm can't be found; "missing" when a
+ * flag column isn't there (a migration isn't applied). A read error throws, and the caller logs nothing.
  */
-async function practiceOf(svc: Svc, studentId: string): Promise<Practice> {
+async function practiceOf(svc: Svc, studentId: string, actor: { id: string; role: "counselor" | "student" }): Promise<Practice> {
   const student = await svc.from("profiles").select("counselor_id").eq("id", studentId).maybeSingle();
   if (student.error) throw student.error;
   const counselorId = ((student.data as Row | null)?.counselor_id as string | null) ?? null;
-  if (!counselorId) return { firmId: null };
-  const counselor = await svc.from("profiles").select("firm_id").eq("id", counselorId).maybeSingle();
-  if (counselor.error) throw counselor.error;
-  const firmId = ((counselor.data as Row | null)?.firm_id as string | null) ?? null;
+  const ids = [...new Set([counselorId, actor.role === "counselor" ? actor.id : null].filter((v): v is string => !!v))];
+  let firmId: string | null = null;
+  if (ids.length > 0) {
+    const people = await svc.from("profiles").select("id, firm_id, exclude_from_learning").in("id", ids);
+    if (people.error) {
+      if (isSchemaMissing(people.error)) return "missing";
+      throw people.error;
+    }
+    const rows = (people.data ?? []) as Row[];
+    if (rows.some((r) => r.exclude_from_learning === true)) return "excluded";
+    firmId = (rows.find((r) => r.id === counselorId)?.firm_id as string | null) ?? null;
+  }
   if (!firmId) return { firmId: null };
   const firm = await svc.from("firms").select("exclude_from_learning").eq("id", firmId).maybeSingle();
   if (firm.error) {
@@ -212,7 +223,7 @@ export async function logImpressions(request: LearnRequest, run: ImpressionRun, 
     if (!svc || !role) return 0;
     if (!run.bands.some((b) => b.shown.length > 0)) return 0;
 
-    const practice = await practiceOf(svc, run.studentId);
+    const practice = await practiceOf(svc, run.studentId, { id: request.auth.userId, role });
     if (practice === "missing") {
       pause(now, log);
       return 0;
@@ -281,7 +292,7 @@ export async function logChoices(request: LearnRequest, choices: Choice[], deps:
     const since = new Date(now.getTime() - CHOICE_LOOKBACK_DAYS * 86_400_000);
     const rows: Row[] = [];
     for (const studentId of [...new Set(wanted.map((c) => c.studentId))]) {
-      const practice = await practiceOf(svc, studentId);
+      const practice = await practiceOf(svc, studentId, { id: request.auth.userId, role });
       if (practice === "missing") {
         pause(now, log);
         return 0;

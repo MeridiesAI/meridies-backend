@@ -176,6 +176,28 @@ let runId;
   await sql(`update public.firms set exclude_from_learning = false where id = '${firmId}'`);
 }
 
+// ---- A flagged counselor (solo, no firm: production's usual case) logs nothing; nobody flags themselves ----
+{
+  const c = await user("ll-flagged");
+  const s = await studentOf(c, "ll-flagged-s");
+  const self = await rest(c.token, "PATCH", `/rest/v1/profiles?id=eq.${c.id}`, { exclude_from_learning: true });
+  check(
+    "a counselor can't set their own exclude_from_learning",
+    self.status >= 400 && (await sql(`select exclude_from_learning from public.profiles where id = '${c.id}'`)) === "f",
+    `${self.status}`
+  );
+  await sql(`update public.profiles set exclude_from_learning = true where id = '${c.id}'`);
+  const r = await call(c.token, "POST", "/colleges/list-builder", { studentId: s.id, criteria: CRITERIA });
+  check("flagged: the list builder still answers", r.status === 200 && r.body?.tiers?.length === 3, `${r.status}`);
+  const add = await call(c.token, "POST", "/application/college-list", { studentId: s.id, collegeId: shownOf(r.body)[0].collegeId });
+  check("flagged: adding still works", add.status === 201, `${add.status}`);
+  await pause(800);
+  check(
+    "flagged: nothing logged for their student",
+    (await count("list_builder_impressions", `student_id = '${s.id}'`)) === 0 && (await count("list_builder_choices", `student_id = '${s.id}'`)) === 0
+  );
+}
+
 // ---- Deletion: the student's rows go with their account; the acting account's rows stay, unnamed ----
 {
   const solo = await user("ll-solo");
