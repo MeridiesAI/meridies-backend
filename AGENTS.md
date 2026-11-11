@@ -125,6 +125,8 @@ src/
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
 │   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
 │   ├── listLearning.ts    # list-builder learning: what Build College Lists showed and what was added/removed/recommended (service role, never awaited)
+│   ├── listContract.ts    # the list-match contract: core features, opportunity categories, card -> feature map, match and learning numbers (definitions only)
+│   ├── embeddings.ts      # in-process text embeddings (Supabase/gte-small, 384, fp32) for college_opportunities; model downloaded on first use
 │   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
@@ -2496,6 +2498,19 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
   signed-in user, written by service_role only, like `college_site_info`.
 - **Deploy order:** either, for both files; not in `REQUIRED_SCHEMA`. Without them the list builder and every list
   write work as before and log nothing. Tests: `test/unit/list-learning.test.ts`, `test/integration/list-learning.test.mjs`.
+- **The match contract** (`lib/listContract.ts`, no migration): the ten `CORE_FEATURES` (`college_core_features.feature_key`;
+  `universal` ones only help a match, `taste` ones follow the student's preference), `OPPORTUNITY_CATEGORIES` with prior
+  weights, `CARD_FEATURE_MAP` (preference card key -> feature and sign; the sign follows the card's situation, so the
+  `housing` card, "guaranteed for one year only", is -1 on `residential`), `MATCH_CONFIG` and `LEARNING_CONFIG`.
+  Definitions only; nothing reads them yet. Keys are stored, so add, never rename. `test/unit/list-contract.test.ts`
+  checks every mapped card exists in the seed (`20261105000006`).
+- **Embeddings** (`lib/embeddings.ts`): `embed(texts)` runs `Supabase/gte-small` in process with
+  `@huggingface/transformers` (mean pooling, unit length, 384 numbers, the `college_opportunities.embedding` size).
+  **fp32 on purpose**: the 8-bit model's vectors shift with the rest of the batch. Input past 512 tokens (about 400
+  words) is cut off silently. The model (about 130 MB) downloads from the Hugging Face Hub on first use into
+  `node_modules/@huggingface/transformers/.cache` (lost on each Railway deploy); `warmEmbeddings()` loads it and never
+  throws, but nothing calls it at boot yet. `.npmrc` sets `onnxruntime-node-install=skip` so installs on Linux don't
+  download onnxruntime's CUDA libraries. `test/unit/embeddings.test.ts` is the one unit test that uses the network.
 
 ## Anthropic / AI rules
 
