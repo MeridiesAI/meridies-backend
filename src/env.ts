@@ -46,6 +46,10 @@ const envSchema = z.object({
   // 404 agreements_off unless "true". Stays off in production until the consent
   // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
   AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // List-match scoring (lib/listMatch.ts, lib/listMatchLoad.ts): Build College Lists ranks each band by match score
+  // instead of odds alone, and the server loads the embedding model at boot. Off unless "true"; off, the list
+  // builder's answer is byte for byte what it was.
+  LIST_MATCH_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any
