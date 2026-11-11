@@ -102,6 +102,8 @@ export type RosterGuardian = {
   relationship: string | null;
   alertsEnabled: boolean;
   receivesReports: boolean;
+  /** The student added them (20261122000001); undefined when the column isn't there yet. */
+  addedByStudent?: boolean;
 };
 
 /** What `GET /guardians/roster` returns for each parent. The app reads exactly these keys. */
@@ -116,6 +118,8 @@ export type RosterEntry = {
   classYear: string | null;
   receivesAlerts: boolean;
   receivesReports: boolean;
+  /** The student added this parent themselves ("Added by Maya"). Absent before 20261122000001. */
+  addedByStudent?: boolean;
 };
 
 export type RosterRow = { key: string; entry: RosterEntry };
@@ -137,6 +141,7 @@ export function toRosterGuardian(r: Row): RosterGuardian {
     // A missing flag is the column's default (on), the same reading the composer and blasts use.
     alertsEnabled: r.alerts_enabled !== false,
     receivesReports: r.receives_reports !== false,
+    ...("added_by" in r ? { addedByStudent: r.added_by != null && String(r.added_by) === String(r.student_id) } : {}),
   };
 }
 
@@ -211,6 +216,7 @@ export function buildRoster(students: readonly RosterStudent[], guardians: reado
         classYear: s.classYear,
         receivesAlerts: g.alertsEnabled,
         receivesReports: g.receivesReports,
+        ...(g.addedByStudent !== undefined ? { addedByStudent: g.addedByStudent } : {}),
       },
     });
   }

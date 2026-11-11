@@ -9,13 +9,23 @@ const g1 = await call(s.token, "POST", "/accountability/guardians", { full_name:
 const gStatus = g1.status; const gid = g1.body?.id;
 check("student can add a guardian", gStatus === 201 || gStatus === 200, `status ${gStatus} ${JSON.stringify(g1.body).slice(0,120)}`);
 check("…but it starts with alerts off", (await sql(`select alerts_enabled from guardians where id='${gid}'`)) === "f");
-const sEdit = await call(s.token, "PATCH", `/accountability/guardians/${gid}`, { email: "me@student.com" });
-check("student can't change a guardian", sEdit.status === 404 || sEdit.status === 403, `status ${sEdit.status}`);
-check("…and the email is unchanged", (await sql(`select email from guardians where id='${gid}'`)) === "pat@example.com");
-const sDel = await call(s.token, "DELETE", `/accountability/guardians/${gid}`);
-check("student can't delete a guardian", (await sql(`select count(*) from guardians where id='${gid}'`)) === "1", `status ${sDel.status}`);
+// 20261122000001: a student may fix or remove a parent THEY added until the counselor switches them on; after
+// that the address is where alerts go, so it can't be redirected or removed (test/integration/my-guardians.test.mjs).
 const cEdit = await call(c.token, "PATCH", `/accountability/guardians/${gid}`, { alerts_enabled: true });
 check("counselor turns alerts on", cEdit.status === 200 && (await sql(`select alerts_enabled from guardians where id='${gid}'`)) === "t", `status ${cEdit.status}`);
+const sEdit = await call(s.token, "PATCH", `/accountability/guardians/${gid}`, { email: "me@student.com" });
+check("student can't redirect a switched-on guardian", sEdit.status >= 400, `status ${sEdit.status}`);
+check("…and the email is unchanged", (await sql(`select email from guardians where id='${gid}'`)) === "pat@example.com");
+const sDel = await call(s.token, "DELETE", `/accountability/guardians/${gid}`);
+check("student can't delete a switched-on guardian", (await sql(`select count(*) from guardians where id='${gid}'`)) === "1", `status ${sDel.status}`);
+const cAdded = await call(c.token, "POST", "/accountability/guardians", { studentId: s.id, full_name: "Casey Counselor-Added", email: "casey@example.com" });
+const cgid = cAdded.body?.id;
+const sEdit2 = await call(s.token, "PATCH", `/accountability/guardians/${cgid}`, { email: "me@student.com" });
+check("student can't change a guardian the counselor added", (await sql(`select email from guardians where id='${cgid}'`)) === "casey@example.com", `status ${cAdded.status}/${sEdit2.status}`);
+await call(s.token, "DELETE", `/accountability/guardians/${cgid}`);
+check("…nor delete one", (await sql(`select count(*) from guardians where id='${cgid}'`)) === "1");
+const cDel = await call(c.token, "DELETE", `/accountability/guardians/${cgid}`);
+check("…which the counselor can", (await sql(`select count(*) from guardians where id='${cgid}'`)) === "0", `status ${cDel.status}`);
 
 // Firm teams
 const f = await call(c.token, "POST", "/firms", { name: "Rivera College Advising" });

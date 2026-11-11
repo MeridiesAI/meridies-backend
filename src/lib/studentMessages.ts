@@ -134,17 +134,28 @@ export type FamilyContact = {
   isPrimary: boolean;
   /** False when the guardian opted out: listed, never written to. */
   receivesMessages: boolean;
+  /**
+   * The student added them themselves (onboarding or Settings, 20261122000001), so messages stay off until the
+   * counselor switches them on. Absent before that migration is applied.
+   */
+  addedByStudent?: boolean;
 };
 
+const FAMILY_COLUMNS = "id, full_name, email, phone, relationship, is_primary, alerts_enabled, created_at";
+
 export async function loadFamily(db: SupabaseClient, studentId: string): Promise<FamilyContact[]> {
-  const { data, error } = await db
-    .from("guardians")
-    .select("id, full_name, email, phone, relationship, is_primary, alerts_enabled, created_at")
-    .eq("student_id", studentId)
-    .order("is_primary", { ascending: false })
-    .order("created_at", { ascending: true });
+  const read = (columns: string) =>
+    db
+      .from("guardians")
+      .select(columns)
+      .eq("student_id", studentId)
+      .order("is_primary", { ascending: false })
+      .order("created_at", { ascending: true });
+  let { data, error } = await read(`${FAMILY_COLUMNS}, added_by`);
+  // Before 20261122000001 there is no added_by: the list is the same without the label.
+  if (error?.code === "42703") ({ data, error } = await read(FAMILY_COLUMNS));
   if (error) throw fromPostgrest(error);
-  return ((data ?? []) as Row[]).map((g) => ({
+  return ((data ?? []) as unknown as Row[]).map((g) => ({
     id: String(g.id),
     name: String(g.full_name),
     email: s(g.email),
@@ -152,6 +163,7 @@ export async function loadFamily(db: SupabaseClient, studentId: string): Promise
     relationship: s(g.relationship),
     isPrimary: g.is_primary === true,
     receivesMessages: g.alerts_enabled !== false,
+    ...("added_by" in g ? { addedByStudent: g.added_by != null && g.added_by === studentId } : {}),
   }));
 }
 

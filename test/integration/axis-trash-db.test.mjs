@@ -284,7 +284,7 @@ for (const [label, insert, path] of [
 // Every trigger that skips during a restore still does; the service role can't restore.
 {
   const guarded = await sql(`select count(*) from pg_trigger where not tgisinternal and pg_get_triggerdef(oid) ilike '%meridies.axis_restore%'`);
-  check("every trigger that must skip during a restore does", Number(guarded) === 19, guarded);
+  check("every trigger that must skip during a restore does", Number(guarded) === 20, guarded);
   const svcRestore = await serviceRpc("axis_trash_restore", { p_action: randomUUID() });
   check("the service role can't restore", svcRestore.status === 401 || svcRestore.status === 403 || svcRestore.status === 404, `status ${svcRestore.status}`);
 }
