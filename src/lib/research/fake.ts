@@ -34,13 +34,19 @@ export const FOCUS_LEAK = "fixture:leak-query";
 export const FOCUS_EMPTY = "fixture:empty";
 /** Candidates are found but the keeper drops every one (a blocked domain, a URL the run never saw): a run that lost them downstream. */
 export const FOCUS_ALL_DROPPED = "fixture:all-dropped";
+/**
+ * The good college candidates come back with no real citation (the model wrote it as text, so the API attached none)
+ * while the run's search results include a page titled with each one's name: the title-matched pages recover them.
+ */
+export const FOCUS_UNCITED = "fixture:uncited";
 
 export function fakeResearch(feature: "college_list" | "activities", focus: string | null = null): ResearchResult {
   const all = feature === "college_list" ? COLLEGES : ACTIVITIES;
   const rows = focus === FOCUS_EMPTY ? [] : focus === FOCUS_ALL_DROPPED ? all.slice(0, 2) : all;
+  const uncited = focus === FOCUS_UNCITED;
   const parts = rows.map((r) => ({
     text: JSON.stringify({ title: r.title, summary: r.summary, deadline: r.deadline, cost: r.cost }),
-    citations: [{ url: r.url, title: r.title, citedText: r.summary }],
+    citations: uncited ? [] : [{ url: r.url, title: r.title, citedText: r.summary }],
   }));
   // Connective text with no citation: the parser must ignore it.
   if (rows.length) parts.unshift({ text: "Here are some options I found.", citations: [] });
@@ -55,6 +61,7 @@ export function fakeResearch(feature: "college_list" | "activities", focus: stri
       ...(focus === FOCUS_LEAK ? ["robotics programs near lincoln high school"] : []),
     ],
     seenUrls,
+    seenPages: rows.filter((r) => !r.url.startsWith("https://invented.example")).map((r) => ({ url: r.url, title: `${r.title} | Admissions` })),
   };
 }
 
