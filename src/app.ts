@@ -100,6 +100,7 @@ import schoolScholarshipRoutes from "./routes/schoolScholarships.js";
 import bookingRoutes from "./routes/booking.js";
 import pushRoutes from "./routes/push.js";
 import studentBookingRoutes from "./routes/studentBooking.js";
+import publicBookingRoutes from "./routes/publicBooking.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -271,6 +272,8 @@ export function buildApp() {
   app.register(bookingRoutes, { prefix: "/booking" });
   app.register(pushRoutes, { prefix: "/push" });
   app.register(studentBookingRoutes, { prefix: "/me/booking" });
+  // Absolute paths (/public/book/:slug...): a counselor's public booking link, no sign-in.
+  app.register(publicBookingRoutes);
   startSweepInterval(app);
   startExtractionRecovery(app);
 

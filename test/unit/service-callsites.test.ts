@@ -177,6 +177,15 @@ const REVIEWED = [
   // booking_settings, active booking_meeting_types, scheduled meetings' start and end, and which calendar providers
   // they connected (integration_tokens.provider only). Only free slot times are returned. Writes nothing.
   "lib/booking.ts",
+  // routes/publicBooking.ts: public, the slug decides. resolvePublicLink reads the one booking_settings row whose
+  // public_slug it is and asks isCounselorApproved (fail closed), booking on and the link on before anything else;
+  // every later read and write is keyed by that counselor (their types, meetings' and public bookings' times,
+  // calendar providers, name, firm and logo) or by the public_bookings row this request just reserved. It writes
+  // that row (book_public_slot, service role only), the counselor's notification, and the pipeline card through
+  // public_booking_to_pipeline. routes/booking.ts: inside an approved counselor's own request (authenticate +
+  // requireRole), writes only public_slug on the caller's own settings row (a column clients can't write).
+  "routes/publicBooking.ts",
+  "routes/booking.ts",
   "lib/accountability.ts", "lib/aiBudget.ts", "lib/anthropic.ts", "lib/axis/attachments.ts", "lib/axis/drafts/state.ts", "lib/axis/llm.ts", "lib/caseloadTransfer.ts", "lib/documentClaim.ts", "lib/documentExtraction.ts", "lib/email.ts", "lib/eventsDiscovery.ts", "lib/heartbeat.ts", "lib/highSchoolProfile.ts", "lib/profileUpdateDocument.ts", "lib/imports/jobs.ts",
   "lib/imports/files.ts", "lib/imports/heldAddresses.ts", "lib/imports/invitations.ts", "lib/imports/mapping.ts", "lib/imports/retention.ts", "lib/imports/stage.ts",
   "lib/ingest/linkCheck.ts", "lib/ingest/run.ts", "lib/limits.ts", "lib/listLearning.ts", "lib/myInvitations.ts", "lib/newStudentIntake.ts", "lib/oauth.ts", "lib/practiceSettings.ts",
