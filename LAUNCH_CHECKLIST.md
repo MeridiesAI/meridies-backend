@@ -101,6 +101,9 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 
 - [x] **Resend**: the sending domain is verified, and `INVITE_FROM_EMAIL` uses it. Until then, invites
   to anyone but the Resend account owner fail.
+- [ ] **Parent notices** (`20261122000001`): set `RESEND_PARENTS_FROM` ("Meridies <family@your-domain>") on an
+  address of a domain verified in Resend, or leave it unset to send them from `INVITE_FROM_EMAIL`. Apply the
+  migration to production after the API deploys (the routes say "isn't switched on yet" until then).
 - [x] **Supabase Auth SMTP**: Auth > SMTP Settings points at Resend (`smtp.resend.com`, port 465,
   user `resend`, the API key as password) with a sender on the verified domain. Supabase's built-in
   mailer only delivers to the project's team members and is rate limited, so signup confirmations
