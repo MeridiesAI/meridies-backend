@@ -12,6 +12,8 @@ const base = {
   host: "Fixture Host",
   start_date: "2099-01-15",
   url: "https://example.org/e",
+  source_url: "https://example.org/e/schedule",
+  checked_on: "2026-11-01",
 };
 
 test("events CSV: the sample file maps cleanly", () => {
@@ -31,6 +33,51 @@ test("events CSV: the sample file maps cleanly", () => {
   assert.equal(session!.row.start_time, null);
   assert.equal(session!.row.photo_key, null);
   assert.equal(session!.row.time_zone, "America/Los_Angeles");
+  assert.equal(webinar!.row.source_url, "https://example.org/fixture-aid-webinar");
+  assert.equal(webinar!.row.last_verified_at, "2026-11-01T00:00:00Z");
+});
+
+test("events CSV: every row cites where its dates were read, and when", () => {
+  const { ok, errors } = mapEventsCsv([base]);
+  assert.deepEqual(errors, []);
+  assert.equal(ok[0]!.row.source_url, "https://example.org/e/schedule");
+  assert.equal(ok[0]!.row.last_verified_at, "2026-11-01T00:00:00Z");
+
+  const cases: [Record<string, string>, RegExp][] = [
+    [{ ...base, source_url: "" }, /source_url: is required/],
+    [{ ...base, source_url: "   " }, /source_url: is required/],
+    [{ ...base, source_url: "the IECA site" }, /source_url: isn't a URL/],
+    [{ ...base, source_url: "ftp://example.org/x" }, /source_url: must be http\(s\)/],
+    [{ ...base, checked_on: "" }, /checked_on: use YYYY-MM-DD/],
+    [{ ...base, checked_on: "Nov 1 2026" }, /checked_on: use YYYY-MM-DD/],
+    [{ ...base, checked_on: "2026-02-30" }, /checked_on: isn't a real date/],
+    [{ ...base, checked_on: "2999-01-01" }, /checked_on: is in the future/],
+  ];
+  for (const [row, why] of cases) {
+    const res = mapEventsCsv([row]);
+    assert.equal(res.ok.length, 0, JSON.stringify(row));
+    assert.ok(res.errors.some((e) => why.test(e)), `${JSON.stringify(res.errors)} should match ${why}`);
+  }
+  const { source_url: _s, checked_on: _c, ...noSource } = base;
+  const missing = mapEventsCsv([noSource]);
+  assert.equal(missing.ok.length, 0);
+  assert.ok(missing.errors.some((e) => /source_url: is required/.test(e)), JSON.stringify(missing.errors));
+  assert.ok(missing.errors.some((e) => /checked_on: is required/.test(e)), JSON.stringify(missing.errors));
+});
+
+test("events CSV: bad dates are refused with the column named", () => {
+  const cases: [Record<string, string>, RegExp][] = [
+    [{ ...base, start_date: "2099-13-01" }, /start_date: isn't a real date/],
+    [{ ...base, start_date: "2099-1-5" }, /start_date: use YYYY-MM-DD/],
+    [{ ...base, start_date: "" }, /start_date: use YYYY-MM-DD/],
+    [{ ...base, end_date: "2099-02-29" }, /end_date: isn't a real date/],
+    [{ ...base, end_date: "2099-01-14" }, /end_date: is before start_date/],
+  ];
+  for (const [row, why] of cases) {
+    const res = mapEventsCsv([row]);
+    assert.equal(res.ok.length, 0, JSON.stringify(row));
+    assert.ok(res.errors.some((e) => why.test(e)), `${JSON.stringify(res.errors)} should match ${why}`);
+  }
 });
 
 test("events CSV: defaults for blank time zone and place", () => {

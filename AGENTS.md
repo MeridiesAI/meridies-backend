@@ -1910,8 +1910,8 @@ scripts/ingest/events-csv.ts --file <csv> [--dry-run]` (columns in
 `hub_events` accepts, a file with one bad row loads nothing, and a
 `college_unitid` must already be in the catalog. Rows become Meridies-wide
 listings (`created_by` and `firm_id` null), which every approved counselor
-sees. `hub_events` has no unique constraint, so the loader matches on the
-natural key (name, host, start_date), trimmed and ignoring case, among
+sees. The loader matches on the natural key (name, host, start_date),
+trimmed and ignoring case (the `hub_events_meridies_key` unique index), among
 Meridies-wide rows only: a re-run updates in place, never duplicates, never
 touches a counselor's own listing, and deletes nothing. A URL is not the key,
 because a recurring webinar shares one page across dates. Renaming an event in
@@ -1919,7 +1919,15 @@ the file inserts a new row; remove the old one by hand. Service role from env.
 Optional `audience` column: `counselor | student | everyone`; blank means
 everyone for an info session, tour, virtual visit or open house, counselor
 for the rest. Loaded rows are `source = 'csv'`, and a curated row always wins
-over a discovered one with the same key.
+over a discovered one with the same key. Every row must cite its
+`source_url` (the organizer's page or PDF the dates were read on) and
+`checked_on` (YYYY-MM-DD, not in the future); they land in `source_url` and
+`last_verified_at` (no migration: discovery added both columns), and a row
+without them fails the file. The checked-in season file is
+`scripts/ingest/data/events-2026-27.csv` (93 verified rows: counselor
+conferences, workshops and webinars, plus NACAC and NEACAC college fairs with
+audience `everyone`); how to add rows is in `scripts/ingest/data/README.md`.
+
 
 **Events Hub discovery** (`lib/eventsDiscovery.ts`, `20261021000001`) finds
 colleges' own upcoming events, so the hub isn't empty and students get real

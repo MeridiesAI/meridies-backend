@@ -66,70 +66,98 @@ Load: `npx tsx scripts/ingest/curated-csv.ts --dataset supplements --file <csv> 
 `scripts/ingest/events-csv.ts` loads Meridies-wide Events Hub listings
 (`hub_events`) from a curator's CSV; columns are documented in
 `src/lib/ingest/events.ts`, and `test/fixtures/events-sample.csv` shows the
-shape (its rows are fake). Every listing needs the organizer's own page as
-`url`. Name files by season (e.g. `events-2026-fall.csv`) and list them here.
+shape (its rows are fake). Every row needs the organizer's own page as `url`,
+the page (or PDF) where someone read its name, dates and place as `source_url`,
+and the day they read it as `checked_on`; a row without them fails the file. The
+loader stores them as `hub_events.source_url` and `last_verified_at`, and the
+event card says "Dates from {host}'s own page, checked {day}". Name files by
+season (e.g. `events-2026-27.csv`) and list them here.
 
-Load: `npx tsx --env-file=.env scripts/ingest/events-csv.ts --file <csv> [--dry-run]`
-
-| File | Source | Checked | Covers |
+| File | Rows | Checked | Covers |
 |---|---|---|---|
-| `events-2026-fall.csv` | Each organizer's own event page (the row's `url`) | 2026-11-07 | 27 counselor conferences from IECA's Nov. 12-13, 2026 New York symposium through 2027 (kind `conference`, topic `practice`, audience left blank so counselors see them). Dates, place and name are as that page states them. Times are blank (all-day), and a multi-day event runs `start_date` to `end_date`. |
+| `events-2026-27.csv` | 93 | 2026-11-10 | Nov. 2026 to Sept. 2027: 35 conferences, 7 workshops and 15 webinars for counselors (audience blank, so counselors only), and 36 college fairs (audience `everyone`, so students see them too). |
 
-Organizers read for `events-2026-fall.csv` (a row only where the page states the
-event's name, dates and place):
+### Load it (local or staging, never by hand into production)
 
-- **Rows:** NACAC (2027 conference, Asia Summit); IECA (2027 Annual Conference,
-  Professional Member Retreat, Winter Forum, New York and European symposia);
-  HECA (2027 annual conference); and 19 NACAC affiliates: Dakota, Great Plains,
-  Hawaii, Illinois, Indiana, Iowa, Kentucky with Ohio (joint conference),
+```sh
+# 1. check the file and see what would change; writes nothing
+npx tsx --env-file=<env> scripts/ingest/events-csv.ts --file scripts/ingest/data/events-2026-27.csv --dry-run
+# 2. load it; re-running is safe (matched on name, host and start date, updated in place)
+npx tsx --env-file=<env> scripts/ingest/events-csv.ts --file scripts/ingest/data/events-2026-27.csv
+```
+
+`<env>` names the database (SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY). The
+repo's `.env` is production: load there only as a reviewed release step.
+
+### Add events
+
+1. Read the event on the organizer's own site. Add a row only when that page (or
+   a schedule or PDF it links) states the name, the date(s) and the city, venue
+   or "Virtual". A "TBD", "tentative" or month-only date gets no row; come back
+   when it's firm. Never fill a date from a third-party listing or last year's.
+2. Append a row to the season's file (or start the next season's,
+   `events-2027-28.csv`, and list it in the table above):
+   - `kind`: `conference`, `workshop`, `webinar` or `college-fair`; `photo_key`
+     the same as `kind`.
+   - `audience`: blank for counselor events; `everyone` for a college fair.
+   - `start_time`/`end_time`: only for one session on one day (or one block over
+     several days); a fair with several sessions keeps them blank (all day) and
+     lists the sessions in `description`.
+   - `time_zone`: the IANA zone of the place (`America/Chicago`), or of the
+     stated time for a virtual event.
+   - `place`: as the page states it ("Javits Center, New York, NY", "Virtual").
+   - `topics`: `practice` for professional development, `lists` for fairs.
+   - `url`: the event's page; `source_url`: where the dates are (same URL is
+     fine); `checked_on`: today.
+   - `description`: one or two sentences, only what the page says, under 400
+     characters.
+3. Run `node --import tsx --import ./test/env.ts --test test/unit/events-seed-file.test.ts`
+   (checks every `events-*.csv` here), then the `--dry-run` above.
+4. A counselor can also add a one-off listing for their practice from the Hub
+   ("Add an event"); that stays theirs and never mixes with these rows.
+
+A changed date or name in the file inserts a new row (the key is name, host and
+start date): delete the old Meridies-wide row by hand. The loader never deletes,
+and past events drop off the hub by themselves. Refresh each fall: re-read the
+same organizers and add the next season.
+
+### What `events-2026-27.csv` holds and where it came from
+
+Every row was read on 2026-11-10 on the `source_url` page:
+
+- **Counselor conferences (27, carried over from the earlier `events-2026-fall.csv`
+  and re-read):** NACAC 2027 conference (Kansas City; its page URL says
+  `nacac-conference-2026` but the page is the 2027 event) and Asia Summit; IECA
+  (Annual Conference, Professional Member Retreat, Winter Forum, New York and
+  European symposia); HECA 2027; and 19 NACAC affiliates' 2027 conferences
+  (Dakota, Great Plains, Hawaii, Illinois, Indiana, Iowa, Kentucky with Ohio,
   Minnesota, New England, New York State, Pacific Northwest, Pennsylvania,
-  Potomac & Chesapeake, Rocky Mountain, Southern, Texas, Western (WACAC),
-  Wisconsin (also "WACAC") and International ACAC.
-- **Read, no row:** NJACAC (its page shows only the May 2026 conference, which
-  is past); MOACAC (the 2027 conference page says "stay tuned", no dates); OACAC
-  (its own page still shows March 2026; the 2027 conference is the joint one
-  with Kentucky above). Michigan's MACAC site refused an automated read (403),
-  so it has no row. IECA's members-only calendar needs a login (reported by the
-  compiler, not independently verified).
-- **Left out on purpose:** past events (NACAC's Oct. 8-10, 2026 conference in
-  Minneapolis), college fairs, and training institutes and half-day forums
-  (HECA's January 2027 PDI, the affiliates' summer and winter institutes,
-  Minnesota's January 2027 Winter Forum, International ACAC's Europe Regional
-  Institute). Add them as their own kinds if the hub should list them.
-- **What a row says:** `place` and `description` say only what the row's own
-  `url` page states. Where a page names a venue or a city without a state, the row
-  has just that (Punahou School; Keuka College; St. Paul College; Boise State
-  University; Hershey Lodge & Convention Center; Hilton Cleveland Downtown,
-  Cleveland), and the Kentucky-Ohio row spells its venue as that page does
-  ("Cincinnati Marriot at RiverCenter"). A state code (FL, IL, IA, RI) only
-  abbreviates a state the page spells out. `time_zone` is the zone of the stated
-  place; the loader would otherwise default it to America/New_York, and these
-  all-day rows show no clock time.
-- **Dates that rest on a looser page:** TACAC's page says presenters must be
-  available "either February 21 or February 22, 2027" and puts a regional college
-  fair on Tuesday evening, February 23, "after the conference", so the row runs
-  Feb. 21-22 (the page prints no single date range). The GPACAC row leaves out
-  the conference's theme because the cited schedule page does not state it.
-- **URLs:** the NACAC 2027 conference page's URL says `nacac-conference-2026` but
-  the page is the 2027 event. IECA's European symposium event page is members-only,
-  so its row points at IECA's public symposia page, which lists the dates. Dakota
-  ACAC's row points at its landing page, where the 2027 save-the-date sits.
-- **Not independently re-verified (bot-blocked for a second reader):** a second
-  reader got a Cloudflare 403 on iecaonline.com (5 rows: "IECA Regional Symposium:
-  Beyond the Traditional Path", "IECA Professional Member Retreat", "IECA Winter
-  Forum", "IECA European Regional Symposium", "IECA 2027 Annual Conference"),
-  nacacnet.org (2: "NACAC Asia Summit", "NACAC Conference 2027") and
-  wacac.org/events (1: "WACAC (Western) 2027 Annual Conference"), and an Apache 406
-  on rmacac.org (1: "RMACAC 2027 Annual Conference"). The compiler read all nine
-  on 2026-11-07, but re-read them in a browser before a production load.
-
-Refresh yearly: conference seasons are announced a year or so ahead, so each fall
-re-read the same organizers' pages and add next season's file (e.g.
-`events-2027-fall.csv`). Past events drop off the hub by themselves and the
-loader never deletes, so a finished season's file can stay. Re-running a file is
-safe (matched on name, host and start date); a changed date or name needs the old
-row removed by hand. `test/unit/events-seed-file.test.ts` checks every
-`events-*.csv` here and that each is listed above.
+  Potomac & Chesapeake, Rocky Mountain, Southern, Texas, Western, Wisconsin,
+  International ACAC). One correction: TACAC runs Feb. 21-23, 2027, per TACAC's
+  calendar entry (the earlier file had Feb. 21-22).
+- **More counselor events:** ASCA 2027 Annual Conference (Columbus; dates from
+  ASCA's exhibitor brochure PDF); ACCIS 2027 Annual Conference; HECA's virtual
+  PDI; College Board's Prepárate, A Dream Deferred, HBCU Conference and NASAI
+  (its national events page); CIS India Institute and its online Transitions-Care
+  course; WACAC's GRAC legislative conference, four Share, Learn & Connect days
+  and two WACAC Wednesday webinars; three NACAC webinars; an NJACAC workshop;
+  NCAIS and ADVIS counselor meetings; seven IECA online roundtables and affinity
+  group meetings (times as IECA's calendar states them, Eastern).
+- **College fairs:** NACAC's spring 2027 National College Fairs (21 cities,
+  three virtual fairs, the Vancouver and Hong Kong Global Universities fairs,
+  the Denver STEM fair; `source_url` is NACAC's spring 2027 schedule PDF and
+  `url` NACAC's attendee registration site, since the PDF links no per-fair
+  page), the Nov. 14, 2026 NACAC STEM fair in New Jersey (fall 2026 PDF), and
+  NEACAC's eight spring 2027 fairs.
+- **Left out on purpose:** anything without a firm date on the organizer's own
+  site: CIS-EARCOS Institute (save-the-date only), WACAC Summer Institute 2027
+  (host campus not chosen), NACAC GWI, Summer Institute and fall 2027 fairs,
+  College Board Forum 2027, CTCL's 2027 tour, the Black and Latino College
+  Expos (2027 dates only on third-party sites), MACAC (Michigan; site refused
+  the read), MOACAC and NJACAC 2027 conferences, Illinois ACAC fairs (named,
+  not dated). Also left out: Iowa ACAC's 15 high-school college days (dated, but
+  local to one district each), IECA meetings whose page names no place, and
+  ASCA webinars without a stated format.
 
 ## Campus photos
 

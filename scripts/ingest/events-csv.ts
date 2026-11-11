@@ -3,7 +3,7 @@
  * src/lib/ingest/events.ts). Rows become Meridies-wide `hub_events` (no author,
  * no firm), seen by every approved counselor.
  *
- *   npx tsx --env-file=.env scripts/ingest/events-csv.ts --file ./events-2026-fall.csv
+ *   npx tsx --env-file=.env scripts/ingest/events-csv.ts --file scripts/ingest/data/events-2026-27.csv
  *   ... --dry-run    check the file (and the colleges it names) without writing
  *
  * Any row with an error stops the load before anything is written. Re-running
