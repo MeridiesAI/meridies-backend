@@ -36,6 +36,8 @@ import { MAX_TRANSLATED_SEGMENTS, smsOverLimit } from "../lib/smsSegments.js";
 import { translateFakeOn, translateMessage, TRANSLATE_BODY_MAX, TRANSLATE_SUBJECT_MAX } from "../lib/translate.js";
 import { toInviteDelivery, type InviteDelivery } from "../lib/inviteDelivery.js";
 import { plainName } from "../lib/context/identity.js";
+import { loadFamilyVisibility } from "../lib/familyVisibility.js";
+import { toFamilyVisibility } from "../lib/serialize.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { replyAddressFor } from "../lib/replyRouting.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
@@ -151,13 +153,16 @@ export default async function communicationRoutes(app: FastifyInstance) {
       const student = await resolveStudentId(request, id, "view");
       const db = request.db;
 
-      const [pref, family, contact, facts, settings, familyLanguage] = await Promise.all([
+      const [pref, family, contact, facts, settings, familyLanguage, visibility] = await Promise.all([
         loadComposerPref(db, student),
         loadFamily(db, student),
         loadStudentContact(db, student),
         loadComposerFacts(db, student),
         loadSettings(request, request.auth.userId, student),
         loadFamilyLanguage(db, student),
+        // A reminder only: the composer is written by hand and is not filtered, so an unreadable switch shows nothing
+        // rather than failing the composer. What is sent on its own reads it again and fails closed.
+        loadFamilyVisibility(db, student).catch(() => null),
       ]);
       if (!contact) throw notFound("That student isn't on your roster");
       // Financial aid already knows what some families speak: offered, never copied silently.
@@ -180,6 +185,8 @@ export default async function communicationRoutes(app: FastifyInstance) {
         applicationsIn: facts.applicationsIn,
         quietHours: { now: quiet, resumesAt: quiet ? nextSendWindow(settings) : null },
         textLimit: TEXT_LIMIT,
+        // What the parents receive from Meridies on its own (null when it couldn't be read).
+        familyVisibility: visibility ? toFamilyVisibility(student, visibility) : null,
       };
     }
   );

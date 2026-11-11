@@ -25,7 +25,15 @@ import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { deliverParentAlert, type ParentAlertRow } from "../lib/parentAlertDelivery.js";
 import { recordSweepAudit } from "../lib/sweepSchedule.js";
-import { toAlertPref, toStudentRedFlag } from "../lib/serialize.js";
+import { toAlertPref, toFamilyVisibility, toStudentRedFlag } from "../lib/serialize.js";
+import {
+  FAMILY_CATEGORIES,
+  FAMILY_COLUMNS,
+  FAMILY_VISIBILITY_UNAVAILABLE,
+  FAMILY_VISIBILITY_UNAVAILABLE_MESSAGE,
+  loadFamilyVisibility,
+} from "../lib/familyVisibility.js";
+import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 
 const studentQuery = z.object({ studentId: z.string().uuid().optional() });
 
@@ -247,6 +255,55 @@ export default async function accountabilityRoutes(app: FastifyInstance) {
         .single();
       if (error) throw fromPostgrest(error);
       return toAlertPref(data as Record<string, unknown>);
+    }
+  );
+
+  /**
+   * What this student's parents receive (lib/familyVisibility.ts): one switch per kind of information Meridies
+   * sends a family on its own. Readable like the alert prefs (so the arrangement is not a secret), written only by
+   * the student's counselor. Every switch is on until the counselor turns it off; before the migration the GET
+   * answers `available: false` with everything on, and the PUT answers 503 `family_visibility_unavailable`.
+   */
+  app.get(
+    "/family-visibility",
+    { preHandler: [app.authenticate, limit("family-visibility:read", 240, 60)] },
+    async (request) => {
+      const { studentId } = studentQuery.parse(request.query);
+      const student = await resolveStudentId(request, studentId, "view");
+      return toFamilyVisibility(student, await loadFamilyVisibility(request.db, student));
+    }
+  );
+
+  app.put(
+    "/family-visibility",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("family-visibility:put", 120, 60)] },
+    async (request) => {
+      const b = z
+        .object({
+          studentId: z.string().uuid(),
+          categories: z
+            .object({ tasks: z.boolean().optional(), colleges: z.boolean().optional(), essays: z.boolean().optional() })
+            .strict()
+            .refine((c) => Object.keys(c).length > 0, "Name at least one kind of information"),
+        })
+        .strict()
+        .parse(request.body);
+      const student = await resolveStudentId(request, b.studentId, "edit");
+
+      // One column per kind, so two switches saved at once can't undo each other.
+      const row: Record<string, unknown> = { student_id: student, updated_by: request.auth.userId };
+      for (const c of FAMILY_CATEGORIES) {
+        const v = b.categories[c];
+        if (v !== undefined) row[FAMILY_COLUMNS[c]] = v;
+      }
+      const { error } = await request.db.from("student_alert_prefs").upsert(row, { onConflict: "student_id" });
+      if (error) {
+        if (isResultsNotApplied(error)) {
+          throw new HttpError(503, FAMILY_VISIBILITY_UNAVAILABLE_MESSAGE, FAMILY_VISIBILITY_UNAVAILABLE);
+        }
+        throw fromPostgrest(error);
+      }
+      return toFamilyVisibility(student, await loadFamilyVisibility(request.db, student));
     }
   );
 
