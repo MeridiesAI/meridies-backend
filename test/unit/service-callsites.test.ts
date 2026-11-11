@@ -153,6 +153,11 @@ const REVIEWED = [
   // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't
   // write; nothing curated changes until a catalog editor approves through review_catalog_proposal.
   "lib/catalogProposalsRun.ts",
+  // lib/ingest/collegeFeaturesRun.ts: the college features ingest (npm run ingest:features) acts for no counselor.
+  // It reads which colleges students list (ids only, lib/rosterColleges.ts), public catalog rows and the colleges'
+  // public pages, and writes only catalog tables no client can write (college_core_features, college_opportunities,
+  // college_source_pages) plus its ai_runs summary row. Nothing about a student or counselor is written.
+  "lib/ingest/collegeFeaturesRun.ts",
   // routes/calendarIcal.ts: the subscribed calendar feed. GET /calendar/ical/:token.ics is public: the hashed token
   // decides, and lib/calendarIcal.ts (handed the client) asks approvedCounselorIds for the token's counselor before
   // building anything, then names that counselor's own caseload (fullCaseloadStudentIds) in every student-spanning
