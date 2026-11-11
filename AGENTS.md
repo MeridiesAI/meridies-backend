@@ -80,6 +80,8 @@ src/
 │   ├── booking.ts         # student booking: settings/types DTOs, the student's counselor, slots with busy time
 │   ├── bookingWrite.ts    # student booking: book / reschedule / cancel rules and write order (injected I/O)
 │   ├── bookingCalendar.ts # student booking: the ONE provider call with the counselor's token (see below)
+│   ├── publicBooking.ts   # the public booking link: slug, which links answer, book (honeypot, caps, rollback), the follow-ups' words
+│   ├── publicBookingStore.ts # the public booking link's migration probe and the busy time its bookings add
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── parentCopy.ts      # what a parent is told (email + text wording), who is reachable; pure
 │   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
@@ -204,6 +206,7 @@ src/
 │   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
 │   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
+│   ├── publicBooking.ts   # /public/book/:slug   public: a counselor's share link, its slots, book one (no account)
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
 │   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports, catalog proposals)
@@ -1116,6 +1119,62 @@ forget it.
   the columns, `GET /booking/settings` says `bookingPageReady: false`, a PUT naming them is 503
   `booking_page_unavailable`, and students see no link. Tests: `test/unit/booking-page.test.ts`, the plain-event
   cases in `test/unit/booking-write.test.ts`.
+- **The public booking link** (`20261121000001`; `lib/publicBooking.ts`, `lib/publicBookingStore.ts`,
+  `routes/publicBooking.ts`, the slug routes in `routes/booking.ts`). Every counselor has a Calendly-style share link,
+  `/public/book/<slug>`, that anyone (a prospective family, no account) uses to book one of their active meeting
+  types in the same free slots their students see. **The slug** (`booking_settings.public_slug`, unique) is the name
+  slugified (accents folded, 40 characters, "counselor" when nothing is left) plus 5 characters from a 32-letter
+  alphabet without l/o/0/1 ("jane-doe-4f7km"); the migration backfilled every existing settings row, and the API
+  gives one to any row without it on its first `GET /booking/settings` (or PUT) with the service role
+  (`writeSlug`): **a user session can't write it** (`private.booking_settings_slug_guard`, keyed off current_user),
+  so a counselor can't pick "harvard-admissions". A counselor with no settings row reads `publicSlug: null` (making a
+  row on a GET would flip "never set up", which decides whether students may cancel). `GET /booking/settings` adds
+  `publicSlug` and `publicBookingEnabled` (default true); `PUT` takes `publicBookingEnabled`; `POST
+  /booking/public-link/rotate` (10 an hour) answers `{ publicSlug }` with a new suffix and the old link 404s at once
+  (409 `booking_not_set_up` with no settings row). **The public routes** (absolute paths, no auth, service role,
+  everything keyed by the counselor the slug resolved to): `GET /public/book/:slug` -> `{ counselor: { name,
+  practiceName (the firm's name, null when solo), logoUrl (https only), timezone }, types: [{ id, name,
+  durationMinutes, mode }] }`, never the counselor's email; `GET /public/book/:slug/slots?typeId&from&to` -> exactly
+  `GET /me/booking/slots`' answer (`slotsFor`); `POST /public/book/:slug { typeId, startsAt, name (1-120), email,
+  phone? (40), note? (1000), website? }` (strict, no control characters) -> 201 `{ booking: { id, startsAt, endsAt,
+  mode, joinUrl, typeName } }`. An unknown or malformed slug, `public_booking_enabled` off, booking paused or never set
+  up, replaced by the Google booking page (`instead`), or an unapproved counselor are **the same 404
+  `booking_link_not_found`** (`publicLinkOpen`), so a link says nothing about the account. **Booking** is the student
+  path's rules: the start must be one the slots offer now (`slotOpen`), duration and mode from the type, at most 3
+  upcoming bookings per address per counselor (409 `too_many_bookings`), reserved with
+  `public.book_public_slot` (service role only) under **the same advisory lock** as `book_meeting_slot`, which
+  re-checks approval, booking on, the link on, the type and its exact length, and overlap with meetings and public
+  bookings; a race or a stale slot is 409 `slot_unavailable`. Then the counselor's connected calendar, like a
+  student's booking (Meet/Teams conference event when that provider is connected, else a plain event on Google then
+  Outlook; titled "<type> with <name>", the booker's email, phone and note in the description; a provider failure
+  releases the row, 503 `calendar_write_failed`; `createPublicBookingEvent` in `lib/bookingCalendar.ts` is the second
+  deliberate use of the counselor's token, for a row naming the slug's counselor, scheduled, with no event yet).
+  **After the answer** (never fails the booking): the booker gets an email with an .ics REQUEST (UID
+  `meeting-public-<id>@meridiesai.com`, organizer the counselor, Reply-To the counselor; template
+  `public-booking-confirmation`), the counselor a bell notice and an email with an .ics PUBLISH copy ("Maria Lopez
+  booked Intro call on Tue, Jan 5, 9:00 AM EST", the email, phone and note, Reply-To the booker; template
+  `public-booking-counselor`), and `public.public_booking_to_pipeline` puts the booker on the Contact Pipeline: a
+  contact of the counselor's workspace whose parent or student email matches (open first), else a new one in the
+  first stage (name as the card's title, email and phone in the parent fields, owner the counselor, source "Booking
+  link"), plus a `meeting` timeline entry "Booked <type> for <date>"; no stages yet (pipeline never opened) means no
+  card. **The honeypot**: a non-empty `website` gets a 201 decoy booking and nothing is stored or sent (the link and
+  type are still resolved). **Limits**: in process 60 reads / 10 books a minute per address; DB-backed 600 reads and
+  10 books an hour per address, 5 books a day per booker address (hashed key, across counselors), 40 a day per
+  counselor. **Busy everywhere**: `meetingBusy` (student slots and the link's) adds scheduled public bookings, and
+  the migration re-creates `book_meeting_slot` / `reschedule_meeting_slot` with the same check, so a student can't
+  take a family's slot. **Storage**: `public_bookings`, a table of its own rather than a nullable
+  `meetings.student_id` (every per-student read, the owner guard, the attendee trigger, the invite rounds and caseload
+  transfer key on it); owner-only RLS (select, and update of `status` only, scheduled -> cancelled, which stamps
+  `cancelled_at`), no anon or student access, approval gate; `manage_token_hash` is reserved for a later "manage my
+  booking" link and nothing writes it yet. **The calendar feed**: the counselor's whole calendar (not one student's)
+  carries each as kind `meeting`, `id` `meeting:<booking id>`, title "<type> with <name>", `studentId: null`,
+  `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`); the subscribed iCal feed
+  says only "Meeting". **Not built**: a counselor route to cancel one (only PostgREST's status update, which emails
+  nobody), the booker's own cancel/reschedule link, public bookings in the data export. **Deploy order:** either; not
+  in `REQUIRED_SCHEMA`. Until applied (`publicBookingReady`, zero-row probes, ready kept, missing rechecked after 30 s)
+  the public routes and rotate answer 503 `public_booking_unavailable` (also without the service key), settings leave
+  the two fields out, a PUT naming `publicBookingEnabled` is 503, and slots and the feed read no public bookings.
+  Tests: `test/unit/public-booking.test.ts`, `test/integration/public-booking.test.mjs`.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the
