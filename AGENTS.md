@@ -55,7 +55,8 @@ src/
 │   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
 │   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
 │   ├── liveDocuments.ts   # live edit times of linked files, for the task tracker
-│   ├── documentGuess.ts   # the type guess for an unconfirmed import: printed phrases, filename, Google type; no model
+│   ├── documentGuess.ts   # the type guess (imports and every upload): printed phrases, text shape, filename, Google type; no model
+│   ├── documentSort.ts    # Files auto-sort: the guess for bytes (POST /files/documents/guess) or a stored object (an upload with no kind)
 │   ├── documentExtraction.ts # confirmed files to text: durable queue, 2-minute leases, recovery, retry
 │   ├── pdfText.ts         # PDF text in a capped worker thread (+ pdfText.extract / .options / .worker); unpdf 1.8.1. Line breaks are kept (`pageTextFromItems`: PDF.js `hasEOL`, else a changed baseline), so a resume reads as its lines, not one blob
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
@@ -107,6 +108,7 @@ src/
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
+│   ├── activityListImport.ts # an activity list in Files -> proposed Activities rows (a sheet's columns without a model; else AxIS); stores nothing
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
@@ -1122,7 +1124,18 @@ the database (`20261010*`):
   student's own files (PDF, image, .docx/.txt, .xlsx/.csv in the capped parse
   process; the hand-in's document rules and byte cap) and returns proposed
   rows, storing nothing; `POST /profile-updates/file { draft }` files one the
-  student confirmed, under the same checks.
+  student confirmed, under the same checks. **`POST /application/activities/from-document { studentId?,
+  documentId }`** (the student, or a counselor who can edit them; 20 a minute) proposes Activities rows from an
+  activity list in the student's Files for the Application page (`lib/activityListImport.ts`): a .xlsx/.csv whose
+  header row names the Common App's columns ("Activity type", "Position", "Organization", "Description", "Grades",
+  "Hours per week", "Weeks per year" and the usual variants; a title row above it is skipped) is read in the capped
+  parse process **without a model**, each row checked by `parseDraft` (description capped at 150, grades and
+  numbers validated, an activity type matched to the Common App list or left missing); any other file goes to
+  `proposalsFromDocument` (now taking the student id; AxIS, Haiku, its usual gates), 503
+  `activity_import_unavailable` without a model key. Answers `{ filename, read: "sheet" | "ai", proposals: [{ draft,
+  missing, onSheet }] }` (`onSheet`: the sheet already has that organization and position). Sensitive kinds are
+  refused. **Nothing is written**: the counselor adds each row they confirm through the sheet's own routes.
+  Tests: `test/unit/activity-list-import.test.ts`.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
@@ -3210,6 +3223,20 @@ Only a counselor sets `aiAccess` and `ferpaWaived`, on create and on patch: the
 route answers 403 to anyone else, and the `documents_guard_student_restricted`
 trigger refuses a student's write of either, also through PostgREST. The same
 trigger stops a student filing a document they didn't upload under a restricted kind.
+
+**Files auto-sort** (`lib/documentSort.ts`, no migration). Every upload is sorted by `lib/documentGuess.ts` (no
+model): printed phrases (now also an activity list's columns, "Hours per week", "Weeks per year", "Activity type",
+"Position/Leadership", and an essay's "Personal Statement", "Prompt:", "Word count"), the text's shape (three or
+more resume headings is a resume, a contact line near the top a second signal; long first-person paragraphs are an
+essay, but only when nothing was printed, since a recommendation letter is prose too), then whole filename words
+(`activity`, `extracurriculars`, `ecs`, `essay`, `supplement`, "personal statement"). `guessText` reads a CSV's
+start in memory and a workbook's first 40 rows in the capped parse process. **`POST /files/documents/guess`**
+(`?filename=&mimeType=`, body `application/octet-stream` up to 10 MB, empty for the name alone; 120 a minute) answers
+the guess, storing nothing: the counselor's filing popup pre-selects it. **`POST /files/documents` without a `kind`**
+reads the object it registers on the caller's own client (10 MB cap; past it, or unreadable, the filename alone)
+and files it under the guess (`other` when unsure); a sensitive guess comes kept out of AI unless the body says
+otherwise. A body that names a kind is unchanged. `activity-list` was already in `documents_kind_check`. Tests:
+`test/unit/document-guess.test.ts`, `test/unit/activity-list-import.test.ts`.
 
 **Unconfirmed files.** A Google import that names no kind is `kind_confirmed = false`, `available_to_llm = false`,
 with the server's guess in `kind_guess` (`lib/documentGuess.ts`: printed phrases, filename, Google file type; no
