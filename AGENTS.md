@@ -632,8 +632,8 @@ forget it.
   refuses an accepted one); `agreement_acceptances` is not captured because its RESTRICT means it never reaches the
   trash. Text only (no PDF; `storage_path`
   stays null). **The switch:** every route answers 404 `agreements_off` (the public page a plain "not available" page)
-  unless `AGREEMENTS_ENABLED=true`; keep it off until the placeholder consent wording (`AGREEMENT_CONSENT_VERSION =
-  'v0-PLACEHOLDER'`, marked NEEDS LEGAL REVIEW) has been reviewed, and change the version with the sentence. Open
+  unless `AGREEMENTS_ENABLED=true`. The consent wording passed legal review on 2026-11-11 (`AGREEMENT_CONSENT_VERSION =
+  'v1-2026-11-11'`); a changed sentence needs a new version. Open
   decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
   the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
   `test/integration/agreements.test.mjs` (CI runs the API with the switch on).
@@ -1109,9 +1109,9 @@ forget it.
   `https://calendar.google.com/calendar/...`, no credentials or port (`parseBookingPageUrl`; a stored value that
   fails the rule is read as none). `GET /me/booking/types` adds `bookingPage: { url, counselorName }` whenever the
   student's approved counselor has a settings row with a page, whatever `reason` says. `instead` makes Meridies'
-  own booking read as `paused` (`meridiesBookingOn`): no slots, books or moves, cancels still work. **Needs a
-  migration that is not in this repo yet** (two `booking_settings` columns with a CHECK; the SQL is in the PR): until
-  it is applied `bookingPageReady` (zero-row probe, ready kept, missing rechecked after 30 s) is false, no query names
+  own booking read as `paused` (`meridiesBookingOn`): no slots, books or moves, cancels still work. The columns are
+  `booking_settings.booking_page_url` / `booking_page_mode` (`20261118000001`, with a CHECK holding the same host rule;
+  either deploy order, not in `REQUIRED_SCHEMA`): until it is applied `bookingPageReady` (zero-row probe, ready kept, missing rechecked after 30 s) is false, no query names
   the columns, `GET /booking/settings` says `bookingPageReady: false`, a PUT naming them is 503
   `booking_page_unavailable`, and students see no link. Tests: `test/unit/booking-page.test.ts`, the plain-event
   cases in `test/unit/booking-write.test.ts`.
@@ -3184,7 +3184,8 @@ calendar can add.
   `RSVP=FALSE` (Meridies has no inbound mail). UID `meeting-<id>@meridiesai.com`
   for the life of the meeting; SEQUENCE is `meetings.ics_sequence`, written
   only by a trigger that raises it on every change a calendar shows (and on
-  `send_invites` switching) and ignores any client value. Delete sends the
+  `send_invites` or, since `20261118000001`, `guardians_invited` switching, so a guardian put back on a meeting
+  gets an invite that outranks their cancellation) and ignores any client value. Delete sends the
   last sequence plus one. Times are UTC; typed text is escaped as TEXT or a
   quoted parameter so it can't start a property.
 - **What goes out.** Booking, switching invites on, and un-cancelling: REQUEST

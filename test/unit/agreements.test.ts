@@ -45,7 +45,7 @@ test("the certificate carries exactly the recorded fields, in order", () => {
     acceptedAt: new Date("2026-11-07T15:04:05.678Z"),
     ip: "203.0.113.9",
     userAgent: "Mozilla/5.0 Test",
-    consentVersion: "v0-PLACEHOLDER",
+    consentVersion: "v1-2026-11-11",
     practiceName: "Bright Path Counseling",
   });
   assert.equal(
@@ -59,7 +59,7 @@ test("the certificate carries exactly the recorded fields, in order", () => {
       "Accepted at (UTC): 2026-11-07T15:04:05.678Z",
       "IP address: 203.0.113.9",
       "User agent: Mozilla/5.0 Test",
-      "Consent wording version: v0-PLACEHOLDER",
+      "Consent wording version: v1-2026-11-11",
       "Recorded by Meridies on behalf of Bright Path Counseling.",
       NOT_CERTIFIED_LINE,
     ].join("\n")
@@ -85,7 +85,7 @@ test("the certificate says what wasn't recorded instead of leaving a blank", () 
 });
 
 test("the consent wording is one placeholder, versioned, waiting for legal review", () => {
-  assert.equal(AGREEMENT_CONSENT_VERSION, "v0-PLACEHOLDER");
+  assert.equal(AGREEMENT_CONSENT_VERSION, "v1-2026-11-11");
   assert.ok(AGREEMENT_CONSENT_SENTENCE.length > 20 && AGREEMENT_CONSENT_SENTENCE.length < 400);
 });
 
@@ -210,7 +210,7 @@ test("a signer name with HTML is escaped on the page and in both emails, and the
     acceptedAt: new Date("2026-11-07T00:00:00.000Z"),
     ip: null,
     userAgent: null,
-    consentVersion: "v0-PLACEHOLDER",
+    consentVersion: "v1-2026-11-11",
     practiceName: "P",
   });
   const page = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, accepted: { signerName: evil, acceptedAt: "2026-11-07T00:00:00.000Z", bodySha256: sha("Body") } });
