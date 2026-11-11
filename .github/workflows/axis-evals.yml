@@ -59,7 +59,7 @@ jobs:
       - if: steps.key.outputs.run == 'true'
         run: npm ci
       - if: steps.key.outputs.run == 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+        run: command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
 
       - name: Start Supabase with every migration
         if: steps.key.outputs.run == 'true'
