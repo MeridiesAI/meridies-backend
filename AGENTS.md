@@ -124,6 +124,7 @@ src/
 │   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
 │   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
+│   ├── listLearning.ts    # list-builder learning: what Build College Lists showed and what was added/removed/recommended (service role, never awaited)
 │   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
@@ -1878,7 +1879,9 @@ majors, HBCU/HSI/women's/religious, setting, fit) and pages. Fit
 (reach/target/likely) is `studentOdds` in SQL and is labelled a Meridies
 estimate. `GET /colleges/search` keeps its array response; the total and next
 cursor are the `X-Total-Count` / `X-Next-Cursor` headers. No embeddings: the AI
-rule is Anthropic only.
+rule is Anthropic only. (`college_opportunities.embedding`, `vector(384)`, exists
+since `20261119000001` but nothing fills it yet: what makes those vectors is an
+open decision against this rule, see "List-builder learning".)
 
 ### Resource library and curated datasets
 
@@ -2443,6 +2446,52 @@ The model never writes a result list and never changes the catalog.
 - `POST /colleges/list-builder` draws candidates from the whole catalog
   (`catalogListCandidates`) and, with `explain: true`, adds one AxIS line per
   school shown. The order is always the fit model's.
+
+## List-builder learning (`20261119000001`; `lib/listLearning.ts`)
+
+What Build College Lists showed and what people then did with each school, kept so ranking weights can be learned
+later. **Nothing here changes a ranking**; nothing reads these tables yet.
+
+- **`list_builder_impressions`**: one row per school a `POST /colleges/list-builder` answer showed (after `explain`,
+  so a failed answer logs nothing). `run_id` is the same for every row of one answer; `position` is 1-based within
+  its band's column as shown (after the offset's rotation); `band` reach|target|likely; `odds` the fit model's
+  percent (0.5-94, null without a published admit rate). `criteria` is the ListCriteria **without free text**
+  (`learningCriteria`: majors become `majorFields`, the fields the ranking matched; the origin becomes `originSet`;
+  plus `relaxed`, `offset`, `perTier` and the chat's dropped schools, `excluded`, ids, at most 50, and
+  `excludedCount`). `features` is the ListSchool fields the ranking reads, `miles`, `curated`, and the school's
+  `bandRank` / `bandTotal` in the whole band.
+- **`list_builder_choices`**: one row per school `added` to or `removed` from a list, or `recommended` (a counselor's
+  Recommend, which is Build College Lists' own button for a counselor; the brief asked for add/remove only, so this
+  third action is ours). `source` is where the change was made: `list_builder` (the student's Add to my list),
+  `axis` (any request AxIS made, read from its in-process `x-meridies-axis` header, which only labels the row), else
+  `manual`. `run_id` / `position` are the newest impression of that school for that student in the last 30 days, or
+  both null. A school typed in by hand (no `college_id`) is not logged.
+- **Where it is called** (`test/unit/list-learning.test.ts` fails when a new direct insert/delete on
+  `student_colleges` appears): `addToList` (the board's Add, accepting a Recommended card, research's accept, and
+  AxIS's `college_list.add` / `accept_recommendation`, which call those routes; `opts.choice` names the source, null
+  when the caller logs a batch), `POST /colleges/list-builder/add` (one batch), `DELETE /application/college-list/:id`
+  (only when a row really went), `POST /application/college-list/recommendations`, the older `/student-colleges`
+  collection routes (`afterWrite` / the new `afterDelete` hook in `lib/collection.ts`), and an AxIS **Restore** of a
+  removed school (`routes/axis.ts`, `logRestoredChoice`: the database re-inserts that row, so no route sees it).
+  **Not logged:** a counselor dismissing a Recommended card, and the older `PATCH /student-colleges/:id` changing a
+  row's `college_id`.
+- **Rules.** Service role only (no grants or policies for anon/authenticated; approval gate attached). Ids, numbers
+  and fixed labels only. **Never awaited, never throws**: a failure is a warning; while the tables are missing the
+  first failure warns once and nothing is tried for five minutes. The firm is the student's counselor's
+  (`profiles.firm_id` of `counselor_id`); **`firms.exclude_from_learning`** (our team, demo and test firms; set by hand
+  as `postgres`, `update public.firms set exclude_from_learning = true where id = '<firm id>'`; clients read it but
+  can't write it) skips the student entirely, and a firm that can't be read logs nothing (fail closed). A solo
+  counselor without a firm row can't be excluded. Deleting a student's account deletes their rows (`student_id`
+  cascades); deleting the acting account keeps the rows and sets `actor_id` null. **Not in the data export**: the export
+  reads as the caller under RLS and no client can read these tables (like `ai_runs` and `audit_log`); what a student
+  actually chose is already there as `student_colleges`. Answer a formal access request by `student_id` with SQL.
+- **Catalog tables for the matching work** (same migration, empty): `college_core_features` (`college_id`,
+  `feature_key`, `value` 0-1 or null for unknown, `quote`, `source_url`, `extracted_at`; primary key (college,
+  key)) and `college_opportunities` (programs a college offers, `embedding extensions.vector(384)` with an HNSW cosine
+  index, `content_hash`, `first_seen_at` / `last_seen_at`, `active`). pgvector is enabled in `extensions`. Read by any
+  signed-in user, written by service_role only, like `college_site_info`.
+- **Deploy order:** either; not in `REQUIRED_SCHEMA`. Without the file the list builder and every list write work as
+  before and log nothing. Tests: `test/unit/list-learning.test.ts`, `test/integration/list-learning.test.mjs`.
 
 ## Anthropic / AI rules
 
@@ -4176,7 +4225,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
-  the student's own export holds neither).
+  the student's own export holds neither). The list-builder learning tables are in
+  no export, by that rule: no client can read them (see "List-builder learning").
   **AxIS chats** (`lib/axisChatExport.ts`; no migration) are in all three exports, in four parts: the chat
   (`ai_conversations`), its messages, its action cards (`axis_actions`) and its attached files, each file row with
   the text the server read from it (`extracted_text`, `extract_kind`, `extract_cut`; never the file's bytes). Every

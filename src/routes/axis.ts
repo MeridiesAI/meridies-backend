@@ -49,6 +49,7 @@ import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, un
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { reinviteRestoredMeetings } from "../lib/axisRestoreMeetings.js";
+import { logRestoredChoice } from "../lib/listLearning.js";
 import { storableRuns } from "../lib/axis/quotes.js";
 
 const messageSchema = z
@@ -341,7 +342,7 @@ export default async function axisRoutes(app: FastifyInstance) {
     const id = idParam(request);
     const { data: row, error } = await request.db
       .from("axis_actions")
-      .select("id, type, status, result")
+      .select("id, type, status, result, payload")
       .eq("id", id)
       .maybeSingle();
     if (error) throw actionsError(error);
@@ -380,6 +381,8 @@ export default async function axisRoutes(app: FastifyInstance) {
       // A restored meeting sends its invitation again (Elvin, 11/8): the delete emailed a cancellation. Nothing
       // else a restore brings back sends anything. Never throws; `invited` only when a round went out.
       const { invited } = await reinviteRestoredMeetings(request, id);
+      // A school taken off a list and restored is back on it: logged for list-builder learning. Never awaited.
+      void logRestoredChoice(request, row.payload);
       return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [], ...(invited ? { invited: true } : {}) };
     }
     let answer: unknown;

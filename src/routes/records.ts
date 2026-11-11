@@ -10,6 +10,7 @@ import { registerCollection } from "../lib/collection.js";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { logChoice } from "../lib/listLearning.js";
 import { bucketHistory } from "../lib/polygonHistory.js";
 import {
   toActivity,
@@ -173,6 +174,15 @@ export default async function recordRoutes(app: FastifyInstance) {
   });
   registerCollection(app, {
     path: "student-colleges", table: "student_colleges", body: collegeBody, toDto: toCollege,
+    // The older list routes (the app uses /application/college-list): logged for list-builder learning like those.
+    afterWrite: async (request, studentId, row, action) => {
+      if (action === "insert") {
+        void logChoice(request, { studentId, collegeId: (row.college_id as string | null) ?? null, action: "added", source: "manual" });
+      }
+    },
+    afterDelete: (request, studentId, row) => {
+      void logChoice(request, { studentId, collegeId: (row.college_id as string | null) ?? null, action: "removed", source: "manual" });
+    },
   });
   registerCollection(app, {
     path: "notes", table: "meeting_notes", body: noteBody, toDto: toNote,
