@@ -167,7 +167,7 @@ export function learningCriteria(c: ListCriteria, relaxed: Constraint[], view: I
   };
 }
 
-/** The ListSchool fields the ranking reads, and where the school sat. */
+/** The ListSchool fields the ranking reads, where the school sat, and its match scores when list matching ran. */
 export function learningFeatures(pick: ListPick, bandRank: number, bandTotal: number, curated: boolean): Row {
   const s = pick.school;
   return {
@@ -184,6 +184,10 @@ export function learningFeatures(pick: ListPick, bandRank: number, bandTotal: nu
     curated,
     bandRank,
     bandTotal,
+    // List-match scores (LIST_MATCH_ENABLED), numbers only: the programs behind them are not kept.
+    ...(pick.match
+      ? { matchScore: pick.match.matchScore, coreScore: pick.match.coreScore, opportunityScore: pick.match.opportunityScore }
+      : {}),
   };
 }
 

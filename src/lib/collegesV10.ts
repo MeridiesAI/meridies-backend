@@ -9,6 +9,7 @@
 
 import { z } from "zod";
 import { consideration, testPolicyFrom } from "./ingest/ipeds.js";
+import { finalizeMatch, rankWithinBands, type MatchInput, type MatchScore } from "./listMatch.js";
 import { RACE_KEYS, type RaceKey } from "./ingest/scorecard.js";
 import {
   carnegieBasicLabel,
@@ -346,12 +347,26 @@ export function fitFor(s: ListSchool, odds: number | null): Fit {
   return "likely";
 }
 
-export type ListPick = { school: ListSchool; miles: number | null; odds: number | null; fit: Fit };
+export type ListPick = {
+  school: ListSchool;
+  miles: number | null;
+  odds: number | null;
+  fit: Fit;
+  /** List-match scores (lib/listMatch.ts), only when buildList was given match data (LIST_MATCH_ENABLED). */
+  match?: MatchScore;
+};
 
+/**
+ * The list for one student. Odds decide each school's band; by default a band is in odds order. Given `match`
+ * (list-match data per college id, LIST_MATCH_ENABLED), each pick carries its scores (the opportunity score rescaled
+ * across this list's schools) and each band is ordered by match score, schools without one after the rest in odds
+ * order. No school is dropped or moved to another band for its score.
+ */
 export function buildList(
   student: StudentNumbers,
   schools: ListSchool[],
-  c: ListCriteria
+  c: ListCriteria,
+  match?: ReadonlyMap<string, MatchInput>
 ): { picks: ListPick[]; relaxed: Constraint[] } {
   const withScores = c.testOptional !== "Yes";
   const near = schools
@@ -371,10 +386,44 @@ export function buildList(
         return { school, miles, odds, fit: fitFor(school, odds) };
       });
       picks.sort((a, b) => (b.odds ?? -1) - (a.odds ?? -1) || (a.school.admit ?? 100) - (b.school.admit ?? 100));
-      return { picks, relaxed };
+      if (!match) return { picks, relaxed };
+      const scores = finalizeMatch(match, picks.map((p) => p.school.collegeId));
+      const scored: ListPick[] = picks.map((p) => ({ ...p, match: scores.get(p.school.collegeId) }));
+      return { picks: rankWithinBands(scored, (p) => p.match?.matchScore ?? null), relaxed };
     }
     relaxed.push(active[0]);
   }
+}
+
+/**
+ * One school in a POST /colleges/list-builder answer. The match fields are there only when list matching ran
+ * (LIST_MATCH_ENABLED), so with the flag off the answer is exactly what it always was.
+ */
+export function listPickDto(p: ListPick) {
+  return {
+    collegeId: p.school.collegeId,
+    slug: p.school.slug,
+    name: p.school.name,
+    initials: p.school.initials,
+    brandColor: p.school.brandColor,
+    city: p.school.city,
+    state: p.school.state,
+    website: p.school.website,
+    miles: p.miles,
+    size: sizeLabel(p.school.undergrads),
+    setting: p.school.setting,
+    testPolicy: p.school.testPolicy,
+    regularDeadline: p.school.regularDeadline,
+    fit: p.fit,
+    ...(p.match
+      ? {
+          matchScore: p.match.matchScore,
+          coreScore: p.match.coreScore,
+          opportunityScore: p.match.opportunityScore,
+          topOpportunities: p.match.topOpportunities.map((o) => ({ name: o.name, category: o.category, quote: o.quote, sourceUrl: o.sourceUrl })),
+        }
+      : {}),
+  };
 }
 
 export const toListSchool = (college: Row, list: Row, needRating: number | null): ListSchool => {
