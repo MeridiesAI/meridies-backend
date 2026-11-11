@@ -28,6 +28,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { exportParentData } from "../lib/parentToCounselor.js";
 import { env } from "../env.js";
 import { DeletionFailed, blockError, deleteAccount, deletionBlocker, type DeletionSubject } from "../lib/accountDeletion.js";
 import { closureEmail, closureView, isActiveClosure, isClosureTableMissing, isStalePurging, purgeAfterFrom, purgeFlag, type ClosureRow } from "../lib/accountClosure.js";
@@ -181,9 +182,13 @@ const tooLarge = () =>
   new HttpError(413, "That batch is too large to export at once. Export fewer students at a time.", "export_too_large");
 
 export default async function accountRoutes(app: FastifyInstance) {
-  app.get("/export", { preHandler: [app.authenticate, limit("account:export", 10, 3600)], config: { allowPending: true } }, async (request, reply) => {
+  app.get("/export", { preHandler: [app.authenticate, limit("account:export", 10, 3600)], config: { allowPending: true, allowParent: true } }, async (request, reply) => {
     const me = request.auth.userId;
     reply.header("Content-Disposition", `attachment; filename="meridies-export-${new Date().toISOString().slice(0, 10)}.json"`);
+    if (request.profile.role === "parent") {
+      // A parent account (20261123000002): their own row, who is on their Parent view, and what they sent.
+      return { exportedAt: new Date().toISOString(), kind: "parent", ...(await exportParentData(request)) };
+    }
     if (request.profile.role === "student") {
       // Their own chats, all of them: a student's (from before chats were counselor-only) usually name no student.
       return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, me, { owner: me })) };
@@ -378,7 +383,7 @@ export default async function accountRoutes(app: FastifyInstance) {
    * on their roster is refused: archive or hand off the roster first, so no
    * family's record disappears as a side effect.
    */
-  app.delete("/", { preHandler: [app.authenticate, limit("account:delete", 3, 3600)], config: { allowPending: true } }, async (request, reply) => {
+  app.delete("/", { preHandler: [app.authenticate, limit("account:delete", 3, 3600)], config: { allowPending: true, allowParent: true } }, async (request, reply) => {
     const { confirm } = z.object({ confirm: z.string() }).strict().parse(request.body);
     if (confirm !== "delete my account") throw badRequest('Type "delete my account" to confirm');
     const svc = serviceClient();
