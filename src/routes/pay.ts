@@ -22,7 +22,17 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { env, hasStripe } from "../env.js";
 import { approvedCounselorIds } from "../lib/access.js";
 import { todayIn } from "../lib/crm.js";
-import { formatUsd } from "../lib/payments.js";
+import {
+  billToOf,
+  invoiceStatus,
+  logoOrigin,
+  readPractice,
+  renderInvoicePageBody,
+  renderPageMessage,
+  renderPayPage,
+  type InvoiceDocument,
+} from "../lib/invoiceDocument.js";
+import { planLine } from "../lib/payments.js";
 import { serializeErr } from "../lib/requestLog.js";
 import { invoiceOwed, META_CONTACT, META_INVOICE, META_PRACTICE, PAY_TOKEN, payUrl } from "../lib/stripeConnect.js";
 import { invoiceForToken, practiceAccount, readAccount, stripeClient, stripeReady } from "../lib/stripePractice.js";
@@ -31,30 +41,35 @@ import { serviceClient } from "../lib/supabase.js";
 type Row = Record<string, unknown>;
 
 // Chrome applies form-action to the redirect after a form post, so Stripe's Checkout origin is allowed.
-const CSP =
-  "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://checkout.stripe.com; base-uri 'none'; frame-ancestors 'none'";
+// The practice's logo is the only image, from its own origin.
+export function payCsp(imgOrigin: string | null): string {
+  return (
+    "default-src 'none'; style-src 'unsafe-inline'; " +
+    (imgOrigin ? `img-src ${imgOrigin}; ` : "") +
+    "form-action 'self' https://checkout.stripe.com; base-uri 'none'; frame-ancestors 'none'"
+  );
+}
 
-const esc = (s: string) =>
-  s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c);
-
-function page(reply: FastifyReply, status: number, body: string) {
+function page(reply: FastifyReply, status: number, body: string, doc: InvoiceDocument | null = null) {
   return reply
     .code(status)
     .header("Cache-Control", "no-store")
     .header("Referrer-Policy", "no-referrer")
     .header("X-Robots-Tag", "noindex")
-    .header("Content-Security-Policy", CSP)
+    .header("Content-Security-Policy", payCsp(logoOrigin(doc)))
     .type("text/html; charset=utf-8")
-    .send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Pay an invoice</title></head>
-<body style="font-family:Arial,sans-serif;max-width:480px;margin:48px auto;padding:0 16px;color:#1f2937">${body}</body></html>`);
+    .send(renderPayPage(doc?.number ? `Invoice ${doc.number}` : "Pay an invoice", body));
 }
 
-const INVALID = "<h1>This link isn't valid</h1><p>Use the pay link in the invoice email you received.</p>";
-const UNAVAILABLE = "<h1>Card payments aren't available right now</h1><p>Try again later, or reply to the invoice email to pay another way.</p>";
+const INVALID = renderPageMessage("This link isn't valid", "Use the pay link in the invoice email you received.");
+const UNAVAILABLE = renderPageMessage(
+  "Card payments aren't available right now",
+  "Try again later, or reply to the invoice email to pay another way."
+);
 
 type Ready =
-  | { ok: false; status: number; body: string }
-  | { ok: true; invoice: Row; contact: Row; owedCents: number; number: string; label: string; dueOn: string; accountId: string };
+  | { ok: false; status: number; body: string; doc?: InvoiceDocument }
+  | { ok: true; invoice: Row; contact: Row; owedCents: number; number: string; label: string; dueOn: string; accountId: string; doc: InvoiceDocument };
 
 export default async function payRoutes(app: FastifyInstance) {
   app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string", bodyLimit: 1024 }, (_r, _b, done) => done(null, {}));
@@ -71,7 +86,7 @@ export default async function payRoutes(app: FastifyInstance) {
 
     const contactRes = await svc
       .from("pipeline_contacts")
-      .select("id, firm_id, counselor_id, student_name, parent_email, student_email")
+      .select("id, firm_id, counselor_id, student_name, parent_name, parent_email, student_email")
       .eq("id", String(invoice.contact_id))
       .maybeSingle();
     if (contactRes.error) throw new Error(`read contact: ${contactRes.error.code ?? "unknown"}`);
@@ -85,12 +100,39 @@ export default async function payRoutes(app: FastifyInstance) {
     if (!account) return { ok: false, status: 404, body: INVALID };
     const { state, owedCents, invoice: dto } = invoiceOwed(account, String(invoice.id));
     if (!dto) return { ok: false, status: 404, body: INVALID };
-    const heading = `<h1>Invoice ${esc(dto.number)}</h1>`;
-    if (state === "void") return { ok: false, status: 410, body: `${heading}<p>This invoice was cancelled. There's nothing to pay.</p>` };
-    if (state === "paid" || owedCents <= 0) return { ok: false, status: 200, body: `${heading}<p>This invoice is paid. Thank you.</p>` };
+    // The invoice as the email showed it, with what it owes now (invoiceOwed: nothing computed here).
+    const live = account.invoices
+      .filter((i) => i.state !== "void")
+      .sort((a, b) => a.issuedOn.localeCompare(b.issuedOn) || a.number.localeCompare(b.number, undefined, { numeric: true }));
+    const nth = live.findIndex((i) => i.id === dto.id) + 1;
+    const practice = await readPractice(svc, {
+      firmId: (contact.firm_id as string | null) ?? null,
+      counselorId: String(contact.counselor_id),
+    });
+    const status = owedCents <= 0 && state !== "void" ? "paid" : invoiceStatus(state ?? dto.state);
+    const base: InvoiceDocument = {
+      practice,
+      number: dto.number,
+      issuedOn: dto.issuedOn,
+      dueOn: dto.dueOn,
+      billTo: { ...billToOf(contact), email: null },
+      lines: [{ description: account.packageName, detail: dto.label, amountCents: dto.amountCents }],
+      subtotalCents: dto.amountCents,
+      creditAppliedCents: dto.creditAppliedCents,
+      alreadyPaidCents: dto.paidCents,
+      amountDueCents: owedCents,
+      status,
+      payUrl: null,
+      plan: nth > 0 ? planLine(account, nth) : null,
+      footnote: null,
+    };
+    if (status === "void") return { ok: false, status: 410, body: renderInvoicePageBody(base), doc: base };
+    if (status === "paid") return { ok: false, status: 200, body: renderInvoicePageBody(base), doc: base };
 
     const acct = await practiceAccount(svc, String(invoice.number_scope));
     if (acct?.charges_enabled !== true) return { ok: false, status: 503, body: UNAVAILABLE };
+    // The button posts back to this same address.
+    const doc: InvoiceDocument = { ...base, payUrl: "" };
     return {
       ok: true,
       invoice,
@@ -100,6 +142,7 @@ export default async function payRoutes(app: FastifyInstance) {
       label: dto.label,
       dueOn: dto.dueOn,
       accountId: String(acct.stripe_account_id),
+      doc,
     };
   }
 
@@ -118,7 +161,11 @@ export default async function payRoutes(app: FastifyInstance) {
         return page(reply, 503, UNAVAILABLE);
       }
       if (!known) return page(reply, 404, INVALID);
-      return page(reply, 200, "<h1>Thank you</h1><p>Your payment went through. It can take a minute to show on the invoice, and Stripe emails your receipt.</p>");
+      return page(
+        reply,
+        200,
+        renderPageMessage("Thank you", "Your payment went through. It can take a minute to show on the invoice, and Stripe emails your receipt.")
+      );
     }
     let r: Ready;
     try {
@@ -127,17 +174,8 @@ export default async function payRoutes(app: FastifyInstance) {
       request.log.error({ err: serializeErr(err) }, "pay: could not load the invoice");
       return page(reply, 503, UNAVAILABLE);
     }
-    if (!r.ok) return page(reply, r.status, r.body);
-    const name = String(r.contact.student_name ?? "").trim();
-    return page(
-      reply,
-      200,
-      `<h1>Invoice ${esc(r.number)}</h1>
-<p>${esc(r.label)}${name ? ` for ${esc(name)}` : ""}</p>
-<p style="font-size:22px;font-weight:bold">${esc(formatUsd(r.owedCents))} due ${esc(r.dueOn)}</p>
-<form method="post"><button type="submit" style="padding:12px 18px;font-size:16px">Pay ${esc(formatUsd(r.owedCents))} by card</button></form>
-<p style="color:#6b7280;font-size:13px">You'll pay on Stripe's secure page. The payment goes straight to the practice.</p>`
-    );
+    if (!r.ok) return page(reply, r.status, r.body, r.doc ?? null);
+    return page(reply, 200, renderInvoicePageBody(r.doc), r.doc);
   });
 
   app.post("/pay/:token", { config }, async (request, reply) => {
@@ -149,7 +187,7 @@ export default async function payRoutes(app: FastifyInstance) {
       request.log.error({ err: serializeErr(err) }, "pay: could not load the invoice");
       return page(reply, 503, UNAVAILABLE);
     }
-    if (!r.ok) return page(reply, r.status, r.body);
+    if (!r.ok) return page(reply, r.status, r.body, r.doc ?? null);
     const stripe = stripeClient();
     if (!stripe || !env.PUBLIC_API_URL) return page(reply, 503, UNAVAILABLE);
 

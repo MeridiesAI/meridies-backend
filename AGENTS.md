@@ -113,6 +113,7 @@ src/
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
+│   ├── invoiceDocument.ts # the invoice layout: email (HTML + text) and pay page; formats, never computes
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -552,6 +553,19 @@ forget it.
   `stripeReady`); otherwise status says `configured: false`, the other routes
   and the pay page answer 503, and the tracker is what it was. Not in
   `REQUIRED_SCHEMA`.
+- **One invoice layout** (`lib/invoiceDocument.ts`): the invoice email (table-based, inline styles, `color-scheme:
+  light only`, plain-text twin) and the pay page draw the same document as the app's `InvoiceDocument`: the
+  practice's logo (else its name in the brand serif), a status pill (Paid / Due / Overdue / Void; "Due" is
+  `open`), bill-to (the family, parent, address), invoice number and issue/due dates, one line item (the package,
+  with the invoice's label), Subtotal, Credit applied, Already paid, Amount due, Pay by card while something is
+  owed and there is a link, and a footer. **It does no arithmetic**: a draft passes `planInvoice`'s split, a saved
+  invoice `deriveAccount`'s figures and `invoiceOwed`. The practice is `readPractice`: a firm's `name`, `logo_url`,
+  `accent_color`; a solo counselor's name and `counselor_branding`; a failed read gives the name alone. The accent
+  is darkened until white text on it reads 4.5:1 (`readableAccent`). Only an https (or loopback http) logo is
+  loaded, and the pay page's CSP allows exactly that logo's origin (`payCsp`). `POST
+  /contacts/:id/invoices/preview` also answers `practice`, `issuedOn`, `packageName`, `plan`, `payByCard` (no
+  token minted), and `GET /pipeline/payments` answers `practice` (both additive). Tests:
+  `test/unit/invoice-document.test.ts`.
 - **Agreements: typed-name acceptance, NOT a certified e-signature, switched OFF** (`20261111000010`;
   `routes/agreements.ts`, `lib/agreements.ts`, `lib/agreementConsent.ts`). A counselor who may bill a Contact Pipeline
   contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;
