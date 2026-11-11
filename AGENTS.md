@@ -604,6 +604,24 @@ forget it.
   decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
   the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
   `test/integration/agreements.test.mjs` (CI runs the API with the switch on).
+- **An agreement can go with an invoice** (`lib/invoiceAgreement.ts`; no migration). `POST
+  /pipeline/contacts/:id/invoices`, its `/preview`, and `POST /pipeline/invoices/:id/send` (Send again) take an
+  optional `agreement`: `{ agreementId }` (one of **that contact's** agreements, draft or sent; another family's is 404,
+  accepted or void 409 `agreement_closed`) or `{ title, bodyText }` (a new one, saved as a draft exactly as `POST
+  /agreements` saves it, only when the invoice goes out). The family gets **one** email: the invoice document with an
+  "Agreement to review" block **above** the bill-to and a "Review and accept the agreement" button to the usual
+  `/agree/:token` page, then the invoice and its Pay by card button (agree first, then pay; paying never depends on
+  accepting, and the block says "before you pay" only when there is a Pay button). The link is minted with
+  `mintAgreementLink` on the caller's client, the same as `POST /agreements/:id/send` (draft|sent -> sent, 30 days, a
+  resend expires the earlier links). **The link between them is the email only**: the delivery record (template
+  `pipeline-invoice-agreement`, the invoice's `message_delivery_id`) names the agreement and keeps its link out
+  (`recordText`, "[private agreement link omitted]"); nothing is stored on the invoice or the agreement. The preview
+  answers `agreement: { id | null, title }` and mints and saves nothing. Refusals come before the invoice is numbered
+  (a bad agreement leaves no invoice); `send: false` with an agreement is 400 `agreement_needs_send`, no address 400
+  `contact_no_email`. **Switch:** with `AGREEMENTS_ENABLED` off, asking for one is 404 `agreements_off` before anything
+  is written, and a request without one is byte for byte the invoice email it always was; without the migration 503
+  `agreements_unavailable`. Responses add `agreement: { id, title }` only when one went. Tests:
+  `test/unit/invoice-agreement.test.ts`, `test/integration/invoice-agreement.test.mjs`.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a

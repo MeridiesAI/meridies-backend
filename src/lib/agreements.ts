@@ -22,7 +22,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { env } from "../env.js";
 import { AGREEMENT_CONSENT_SENTENCE } from "./agreementConsent.js";
+import { crmError } from "./crm.js";
 import { brandedEmail, brandedText, escapeHtml } from "./email.js";
+import { HttpError } from "./errors.js";
+import { isResultsNotApplied } from "./resultsAvailability.js";
 
 type Row = Record<string, unknown>;
 
@@ -35,6 +38,33 @@ export const AGREEMENT_LINK_DAYS = 30;
 export const TITLE_MAX = 160;
 export const BODY_MAX = 60_000;
 export const USER_AGENT_MAX = 512;
+
+/** A draft's title and text, as `POST /agreements` (and an invoice's inline agreement) takes them. */
+export const agreementTitle = z
+  .string()
+  .trim()
+  .min(1)
+  .max(TITLE_MAX)
+  // eslint-disable-next-line no-control-regex
+  .refine((s) => !/[\u0000-\u001f\u007f]/.test(s), "The title can't contain control characters");
+export const agreementBodyText = z
+  .string()
+  .min(1)
+  .max(BODY_MAX)
+  .refine((s) => s.trim().length > 0, "Write the agreement first")
+  .refine((s) => !s.includes("\u0000"), "The text can't contain a null character");
+
+/** The OFF switch's answer (every agreements route, and an invoice asked to carry one). */
+export const agreementsOff = () => new HttpError(404, "Agreements aren't switched on", "agreements_off");
+/** Switched on, but the database update isn't in. */
+export const agreementsUnavailable = () => new HttpError(503, "Agreements aren't switched on yet", "agreements_unavailable");
+
+/** A missing table or function is the migration not being in; anything else is the CRM's usual mapping. */
+export function agreementsError(error: { code?: string; message?: string } | null): HttpError {
+  if (isResultsNotApplied(error)) return agreementsUnavailable();
+  if (error?.code === "42501") return new HttpError(403, "Only the contact's consultant or a firm admin can do that", "agreement_forbidden");
+  return crmError(error);
+}
 
 export const NOT_CERTIFIED_LINE = "Typed-name acceptance; not a certified electronic signature.";
 

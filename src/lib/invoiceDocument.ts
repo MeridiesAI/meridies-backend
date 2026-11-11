@@ -54,6 +54,30 @@ export type InvoiceDocument = {
   footnote: string | null;
 };
 
+/**
+ * An agreement sent in the same email as the invoice (lib/invoiceAgreement.ts): its title and the
+ * private /agree/:token link. `url: null` draws the record copy, with the link left out, for
+ * message_deliveries. Only the email carries it; the pay page never does.
+ */
+export type InvoiceEmailAgreement = { title: string; url: string | null };
+
+/** What the record copy says where the agreement's private link was. */
+export const AGREEMENT_LINK_OMITTED = "[private agreement link omitted]";
+
+/**
+ * The agreement block's words (NEEDS LEGAL REVIEW with the rest of the agreement copy). The family is
+ * asked to read the agreement first and then pay: the agreement says what the invoice is for, so it
+ * comes before the Pay by card button. Paying never depends on accepting.
+ */
+export const AGREEMENT_HEADING = "Agreement to review";
+export const AGREEMENT_BUTTON = "Review and accept the agreement";
+export function agreementIntro(title: string, beforePaying: boolean): string {
+  return beforePaying
+    ? `This invoice comes with an agreement, "${title}". Please read it before you pay. If you agree, accept it by typing your name.`
+    : `This invoice comes with an agreement, "${title}". Please read it. If you agree, accept it by typing your name.`;
+}
+export const AGREEMENT_FINE_PRINT = "The link is private to you and works for 30 days. Typed-name acceptance; not a certified electronic signature.";
+
 const DEFAULT_ACCENT = "#12402e";
 
 // ---- Reading the practice ----------------------------------------------------------
@@ -226,8 +250,31 @@ function emailPill(s: InvoiceStatus): string {
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;"><tr><td bgcolor="${p.bg}" style="background:${p.bg};border:1px solid ${p.border};border-radius:999px;padding:4px 12px;font-family:${FONT};font-size:12px;font-weight:700;letter-spacing:0.02em;color:${p.fg};white-space:nowrap;">${STATUS_LABEL[s]}</td></tr></table>`;
 }
 
+/** The agreement block, under the header and above the bill-to: first in the email, before the invoice and its Pay button. */
+function agreementHtml(a: InvoiceEmailAgreement, accent: string, beforePaying: boolean): string {
+  const button = a.url
+    ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;"><tr>
+      <td align="center" bgcolor="${accent}" style="background:${accent};border-radius:10px;">
+        <a href="${esc(a.url)}" style="display:block;padding:13px 20px;font-family:${FONT};font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:10px;">${AGREEMENT_BUTTON}</a>
+      </td>
+    </tr></table>`
+    : `<div style="margin-top:14px;font-family:${FONT};font-size:13px;color:${MUTED};">${esc(AGREEMENT_LINK_OMITTED)}</div>`;
+  return `<tr><td style="padding:24px 32px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f7f8f5" style="background:#f7f8f5;border:1px solid ${HAIR};border-radius:12px;border-collapse:separate;"><tr>
+      <td style="padding:18px 20px;font-family:${FONT};">
+        <div style="font-size:12px;font-weight:600;color:${MUTED};">${AGREEMENT_HEADING}</div>
+        <div dir="auto" style="padding-top:4px;font-size:16px;font-weight:600;color:${INK};">${esc(a.title)}</div>
+        <div dir="auto" style="padding-top:6px;font-size:14px;line-height:1.55;color:${INK};">${esc(agreementIntro(a.title, beforePaying))}</div>
+        ${button}
+        <div style="padding-top:10px;font-size:12px;line-height:1.5;color:${MUTED};">${esc(AGREEMENT_FINE_PRINT)}</div>
+      </td>
+    </tr></table>
+  </td></tr>
+  `;
+}
+
 /** The invoice email's HTML: tables and inline styles only, light on purpose (dark-mode clients keep the paper white). */
-export function renderInvoiceEmailHtml(d: InvoiceDocument): string {
+export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEmailAgreement | null = null): string {
   const accent = readableAccent(d.practice.accentColor);
   const title = d.number ? `Invoice ${d.number}` : "Invoice";
   const meta = [
@@ -278,6 +325,7 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument): string {
     ? `<tr><td style="padding:20px 32px 0;font-family:${FONT};font-size:13px;line-height:1.55;color:${MUTED};" dir="auto">${esc(d.plan)}</td></tr>`
     : "";
   const footnote = d.footnote ? `<div style="padding-top:6px;">${esc(d.footnote)}</div>` : "";
+  const agree = agreement ? agreementHtml(agreement, accent, showsPayButton(d)) : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -299,7 +347,7 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument): string {
       <td valign="middle" align="right">${emailPill(d.status)}</td>
     </tr></table>
   </td></tr>
-  <tr><td style="padding:28px 32px 0;">
+  ${agree}<tr><td style="padding:28px 32px 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
       <td valign="top" style="padding-bottom:16px;">
         <div style="font-family:${FONT};font-size:12px;font-weight:600;color:${MUTED};padding-bottom:6px;">Bill to</div>
@@ -347,12 +395,22 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument): string {
 }
 
 /** The plain-text part: the same document, line by line. */
-export function renderInvoiceEmailText(d: InvoiceDocument): string {
+export function renderInvoiceEmailText(d: InvoiceDocument, agreement: InvoiceEmailAgreement | null = null): string {
   const out = [
     d.practice.name,
     `${d.number ? `Invoice ${d.number}` : "Invoice"} · ${STATUS_LABEL[d.status]}`,
     `Issued ${longDate(d.issuedOn)} · Due ${longDate(d.dueOn)}`,
     "",
+    ...(agreement
+      ? [
+          `${AGREEMENT_HEADING}: ${agreement.title}`,
+          agreementIntro(agreement.title, showsPayButton(d)),
+          `${AGREEMENT_BUTTON}:`,
+          agreement.url ?? AGREEMENT_LINK_OMITTED,
+          AGREEMENT_FINE_PRINT,
+          "",
+        ]
+      : []),
     "Bill to",
     d.billTo.name,
     ...(d.billTo.contactName ? [d.billTo.contactName] : []),
@@ -374,8 +432,18 @@ export function renderInvoiceEmailText(d: InvoiceDocument): string {
   return out.join("\n");
 }
 
-export function renderInvoiceEmail(d: InvoiceDocument): { html: string; text: string } {
-  return { html: renderInvoiceEmailHtml(d), text: renderInvoiceEmailText(d) };
+/**
+ * The invoice email. With an agreement, the same document with the agreement block first, plus
+ * `recordText`: the text with the agreement's private link left out, for message_deliveries (an
+ * email carrying a one-time link records this instead). Without one, exactly the invoice email.
+ */
+export function renderInvoiceEmail(d: InvoiceDocument, agreement: InvoiceEmailAgreement | null = null): { html: string; text: string; recordText?: string } {
+  if (!agreement) return { html: renderInvoiceEmailHtml(d), text: renderInvoiceEmailText(d) };
+  return {
+    html: renderInvoiceEmailHtml(d, agreement),
+    text: renderInvoiceEmailText(d, agreement),
+    recordText: renderInvoiceEmailText(d, { ...agreement, url: null }),
+  };
 }
 
 // ---- The pay page ----------------------------------------------------------------------
