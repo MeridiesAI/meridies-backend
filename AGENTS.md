@@ -792,6 +792,19 @@ forget it.
   `role_confirmed`, `onboarding_complete` and `profiles.parent_email`; any refusal deletes the user it just made.
   Redeeming uses up every unused invitation to that address. `handle_new_user` and `confirm_user_role` still accept
   only student and counselor, so no client sign-up or OAuth role pick can make a parent.
+  **Google** (no migration): the app keeps the token in an httpOnly cookie across the OAuth round trip (never a query
+  string) and, back on its `/join-parent/google`, posts it to `POST /parent-invites/claim { token? }` as the signed-in
+  user (open to every role and to a pending counselor, 20 an hour). `claimDecision` (`lib/parentAccounts.ts`, pure):
+  a parent goes to their view (also how a parent signs in later with Google, no token); otherwise the auth user's
+  provider-verified address (read with the service role, `email_confirmed_at`) must equal the invited one,
+  case-insensitive, and then `parent_invite_redeem` makes the role-less first-sign-in account a parent. A different
+  Google account is 409 `invite_email_mismatch` with `maskedEmail` ("This invite was sent to m***@gmail.com. Sign in
+  with that Google account, or use email and password."); a student's or counselor's account with the invited address
+  gets the password path's 409 `email_taken`; a used, expired or bad link its own code; no invitation 404
+  `no_parent_account`. Every refusal leaves the invitation unused. The account a refused Google sign-in just made
+  (`isFreshAccount`: student role unconfirmed, no counselor or firm, onboarding not started, under 15 minutes old) is
+  deleted (`signedOut: true`), so it can never be onboarded as a student; an established account is never touched.
+  Tests: `test/unit/parent-accounts.test.ts`, `test/integration/parent-google.test.mjs`.
   **The link is live, by address.** A parent sees a student while a `guardians` row of that student has
   `lower(btrim(email)) = parent_email` and either `alerts_enabled` or `added_by = student_id` (a student's own
   addition still waiting for the counselor's Turn on: **viewing isn't messaging**, and the student chose to share their

@@ -109,7 +109,10 @@ const REVIEWED = [
   // /parent-invites/accept. It acts for no counselor. It creates an auth user for exactly the address the
   // database's parent_invite_preview returned for that token's hash (the token only reached that inbox), then calls
   // parent_invite_redeem (EXECUTE to service_role only), which re-checks everything in one transaction; on any
-  // refusal it deletes that just-made user. No client id reaches the service role.
+  // refusal it deletes that just-made user. No client id reaches the service role. And claimParentInvite (POST
+  // /parent-invites/claim, Google on the parent path, inside the caller's own request): reads only the caller's own
+  // auth user (the JWT's id), redeems for that same id (the function re-checks a matching, verified, role-less
+  // account), and deletes the caller's own account only when the path itself just made it (isFreshAccount).
   "lib/parentInvites.ts",
   // lib/parentToCounselor.ts: inside a parent account's own request (authenticate + requireRole("parent"),
   // allowParent). The counselor is the one parent_children returned on the caller's own client (the live guardian
