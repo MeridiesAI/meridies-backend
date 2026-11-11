@@ -76,6 +76,7 @@ src/
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
+│   ├── calendarLink.ts    # the Google event's page (htmlLink) computed from the stored id + the connected address
 │   ├── bookingSlots.ts    # student booking: free slots from weekly hours, busy time, buffer, notice (pure, DST-safe)
 │   ├── booking.ts         # student booking: settings/types DTOs, the student's counselor, slots with busy time
 │   ├── bookingWrite.ts    # student booking: book / reschedule / cancel rules and write order (injected I/O)
@@ -1052,7 +1053,14 @@ forget it.
   charged, and a meeting whose own student isn't on its owner's caseload
   sends nothing and charges nothing. A new route that calls a provider about
   a stored row, or charges a limit keyed by a stored owner, checks ownership
-  the same way. **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
+  the same way. **The event's link** (`lib/calendarLink.ts`, no migration): `/meetings` answers carry `htmlLink`,
+  Google's event page `https://www.google.com/calendar/event?eid=<base64url("<eventId> <calendarId>")>`, computed
+  because nothing stores Google's own `htmlLink`. Every event is made on `calendars/primary`, whose id is the
+  connected account's address (`integration_tokens.account_email`; "primary" means nothing inside an eid), so the
+  link is only given to the meeting's owner (the eid spells out their address; a collaborator or student gets null and
+  the app opens that day), only for `calendar_provider` google, and null with no stored address. Outlook's `webLink`
+  isn't stored, so Outlook meetings have none. Tests: `test/unit/calendar-link.test.ts`.
+  **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
   own book / move / cancel acts on their counselor's calendar with the counselor's token.
 - **Student self-booking, part 1** (`20261111000001`; `lib/bookingSlots.ts`, `lib/booking.ts`, `routes/booking.ts`,
   `routes/studentBooking.ts`, `listBusy` in `lib/suiteApi.ts`). `booking_settings` (one row per counselor: `enabled`,
@@ -1207,8 +1215,9 @@ forget it.
   `cancelled_at`), no anon or student access, approval gate; `manage_token_hash` is reserved for a later "manage my
   booking" link and nothing writes it yet. **The calendar feed**: the counselor's whole calendar (not one student's)
   carries each as kind `meeting`, `id` `meeting:<booking id>`, title "<type> with <name>", `studentId: null`,
-  `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`); the subscribed iCal feed
-  says only "Meeting". **Not built**: a counselor route to cancel one (only PostgREST's status update, which emails
+  `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`) and, in the app's feed,
+  `htmlLink` (its Google event page, `lib/calendarLink.ts`; null on Outlook or with no event); the subscribed iCal
+  feed says only "Meeting". **Not built**: a counselor route to cancel one (only PostgREST's status update, which emails
   nobody), the booker's own cancel/reschedule link, public bookings in the data export. **Deploy order:** either; not
   in `REQUIRED_SCHEMA`. Until applied (`publicBookingReady`, zero-row probes, ready kept, missing rechecked after 30 s)
   the public routes and rotate answer 503 `public_booking_unavailable` (also without the service key), settings leave
