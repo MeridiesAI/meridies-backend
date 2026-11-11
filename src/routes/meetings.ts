@@ -53,7 +53,8 @@ import {
   NOT_OWNER_SKIP,
   ownsMeeting,
 } from "../lib/meetingCalendar.js";
-import type { SuiteProvider } from "../lib/oauth.js";
+import { connectedAccountEmail, type SuiteProvider } from "../lib/oauth.js";
+import { meetingHtmlLink, needsGoogleAddress } from "../lib/calendarLink.js";
 import { toMeeting } from "../lib/serialize.js";
 import {
   createConferenceEvent,
@@ -509,7 +510,7 @@ async function replaceAttendees(
   if (error) throw fromPostgrest(error);
 }
 
-/** Meetings with `attendeeIds`: the primary first, then everyone else invited. */
+/** Meetings with `attendeeIds` (the primary first, then everyone else invited) and `htmlLink`. */
 async function withAttendees(request: FastifyRequest, rows: Row[]) {
   const byMeeting = new Map<string, string[]>();
   if (rows.length > 0) {
@@ -525,10 +526,16 @@ async function withAttendees(request: FastifyRequest, rows: Row[]) {
       byMeeting.set(String(a.meeting_id), list);
     }
   }
+  // The Google event's own page, for the meeting's owner only (lib/calendarLink.ts). A read that can't find the
+  // connected address just leaves the link out: the app then opens that day instead.
+  const viewer = request.auth.userId;
+  const googleAddress = needsGoogleAddress(rows, viewer)
+    ? await connectedAccountEmail(viewer, "google").catch(() => null)
+    : null;
   return rows.map((r) => {
     const primary = String(r.student_id);
     const others = (byMeeting.get(String(r.id)) ?? []).filter((id) => id !== primary);
-    return { ...toMeeting(r), attendeeIds: [primary, ...others] };
+    return { ...toMeeting(r), attendeeIds: [primary, ...others], htmlLink: meetingHtmlLink(r, viewer, googleAddress) };
   });
 }
 

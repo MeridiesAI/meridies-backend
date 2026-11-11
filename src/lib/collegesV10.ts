@@ -103,39 +103,7 @@ export function escapeIlike(q: string): string {
 
 // ---- Research filing ----------------------------------------------------------
 
-function hostWords(website: string | null): string | null {
-  if (!website) return null;
-  const host = website.replace(/^https?:\/\/(www\.)?/i, "").split("/")[0];
-  return host ? host.toLowerCase().replace(/\./g, " ") : null;
-}
-
-/**
- * The school a resource is about, read off its address or file name: a name
- * or alias in the text, or the school's own domain. Null when nothing matches
- * (the caller files it under "General").
- */
-export function schoolIn(
-  text: string,
-  colleges: { id: string; name: string; aka: string[]; website: string | null }[]
-): { id: string; name: string } | null {
-  const t = ` ${text.toLowerCase().replace(/[-_./]+/g, " ")} `;
-  // Longest names first, so "University of Pennsylvania" wins over "Penn".
-  const sorted = [...colleges].sort((a, b) => b.name.length - a.name.length);
-  for (const c of sorted) {
-    if ([c.name, ...c.aka].some((n) => n.length >= 3 && t.includes(` ${n.toLowerCase()} `))) {
-      return { id: c.id, name: c.name };
-    }
-  }
-  for (const c of sorted) {
-    const host = hostWords(c.website);
-    if (host && t.includes(` ${host} `)) return { id: c.id, name: c.name };
-    // A subdomain of the school's own site ("admissions.cornell.edu").
-    if (host && t.includes(` ${host}`) && host.split(" ").length >= 2) {
-      return { id: c.id, name: c.name };
-    }
-  }
-  return null;
-}
+// The matcher itself (address, admissions domains, page title) is lib/collegeMatch.ts.
 
 // ---- Decision rounds -----------------------------------------------------------
 

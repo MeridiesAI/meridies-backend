@@ -98,8 +98,22 @@ type SendEmailArgs = DeliveryColumns & {
   retryOn429?: boolean;
   /** Extra message headers (e.g. List-Unsubscribe on a recurring email). */
   headers?: Record<string, string>;
+  /**
+   * The configured sender ("Name <address>") when it isn't INVITE_FROM_EMAIL: a message with its own identity, such
+   * as the parent notice (RESEND_PARENTS_FROM). Server config only, never a client value.
+   */
+  from?: string;
+  /** Resend tags, so the provider's own logs can be filtered by kind (ASCII letters, digits, _ and - only). */
+  tags?: { name: string; value: string }[];
   logger?: Logger;
 };
+
+/** Resend refuses a tag outside [A-Za-z0-9_-] (256 characters at most); a bad one is dropped, never the email. */
+export function cleanTags(tags: { name: string; value: string }[] | undefined): { name: string; value: string }[] | undefined {
+  const ok = (v: string) => /^[A-Za-z0-9_-]{1,256}$/.test(v);
+  const kept = (tags ?? []).filter((t) => ok(t.name) && ok(t.value));
+  return kept.length ? kept : undefined;
+}
 
 /**
  * Write the audit row. Never fatal: a logging failure must not fail the send it
@@ -137,15 +151,16 @@ export function fromHeader(configured: string, name?: string | null): string {
 /** Mailpit's send API (local development only, see `DEV_MAIL_URL`). */
 async function sendToDevMail(
   base: string,
-  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string>; fromName?: string | null }
+  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string>; fromName?: string | null; from?: string }
 ): Promise<{ providerId: string | null; sent: boolean; errorText: string | null }> {
-  const from = /^(.*?)\s*<([^>]+)>$/.exec(fromHeader(env.INVITE_FROM_EMAIL, m.fromName));
+  const configured = m.from ?? env.INVITE_FROM_EMAIL;
+  const from = /^(.*?)\s*<([^>]+)>$/.exec(fromHeader(configured, m.fromName));
   try {
     const res = await fetch(new URL("/api/v1/send", base), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        From: from ? { Name: from[1], Email: from[2] } : { Email: env.INVITE_FROM_EMAIL },
+        From: from ? { Name: from[1], Email: from[2] } : { Email: configured },
         To: [{ Email: m.to }],
         Subject: m.subject,
         HTML: m.html,
@@ -193,6 +208,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       replyTo: args.replyTo,
       headers: args.headers,
       fromName: args.fromName,
+      from: args.from,
     }));
     if (!sent) logger?.error({ template, err: errorText }, "dev mail send failed");
   } else if (!hasResend) {
@@ -201,13 +217,14 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
   } else {
     try {
       const body = JSON.stringify({
-        from: fromHeader(env.INVITE_FROM_EMAIL, args.fromName),
+        from: fromHeader(args.from ?? env.INVITE_FROM_EMAIL, args.fromName),
         to: [to],
         subject,
         html,
         text,
         ...(args.replyTo ? { reply_to: args.replyTo } : {}),
         ...(args.headers ? { headers: args.headers } : {}),
+        ...(cleanTags(args.tags) ? { tags: cleanTags(args.tags) } : {}),
         ...(attachments
           ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content, content_type: a.contentType })) }
           : {}),

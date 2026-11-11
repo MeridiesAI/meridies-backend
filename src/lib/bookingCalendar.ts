@@ -21,6 +21,14 @@
  *  - it goes through the same suiteApi calls as the counselor's own routes
  *    (token refresh, scope checks, `sendUpdates=none`, no attendees), so the
  *    provider emails nobody: invites are Meridies' own (lib/meetingInvites.ts).
+ *
+ * The public booking link (20261121000001, routes/publicBooking.ts) is the same
+ * exception for someone with no account: a booking through the counselor's link
+ * lands on the counselor's calendar. Narrower still: the token owner is the
+ * counselor the link's slug resolved to on the server (approved, booking and
+ * the link on), the `public_bookings` row must name that counselor, still be
+ * scheduled and have no event yet, and the only other call removes the event a
+ * booking just made, when saving it failed.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -168,4 +176,47 @@ export async function removeBookingProviderEvent(
     }, "booking: calendar event not deleted; cancelled in Meridies only");
     throw err;
   }
+}
+
+// ---- the public booking link ----------------------------------------------------------------------
+
+/**
+ * An event on the counselor's calendar for a booking just made through their public link: a conference event
+ * (Meet / Teams) or a plain one (in person, phone). `counselorId` is the counselor the slug resolved to on the
+ * server; the row must name them, be scheduled and have no event yet.
+ */
+export async function createPublicBookingEvent(
+  booking: Row,
+  counselorId: string,
+  provider: SuiteProvider,
+  input: CalendarEventInput,
+  conference: boolean,
+  log: Log,
+  deps: BookingProviderDeps = realDeps
+): Promise<{ provider: SuiteProvider; eventId: string; joinUrl: string | null }> {
+  if (counselorId.length === 0 || booking.counselor_id !== counselorId) {
+    throw new Error("booking calendar: the public booking isn't this counselor's");
+  }
+  if (booking.status !== "scheduled") throw new Error("booking calendar: the public booking isn't scheduled");
+  if (booking.calendar_event_id) throw new Error("booking calendar: the public booking already has an event");
+  if (conference) {
+    const created = await deps.create(counselorId, provider, input, log);
+    return { provider, eventId: created.eventId, joinUrl: created.joinUrl };
+  }
+  const created = await deps.createPlain(counselorId, provider, input, log);
+  return { provider, eventId: created.eventId, joinUrl: null };
+}
+
+/** Remove the event a public booking just made, when saving the booking failed. Throws on failure. */
+export async function removePublicBookingEvent(
+  booking: Row,
+  counselorId: string,
+  event: { provider: SuiteProvider; eventId: string },
+  log: Log,
+  deps: BookingProviderDeps = realDeps
+): Promise<void> {
+  if (counselorId.length === 0 || booking.counselor_id !== counselorId) {
+    throw new Error("booking calendar: the public booking isn't this counselor's");
+  }
+  await deps.remove(counselorId, event.provider, event.eventId, log);
 }

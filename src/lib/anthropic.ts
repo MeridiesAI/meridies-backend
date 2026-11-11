@@ -565,6 +565,8 @@ export type ResearchResult = {
   queries: string[];
   /** Every URL that came back in a search result or a fetch, de-duplicated, in order. Empty when nothing ran. */
   seenUrls: string[];
+  /** The same pages with the title the search result or fetch gave them (null when none). Absent from older callers. */
+  seenPages?: { url: string; title: string | null }[];
 };
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -593,6 +595,31 @@ export function extractResearchActivity(blocks: readonly unknown[]): { queries: 
     }
   }
   return { queries: [...queries], seenUrls: [...seenUrls] };
+}
+
+/**
+ * The pages a run saw with their titles, from search results and fetches (first title wins), in order. Pure and
+ * tolerant like `extractResearchActivity`. Research uses it to give a college candidate whose citation the API
+ * couldn't attach (the model wrote it as text) a page the run really saw that is titled with that college's name.
+ */
+export function extractSeenPages(blocks: readonly unknown[]): { url: string; title: string | null }[] {
+  const pages = new Map<string, string | null>();
+  const add = (url: unknown, title: unknown) => {
+    if (typeof url !== "string" || !url) return;
+    const t = typeof title === "string" && title.trim() ? title.trim().slice(0, 300) : null;
+    if (!pages.has(url) || (pages.get(url) === null && t)) pages.set(url, t);
+  };
+  for (const block of blocks) {
+    if (!isRecord(block)) continue;
+    if (block.type === "web_search_tool_result" && Array.isArray(block.content)) {
+      for (const r of block.content) if (isRecord(r)) add(r.url, r.title);
+    } else if (block.type === "web_fetch_tool_result" && isRecord(block.content) && block.content.type === "web_fetch_result") {
+      const c = block.content;
+      const doc = isRecord(c.content) ? c.content : null;
+      add(c.url, doc && typeof doc.title === "string" ? doc.title : null);
+    }
+  }
+  return [...pages].map(([url, title]) => ({ url, title }));
 }
 
 const RESEARCH_SYSTEM = [
@@ -708,6 +735,7 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
     let response: Anthropic.Beta.BetaMessage | null = null;
     const queries = new Set<string>();
     const seenUrls = new Set<string>();
+    const seenPages = new Map<string, string | null>();
     // Server tools can pause a long turn; resume it a few times at most. Each API call reserves on its own.
     const subject = researchSubject(actorId);
     const model = opts.model ?? RESEARCH_MODEL;
@@ -751,6 +779,7 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
       const activity = extractResearchActivity(response.content);
       for (const q of activity.queries) queries.add(q);
       for (const u of activity.seenUrls) seenUrls.add(u);
+      for (const pg of extractSeenPages(response.content)) if (!seenPages.has(pg.url) || seenPages.get(pg.url) === null) seenPages.set(pg.url, pg.title);
       if (response.stop_reason !== "pause_turn") break;
       messages.push({ role: "assistant", content: response.content });
     }
@@ -758,7 +787,7 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
 
     if (response.stop_reason === "refusal") {
       await finish("blocked", { input_tokens: inputTokens, output_tokens: outputTokens, error: "refusal" });
-      return { parts: [], sources: [], runId, refused: true, queries: [...queries], seenUrls: [...seenUrls] };
+      return { parts: [], sources: [], runId, refused: true, queries: [...queries], seenUrls: [...seenUrls], seenPages: [...seenPages].map(([url, title]) => ({ url, title })) };
     }
 
     const parts: ResearchPart[] = [];
@@ -780,7 +809,15 @@ async function research(opts: ResearchOptions, actorId: string | null, log: Rese
     for (const p of parts) for (const c of p.citations) if (!seen.has(c.url)) seen.set(c.url, c.title);
 
     await finish("succeeded", { input_tokens: inputTokens, output_tokens: outputTokens });
-    return { parts, sources: [...seen].map(([url, title]) => ({ url, title })), runId, refused: false, queries: [...queries], seenUrls: [...seenUrls] };
+    return {
+      parts,
+      sources: [...seen].map(([url, title]) => ({ url, title })),
+      runId,
+      refused: false,
+      queries: [...queries],
+      seenUrls: [...seenUrls],
+      seenPages: [...seenPages].map(([url, title]) => ({ url, title })),
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : "unknown error";
     await finish("failed", { error: message.slice(0, 500) });

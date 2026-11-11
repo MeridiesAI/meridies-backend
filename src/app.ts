@@ -20,6 +20,7 @@ import kpiUnsubscribeRoutes from "./routes/kpiUnsubscribe.js";
 import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
 import guardianRoutes from "./routes/guardians.js";
+import myGuardianRoutes from "./routes/myGuardians.js";
 import chatRoutes from "./routes/chat.js";
 import axisRoutes from "./routes/axis.js";
 import axisEvalRoutes from "./routes/axisEval.js";
@@ -100,6 +101,7 @@ import schoolScholarshipRoutes from "./routes/schoolScholarships.js";
 import bookingRoutes from "./routes/booking.js";
 import pushRoutes from "./routes/push.js";
 import studentBookingRoutes from "./routes/studentBooking.js";
+import publicBookingRoutes from "./routes/publicBooking.js";
 
 export function buildApp() {
   const app = Fastify({
@@ -251,6 +253,7 @@ export function buildApp() {
   // because it also serves the counselor's /students/:id/profile-updates.
   app.register(meRoutes, { prefix: "/me" });
   app.register(myEventRoutes, { prefix: "/me/events" });
+  app.register(myGuardianRoutes, { prefix: "/me/guardians" });
   app.register(profileUpdateRoutes);
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
   app.register(resourceRoutes, { prefix: "/resources" });
@@ -271,6 +274,8 @@ export function buildApp() {
   app.register(bookingRoutes, { prefix: "/booking" });
   app.register(pushRoutes, { prefix: "/push" });
   app.register(studentBookingRoutes, { prefix: "/me/booking" });
+  // Absolute paths (/public/book/:slug...): a counselor's public booking link, no sign-in.
+  app.register(publicBookingRoutes);
   startSweepInterval(app);
   startExtractionRecovery(app);
 

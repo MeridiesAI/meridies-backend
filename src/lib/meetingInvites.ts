@@ -320,7 +320,7 @@ const MAX_GUARDIANS_PER_STUDENT = 4;
 const RANK: Record<IcsMethod, number> = { REQUEST: 3, PUBLISH: 2, CANCEL: 1 };
 
 /** A valid address, lowercased, or null. */
-function validEmail(v: unknown): string | null {
+export function validEmail(v: unknown): string | null {
   const raw = s(v);
   if (!raw) return null;
   try {
@@ -577,8 +577,8 @@ export function inviteEmail(
 
 const SEND_SPACING_MS = 250;
 
-/** The address the email comes from, for SENT-BY. */
-function fromAddress(): string | null {
+/** The address the email comes from, for SENT-BY (also the public booking link's invite, lib/publicBooking.ts). */
+export function fromAddress(): string | null {
   const m = /<([^>]+)>\s*$/.exec(env.INVITE_FROM_EMAIL);
   return validEmail(m ? m[1] : env.INVITE_FROM_EMAIL);
 }

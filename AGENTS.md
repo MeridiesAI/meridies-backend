@@ -51,6 +51,7 @@ src/
 │   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
+│   ├── linkText.ts        # a read link's page text for AxIS: stored with the digest, served under the AI switches
 │   ├── oauth.ts           # Google/Microsoft OAuth (code + PKCE), token refresh/revoke
 │   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
 │   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
@@ -76,10 +77,14 @@ src/
 │   ├── ics.ts             # RFC 5545 meeting invite files: stable UID, SEQUENCE, escaping, 75-octet folding
 │   ├── meetingInvites.ts  # emailed meeting invites: who gets what, fail-closed recipients, sent after the response
 │   ├── meetingCalendar.ts # a meeting's calendar event: only its owner's, only with the caller's own token
+│   ├── calendarLink.ts    # the Google event's page (htmlLink) computed from the stored id + the connected address
 │   ├── bookingSlots.ts    # student booking: free slots from weekly hours, busy time, buffer, notice (pure, DST-safe)
 │   ├── booking.ts         # student booking: settings/types DTOs, the student's counselor, slots with busy time
 │   ├── bookingWrite.ts    # student booking: book / reschedule / cancel rules and write order (injected I/O)
 │   ├── bookingCalendar.ts # student booking: the ONE provider call with the counselor's token (see below)
+│   ├── publicBooking.ts   # the public booking link: slug, which links answer, book (honeypot, caps, rollback), the follow-ups' words
+│   ├── publicBookingStore.ts # the public booking link's migration probe and the busy time its bookings add
+│   ├── publicBookingCancel.ts # a counselor cancels a public-link booking: rules, write order, the CANCEL email (injected I/O)
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── parentCopy.ts      # what a parent is told (email + text wording), who is reachable; pure
 │   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
@@ -90,6 +95,7 @@ src/
 │   ├── translate.ts       # Translate: the prompts, the checks on the model's answer (links and addresses kept exactly), looksEnglish, TRANSLATE_FAKE
 │   ├── inboundTranslate.ts # a family's reply in English, written on its row by the webhooks; the retry sweep on the dispatch cron
 │   ├── twilioNumbers.ts   # search/buy/release a consultant's own Twilio number
+│   ├── collegeMatch.ts    # which catalog school a research link/file is about: host, admissions domains, path, page title
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
@@ -112,6 +118,8 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
+│   ├── myGuardians.ts     # a student's own parents (/me/guardians): validation, who may change what, the store
+│   ├── parentNotice.ts    # the email a parent gets when a student adds them: once per address, RESEND_PARENTS_FROM
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
@@ -182,6 +190,7 @@ src/
 │   ├── meetingSummary.ts  # /ai/meeting-summary   a counselor's pasted notes -> a draft summary + action items (stores nothing)
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
+│   ├── myGuardians.ts     # /me/guardians the student's parents: list, add, edit, remove (their own additions)
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
 │   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
@@ -204,8 +213,9 @@ src/
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
-│   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
+│   ├── booking.ts         # /booking      a counselor's booking settings and meeting types; read/cancel a public-link booking
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
+│   ├── publicBooking.ts   # /public/book/:slug   public: a counselor's share link, its slots, book one (no account)
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
 │   ├── profileUpdates.ts  # /profile-updates  Profile Update (AxIS); /students/:id/profile-updates
 │   └── internal.ts        # CRON_SECRET machine routes (sweep, catalog, link check, events, photos, imports, catalog proposals)
@@ -715,6 +725,41 @@ forget it.
   and the app must not resend without it (that would widen the audience). **Rollback caution:** an API older than
   this ignores `filters.aid` when the cron sends a queued blast, so cancel queued aid-filtered blasts before rolling
   back. Tests: `test/unit/blast-aid-filter.test.ts`, `test/integration/blasts-aid.test.mjs`.
+- **A student manages the parents they added** (`20261122000001`; `routes/myGuardians.ts`, `lib/myGuardians.ts`,
+  `lib/parentNotice.ts`). Onboarding's Parents step and the student's Settings › Parents call `GET/POST /me/guardians`
+  and `PATCH/DELETE /me/guardians/:id` (student-only, no student id taken). **The rows are `guardians`**, the same ones
+  the Communication page, Parent contacts, blasts and alerts read: nothing is copied, so a parent a student adds is on
+  every counselor screen at once. The migration adds `guardians.added_by` (stamped by the insert trigger from
+  `auth.uid()`, never from the client; null for older rows and service-role inserts; the update trigger never changes
+  it) and two student policies. **The product call of `20261007000006` stands:** a student's addition starts with
+  alerts off and only the counselor switches it on (`PATCH /accountability/guardians/:id {alerts_enabled}`; the app's
+  composer has **Turn on** on the chip). What a student may do, enforced by RLS + `guardians_student_update_guard` and
+  mirrored in the DTO's `editable` / `removable`: a parent they added and the counselor hasn't switched on, anything
+  (name, relationship, email, phone; remove); one the counselor switched on, the name and relationship only (an email
+  or phone change raises 42501, the API says 403 `guardian_contact_locked`; no delete); one the counselor added, or
+  with no `added_by`, nothing (403 `guardian_locked`). A student never changes `alerts_enabled`, `receives_reports`,
+  `preferred_channel`, `is_primary`, `student_id` or `added_by` (the trigger keeps the old values), so a student can
+  never redirect or silence where their counselor's alerts go. Body: `{ name (1-120), relationship: Mother | Father |
+  Guardian | Other, email (required, lowercased), phone? (7-15 digits) }`, strict. Up to 4 parents in all
+  (`guardians_full`), one address once per student (`guardian_exists`). Limits per student: list 120/min, add 12/hour,
+  edit 30/hour, remove 30/hour. 503 `guardians_unavailable` until the migration is applied (the app says "isn't
+  switched on yet"). The composer's `family[]` and `/guardians/roster` rows carry `addedByStudent` (absent before the
+  migration: both fall back to the old columns on 42703), which the app shows as "Added by {first}".
+  **The parent notice** (`lib/parentNotice.ts`): when a student adds a parent or changes their email, that address gets
+  one short email: "{Student} added you as a parent on Meridies; {counselor} is their counselor and may email you
+  updates about {first}'s college applications; nothing to sign up for". No link of any kind (there is no parent
+  portal). Reply-To is the counselor's routed address (`replyAddressFor`, party parent) or their own email; with no
+  counselor yet the copy says one may write once the student connects, and there is no Reply-To. Same
+  `RESEND_API_KEY`, its own sender `RESEND_PARENTS_FROM` (falls back to `INVITE_FROM_EMAIL`; must be on a domain
+  verified in Resend), template `parent-added`, Resend tag `category=parent-added`, recorded in `message_deliveries`
+  (`recipient_kind` guardian) so the delivery webhook tracks it. **Once per address per student:** any earlier
+  `parent-added` row to that address for this student that reached the provider (queued, sent, delivered, bounced)
+  means no new email, so remove-and-re-add or a name fix sends nothing; a send that failed before leaving may be
+  retried. An address this student's messages bounced at or that marked one as spam gets none. At most 8 notices a
+  student a day; Resend's Idempotency-Key covers two adds racing. It never fails the add (`notice: sent |
+  already_sent | not_sent` in the answer). Tests: `test/unit/my-guardians.test.ts` (rules, the email's words, the
+  routes on a memory store: validation, ownership, no double email, the rate limit), `test/integration/my-guardians.test.mjs`
+  (RLS and the trigger straight through PostgREST, the counselor's views, the email once), `hardening.test.mjs`.
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
@@ -1012,7 +1057,14 @@ forget it.
   charged, and a meeting whose own student isn't on its owner's caseload
   sends nothing and charges nothing. A new route that calls a provider about
   a stored row, or charges a limit keyed by a stored owner, checks ownership
-  the same way. **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
+  the same way. **The event's link** (`lib/calendarLink.ts`, no migration): `/meetings` answers carry `htmlLink`,
+  Google's event page `https://www.google.com/calendar/event?eid=<base64url("<eventId> <calendarId>")>`, computed
+  because nothing stores Google's own `htmlLink`. Every event is made on `calendars/primary`, whose id is the
+  connected account's address (`integration_tokens.account_email`; "primary" means nothing inside an eid), so the
+  link is only given to the meeting's owner (the eid spells out their address; a collaborator or student gets null and
+  the app opens that day), only for `calendar_provider` google, and null with no stored address. Outlook's `webLink`
+  isn't stored, so Outlook meetings have none. Tests: `test/unit/calendar-link.test.ts`.
+  **The one exception is student booking** (`lib/bookingCalendar.ts`, part 2 below): a student's
   own book / move / cancel acts on their counselor's calendar with the counselor's token.
 - **Student self-booking, part 1** (`20261111000001`; `lib/bookingSlots.ts`, `lib/booking.ts`, `routes/booking.ts`,
   `routes/studentBooking.ts`, `listBusy` in `lib/suiteApi.ts`). `booking_settings` (one row per counselor: `enabled`,
@@ -1118,6 +1170,76 @@ forget it.
   the columns, `GET /booking/settings` says `bookingPageReady: false`, a PUT naming them is 503
   `booking_page_unavailable`, and students see no link. Tests: `test/unit/booking-page.test.ts`, the plain-event
   cases in `test/unit/booking-write.test.ts`.
+- **The public booking link** (`20261121000001`; `lib/publicBooking.ts`, `lib/publicBookingStore.ts`,
+  `routes/publicBooking.ts`, the slug routes in `routes/booking.ts`). Every counselor has a Calendly-style share link,
+  `/public/book/<slug>`, that anyone (a prospective family, no account) uses to book one of their active meeting
+  types in the same free slots their students see. **The slug** (`booking_settings.public_slug`, unique) is the name
+  slugified (accents folded, 40 characters, "counselor" when nothing is left) plus 5 characters from a 32-letter
+  alphabet without l/o/0/1 ("jane-doe-4f7km"); the migration backfilled every existing settings row, and the API
+  gives one to any row without it on its first `GET /booking/settings` (or PUT) with the service role
+  (`writeSlug`): **a user session can't write it** (`private.booking_settings_slug_guard`, keyed off current_user),
+  so a counselor can't pick "harvard-admissions". A counselor with no settings row reads `publicSlug: null` (making a
+  row on a GET would flip "never set up", which decides whether students may cancel). `GET /booking/settings` adds
+  `publicSlug` and `publicBookingEnabled` (default true); `PUT` takes `publicBookingEnabled`; `POST
+  /booking/public-link/rotate` (10 an hour) answers `{ publicSlug }` with a new suffix and the old link 404s at once
+  (409 `booking_not_set_up` with no settings row). **The public routes** (absolute paths, no auth, service role,
+  everything keyed by the counselor the slug resolved to): `GET /public/book/:slug` -> `{ counselor: { name,
+  practiceName (the firm's name, null when solo), logoUrl (https only), timezone }, types: [{ id, name,
+  durationMinutes, mode }] }`, never the counselor's email; `GET /public/book/:slug/slots?typeId&from&to` -> exactly
+  `GET /me/booking/slots`' answer (`slotsFor`); `POST /public/book/:slug { typeId, startsAt, name (1-120), email,
+  phone? (40), note? (1000), website? }` (strict, no control characters) -> 201 `{ booking: { id, startsAt, endsAt,
+  mode, joinUrl, typeName } }`. An unknown or malformed slug, `public_booking_enabled` off, booking paused or never set
+  up, replaced by the Google booking page (`instead`), or an unapproved counselor are **the same 404
+  `booking_link_not_found`** (`publicLinkOpen`), so a link says nothing about the account. **Booking** is the student
+  path's rules: the start must be one the slots offer now (`slotOpen`), duration and mode from the type, at most 3
+  upcoming bookings per address per counselor (409 `too_many_bookings`), reserved with
+  `public.book_public_slot` (service role only) under **the same advisory lock** as `book_meeting_slot`, which
+  re-checks approval, booking on, the link on, the type and its exact length, and overlap with meetings and public
+  bookings; a race or a stale slot is 409 `slot_unavailable`. Then the counselor's connected calendar, like a
+  student's booking (Meet/Teams conference event when that provider is connected, else a plain event on Google then
+  Outlook; titled "<type> with <name>", the booker's email, phone and note in the description; a provider failure
+  releases the row, 503 `calendar_write_failed`; `createPublicBookingEvent` in `lib/bookingCalendar.ts` is the second
+  deliberate use of the counselor's token, for a row naming the slug's counselor, scheduled, with no event yet).
+  **After the answer** (never fails the booking): the booker gets an email with an .ics REQUEST (UID
+  `meeting-public-<id>@meridiesai.com`, organizer the counselor, Reply-To the counselor; template
+  `public-booking-confirmation`), the counselor a bell notice and an email with an .ics PUBLISH copy ("Maria Lopez
+  booked Intro call on Tue, Jan 5, 9:00 AM EST", the email, phone and note, Reply-To the booker; template
+  `public-booking-counselor`), and `public.public_booking_to_pipeline` puts the booker on the Contact Pipeline: a
+  contact of the counselor's workspace whose parent or student email matches (open first), else a new one in the
+  first stage (name as the card's title, email and phone in the parent fields, owner the counselor, source "Booking
+  link"), plus a `meeting` timeline entry "Booked <type> for <date>"; no stages yet (pipeline never opened) means no
+  card. **The honeypot**: a non-empty `website` gets a 201 decoy booking and nothing is stored or sent (the link and
+  type are still resolved). **Limits**: in process 60 reads / 10 books a minute per address; DB-backed 600 reads and
+  10 books an hour per address, 5 books a day per booker address (hashed key, across counselors), 40 a day per
+  counselor. **Busy everywhere**: `meetingBusy` (student slots and the link's) adds scheduled public bookings, and
+  the migration re-creates `book_meeting_slot` / `reschedule_meeting_slot` with the same check, so a student can't
+  take a family's slot. **Storage**: `public_bookings`, a table of its own rather than a nullable
+  `meetings.student_id` (every per-student read, the owner guard, the attendee trigger, the invite rounds and caseload
+  transfer key on it); owner-only RLS (select, and update of `status` only, scheduled -> cancelled, which stamps
+  `cancelled_at`), no anon or student access, approval gate; `manage_token_hash` is reserved for a later "manage my
+  booking" link and nothing writes it yet. **The calendar feed**: the counselor's whole calendar (not one student's)
+  carries each as kind `meeting`, `id` `meeting:<booking id>`, title "<type> with <name>", `studentId: null`,
+  `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`) and, in the app's feed,
+  `htmlLink` (its Google event page, `lib/calendarLink.ts`; null on Outlook or with no event); the subscribed iCal
+  feed says only "Meeting". **The counselor cancels one** (`lib/publicBookingCancel.ts`, routes in `routes/booking.ts`, no migration):
+  `GET /booking/public/:id` -> `{ booking: { id, typeName, mode, name, email, phone, note, startsAt, endsAt, status,
+  joinUrl, calendarProvider, contactId, cancelledAt, createdAt } }` (the caller's own row on their own client, else 404
+  `booking_not_found`); `POST /booking/public/:id/cancel` (counselor only, 60 an hour) -> `{ booking, calendarRemoved }`:
+  a conditional `scheduled -> cancelled` on the caller's session (the `status` grant; the guard stamps `cancelled_at`;
+  a second or racing cancel is 409 `already_cancelled` and emails nobody), which frees the slot (everything counts
+  scheduled bookings only); then the event on the counselor's own calendar is deleted with **their own** token
+  (`deleteCalendarEvent`; best effort like a student's cancel: `calendarRemoved: false` when the provider failed, ids
+  logged, the pointer kept since a session writes only `status`). After the answer: the booker gets
+  `public-booking-cancellation` (Reply-To the counselor) with an .ics CANCEL for the original invite (same UID
+  `meeting-public-<id>@meridiesai.com`, SEQUENCE 1; the invite was 0), and a booking with `contact_id` gets a
+  `meeting` timeline entry "Cancelled <type> on <date>" in the counselor's booking zone (inserted on the caller's
+  session). Both answer 503 `public_booking_unavailable` before the migration. Tests:
+  `test/unit/public-booking-cancel.test.ts`, `test/integration/public-booking-cancel.test.mjs` (MAILPIT_URL for the
+  .ics). **Not built**: the booker's own cancel/reschedule link, public bookings in the data export. **Deploy order:** either; not
+  in `REQUIRED_SCHEMA`. Until applied (`publicBookingReady`, zero-row probes, ready kept, missing rechecked after 30 s)
+  the public routes and rotate answer 503 `public_booking_unavailable` (also without the service key), settings leave
+  the two fields out, a PUT naming `publicBookingEnabled` is 503, and slots and the feed read no public bookings.
+  Tests: `test/unit/public-booking.test.ts`, `test/integration/public-booking.test.mjs`.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the
@@ -3118,6 +3240,26 @@ answer an empty or overlong one. `POST /files/links` answers a failed read's cod
 (`fileKindOf`: PDF, Word, images…; "use Add a file") **before** making a folder, and answers
 `url` as it will be stored. Tests: `test/unit/links.test.ts`.
 
+**A read link keeps its page text for AxIS** (`lib/linkText.ts`, migration `20261123000001`,
+`document_links.page_text`, at most 40,000 characters). The read stores the extracted text with the
+digest (`digestUpdate`), only onto a link still open to AI; the keep-out trigger clears it with the
+summary. `GET /files/links` never selects it (`LINK_LIST_COLUMNS`). AxIS reads it through the
+`files.read_link` lookup (`GET /files/links/:id/text`, counselors, 120 a minute): served only while the
+link is "AI may read it", read, and the practice has both AI summaries and document reading on, else a
+409 in words; at most 12,000 characters, inside one untrusted `web page` block (the address, domain and title stay inside it), and the lookup
+is `outside` (changes after it wait for a click). Before the migration the read retries its write
+without the column and the route answers "read it again". Tests: `test/unit/link-text.test.ts`.
+
+**Which school a research link is filed under** (`lib/collegeMatch.ts`, `POST /colleges/research/folder`):
+the link's host first (the school's catalog `website` or any subdomain of it, by whole labels; else a known
+admissions site off the school's domain, `ADMISSIONS_DOMAINS`, e.g. `mitadmissions.org` → `mit.edu`, keyed by
+main domain so it finds the same school in every environment), then a name or alias in the path's words, and
+only when those find nothing the page's `<title>` (`fetchPageMeta`, at most 6 seconds, a failure is no title).
+Careful by design: whole words, longest match wins ("Penn State" over "Penn"), a tie between two schools is
+General, ordinary-word aliases ("Cal", "Union", "State") never match alone, and in a title an acronym or
+one-word alias matches only as written ("MIT", not "mit"). Add an entry to `ADMISSIONS_DOMAINS` only for a
+site the school itself runs, not a system portal or a blog. Tests: `test/unit/college-match.test.ts`.
+
 ### Connected apps (Google / Microsoft OAuth)
 
 `GET /integrations/:provider/authorize` (counselor) returns the consent URL
@@ -3678,9 +3820,43 @@ column and tables.
   API splits one answer into text blocks at citation boundaries, so
   `parseCandidates` joins the blocks in order and gives each JSON candidate
   object the citations of every block that overlaps it; an object that overlaps
-  no citation is dropped. At most 8 candidates and 5 sources each. Colleges
-  search the official-site allowlist (`researchDomains`); activities search the
-  open web minus the blocklist.
+  no citation is dropped, with one exception for colleges: the model often
+  writes its citation into the JSON as text, which the API can't attach, so a
+  college object with no citation takes up to two pages the run really saw
+  (search results and fetches, `extractSeenPages` -> `ResearchResult.seenPages`)
+  whose title, or a part of it split at " | ", " - ", ": ", starts with the
+  college's whole name of two or more words (`sourcesByTitle`; "State
+  University" never takes a "Ball State University" page). Those still go
+  through the keeper below; the run logs how many were `recovered`.
+  Before the JSON is read, the model's own markup is
+  taken out of the joined text (`stripModelMarkupMapped`, spans mapped back to
+  the original): citation wrappers it wrote as text (`<cite index="3-1">…</cite>`,
+  or `<cite index=\"3-1\">` escaped inside a JSON string, which the API can't
+  turn into a citation), other stray XML-like tags and `[S1]` markers; the words
+  inside a tag stay. Bare quotes in such a tag used to break the object, so the
+  candidate was lost; escaped ones were stored and shown ("Cost: <cite …>There
+  is no application fee.</cite>"). `cleanText` applies the same rule to every
+  stored field (title, summary, why, deadline, cost, source titles), and
+  `20261122000031_research_strip_model_markup.sql` cleans rows stored before
+  (and the task or list row an accept made from them). `RESEARCH_FAKE`'s
+  `fixture:markup` focus returns candidates written that way.
+  At most 8
+  candidates and 5 sources each. Colleges search the official-site allowlist
+  (`researchDomains`); activities search the open web minus the blocklist.
+- **A balanced list.** The college ask wants about a third reach, target and
+  likely, judged against the brief's GPA and test bands (highly selective
+  reach and target schools when the bands are high), spread across the country
+  with two or three near the brief's region; "options near the region are
+  welcome" is said only for activities. The match step keeps every reasonable
+  candidate (drops only clear misfits or schools already on the list), and may
+  set `fit` (reach / target / likely, optional in `MATCH_SCHEMA`); a valid fit is
+  stored in `details.fit` and accepting a college puts it on the list row's fit
+  tag. Spend: no new model call, no change to searches, fetches, turns, model
+  or effort; the research prompt grows by about 120 tokens and each pick by a
+  few output tokens.
+- **Link checks run at once** (`LINK_CHECKS` = 6 at a time, each distinct page
+  once): one check can take its 10-second timeout, and checking one after
+  another made a run with a few slow sites wait most of a minute.
 - **Before anything is stored** (`validatePicks`): a pick must name a real,
   unused candidate and have an effort of low, medium or high; `why` is at most
   200 characters and two sentences, otherwise the pick is dropped whole (never
@@ -3716,7 +3892,7 @@ column and tables.
   match step or the reason checks) is stored as `succeeded` with an empty list
   but expires at once, so the next request runs again. Each run logs its counts
   with the run id (numbers only): answer parts, candidate objects found,
-  candidates parsed, kept by the keeper, picked, stored. The scanner steps into an
+  candidates parsed, recovered by title, kept by the keeper, picked, stored. The scanner steps into an
   object with no string `title`, so a `{"candidates":[...]}` wrapper yields its
   inner candidates. Failed and discarded runs are never served.
 - **Recommendations.** `recommendations` and `research_runs` are readable by a
@@ -4533,6 +4709,7 @@ npm run dev               # http://localhost:4000
 | `SUPABASE_ANON_KEY` | The key every user-scoped query runs under |
 | `SUPABASE_SERVICE_ROLE_KEY` | Optional; rate limits/quotas/audit degrade without it |
 | `ANTHROPIC_API_KEY` | Optional; `/ai/*` returns 503 without it |
+| `RESEND_PARENTS_FROM` | Optional; the sender of the notice a parent gets when a student adds them ("Name <address>" on a domain verified in Resend). Unset: `INVITE_FROM_EMAIL`. Same `RESEND_API_KEY` |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Optional; without them (and a sender) SMS is recorded `queued`, never sent |
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |

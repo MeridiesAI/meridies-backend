@@ -32,6 +32,8 @@
 import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyRequest } from "fastify";
 import { fromPostgrest } from "./errors.js";
+import { googleEventHtmlLink } from "./calendarLink.js";
+import { publicBookingReady } from "./publicBookingStore.js";
 import type { Role } from "./serialize.js";
 
 type Row = Record<string, unknown>;
@@ -72,6 +74,16 @@ export type CalendarFeedItem = {
   school: string | null;
   /** A student's own event (`student_calendar_events`): theirs to edit and delete. */
   personal?: boolean;
+  /**
+   * A booking made through the counselor's public booking link (`public_bookings`, 20261121000001): kind
+   * `meeting`, no student, `ref` the booking's id. Not a `meetings` row, so not editable through /meetings.
+   */
+  publicBooking?: boolean;
+  /**
+   * Public bookings only: the Google event's own page on the counselor's calendar (lib/calendarLink.ts), when the
+   * booking's event is on Google and the feed was built with `googleAccountEmail`. Absent otherwise.
+   */
+  htmlLink?: string | null;
 };
 
 export type EventTypeDto = {
@@ -181,6 +193,11 @@ export type FeedContext = {
    * batches of FEED_ID_CHUNK, so a big practice works.
    */
   caseload?: string[];
+  /**
+   * The owner's connected Google address, read only when a public booking has a Google event, for its `htmlLink`.
+   * The app's feed passes it; the subscribed iCal feed doesn't (it says only "Meeting").
+   */
+  googleAccountEmail?: () => Promise<string | null>;
 };
 
 /** Ids named in one `.in()` filter (a URL), so a caseload of any size is read in batches. */
@@ -394,6 +411,33 @@ async function loadPersonalEvents(db: SupabaseClient, studentId: string, from: s
 }
 
 /**
+ * The counselor's own bookings through their public link (20261121000001), keyed by `counselorId` in the query
+ * itself (the iCal feed reads with the service role). None before the migration (publicBookingReady).
+ */
+async function loadPublicBookings(
+  db: SupabaseClient,
+  counselorId: string,
+  fromInstant: string,
+  toInstant: string,
+  includeCancelled: boolean
+): Promise<Row[]> {
+  if (!(await publicBookingReady(db))) return [];
+  let b = db
+    .from("public_bookings")
+    .select("id, type_name, name, email, phone, note, starts_at, ends_at, status, calendar_provider, calendar_event_id")
+    .eq("counselor_id", counselorId)
+    .gte("starts_at", fromInstant)
+    .lt("starts_at", toInstant);
+  if (!includeCancelled) b = b.neq("status", "cancelled");
+  const { data, error } = await b.order("starts_at").limit(2000);
+  if (error) {
+    if (isMissingTable(error)) return [];
+    throw fromPostgrest(error);
+  }
+  return (data ?? []) as Row[];
+}
+
+/**
  * Build the feed. `q.studentId` is set only after the route proved the caller
  * may view that student; a student caller is always scoped to themselves. A
  * counselor's whole calendar needs `ctx.caseload` (see FeedContext): the
@@ -531,7 +575,7 @@ export async function buildCalendarFeed(
   };
 
   const counselor = ctx.role === "counselor";
-  const [dlRows, mt, tkRows, pe, eventTypes, assignments, clRows, personal, acRows] = await Promise.all([
+  const [dlRows, mt, tkRows, pe, eventTypes, assignments, clRows, personal, acRows, publicRows] = await Promise.all([
     perBatch(deadlines),
     meetings.order("starts_at").limit(2000),
     perBatch(tasks),
@@ -542,6 +586,8 @@ export async function buildCalendarFeed(
     // One student's own events: the student themselves, or a counselor looking at that student.
     scopeStudent ? loadPersonalEvents(db, scopeStudent, q.from, q.to) : Promise.resolve([] as Row[]),
     perBatch(academics),
+    // The counselor's whole calendar only: bookings through their public link belong to no student.
+    counselor && !scopeStudent ? loadPublicBookings(db, me, fromInstant, toInstant, q.includeCancelled) : Promise.resolve([] as Row[]),
   ]);
   for (const r of [mt, pe]) if (r.error) throw fromPostgrest(r.error);
   const dl = { data: dlRows };
@@ -707,6 +753,43 @@ export async function buildCalendarFeed(
       detail: ns(r.agenda),
       done: s(r.status) === "held",
       meetingStatus: s(r.status),
+    });
+  }
+
+  // A booking through the counselor's public link shows as a meeting "<type> with <name>", with no student
+  // (`publicBooking: true`: it isn't a `meetings` row, so the app doesn't open it with /meetings/:id).
+  const googleBooked = publicRows.some((r) => r.calendar_provider === "google" && Boolean(r.calendar_event_id));
+  const googleAddress =
+    googleBooked && ctx.googleAccountEmail ? await ctx.googleAccountEmail().catch(() => null) : null;
+  for (const r of publicRows) {
+    const startsAt = s(r.starts_at);
+    const date = dayIn(startsAt, q.tz);
+    if (date < q.from || date > q.to) continue;
+    const ref = s(r.id);
+    const contact = [s(r.email), ns(r.phone)].filter(Boolean).join(" · ");
+    items.push({
+      ...base,
+      id: `meeting:${ref}`,
+      kind: "meeting",
+      ref,
+      type: typeOf("meeting", ref),
+      title: `${s(r.type_name)} with ${s(r.name)}`,
+      date,
+      startsAt,
+      endsAt: ns(r.ends_at),
+      allDay: false,
+      studentId: null,
+      attendeeIds: [],
+      detail: [contact, ns(r.note)].filter(Boolean).join("\n\n") || null,
+      done: false,
+      meetingStatus: s(r.status),
+      publicBooking: true,
+      ...(ctx.googleAccountEmail
+        ? {
+            htmlLink:
+              r.calendar_provider === "google" ? googleEventHtmlLink(ns(r.calendar_event_id), googleAddress) : null,
+          }
+        : {}),
     });
   }
 
