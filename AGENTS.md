@@ -92,6 +92,7 @@ src/
 │   ├── translate.ts       # Translate: the prompts, the checks on the model's answer (links and addresses kept exactly), looksEnglish, TRANSLATE_FAKE
 │   ├── inboundTranslate.ts # a family's reply in English, written on its row by the webhooks; the retry sweep on the dispatch cron
 │   ├── twilioNumbers.ts   # search/buy/release a consultant's own Twilio number
+│   ├── collegeMatch.ts    # which catalog school a research link/file is about: host, admissions domains, path, page title
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
@@ -3196,6 +3197,16 @@ answer an empty or overlong one. `POST /files/links` answers a failed read's cod
 `url` with `normalizeLink` (no fetch) and refuses a link whose path names a file
 (`fileKindOf`: PDF, Word, images…; "use Add a file") **before** making a folder, and answers
 `url` as it will be stored. Tests: `test/unit/links.test.ts`.
+
+**Which school a research link is filed under** (`lib/collegeMatch.ts`, `POST /colleges/research/folder`):
+the link's host first (the school's catalog `website` or any subdomain of it, by whole labels; else a known
+admissions site off the school's domain, `ADMISSIONS_DOMAINS`, e.g. `mitadmissions.org` → `mit.edu`, keyed by
+main domain so it finds the same school in every environment), then a name or alias in the path's words, and
+only when those find nothing the page's `<title>` (`fetchPageMeta`, at most 6 seconds, a failure is no title).
+Careful by design: whole words, longest match wins ("Penn State" over "Penn"), a tie between two schools is
+General, ordinary-word aliases ("Cal", "Union", "State") never match alone, and in a title an acronym or
+one-word alias matches only as written ("MIT", not "mit"). Add an entry to `ADMISSIONS_DOMAINS` only for a
+site the school itself runs, not a system portal or a blog. Tests: `test/unit/college-match.test.ts`.
 
 ### Connected apps (Google / Microsoft OAuth)
 
