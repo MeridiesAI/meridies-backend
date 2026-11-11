@@ -297,3 +297,104 @@ export function hintOf(e: { hint?: string | null } | null | undefined): string |
   const h = (e?.hint ?? "").trim();
   return /^[a-z_]{2,40}$/.test(h) ? h : null;
 }
+
+// ---- Google (or any OAuth) sign-in on the parent path -------------------------------------------------------------
+
+/** An address as the refusal shows it: "m***@gmail.com". Never the whole local part. */
+export function maskEmail(email: string | null | undefined): string {
+  const e = (email ?? "").trim().toLowerCase();
+  const at = e.lastIndexOf("@");
+  if (at < 1) return "that address";
+  return `${e[0]}***${e.slice(at)}`;
+}
+
+/** An account the parent path itself just made (a first Google sign-in, no role, nothing in it) is this young at most. */
+export const FRESH_ACCOUNT_MS = 15 * 60 * 1000;
+
+export type ClaimInput = {
+  /** The caller's profile as `authenticate` loaded it. */
+  role: string;
+  roleConfirmed: boolean;
+  counselorId: string | null;
+  firmId: string | null;
+  onboardingStep: number;
+  onboardingComplete: boolean;
+  /** The auth user's sign-in address and whether the provider verified it (Google's `email_verified`). */
+  authEmail: string | null;
+  emailVerified: boolean;
+  createdAt: string | null;
+  /** Whether an invitation came back from the round trip, and what the database says about it. */
+  hasToken: boolean;
+  preview: { valid: boolean; reason: string | null; email: string | null; hasAccount: boolean } | null;
+  now: number;
+};
+
+export type ClaimDecision =
+  | { kind: "parent" }
+  | { kind: "redeem" }
+  | { kind: "refuse"; status: number; code: string; message: string; maskedEmail?: string; deleteFresh: boolean };
+
+/**
+ * The sign-in just made a brand-new account with no role (handle_new_user's student, unconfirmed) and nothing in it:
+ * the parent path may take it back rather than leave a stray account that would later be onboarded as a student.
+ */
+export function isFreshAccount(i: Pick<ClaimInput, "role" | "roleConfirmed" | "counselorId" | "firmId" | "onboardingStep" | "onboardingComplete" | "createdAt" | "now">): boolean {
+  const made = i.createdAt ? Date.parse(i.createdAt) : Number.NaN;
+  return (
+    i.role === "student" &&
+    !i.roleConfirmed &&
+    !i.counselorId &&
+    !i.firmId &&
+    !i.onboardingComplete &&
+    i.onboardingStep === 0 &&
+    Number.isFinite(made) &&
+    i.now - made >= 0 &&
+    i.now - made <= FRESH_ACCOUNT_MS
+  );
+}
+
+/** The same sentence the email-and-password path gives an address that is a student's or counselor's sign-in. */
+export const EMAIL_TAKEN = "That address already has a Meridies account. Sign in with it, or ask for a different email.";
+
+/**
+ * What to do with a signed-in OAuth user arriving on the parent path. Pure; the caller does the reads and the writes.
+ * A parent goes to their view. With an invitation, the provider-verified address must equal the invited one
+ * (case-insensitive); then a role-less account is redeemed into a parent account, and a student's or counselor's
+ * account gets the password path's refusal. Anything refused leaves the invitation unused, and a fresh account the
+ * path itself made is taken back.
+ */
+export function claimDecision(i: ClaimInput): ClaimDecision {
+  if (i.role === "parent" && i.roleConfirmed) return { kind: "parent" };
+  const fresh = isFreshAccount(i);
+  if (!i.hasToken || !i.preview) {
+    return {
+      kind: "refuse",
+      status: 404,
+      code: "no_parent_account",
+      message: "There's no parent account for this Google address. A parent account starts from the invitation email your student's counselor sends.",
+      deleteFresh: fresh,
+    };
+  }
+  const p = i.preview;
+  if (!p.valid || !p.email) {
+    if (p.reason === "used" || p.hasAccount) return { kind: "refuse", status: 409, code: "invite_used", message: "This invitation has already been used. Log in instead.", deleteFresh: fresh };
+    if (p.reason === "expired" || p.reason === "removed") return { kind: "refuse", status: 410, code: `invite_${p.reason}`, message: "This invitation has run out. Ask your student's counselor to send a new one.", deleteFresh: fresh };
+    return { kind: "refuse", status: 404, code: "invite_invalid", message: "This invitation link isn't valid. Open it again from the email.", deleteFresh: fresh };
+  }
+  const invited = p.email.trim().toLowerCase();
+  if (!i.emailVerified || !i.authEmail || i.authEmail.trim().toLowerCase() !== invited) {
+    const masked = maskEmail(invited);
+    return {
+      kind: "refuse",
+      status: 409,
+      code: "invite_email_mismatch",
+      message: `This invite was sent to ${masked}. Sign in with that Google account, or use email and password.`,
+      maskedEmail: masked,
+      deleteFresh: fresh,
+    };
+  }
+  if (i.roleConfirmed || i.counselorId || i.firmId) {
+    return { kind: "refuse", status: 409, code: "email_taken", message: EMAIL_TAKEN, deleteFresh: false };
+  }
+  return { kind: "redeem" };
+}

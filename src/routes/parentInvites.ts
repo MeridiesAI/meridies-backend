@@ -4,6 +4,7 @@
  *   POST /parent-invites            counselor: Invite to Meridies / Resend invite for one parent row  { guardianId }
  *   POST /parent-invites/preview    public: is this link good, and who is it from                     { token }
  *   POST /parent-invites/accept     public: make the parent account from a good link                  { token, fullName, password }
+ *   POST /parent-invites/claim      signed in (Google): redeem the invitation for this account, or say why not  { token? }
  *
  * The token travels in the body, never the path or the query, so no log line carries it. Before the migration the
  * three answer 503 `parent_accounts_unavailable` (the app: "isn't switched on yet").
@@ -15,7 +16,7 @@ import { HttpError } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { consumeRateLimit, enforceRateLimit, limit } from "../lib/limits.js";
 import { PASSWORD_MIN, isInviteToken } from "../lib/parentAccounts.js";
-import { counselorInvite, previewParentInvite, redeemParentInvite } from "../lib/parentInvites.js";
+import { claimParentInvite, counselorInvite, previewParentInvite, redeemParentInvite } from "../lib/parentInvites.js";
 import { anonClient } from "../lib/supabase.js";
 
 /** Invitations one parent row may be sent in a day (a resend or two, a typo fixed). */
@@ -73,4 +74,31 @@ export default async function parentInviteRoutes(app: FastifyInstance) {
     const out = await redeemParentInvite({ token: body.token, fullName: body.fullName, password: body.password, anon: anonClient(), log: request.log });
     return reply.code(201).send(out);
   });
+
+  /**
+   * Back from Google on the parent path (the app's /join-parent/google). The invitation came back in the app's
+   * httpOnly cookie and is posted here in the body. Open to every role (a parent signing in, a role-less first sign-in,
+   * a student or counselor who is refused) and to a pending counselor, so each gets its own answer. A refusal is a
+   * 4xx with `code` (and `maskedEmail` for a different Google account) and `signedOut` when the account the path
+   * just made was taken back; the invitation stays unused.
+   */
+  app.post(
+    "/claim",
+    {
+      preHandler: [app.authenticate, limit("parent-invites:claim", 20, 3600, "Too many tries. Try again in an hour.")],
+      config: { allowParent: true, allowPending: true },
+    },
+    async (request, reply) => {
+      const body = z.object({ token: token.optional() }).strict().parse(request.body ?? {});
+      const r = await claimParentInvite({
+        userId: request.auth.userId,
+        profile: request.profile,
+        token: body.token ?? null,
+        anon: anonClient(),
+        log: request.log,
+      });
+      if (r.outcome === "parent") return { outcome: "parent" };
+      return reply.code(r.status).send({ error: r.message, code: r.code, ...(r.maskedEmail ? { maskedEmail: r.maskedEmail } : {}), signedOut: r.signedOut });
+    }
+  );
 }
