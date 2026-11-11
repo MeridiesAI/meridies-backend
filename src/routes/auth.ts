@@ -44,7 +44,7 @@ const updateMeSchema = z
 const confirmRoleSchema = z.object({ role: z.enum(["student", "counselor"]) }).strict();
 
 export default async function authRoutes(app: FastifyInstance) {
-  app.get("/me", { preHandler: app.authenticate, config: { allowPending: true } }, async (request) => {
+  app.get("/me", { preHandler: app.authenticate, config: { allowPending: true, allowParent: true } }, async (request) => {
     const p = request.profile;
 
     // The blob and the counselor's name are two independent reads: side by side.

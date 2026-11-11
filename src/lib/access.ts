@@ -26,6 +26,14 @@ export function blockedAsPending(p: Approval, allowPending: boolean | undefined)
   return accessStatusOf(p) === "pending" && allowPending !== true;
 }
 
+/**
+ * A parent account (20261123000002) may use a route only when it sets `config: { allowParent: true }`: the Parent
+ * view, who-am-I, and the account's own export and deletion. Everything else is a counselor's or a student's.
+ */
+export function blockedAsParent(p: Pick<Approval, "role">, allowParent: boolean | undefined): boolean {
+  return p.role === "parent" && allowParent !== true;
+}
+
 const ID_CHUNK = 200;
 
 /**
