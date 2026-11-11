@@ -1093,6 +1093,25 @@ forget it.
   `REQUIRED_SCHEMA`. Tests: `test/unit/booking-write.test.ts`, `test/integration/booking-write.test.mjs` (needs the
   API and the run started with `BOOKING_BUSY_FIXTURE`; a counselor's grant row with no Google client configured is
   the failing provider).
+- **Student booking, part 3: the calendar for every mode, and a linked Google booking page** (`lib/bookingPage.ts`,
+  `createPlainCalendarEvent` in `lib/suiteApi.ts`, `createBookingPlainEvent` in `lib/bookingCalendar.ts`). An
+  in-person or phone booking now goes on the counselor's connected calendar too, as a plain event (no conference, no
+  attendees, `sendUpdates=none`; Google when connected with Calendar, else Outlook), stored in the same
+  `calendar_provider` / `calendar_event_id` pointer so a move or cancel follows it, with the same rollback as a Meet
+  type (a failed write releases the reservation, 503 `calendar_write_failed`); `POST /me/booking` answers
+  `calendar: "added" | "not-connected"`. A Meet/Teams booking with no calendar connected still books without a link,
+  and the counselor's notice now says so ("It has no Google Meet link yet: add one to the meeting..."). **The booking
+  page** is the counselor's own Google Calendar appointment schedule: `PUT /booking/settings { bookingPageUrl,
+  bookingPageMode }` (`""`/null removes it; `alongside` | `instead`), only `https://calendar.app.google/<id>` or
+  `https://calendar.google.com/calendar/...`, no credentials or port (`parseBookingPageUrl`; a stored value that
+  fails the rule is read as none). `GET /me/booking/types` adds `bookingPage: { url, counselorName }` whenever the
+  student's approved counselor has a settings row with a page, whatever `reason` says. `instead` makes Meridies'
+  own booking read as `paused` (`meridiesBookingOn`): no slots, books or moves, cancels still work. **Needs a
+  migration that is not in this repo yet** (two `booking_settings` columns with a CHECK; the SQL is in the PR): until
+  it is applied `bookingPageReady` (zero-row probe, ready kept, missing rechecked after 30 s) is false, no query names
+  the columns, `GET /booking/settings` says `bookingPageReady: false`, a PUT naming them is 503
+  `booking_page_unavailable`, and students see no link. Tests: `test/unit/booking-page.test.ts`, the plain-event
+  cases in `test/unit/booking-write.test.ts`.
 - **The practice system folders can't be deleted.** "Practice templates" and
   "Policy & research" are `is_system` folders keyed by `folders.system_key`,
   unique per owner. They can be renamed but not deleted or moved, because the

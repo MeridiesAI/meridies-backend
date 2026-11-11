@@ -13,7 +13,10 @@
  * calendar when the type is Meet/Teams and that calendar is connected
  * (lib/bookingCalendar.ts); a provider failure deletes the reservation and is
  * 503 `calendar_write_failed`. No calendar connected: booked without a link,
- * `joinUrl: null`, `conference: "not-connected"`. Then Meridies' own emailed
+ * `joinUrl: null`, `conference: "not-connected"`, and the counselor's notice
+ * says the meeting has no link yet. An in-person or phone type goes on the
+ * counselor's connected calendar too, as a plain event (Google first, then
+ * Outlook; `calendar: "added"`), with the same rollback on a failure. Then Meridies' own emailed
  * invite to the student (and the counselor's copy) and a notice to the
  * counselor. At most MAX_FUTURE_BOOKINGS future scheduled bookings each.
  *
@@ -95,6 +98,8 @@ export type NoticeInput = {
   byStudent: boolean;
   /** A cancel whose calendar delete failed: the event is still on this calendar. */
   calendarLeft?: SuiteProvider | null;
+  /** A Meet / Teams booking made with no calendar connected: it has no link yet. */
+  noLink?: "google-meet" | "teams" | null;
 };
 
 const when = (iso: string, tz: string) => whenShort(iso, tz).replace(/[  ]/g, " ");
@@ -112,7 +117,10 @@ export function noticeText(n: NoticeInput): { title: string; body: string } {
   const who = n.byStudent ? `${n.first} booked this in Meridies.` : `You set this meeting up; ${n.first} changed it in Meridies.`;
   const moved = n.action === "rescheduled" && n.previous ? `Moved from ${when(n.previous, n.timeZone)}. ${who}` : who;
   const left = n.calendarLeft ? ` It is still on your ${n.calendarLeft === "google" ? "Google" : "Outlook"} calendar; delete it there.` : "";
-  return { title: clip(title, 200), body: moved + left };
+  const noLink = n.noLink
+    ? ` It has no ${n.noLink === "teams" ? "Teams" : "Google Meet"} link yet: add one to the meeting in Meridies (${n.first} gets it in an updated invite), or connect your ${n.noLink === "teams" ? "Outlook" : "Google"} Calendar so bookings get one.`
+    : "";
+  return { title: clip(title, 200), body: moved + left + noLink };
 }
 
 /**
@@ -193,6 +201,8 @@ export type BookingIo = {
   calendar: {
     connected(provider: SuiteProvider): Promise<boolean>;
     create(meeting: Row, provider: SuiteProvider, input: CalendarEventInput): Promise<{ provider: SuiteProvider; eventId: string; joinUrl: string }>;
+    /** A plain event, for in person and phone. */
+    createPlain(meeting: Row, provider: SuiteProvider, input: CalendarEventInput): Promise<{ provider: SuiteProvider; eventId: string }>;
     move(meeting: Row, change: Partial<CalendarEventInput>): Promise<void>;
     remove(meeting: Row): Promise<void>;
   };
@@ -213,6 +223,8 @@ export type BookResult = {
   joinUrl: string | null;
   /** created: a Meet/Teams link on the counselor's calendar; not-connected: a conference type but no calendar; not-needed: in person or phone. */
   conference: "created" | "not-connected" | "not-needed";
+  /** On the counselor's connected calendar (any mode), or not (nothing connected). */
+  calendar: "added" | "not-connected";
 };
 
 export async function bookSlot(io: BookingIo, i: Who & { type: MeetingTypeDto; startsAt: string }): Promise<BookResult> {
@@ -230,7 +242,7 @@ export async function bookSlot(io: BookingIo, i: Who & { type: MeetingTypeDto; s
 
   const provider = bookingConferenceProvider(i.type.mode);
   let conference: BookResult["conference"] = "not-needed";
-  let event: { provider: SuiteProvider; eventId: string; joinUrl: string } | null = null;
+  let event: { provider: SuiteProvider; eventId: string; joinUrl: string | null } | null = null;
   if (provider) {
     conference = (await io.calendar.connected(provider)) ? "created" : "not-connected";
     if (conference === "created") {
@@ -241,11 +253,25 @@ export async function bookSlot(io: BookingIo, i: Who & { type: MeetingTypeDto; s
         throw calendarWriteFailed();
       }
     }
+  } else {
+    // In person or phone: no conference, but the meeting still belongs on the counselor's calendar.
+    const plainOn = (await io.calendar.connected("google")) ? "google" : (await io.calendar.connected("microsoft")) ? "microsoft" : null;
+    if (plainOn) {
+      try {
+        event = { ...(await io.calendar.createPlain(reserved, plainOn, { title, startsAt, endsAt, description: null })), joinUrl: null };
+      } catch {
+        await io.release(id);
+        throw calendarWriteFailed();
+      }
+    }
   }
 
   const values: Row = {};
   if (await io.invitesReady()) values.send_invites = true;
-  if (event) Object.assign(values, { calendar_provider: event.provider, calendar_event_id: event.eventId, join_url: event.joinUrl });
+  if (event) {
+    Object.assign(values, { calendar_provider: event.provider, calendar_event_id: event.eventId });
+    if (event.joinUrl) values.join_url = event.joinUrl;
+  }
   let saved = reserved;
   if (Object.keys(values).length > 0) {
     try {
@@ -260,9 +286,18 @@ export async function bookSlot(io: BookingIo, i: Who & { type: MeetingTypeDto; s
   const invites = await io.invites("booked", null, saved);
   await io.notify({
     action: "booked",
-    ...noticeText({ action: "booked", first, typeName: i.type.name, startsAt, previous: null, timeZone: i.settings.timeZone, byStudent: true }),
+    ...noticeText({
+      action: "booked",
+      first,
+      typeName: i.type.name,
+      startsAt,
+      previous: null,
+      timeZone: i.settings.timeZone,
+      byStudent: true,
+      noLink: conference === "not-connected" && (i.type.mode === "google-meet" || i.type.mode === "teams") ? i.type.mode : null,
+    }),
   });
-  return { meeting: saved, invites, joinUrl: (saved.join_url as string | null) ?? null, conference };
+  return { meeting: saved, invites, joinUrl: (saved.join_url as string | null) ?? null, conference, calendar: event ? "added" : "not-connected" };
 }
 
 type Change = Who & { meeting: Row; attendees: string[] };

@@ -17,7 +17,7 @@ import {
   studentChangeRefusal,
   type BookingIo,
 } from "../../src/lib/bookingWrite.js";
-import { createBookingProviderEvent, moveBookingProviderEvent, removeBookingProviderEvent } from "../../src/lib/bookingCalendar.js";
+import { createBookingPlainEvent, createBookingProviderEvent, moveBookingProviderEvent, removeBookingProviderEvent } from "../../src/lib/bookingCalendar.js";
 import { HttpError } from "../../src/lib/errors.js";
 import { __busy } from "../../src/lib/suiteApi.js";
 
@@ -172,6 +172,7 @@ function io(calls: Calls, over: Partial<BookingIo> = {}): BookingIo {
     calendar: {
       connected: async () => true,
       create: async () => (calls.push("cal:create"), { provider: "google", eventId: "evt1", joinUrl: "https://meet.google.com/abc" }),
+      createPlain: async (_m, provider) => (calls.push(`cal:plain:${provider}`), { provider, eventId: "evt-plain" }),
       move: async () => void calls.push("cal:move"),
       remove: async () => void calls.push("cal:remove"),
     },
@@ -198,8 +199,58 @@ test("booking: a conference type without a connected calendar books with no link
   assert.ok(!calls.includes("cal:create"));
   assert.equal(out.joinUrl, null);
   assert.equal(out.conference, "not-connected");
+  assert.equal(out.calendar, "not-connected");
   const inPerson = await bookSlot(io([]), { ...bookInput, type: { ...type, mode: "in-person" } });
   assert.equal(inPerson.conference, "not-needed");
+});
+
+test("booking: an in-person or phone type goes on the counselor's connected calendar as a plain event", async () => {
+  const calls: Calls = [];
+  const out = await bookSlot(io(calls), { ...bookInput, type: { ...type, mode: "in-person" } });
+  assert.deepEqual(calls, ["reserve", "cal:plain:google", "update:calendar_event_id,calendar_provider,send_invites", "invites:booked", "notify:booked"]);
+  assert.equal(out.calendar, "added");
+  assert.equal(out.joinUrl, null);
+  assert.equal(out.meeting.calendar_event_id, "evt-plain");
+
+  // Outlook only: there.
+  const ms: Calls = [];
+  const base = io(ms);
+  await bookSlot(io(ms, { calendar: { ...base.calendar, connected: async (p) => p === "microsoft" } }), { ...bookInput, type: { ...type, mode: "phone" } });
+  assert.ok(ms.includes("cal:plain:microsoft"));
+
+  // Nothing connected: booked, not on a calendar.
+  const none: Calls = [];
+  const base2 = io(none);
+  const off = await bookSlot(io(none, { calendar: { ...base2.calendar, connected: async () => false } }), { ...bookInput, type: { ...type, mode: "phone" } });
+  assert.equal(off.calendar, "not-connected");
+  assert.ok(!none.some((c) => c.startsWith("cal:")));
+
+  // A provider failure is the same rollback as a Meet type's.
+  const fail: Calls = [];
+  const base3 = io(fail);
+  const failing = io(fail, { calendar: { ...base3.calendar, createPlain: async () => { throw new HttpError(503, "down"); } } });
+  await assert.rejects(bookSlot(failing, { ...bookInput, type: { ...type, mode: "in-person" } }), (e: unknown) => e instanceof HttpError && e.code === "calendar_write_failed");
+  assert.deepEqual(fail, ["reserve", "release"]);
+});
+
+test("booking: a Meet booking with no calendar connected tells the counselor it has no link yet", async () => {
+  const notices: { body: string }[] = [];
+  const base = io([]);
+  await bookSlot(io([], { calendar: { ...base.calendar, connected: async () => false }, notify: async (n) => void notices.push(n) }), bookInput);
+  assert.match(notices[0]!.body, /no Google Meet link yet/);
+  const linked: { body: string }[] = [];
+  await bookSlot(io([], { notify: async (n) => void linked.push(n) }), bookInput);
+  assert.doesNotMatch(linked[0]!.body, /link yet/);
+});
+
+test("the counselor's Google booking page `instead` turns Meridies booking off for books and moves, never for cancels", () => {
+  const row = { enabled: true, time_zone: "America/New_York", weekly_hours: {}, booking_page_url: "https://calendar.app.google/abc123", booking_page_mode: "instead" };
+  const reason = (g: ReturnType<typeof bookingGate>) => (g.ok ? "ok" : g.reason);
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: row, requireEnabled: true })), "not_available");
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: row, requireEnabled: false })), "ok");
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: { ...row, booking_page_mode: "alongside" }, requireEnabled: true })), "ok");
+  // A stored value that isn't a Google page is ignored, so it can't switch booking off either.
+  assert.equal(reason(bookingGate({ approved: true, settingsRow: { ...row, booking_page_url: "https://evil.example/x" }, requireEnabled: true })), "ok");
 });
 
 test("booking: a provider failure after reserving releases the reservation and is 503 calendar_write_failed", async () => {
@@ -261,6 +312,7 @@ test("the booking provider helper uses the counselor's token, only for that coun
   const used: string[] = [];
   const deps = {
     create: async (owner: string) => (used.push(`create:${owner}`), { eventId: "e", joinUrl: "https://x" }),
+    createPlain: async (owner: string) => (used.push(`plain:${owner}`), { eventId: "p" }),
     update: async (owner: string) => void used.push(`update:${owner}`),
     remove: async (owner: string) => void used.push(`remove:${owner}`),
   };
@@ -280,6 +332,13 @@ test("the booking provider helper uses the counselor's token, only for that coun
   await assert.rejects(moveBookingProviderEvent({ ...existing, counselor_id: OTHER }, { counselorId: COUNSELOR, studentId: STUDENT }, { startsAt: day6(15) }, log, deps));
   await assert.rejects(removeBookingProviderEvent({ ...existing, student_id: OTHER }, { counselorId: COUNSELOR, studentId: STUDENT }, log, deps));
   assert.equal(used.length, 3, "nothing called for a mismatched meeting");
+
+  // The plain event (in person, phone) has the same guards.
+  assert.deepEqual(await createBookingPlainEvent(fresh, { counselorId: COUNSELOR, studentId: STUDENT }, "google", input, log, deps), { provider: "google", eventId: "p" });
+  await assert.rejects(createBookingPlainEvent(meetingRow({ counselor_id: OTHER }), { counselorId: COUNSELOR, studentId: STUDENT }, "google", input, log, deps));
+  await assert.rejects(createBookingPlainEvent(meetingRow({ booked_by_student: false }), { counselorId: COUNSELOR, studentId: STUDENT }, "google", input, log, deps));
+  await assert.rejects(createBookingPlainEvent(existing, { counselorId: COUNSELOR, studentId: STUDENT }, "google", input, log, deps));
+  assert.deepEqual(used.slice(3), [`plain:${COUNSELOR}`]);
 });
 
 // ---- polish round -------------------------------------------------------------------------------
