@@ -119,7 +119,10 @@ src/
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
 │   ├── myGuardians.ts     # a student's own parents (/me/guardians): validation, who may change what, the store
-│   ├── parentNotice.ts    # the email a parent gets when a student adds them: once per address, RESEND_PARENTS_FROM
+│   ├── parentNotice.ts    # the email a parent gets when a student adds them: once per address, RESEND_PARENTS_FROM, the account link
+│   ├── parentAccounts.ts  # parent accounts, pure: tokens, the invitation's words, the chip's states, the Parent view's shape
+│   ├── parentInvites.ts   # parent accounts, I/O: mint a link (caller's client), Invite / Resend, chip status, redeem (service role)
+│   ├── parentToCounselor.ts # a parent's "Message {counselor}" (Reply-To the parent, "From the family"); the parent's export
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
@@ -189,6 +192,8 @@ src/
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
 │   ├── myGuardians.ts     # /me/guardians the student's parents: list, add, edit, remove (their own additions)
+│   ├── parent.ts          # /parent       the read-only Parent view (parent accounts only): children, a child's view, message the counselor
+│   ├── parentInvites.ts   # /parent-invites  counselor Invite / Resend; public preview and accept (token in the body)
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
 │   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
@@ -745,8 +750,12 @@ forget it.
   migration: both fall back to the old columns on 42703), which the app shows as "Added by {first}".
   **The parent notice** (`lib/parentNotice.ts`): when a student adds a parent or changes their email, that address gets
   one short email: "{Student} added you as a parent on Meridies; {counselor} is their counselor and may email you
-  updates about {first}'s college applications; nothing to sign up for". No link of any kind (there is no parent
-  portal). Reply-To is the counselor's routed address (`replyAddressFor`, party parent) or their own email; with no
+  updates about {first}'s college applications", and, since parent accounts (`20261123000002`, "Parent accounts"
+  below), a **Create your parent account** button to a tokenized `/join-parent/<token>` link minted on the student's
+  own client (`mintParentInvite`), or **Open your parent view** when the address already has a parent account. Before
+  that migration, or for an address that already has a student or counselor account, it keeps the old words ("nothing
+  to sign up for") and no link, because then they are true. The delivery record never holds the link (`recordText`).
+  Reply-To is the counselor's routed address (`replyAddressFor`, party parent) or their own email; with no
   counselor yet the copy says one may write once the student connects, and there is no Reply-To. Same
   `RESEND_API_KEY`, its own sender `RESEND_PARENTS_FROM` (falls back to `INVITE_FROM_EMAIL`; must be on a domain
   verified in Resend), template `parent-added`, Resend tag `category=parent-added`, recorded in `message_deliveries`
@@ -758,11 +767,76 @@ forget it.
   already_sent | not_sent` in the answer). Tests: `test/unit/my-guardians.test.ts` (rules, the email's words, the
   routes on a memory store: validation, ownership, no double email, the rate limit), `test/integration/my-guardians.test.mjs`
   (RLS and the trigger straight through PostgREST, the counselor's views, the email once), `hardening.test.mjs`.
+- **Parent accounts: a read-only Parent view** (`20261123000002`; `lib/parentAccounts.ts`, `lib/parentInvites.ts`,
+  `lib/parentToCounselor.ts`, `routes/parent.ts`, `routes/parentInvites.ts`). **This replaces the old rule "there is no
+  parent portal and no parent login"** (founder, 2026-11-11): a parent or guardian may now have a Meridies account with
+  role `parent`, which reads a Parent view of their child and can write to the counselor, and nothing else. Still no
+  in-app inbox: the parent's message is an email to the counselor, the counselor's answer an email back.
+  **How a parent gets in.** Only through an emailed link: the student's parent notice (above) or the counselor's
+  **Invite to Meridies** / **Resend invite** (`POST /parent-invites { guardianId }`: counselor, edit access, 40 an
+  hour, 3 a day per parent row; template `parent-invite`, Reply-To the counselor's routed address). The token is 32
+  random bytes; `parent_invites` holds only its sha256, the student, the guardian row it was sent for, the address, who
+  sent it, when it expires (30 days) and when it was used. `parent_invite_create` runs on the CALLER's client and lets
+  the guardian's own student or a counselor who manages that student's parents (`can_manage_guardians`) mint one;
+  it refuses an address that already has a parent account (`has_account`: the email then says "Open your parent
+  view"), one that is a student's or counselor's sign-in (`other_account`, 409 `parent_email_taken`) and a parent the
+  counselor added and switched off (`guardian_off`). A new link for the same student and address revokes the unused
+  earlier ones. The join page posts the token in the BODY (`POST /parent-invites/preview`, `/accept`; 60 and 10 an hour
+  per address), never the path, so no log line carries it. `accept` re-reads the preview, creates the auth user for
+  exactly the invited address with `email_confirm: true` (the link reached only that inbox, so the address is proven
+  and production's confirmation email isn't needed), then `parent_invite_redeem` (EXECUTE to `service_role` only)
+  re-checks everything in one transaction (unused, unexpired, the guardian row still there for that student and
+  address, the auth user's confirmed email equal to the invitation's, a fresh profile) and sets `role = 'parent'`,
+  `role_confirmed`, `onboarding_complete` and `profiles.parent_email`; any refusal deletes the user it just made.
+  Redeeming uses up every unused invitation to that address. `handle_new_user` and `confirm_user_role` still accept
+  only student and counselor, so no client sign-up or OAuth role pick can make a parent.
+  **The link is live, by address.** A parent sees a student while a `guardians` row of that student has
+  `lower(btrim(email)) = parent_email` and either `alerts_enabled` or `added_by = student_id` (a student's own
+  addition still waiting for the counselor's Turn on: **viewing isn't messaging**, and the student chose to share their
+  own record; a parent the COUNSELOR added and switched off sees nothing, since off there may be deliberate)
+  (`private.parent_links`, `private.guardian_grants_view`). Nothing is copied, so: removing the guardian row (the
+  counselor, or the student for their own not-yet-switched-on addition), changing its email, or switching a
+  counselor-added parent off ends access on the next request; a caseload transfer changes nothing (the rows are the
+  student's; the view names the new counselor); a second child whose guardian row has the same address appears at once
+  (the app's kid switcher), whoever their counselor is. `parent_email` has no client grant and a unique index.
+  **What a parent reads.** Their database is their own `profiles` row and nothing else: `private.account_open` (the
+  restrictive `approval_gate` on every table and `storage.objects`) answers false for role `parent`, as for a pending
+  counselor. The API refuses a parent on every route that doesn't set `config: { allowParent: true }` (403
+  `parent_account`, `blockedAsParent` in `plugins/supabaseAuth.ts`; open: `GET /auth/me`, `/parent/*`, `GET
+  /account/export`, `DELETE /account`). Everything else comes from two SECURITY DEFINER functions on the parent's own
+  client: `parent_children()` (the students, their counselor while approved, whether the parent may write) and
+  `parent_student_view(student)` (42501, the API's 404 `not_linked`, unless linked right now). Its sections follow the
+  counselor's family-visibility switches (`parents_get_tasks | colleges | essays`; no prefs row = all on), so a switch
+  off removes the section in the database's answer: **tasks** the student can see (`visible_to_student`: title,
+  status, due date; open ones and the last 14 days' finished; the API marks overdue in the student's time zone),
+  **colleges** (name, round, status, deadline, decision date, binding; never notes, fit or fees), **essays** as kind,
+  school, status, word count and limit (never a title, prompt or text), and **meetings** ahead (no switch; time and
+  mode, and the title, place and link only when the counselor invited the parents). While the student's counselor is
+  not approved (pending, revoked, none yet) there are no sections at all. Never: notes, AI output or research, files,
+  financial aid, messages, other students, anything counselor-only. `GET /parent/children`, `GET
+  /parent/children/:id` (both `Cache-Control: no-store`).
+  **Message {counselor}** (`POST /parent/children/:id/message { body }`, 4,000 characters, 10 an hour and 30 a day;
+  `GET .../messages` lists what this parent sent): emailed to the student's approved counselor's sign-in address
+  with Reply-To the parent's `parent_email` (template `parent-to-counselor`), and kept as an `inbound_messages` row
+  (party `parent`, the guardian row, `provider_message_id` `app-parent:<parent id>:<uuid>`), so it lists on the
+  counselor's `GET /communication/:id/replies` ("From the family"). Only once the counselor has switched that parent
+  on (`alerts_enabled`): before that, 409 `parent_not_switched_on` (a parent the counselor hasn't accepted doesn't put
+  words in front of them as "the family").
+  **The counselor's side.** The composer's `family[]` and `/guardians/roster` rows carry `parentAccount { state:
+  none | invited | expired | joined | off, invitedAt, expiresAt, delivery }` (`parent_invite_status`: the newest
+  unrevoked invitation and its email's `message_deliveries` status; absent before the migration, which the app reads
+  as "not switched on": no Invite). **Data rights:** a parent's `GET /account/export` is `{ kind: "parent", profile,
+  children, messagesSent }` and nothing of the student's record; `DELETE /account` works as for anyone (the guardian
+  rows are the student's and stay; their messages stay on the counselor's page). **Deploy order:** either; not in
+  `REQUIRED_SCHEMA` (only the parent routes need it). Before the migration the parent routes and `/parent-invites`
+  answer 503 `parent_accounts_unavailable` and the notice keeps its old words. Tests: `test/unit/parent-accounts.test.ts`,
+  `test/integration/parent-accounts.test.mjs` (the whole flow through Mailpit, and every PostgREST path as the parent).
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
   belongs to, so a consultant can see every parent in one place and download it. **It stores, sends and changes
-  nothing and must not become any of those:** blasts and the composer derive who they reach from the roster at send
+  nothing and must not become any of those** (one exception, the founder's: a row's **Invite to Meridies**, the same
+  one-parent invitation as the Communication page's chip, `POST /parent-invites`; never a bulk or selected send): blasts and the composer derive who they reach from the roster at send
   time on purpose (see Email blasts above), so a curated "parents list" would be a second source of truth that goes
   stale and emails people who opted out. Don't add a send, a tag, a saved selection or an edit here; those belong on the
   student page, where the guardian row lives. **Read as the caller** (`request.db`, no service client), scoped by
@@ -3157,8 +3231,11 @@ nothing to report gets no draft. The job never sends. Tests:
 
 **What a student's parents receive** (`lib/familyVisibility.ts`, `GET`/`PUT /accountability/family-visibility`;
 migration `20261117000001` adds `student_alert_prefs.parents_get_tasks | parents_get_colleges | parents_get_essays`,
-booleans default true, either deploy order). There is no parent login or portal: a family only receives email and text, and these are the
-counselor's per-student switches for the kinds of information Meridies sends a family **on its own**. Every switch on is
+booleans default true, either deploy order). These are the counselor's per-student switches for the kinds of
+information Meridies sends a family **on its own**, and, since parent accounts (`20261123000002`, "Parent accounts"
+below; the founder reversed the earlier "no parent login or portal" rule on 2026-11-11), **also what the read-only
+Parent view shows**: a switch off removes that section from the parent's view, enforced in the database
+(`parent_student_view`), not hidden by the app. Every switch on is
 exactly what was sent before they existed, and the weekly report is then returned untouched. The kinds are only the ones
 something automatic sends: `tasks` (the weekly report's "Finished this week" and "Coming up or overdue", and the
 escalation sweep's parent alert, whose subject names the task), `colleges` (the weekly report's college deadlines, which
