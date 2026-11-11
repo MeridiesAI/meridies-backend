@@ -24,13 +24,20 @@
  *                  info session, tour, virtual visit or open house (students
  *                  see those), counselor for the rest (a conference, a
  *                  counselor workshop).
+ *   source_url     required, http(s); the organizer's page (or PDF) where
+ *                  someone read the name, dates and place. Often the same as
+ *                  `url`; differs when the dates are only on a schedule page.
+ *                  Stored as `hub_events.source_url`.
+ *   checked_on     required, YYYY-MM-DD, the day someone read source_url (not
+ *                  in the future). Stored as `last_verified_at` (midnight UTC).
  *
  * Loaded rows are source "csv". A row the discovery job found with the same
  * key becomes the curator's (the CSV wins); the job never overwrites it after.
  *
  * The natural key is (name, host, start_date), compared trimmed and ignoring
- * case: `hub_events` has no unique constraint to upsert on, and a URL is not
- * one (a recurring webinar shares one registration page across dates). The
+ * case (the same expression as the `hub_events_meridies_key` unique index on
+ * Meridies-wide rows); a URL is not a key (a recurring webinar shares one
+ * registration page across dates). The
  * loader matches only Meridies-wide rows, so a counselor's own listing is never
  * touched. Two rows of one file with the same key are an error.
  */
@@ -54,6 +61,10 @@ export type EventRow = {
   topics: (typeof EVENT_TOPICS)[number][];
   audience: Audience;
   source: "csv";
+  /** The organizer's page the dates were read on. */
+  source_url: string;
+  /** The day someone read it, as midnight UTC. */
+  last_verified_at: string;
 };
 
 /** Kinds students go to: a curator who leaves audience blank means them too. */
@@ -67,13 +78,20 @@ const opt = <T extends z.ZodTypeAny>(schema: T) => z.preprocess(blankToNull, sch
 
 /** A real calendar date, not just the shape (2026-02-30 is refused). */
 const isoDate = z
-  .string()
+  .string({ required_error: "is required" })
   .trim()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "use YYYY-MM-DD")
   .refine((s) => {
     const d = new Date(`${s}T00:00:00Z`);
     return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
   }, "isn't a real date");
+const httpUrl = z
+  .string({ required_error: "is required" })
+  .trim()
+  .min(1, "is required")
+  .max(2000)
+  .url("isn't a URL")
+  .refine((u) => /^https?:\/\//i.test(u), "must be http(s)");
 const clock = z
   .string()
   .trim()
@@ -90,17 +108,15 @@ const csvRow = z
     end_time: opt(clock),
     time_zone: opt(z.string().trim().max(64).refine(isTimeZone, "isn't a recognised time zone")),
     place: opt(z.string().trim().min(1).max(200)),
-    url: z
-      .string()
-      .trim()
-      .max(2000)
-      .url("isn't a URL")
-      .refine((u) => /^https?:\/\//i.test(u), "must be http(s)"),
+    url: httpUrl,
     description: opt(z.string().trim().max(1000)),
     college_unitid: opt(z.coerce.number().int().positive("isn't an IPEDS unitid")),
     photo_key: opt(z.preprocess((v) => (typeof v === "string" ? v.trim().toLowerCase() : v), z.enum(PHOTO_KEYS))),
     topics: opt(z.string()),
     audience: opt(z.preprocess((v) => (typeof v === "string" ? v.trim().toLowerCase() : v), z.enum(AUDIENCES))),
+    // Where the row's facts come from: no source, no listing.
+    source_url: httpUrl,
+    checked_on: isoDate,
   })
   .passthrough();
 
@@ -132,6 +148,7 @@ export function mapEventRow(raw: Record<string, string>, line: number): { out: M
   if (r.start_time && r.end_time && !r.end_date && r.end_time <= r.start_time) {
     errors.push("end_time: has to be after start_time on a one-day event");
   }
+  if (r.checked_on > new Date().toISOString().slice(0, 10)) errors.push("checked_on: is in the future");
   if (errors.length) return { out: null, errors: errors.map((e) => `line ${line}: ${e}`) };
 
   return {
@@ -155,6 +172,8 @@ export function mapEventRow(raw: Record<string, string>, line: number): { out: M
         topics,
         audience: r.audience ?? (STUDENT_FACING.has(r.kind) ? "everyone" : "counselor"),
         source: "csv",
+        source_url: r.source_url,
+        last_verified_at: `${r.checked_on}T00:00:00Z`,
       },
     },
     errors: [],
