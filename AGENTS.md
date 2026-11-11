@@ -101,6 +101,7 @@ src/
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── branding.ts        # logo/banner/accent: scope, the branding bucket's URL and path rules, image sniffing
+│   ├── studentAvatar.ts   # a student's photo: object path, the `storage:` reference, batch-signed read URLs, cleanup
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
@@ -152,6 +153,7 @@ src/
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
 │   ├── branding.ts        # /branding     logo, banner, accent colour (firm or solo); signed image uploads
+│   ├── studentAvatar.ts   # /students/:id/avatar   a student's profile picture: signed upload, save, remove
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
 │   ├── opportunities.ts, ai.ts, chat.ts
@@ -1429,6 +1431,27 @@ and firm branding reads and saves as before. **Not verified:** real Supabase Sto
 bucket with no policy were tested on the local stack only). Known limits: an upload that is never saved stays in the
 bucket until the next upload URL for that folder cleans it; old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
 `test/unit/branding.test.ts`, `test/integration/branding.test.mjs`.
+### Student profile pictures (no migration; `lib/studentAvatar.ts`, `routes/studentAvatar.ts`)
+
+The student (their own) or their **primary** counselor sets or removes a student's photo; a collaborator, even with
+write access, gets 403 (`profiles`' update policy is the primary counselor's, and the write runs on the caller's own
+client). `POST /students/:id/avatar/upload-url` `{ contentType?: "image/jpeg", sizeBytes }` (≤ 5 MB, 20 an hour)
+answers `{ bucket, path, token, uploadUrl, expiresIn, maxBytes, contentType }`, minted with the service role (the
+private `student-banners` bucket's insert policy is student-self only). The path is `<student id>/avatar-<16 hex>.jpg`,
+named by the API; the app crops to a 512 px JPEG and PUTs the bytes to `uploadUrl`. `PUT /students/:id/avatar
+{ path: string | null }` (60 an hour) accepts only exactly that student's avatar shape (`isOwnAvatarPath`), reads the
+object back (missing: 400 "That photo hasn't finished uploading"; not a JPEG or over 5 MB: removed and 400), writes
+`profiles.avatar_url = 'storage:student-banners/<path>'` (`toAvatarRef`), removes the previous photo best effort, and
+answers `{ avatarUrl }`; null clears it. Before each new upload URL, that student's abandoned `avatar-*.jpg` uploads
+(older than two hours, not the saved one) are removed, and 5 unsaved ones answer 429 `avatar_folder_full`; the banner
+in the same folder is never touched. **Reads:** `avatar_url` is never returned raw. `toMeridiesUser` defaults to
+`unsignedAvatarUrl` (an https URL, e.g. Google's, unchanged; anything else null); `GET /students`, `GET`/`PATCH
+/students/:id` and `GET`/`PATCH /auth/me` sign stored references in one `createSignedUrls` batch (1 hour,
+`signAvatarUrls`) for the rows their own RLS query returned, and only when the reference's folder is the row's own id
+(a student can write any string to their own `avatar_url` through PostgREST). `GET /students/:id` and `GET /auth/me`
+add `avatarEditable`. Without the service key or the bucket the routes answer 503 `avatar_unavailable` and reads show no
+photo. Tests: `test/unit/student-avatar.test.ts`.
+
 ### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
 
 **More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's

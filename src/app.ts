@@ -53,6 +53,7 @@ import importRoutes from "./routes/imports.js";
 import rosterRoutes from "./routes/roster.js";
 import studentRoutes from "./routes/students.js";
 import aiContextRoutes from "./routes/aiContext.js";
+import studentAvatarRoutes from "./routes/studentAvatar.js";
 import researchRoutes from "./routes/research.js";
 import taskRoutes from "./routes/tasks.js";
 // v10 sync imports: foundations
@@ -177,6 +178,7 @@ export function buildApp() {
   app.register(inviteRoutes, { prefix: "/invites" });
   app.register(studentRoutes, { prefix: "/students" });
   app.register(aiContextRoutes, { prefix: "/students" });
+  app.register(studentAvatarRoutes, { prefix: "/students" });
   // Absolute paths (/students/:id/research/:feature, /recommendations/:id/...): no prefix.
   app.register(researchRoutes);
   app.register(deadlineRoutes, { prefix: "/deadlines" });
