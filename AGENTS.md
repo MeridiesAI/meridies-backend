@@ -82,6 +82,7 @@ src/
 │   ├── bookingCalendar.ts # student booking: the ONE provider call with the counselor's token (see below)
 │   ├── publicBooking.ts   # the public booking link: slug, which links answer, book (honeypot, caps, rollback), the follow-ups' words
 │   ├── publicBookingStore.ts # the public booking link's migration probe and the busy time its bookings add
+│   ├── publicBookingCancel.ts # a counselor cancels a public-link booking: rules, write order, the CANCEL email (injected I/O)
 │   ├── studentMessages.ts # Communication composer: frozen recipients, gated delivery
 │   ├── parentCopy.ts      # what a parent is told (email + text wording), who is reachable; pure
 │   ├── replyRouting.ts    # the r-<token>@REPLY_DOMAIN Reply-To for a (counselor, family member); never throws
@@ -208,7 +209,7 @@ src/
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
 │   ├── calendar.ts        # /calendar     feed, event types, practice events
 │   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
-│   ├── booking.ts         # /booking      a counselor's booking settings and meeting types
+│   ├── booking.ts         # /booking      a counselor's booking settings and meeting types; read/cancel a public-link booking
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
 │   ├── publicBooking.ts   # /public/book/:slug   public: a counselor's share link, its slots, book one (no account)
 │   ├── me.ts              # /me           the student view: overview, preferences, settings, polygon (read-only)
@@ -1208,8 +1209,21 @@ forget it.
   booking" link and nothing writes it yet. **The calendar feed**: the counselor's whole calendar (not one student's)
   carries each as kind `meeting`, `id` `meeting:<booking id>`, title "<type> with <name>", `studentId: null`,
   `publicBooking: true` (not a `meetings` row: the app mustn't open it with `/meetings/:id`); the subscribed iCal feed
-  says only "Meeting". **Not built**: a counselor route to cancel one (only PostgREST's status update, which emails
-  nobody), the booker's own cancel/reschedule link, public bookings in the data export. **Deploy order:** either; not
+  says only "Meeting". **The counselor cancels one** (`lib/publicBookingCancel.ts`, routes in `routes/booking.ts`, no migration):
+  `GET /booking/public/:id` -> `{ booking: { id, typeName, mode, name, email, phone, note, startsAt, endsAt, status,
+  joinUrl, calendarProvider, contactId, cancelledAt, createdAt } }` (the caller's own row on their own client, else 404
+  `booking_not_found`); `POST /booking/public/:id/cancel` (counselor only, 60 an hour) -> `{ booking, calendarRemoved }`:
+  a conditional `scheduled -> cancelled` on the caller's session (the `status` grant; the guard stamps `cancelled_at`;
+  a second or racing cancel is 409 `already_cancelled` and emails nobody), which frees the slot (everything counts
+  scheduled bookings only); then the event on the counselor's own calendar is deleted with **their own** token
+  (`deleteCalendarEvent`; best effort like a student's cancel: `calendarRemoved: false` when the provider failed, ids
+  logged, the pointer kept since a session writes only `status`). After the answer: the booker gets
+  `public-booking-cancellation` (Reply-To the counselor) with an .ics CANCEL for the original invite (same UID
+  `meeting-public-<id>@meridiesai.com`, SEQUENCE 1; the invite was 0), and a booking with `contact_id` gets a
+  `meeting` timeline entry "Cancelled <type> on <date>" in the counselor's booking zone (inserted on the caller's
+  session). Both answer 503 `public_booking_unavailable` before the migration. Tests:
+  `test/unit/public-booking-cancel.test.ts`, `test/integration/public-booking-cancel.test.mjs` (MAILPIT_URL for the
+  .ics). **Not built**: the booker's own cancel/reschedule link, public bookings in the data export. **Deploy order:** either; not
   in `REQUIRED_SCHEMA`. Until applied (`publicBookingReady`, zero-row probes, ready kept, missing rechecked after 30 s)
   the public routes and rotate answer 503 `public_booking_unavailable` (also without the service key), settings leave
   the two fields out, a PUT naming `publicBookingEnabled` is 503, and slots and the feed read no public bookings.
