@@ -3719,7 +3719,19 @@ column and tables.
   API splits one answer into text blocks at citation boundaries, so
   `parseCandidates` joins the blocks in order and gives each JSON candidate
   object the citations of every block that overlaps it; an object that overlaps
-  no citation is dropped. At most 8 candidates and 5 sources each. Colleges
+  no citation is dropped. Before the JSON is read, the model's own markup is
+  taken out of the joined text (`stripModelMarkupMapped`, spans mapped back to
+  the original): citation wrappers it wrote as text (`<cite index="3-1">…</cite>`,
+  or `<cite index=\"3-1\">` escaped inside a JSON string, which the API can't
+  turn into a citation), other stray XML-like tags and `[S1]` markers; the words
+  inside a tag stay. Bare quotes in such a tag used to break the object, so the
+  candidate was lost; escaped ones were stored and shown ("Cost: <cite …>There
+  is no application fee.</cite>"). `cleanText` applies the same rule to every
+  stored field (title, summary, why, deadline, cost, source titles), and
+  `20261122000031_research_strip_model_markup.sql` cleans rows stored before
+  (and the task or list row an accept made from them). `RESEARCH_FAKE`'s
+  `fixture:markup` focus returns candidates written that way. At most 8
+  candidates and 5 sources each. Colleges
   search the official-site allowlist (`researchDomains`); activities search the
   open web minus the blocklist.
 - **Before anything is stored** (`validatePicks`): a pick must name a real,

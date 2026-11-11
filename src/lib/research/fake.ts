@@ -34,12 +34,22 @@ export const FOCUS_LEAK = "fixture:leak-query";
 export const FOCUS_EMPTY = "fixture:empty";
 /** Candidates are found but the keeper drops every one (a blocked domain, a URL the run never saw): a run that lost them downstream. */
 export const FOCUS_ALL_DROPPED = "fixture:all-dropped";
+/**
+ * The good candidates arrive with the model's citation wrappers written into the JSON as text, the way a real run
+ * leaked them: escaped in one summary and cost (valid JSON, raw tags in the fields), bare in the other (broken JSON).
+ */
+export const FOCUS_MARKUP = "fixture:markup";
+
+const withMarkup = (r: Fixture, i: number): string =>
+  i % 2 === 0
+    ? JSON.stringify({ title: r.title, summary: `<cite index="${i}-1">${r.summary}</cite>`, deadline: r.deadline, cost: `<cite index="${i}-2">There is no application fee.</cite>` })
+    : `{"title":${JSON.stringify(r.title)},"summary":"<cite index="${i}-1">${r.summary}</cite> [S${i}]","deadline":${JSON.stringify(r.deadline ?? "")}}`;
 
 export function fakeResearch(feature: "college_list" | "activities", focus: string | null = null): ResearchResult {
   const all = feature === "college_list" ? COLLEGES : ACTIVITIES;
   const rows = focus === FOCUS_EMPTY ? [] : focus === FOCUS_ALL_DROPPED ? all.slice(0, 2) : all;
-  const parts = rows.map((r) => ({
-    text: JSON.stringify({ title: r.title, summary: r.summary, deadline: r.deadline, cost: r.cost }),
+  const parts = rows.map((r, i) => ({
+    text: focus === FOCUS_MARKUP ? withMarkup(r, i) : JSON.stringify({ title: r.title, summary: r.summary, deadline: r.deadline, cost: r.cost }),
     citations: [{ url: r.url, title: r.title, citedText: r.summary }],
   }));
   // Connective text with no citation: the parser must ignore it.
