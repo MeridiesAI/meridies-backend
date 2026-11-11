@@ -54,9 +54,45 @@ export function buildResearchQuestion(brief: ResearchBrief): string {
 
 const CONTROL = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
 
-/** Control characters become spaces, runs of whitespace collapse, ends trimmed. */
+/**
+ * Markup the research model sometimes writes into its answer as plain text: citation wrappers it meant as real
+ * citations (`<cite index="3-1">...</cite>`, or `<cite index=\"3-1\">` when it escaped the quotes inside a JSON
+ * string, which the API then can't turn into a citation), any other stray XML-like tag, and `[S1]`-style source
+ * markers. The words inside a tag are kept; only the tags and markers go. A tag is a `<`, a letter, and no `<` or `>`
+ * before its `>`, so "<5%" or "a < b" is left alone.
+ */
+const MODEL_MARKUP = /<\/?[A-Za-z][\w:.-]*(?:\s[^<>]*)?\/?>|[ \t]?\[S\d+(?:\s*[,-]\s*S?\d+)*\]/g;
+
+/** `text` without model markup (above). Whitespace is left for the caller to tidy. */
+export function stripModelMarkup(text: string): string {
+  return text.replace(MODEL_MARKUP, "");
+}
+
+/**
+ * `stripModelMarkup` that also says, for every character it kept, where that character was in `text` (`at[i]`, with
+ * `at[out.length] = text.length`), so a span found in the clean text can be mapped back onto the original (the
+ * citation spans in `parseCandidatesCounted` are measured on the original).
+ */
+export function stripModelMarkupMapped(text: string): { out: string; at: number[] } {
+  let out = "";
+  const at: number[] = [];
+  let last = 0;
+  const keep = (from: number, to: number) => {
+    out += text.slice(from, to);
+    for (let k = from; k < to; k++) at.push(k);
+  };
+  for (const m of text.matchAll(MODEL_MARKUP)) {
+    keep(last, m.index);
+    last = m.index + m[0].length;
+  }
+  keep(last, text.length);
+  at.push(text.length);
+  return { out, at };
+}
+
+/** Model markup removed, control characters become spaces, runs of whitespace collapse, ends trimmed. */
 export function cleanText(s: unknown): string {
-  return typeof s === "string" ? s.replace(CONTROL, " ").replace(/\s+/g, " ").trim() : "";
+  return typeof s === "string" ? stripModelMarkup(s).replace(CONTROL, " ").replace(/\s+/g, " ").trim() : "";
 }
 
 /** A plain short string, or undefined when it is empty or over the cap (never cut: a clipped date misleads). */
@@ -131,7 +167,11 @@ export function parseCandidatesCounted(
   const out: ResearchCandidate[] = [];
   let recovered = 0;
   const titles = new Set<string>();
-  const found = jsonObjectsWithSpans(full);
+  // Leaked citation tags are taken out before the JSON is read: `<cite index="1-2">` with bare quotes inside a JSON
+  // string breaks the object, which then never became a candidate. Spans are mapped back to the original text, where
+  // the citation spans were measured.
+  const clean = stripModelMarkupMapped(full);
+  const found = jsonObjectsWithSpans(clean.out).map((f) => ({ ...f, start: clean.at[f.start]!, end: clean.at[f.end - 1]! + 1 }));
   for (const { value: o, start, end } of found) {
     const title = cleanText(o.title);
     if (!title || title.length > 300 || titles.has(title.toLowerCase())) continue;

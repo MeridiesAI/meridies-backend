@@ -3,9 +3,9 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
-import { FOCUS_UNCITED, fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
+import { FOCUS_MARKUP, FOCUS_UNCITED, fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
 import {
-  buildMatchPrompt, buildResearchQuestion, cleanText, dropStudentInfoInSuggestions, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
+  buildMatchPrompt, buildResearchQuestion, cleanText, dropStudentInfoInSuggestions, stripModelMarkup, stripModelMarkupMapped, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
   replaceWhysNamingStudent, sourcesByTitle, taskTextFor, validatePicks, MATCH_SCHEMA, MATCH_SYSTEM,
 } from "../../src/lib/research/prompt.js";
 import { expiryFor, realSeam, seamFor } from "../../src/lib/research/run.js";
@@ -65,6 +65,59 @@ test("parseCandidates drops over-long titles and fields, strips control characte
   assert.equal(out.length, 8);
   assert.equal(out[0]!.title, "P0");
   assert.equal(out[0]!.cost, undefined);
+});
+
+// Bug: a suggestion showed `Cost: <cite index=\"...\">There is no application fee.</cite>`. The model writes its
+// citation wrappers into the JSON as text; escaped they leak into the stored field, bare they break the object.
+test("parseCandidates: leaked cite tags are taken out, the words inside kept", () => {
+  const out = parseCandidates([
+    {
+      text: '{"title":"Illinois State University","summary":"<cite index=\\"3-1\\">A public university in Normal.</cite>","cost":"<cite index=\\"3-2,3-3\\">There is no application fee.</cite>"}',
+      citations: [{ url: "https://example.org/isu", title: "ISU" }],
+    },
+  ]);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.summary, "A public university in Normal.");
+  assert.equal(out[0]!.cost, "There is no application fee.");
+});
+test("parseCandidates: a cite tag with bare quotes no longer breaks the JSON object (it used to drop the school)", () => {
+  const text = '{"title":"Northern Illinois University","summary":"<cite index="4-1">Offers a strong engineering program.</cite>","deadline":"<cite index="4-2">August 1</cite>"}';
+  assert.throws(() => JSON.parse(text));
+  const out = parseCandidates([{ text, citations: [{ url: "https://example.org/niu", title: null }] }]);
+  assert.deepEqual(out.map((c) => [c.title, c.summary, c.deadline]), [["Northern Illinois University", "Offers a strong engineering program.", "August 1"]]);
+});
+test("parseCandidates: citation spans still line up after markup before them is removed", () => {
+  // The cited block is the second candidate only; the first one's markup must not shift it onto the first.
+  const out = parseCandidates([
+    { text: '<cite index="1-1">intro</cite> {"title":"First","summary":"<cite index=\\"1-2\\">a</cite>"} ', citations: [] },
+    { text: '{"title":"Second","summary":"b"}', citations: [{ url: "https://example.org/2", title: null }] },
+  ]);
+  assert.deepEqual(out.map((c) => c.title), ["Second"]);
+});
+test("stripModelMarkup: cite wrappers, stray tags and [S#] markers go; the words and plain '<' stay", () => {
+  assert.equal(cleanText('Cost: <cite index=\\"12-3\\">There is no application fee.</cite>'), "Cost: There is no application fee.");
+  assert.equal(cleanText("Strong <b>biology</b> program [S1] and labs [S2, S3]."), "Strong biology program and labs.");
+  assert.equal(cleanText("Admit rate <5% and a < b; fee $0 <br/>"), "Admit rate <5% and a < b; fee $0");
+  assert.equal(stripModelMarkup("no markup [2026]"), "no markup [2026]");
+  const m = stripModelMarkupMapped("a<x>b</x>c");
+  assert.equal(m.out, "abc");
+  assert.deepEqual(m.at, [0, 4, 9, 10]);
+});
+test("validatePicks and taskTextFor clean markup out of the match model's reason", () => {
+  const picks = validatePicks({ picks: [{ index: 0, why: "<cite index=\"1-1\">Strong fit</cite> for biology.", effort: "low" }] }, [
+    { title: "<cite>A</cite>", summary: "s", sources: [{ url: "https://example.org/a", title: null }], checkedAt: "2026-10-10T00:00:00.000Z" },
+  ]);
+  assert.equal(picks[0]!.why, "Strong fit for biology.");
+  assert.equal(picks[0]!.title, "A");
+  assert.equal(taskTextFor({ title: "P", why: "Go <cite index=\"2-1\">now</cite>.", sources: [] }).instructions.startsWith("Go now."), true);
+});
+
+test("the markup fixture: every candidate survives parsing, with no tags in any field", () => {
+  const { candidates, objects } = parseCandidatesCounted(fakeResearch("college_list", FOCUS_MARKUP).parts);
+  assert.equal(objects, 4);
+  assert.equal(candidates.length, 4);
+  for (const c of candidates) for (const v of [c.title, c.summary, c.deadline ?? "", c.cost ?? ""]) assert.doesNotMatch(v, /<|\[S\d/);
+  assert.equal(candidates.find((c) => c.title === "Alpha Example College")!.cost, "There is no application fee.");
 });
 
 // Bug 8: "Research colleges" returned 2 low-reach schools for a top-5% student.
