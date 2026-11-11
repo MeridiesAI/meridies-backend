@@ -600,9 +600,9 @@ forget it.
   "Needs a fix" (flag `gpa_over_scale`) against the file's scale, else the
   student's scale on record, and holds a typed fix to the same rule, because
   one refusal at commit would fail the whole save.
-- **Email blasts** (`routes/blasts.ts`, `lib/blasts.ts`, `20261030000001`). An audience is three filters that
+- **Email blasts** (`routes/blasts.ts`, `lib/blasts.ts`, `20261030000001`). An audience is four filters that
   combine (class year, a college on the students' lists, an application status; a college and a status are read
-  from the same list row), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
+  from the same list row; and financial aid status, below), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
   `students` (their sign-in email) or `parents` (guardians with an address and alerts on, one email per address,
   a student nobody can reach kept as a skipped row). `{first}`, `{student}` and `{me}` are filled per recipient (the
   guardian's first name for a parent; the student's first name, "Ana and Luis" when siblings share one parent address
@@ -631,6 +631,19 @@ forget it.
   who else the consultant works with; don't batch the sends. Tests:
   `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`, `test/integration/blasts-separate.test.mjs`
   (checks the real To/Cc/Bcc in Mailpit, for a send now and the cron).
+- **The blast's financial aid filter** (`aid` on the audience; no migration). `{ form: "fafsa" | "css", mode:
+  "include" | "exclude", statuses: [...] }`: the FAFSA's or the CSS Profile's status, exactly the two statuses the
+  Financial aid page shows (`student_aid_profiles.fafsa_status` / `css_status`), never anything from inside a form.
+  `none` is a student with no `student_aid_profiles` row (the page reads that as "Not started", the filter keeps it
+  apart, so "is none of Not started" doesn't silently keep or drop students nobody has looked at). A FAFSA filter
+  refuses a CSS-only status. It is stored in `email_blasts.filters.aid` only when set, so a blast without it is
+  stored as before, and the dispatcher re-reads it at send time like the other filters; a stored aid filter that no
+  longer parses ends the run `failed` (fail closed: never widened to everyone). `GET /blasts/audiences` adds
+  `aidStatuses: { fafsa, css }` with counts (`none` included); an app reads its absence as an older API and hides
+  the filter. **Deploy the backend first:** the audience schema is strict, so an older API refuses `aid` with a 400,
+  and the app must not resend without it (that would widen the audience). **Rollback caution:** an API older than
+  this ignores `filters.aid` when the cron sends a queued blast, so cancel queued aid-filtered blasts before rolling
+  back. Tests: `test/unit/blast-aid-filter.test.ts`, `test/integration/blasts-aid.test.mjs`.
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
