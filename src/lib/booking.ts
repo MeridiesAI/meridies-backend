@@ -25,6 +25,7 @@ import { busyReconnectNeeded, busyUnavailable, listBusy } from "./suiteApi.js";
 import { serviceClient } from "./supabase.js";
 import { SUITE_PROVIDERS, type SuiteProvider } from "./oauth.js";
 import { BOOKING_PAGE_COLUMNS, bookingPageReady, storedBookingPage, type BookingPageMode } from "./bookingPage.js";
+import { PUBLIC_SETTINGS_COLUMNS, publicBookingBusy, publicBookingReady } from "./publicBookingStore.js";
 
 type Row = Record<string, unknown>;
 
@@ -33,9 +34,14 @@ export type BookingMode = (typeof BOOKING_MODES)[number];
 
 export const SETTINGS_COLUMNS =
   "counselor_id, enabled, time_zone, weekly_hours, min_notice_hours, max_days_ahead, buffer_minutes, cancel_cutoff_hours, students_can_reschedule, created_at, updated_at";
-/** The settings columns to read: the booking-page pair only once its migration is in (lib/bookingPage.ts). */
-export function settingsColumns(pageReady: boolean): string {
-  return pageReady ? `${SETTINGS_COLUMNS}, ${BOOKING_PAGE_COLUMNS}` : SETTINGS_COLUMNS;
+/**
+ * The settings columns to read: the booking-page pair only once its migration is in (lib/bookingPage.ts), the
+ * public link's pair only once 20261121000001 is (lib/publicBookingStore.ts).
+ */
+export function settingsColumns(pageReady: boolean, publicReady = false): string {
+  return [SETTINGS_COLUMNS, pageReady ? BOOKING_PAGE_COLUMNS : null, publicReady ? PUBLIC_SETTINGS_COLUMNS : null]
+    .filter(Boolean)
+    .join(", ");
 }
 export const TYPE_COLUMNS = "id, counselor_id, name, duration_minutes, mode, active, sort_order, created_at, updated_at";
 
@@ -106,6 +112,13 @@ export type BookingSettingsDto = {
   bookingPageUrl: string | null;
   /** alongside: students see Meridies booking and the page; instead: only the page. */
   bookingPageMode: BookingPageMode;
+  /**
+   * The public booking link's path segment (/public/book/<slug>), or null (never saved settings). Only present
+   * once 20261121000001 is applied (`publicReady`); before that both public fields are left out.
+   */
+  publicSlug?: string | null;
+  /** Whether the public booking link takes bookings (default true). */
+  publicBookingEnabled?: boolean;
 };
 
 /**
@@ -118,11 +131,18 @@ export function meridiesBookingOn(row: Row): boolean {
   return !(page && page.mode === "instead");
 }
 
-export function toSettings(r: Row | null, pageReady = false): BookingSettingsDto {
+export function toSettings(r: Row | null, pageReady = false, publicReady = false): BookingSettingsDto {
   const row: Row = r ?? { ...DEFAULT_SETTINGS };
   const hours = row.weekly_hours && typeof row.weekly_hours === "object" && !Array.isArray(row.weekly_hours) ? row.weekly_hours : {};
   const page = storedBookingPage(row.booking_page_url, row.booking_page_mode);
+  const publicLink = publicReady
+    ? {
+        publicSlug: typeof row.public_slug === "string" && row.public_slug.length > 0 ? row.public_slug : null,
+        publicBookingEnabled: row.public_booking_enabled !== false,
+      }
+    : {};
   return {
+    ...publicLink,
     saved: Boolean(r),
     enabled: row.enabled === true,
     timeZone: str(row.time_zone) || DEFAULT_SETTINGS.time_zone,
@@ -308,9 +328,10 @@ const MAX_TYPE_MINUTES = 180;
 export type IgnoreMeeting = { id: string; startsAt: string; endsAt: string | null; onCalendar: boolean };
 
 /**
- * The counselor's scheduled Meridies meetings that could touch a slot starting in
+ * The counselor's scheduled Meridies meetings, and the bookings made through their public
+ * booking link (20261121000001, once applied), that could touch a slot starting in
  * [from, to) once widened by the buffer (a slot starting just before `to` runs up to
- * MAX_TYPE_MINUTES past it).
+ * MAX_TYPE_MINUTES past it). Students and the public link read the same busy time.
  */
 export async function meetingBusy(
   svc: SupabaseClient,
@@ -324,20 +345,24 @@ export async function meetingBusy(
   // A meeting is at most a day long in practice; reach back a day so one that started earlier still counts.
   const lo = new Date(Date.parse(from) - pad - 24 * 3_600_000).toISOString();
   const hi = new Date(Date.parse(to) + pad + MAX_TYPE_MINUTES * 60_000).toISOString();
-  const { data, error } = await svc
-    .from("meetings")
-    .select("id, starts_at, ends_at")
-    .eq("counselor_id", counselorId)
-    .eq("status", "scheduled")
-    .gte("starts_at", lo)
-    .lt("starts_at", hi)
-    .limit(2000);
+  const [{ data, error }, publicBusy] = await Promise.all([
+    svc
+      .from("meetings")
+      .select("id, starts_at, ends_at")
+      .eq("counselor_id", counselorId)
+      .eq("status", "scheduled")
+      .gte("starts_at", lo)
+      .lt("starts_at", hi)
+      .limit(2000),
+    publicBookingReady(svc).then((on) => (on ? publicBookingBusy(svc, counselorId, lo, hi) : [])),
+  ]);
   if (error) throw fromPostgrest(error);
-  return ((data ?? []) as Row[]).filter((m) => !ignoreId || str(m.id) !== ignoreId).map((m) => {
+  const meetings = ((data ?? []) as Row[]).filter((m) => !ignoreId || str(m.id) !== ignoreId).map((m) => {
     const start = Date.parse(str(m.starts_at));
     const end = m.ends_at ? Date.parse(str(m.ends_at)) : start + OPEN_ENDED_MEETING_MS;
     return { start: new Date(start).toISOString(), end: new Date(end).toISOString() };
   });
+  return [...meetings, ...publicBusy];
 }
 
 export type BusyFixtureEnv = { BOOKING_BUSY_FIXTURE?: string | undefined; NODE_ENV?: string | undefined };
