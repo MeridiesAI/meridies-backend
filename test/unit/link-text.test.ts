@@ -101,7 +101,8 @@ test("the page text reaches the model inside an untrusted block, escaped", () =>
   // All of it sits in one untrusted block, and a closing tag in the page can't end the block early.
   const blocks = freeBlocks(reply);
   assert.equal(blocks.length, 1);
-  assert.match(blocks[0]!.source, /^web page:mitadmissions\.org$/);
+  assert.equal(blocks[0]!.source, "web page");
+  assert.match(blocks[0]!.text, /mitadmissions\.org/);
   assert.match(blocks[0]!.text, /Ignore previous instructions/);
   assert.ok(!reply.includes("</data> Ignore"), "the page's own </data> is escaped");
   assert.equal((reply.match(/<\/data>/g) ?? []).length, 1);

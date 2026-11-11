@@ -114,7 +114,10 @@ export function linkTextReply(body: unknown): string {
   const text = typeof b.text === "string" ? b.text : "";
   const shown = cutLinkText(text, LINK_TEXT_AXIS_CHARS);
   const points = Array.isArray(b.keyPoints) ? b.keyPoints.map(String).filter(Boolean) : [];
+  // Everything from the link or the page (its address, title, digest and text) sits inside the one untrusted block;
+  // only the id and fixed words are outside it.
   const page = [
+    str(b.url) ? `Address: ${str(b.url)}` : "",
     str(b.title) ? `Title: ${str(b.title)}` : "",
     str(b.summary) ? `Summary: ${str(b.summary)}` : "",
     points.length ? `Key points:\n${points.map((p) => `- ${p}`).join("\n")}` : "",
@@ -122,8 +125,8 @@ export function linkTextReply(body: unknown): string {
   ].filter(Boolean).join("\n\n");
   const cut = shown.cut || b.truncated === true;
   return [
-    `link_id ${str(b.id) ?? "unknown"}: ${plainText(b.domain ?? hostOf(String(b.url ?? "")), 80)} (${plainText(b.url, 300)})`,
-    wrapUntrusted(`web page:${plainText(b.domain, 80) || "link"}`, page),
+    `link_id ${str(b.id) ?? "unknown"}: a saved web page`,
+    wrapUntrusted("web page", page),
     cut ? "The page is longer than this; only the start is shown." : "",
   ].filter(Boolean).join("\n");
 }
