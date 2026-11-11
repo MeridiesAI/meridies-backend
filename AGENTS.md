@@ -2871,6 +2871,20 @@ turned into text by `extractText` with the linear scanners in
 "<script" with no closing token made the old patterns run for minutes on the
 event loop every tenant shares (see "Text a user supplied" below).
 
+**Every refusal has a code and a sentence** (`LINK_ERRORS` in `lib/links.ts`, sent as
+`{ error, code }` with the 400): `link_empty`, `link_invalid`, `link_too_long` (over
+`LINK_MAX_CHARS`, 2,000), `link_scheme`, `link_credentials`, `link_port`, `link_private`,
+`link_dns`, `link_unreachable`, `link_timeout`, `link_redirects`, `link_not_found` (404/410),
+`link_refused` (401/403/429), `link_http_error`, `link_not_page` (not HTML/text: a PDF),
+`link_too_large`, `link_no_text`. `normalizeLink` takes what was pasted: trimmed, and a
+bare address ("bucknell.edu", "www.x.edu/apply") gets `https://` (`prepareLink`). The routes
+that take a link keep their zod length loose so these sentences, not "Invalid request",
+answer an empty or overlong one. `POST /files/links` answers a failed read's code as
+`errorCode` on that response only (not stored). `POST /colleges/research/folder` checks a
+`url` with `normalizeLink` (no fetch) and refuses a link whose path names a file
+(`fileKindOf`: PDF, Word, images…; "use Add a file") **before** making a folder, and answers
+`url` as it will be stored. Tests: `test/unit/links.test.ts`.
+
 ### Connected apps (Google / Microsoft OAuth)
 
 `GET /integrations/:provider/authorize` (counselor) returns the consent URL

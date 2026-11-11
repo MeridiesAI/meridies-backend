@@ -22,8 +22,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { runStructured } from "../lib/anthropic.js";
-import { badRequest, conflict, forbidden, fromPostgrest, notFound, publicMessage } from "../lib/errors.js";
-import { fetchReadablePage, normalizeLink } from "../lib/links.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, publicMessage } from "../lib/errors.js";
+import { fetchReadablePage, linkError, normalizeLink } from "../lib/links.js";
 import { logHost, serializeErr } from "../lib/requestLog.js";
 import { assertAiAllowed } from "../lib/practiceSettings.js";
 import { enforceQuota, limit } from "../lib/limits.js";
@@ -766,7 +766,8 @@ export default async function fileRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const b = z
         .object({
-          url: z.string().trim().min(4).max(2000),
+          // Loose here so normalizeLink can say what's wrong (empty, too long) in words.
+          url: z.string().max(20_000),
           studentId: z.string().uuid().nullable().optional(),
           folderId: z.string().uuid().nullable().optional(),
           title: z.string().trim().max(300).nullable().optional(),
@@ -940,14 +941,20 @@ async function readLink(request: FastifyRequest, row: Row) {
   // summary, and nothing about it reaches a model. It stays saved, as a plain link.
   if (row.available_to_llm === false) return skip(KEPT_OUT_MESSAGE);
 
-  const fail = async (message: string) => {
+  /**
+   * Marks the read failed. `errorCode` (a lib/links.ts reason such as `link_not_found`) is
+   * answered with this response only, not stored, so the caller that pasted the link can
+   * tell a dead or unsupported link from one worth a retry.
+   */
+  const fail = async (message: string, errorCode?: string) => {
     const { data } = await request.db
       .from("document_links")
       .update({ status: "failed", error: message.slice(0, 500) })
       .eq("id", id)
       .select("*")
       .maybeSingle();
-    return toDocumentLink((data ?? { ...row, status: "failed", error: message }) as Row);
+    const link = toDocumentLink((data ?? { ...row, status: "failed", error: message }) as Row);
+    return errorCode ? { ...link, errorCode } : link;
   };
 
   // The practice's "AI summaries" switch, before anything is fetched: a counselor's own
@@ -965,11 +972,12 @@ async function readLink(request: FastifyRequest, row: Row) {
     page = await fetchReadablePage(String(row.url));
   } catch (err) {
     request.log.warn({ host: logHost(row.url), err }, "link read failed");
-    return fail(publicMessage(err, "Couldn't read that link"));
+    return fail(publicMessage(err, "Couldn't read that link"), err instanceof HttpError ? err.code : undefined);
   }
 
   if (page.text.length < 200) {
-    return fail("That page had almost no readable text");
+    const noText = linkError("link_no_text");
+    return fail(noText.message, noText.code);
   }
 
   // Judge relevance against the student it was filed for, when there is one.
