@@ -25,7 +25,8 @@ import { runStructured } from "../lib/anthropic.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, publicMessage } from "../lib/errors.js";
 import { fetchReadablePage, linkError, normalizeLink } from "../lib/links.js";
 import { logHost, serializeErr } from "../lib/requestLog.js";
-import { assertAiAllowed } from "../lib/practiceSettings.js";
+import { assertAiAllowed, loadPracticeSettings } from "../lib/practiceSettings.js";
+import { digestUpdate, isMissingPageText, LINK_LIST_COLUMNS, loadLinkText } from "../lib/linkText.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { isRestrictedDocument } from "../lib/context/documentAi.js";
@@ -765,7 +766,8 @@ export default async function fileRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
-    let builder = request.db.from("document_links").select("*");
+    // Never the page text: up to 40 KB a row, and only AxIS's lookup reads it (GET /links/:id/text).
+    let builder = request.db.from("document_links").select(LINK_LIST_COLUMNS);
     if (q.studentId || request.profile.role === "student") {
       const student = await resolveStudentId(request, q.studentId, "view");
       builder = builder.eq("student_id", student);
@@ -846,6 +848,24 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (b.read === false) return reply.code(201).send(toDocumentLink(data as Row));
       const digested = await readLink(request, data as Row);
       return reply.code(201).send(digested);
+    }
+  );
+
+  /**
+   * The page text a read link keeps, for AxIS (the `files.read_link` lookup). Counselors only, on
+   * their own token (RLS decides which links they may open), and only while every switch that
+   * governs it is on (lib/linkText.ts): otherwise 409 with the reason in words, never the text.
+   */
+  app.get(
+    "/links/:id/text",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("links:text", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const { settings } = await loadPracticeSettings(request);
+      const found = await loadLinkText(request.db, id, settings);
+      if (found.status === "missing") throw notFound("That link isn't on file");
+      if (found.status === "refused") throw conflict(found.message);
+      return found.link;
     }
   );
 
@@ -1092,23 +1112,16 @@ async function readLink(request: FastifyRequest, row: Row) {
   // the link 'failed' would blame the page for it. Only onto a link still open to AI
   // (the condition is in the write, so a PATCH racing it can't be overwritten).
   {
-    const { data, error } = await request.db
+    const write = (withText: boolean) => request.db
       .from("document_links")
-      .update({
-        status: "read",
-        title: (row.title as string | null) ?? digest.title ?? page.title,
-        summary: digest.summary,
-        key_points: digest.keyPoints,
-        relevance: digest.relevance,
-        content_chars: page.chars,
-        extracted: { finalUrl: page.finalUrl, contentType: page.contentType, truncated: page.truncated },
-        error: null,
-        read_at: new Date().toISOString(),
-      })
+      .update(digestUpdate({ title: (row.title as string | null) ?? null, digest, page }, withText))
       .eq("id", id)
       .eq("available_to_llm", true)
       .select("*")
       .maybeSingle();
+    let { data, error } = await write(true);
+    // Code before the migration (20261123000001): the digest is stored as before, without the text.
+    if (error && isMissingPageText(error)) ({ data, error } = await write(false));
     if (error) throw fromPostgrest(error);
     if (!data) return skip(KEPT_OUT_MESSAGE);
     return toDocumentLink(data as Row);

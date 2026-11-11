@@ -13,6 +13,8 @@
  */
 import { z } from "zod";
 import { op, type OpGroup, type OpHelpers } from "../types.js";
+import { wrapUntrusted } from "../../../context/pack.js";
+import { cutLinkText, LINK_TEXT_AXIS_CHARS } from "../../../linkText.js";
 import { asArray, asRecord, changeLines, defined, idOf, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
 
 const DOC_KINDS = [
@@ -103,6 +105,29 @@ function aiLines(i: { available_to_llm?: boolean; ai_access?: (typeof AI_ACCESS)
   return out;
 }
 
+/**
+ * A saved page for the model: its address, then everything from the page itself (title, digest, text)
+ * inside one untrusted block, since all of it came from the web page or a model's reading of it.
+ */
+export function linkTextReply(body: unknown): string {
+  const b = asRecord(body);
+  const text = typeof b.text === "string" ? b.text : "";
+  const shown = cutLinkText(text, LINK_TEXT_AXIS_CHARS);
+  const points = Array.isArray(b.keyPoints) ? b.keyPoints.map(String).filter(Boolean) : [];
+  const page = [
+    str(b.title) ? `Title: ${str(b.title)}` : "",
+    str(b.summary) ? `Summary: ${str(b.summary)}` : "",
+    points.length ? `Key points:\n${points.map((p) => `- ${p}`).join("\n")}` : "",
+    `Page text:\n${shown.text}`,
+  ].filter(Boolean).join("\n\n");
+  const cut = shown.cut || b.truncated === true;
+  return [
+    `link_id ${str(b.id) ?? "unknown"}: ${plainText(b.domain ?? hostOf(String(b.url ?? "")), 80)} (${plainText(b.url, 300)})`,
+    wrapUntrusted(`web page:${plainText(b.domain, 80) || "link"}`, page),
+    cut ? "The page is longer than this; only the start is shown." : "",
+  ].filter(Boolean).join("\n");
+}
+
 const folderBody = (i: Record<string, unknown>) =>
   defined({ name: i.name, parentId: i.parent_id, description: i.description, color: i.color, sortOrder: i.sort_order });
 
@@ -158,7 +183,7 @@ export const files: OpGroup = {
       name: "files.list_links",
       kind: "read",
       outside: true,
-      title: "Saved links with ids, by student or folder.",
+      title: "Saved links with ids, by student or folder. Titles only: read what a page says with files.read_link.",
       doc: "{ student_id?, folder_id? }",
       input: z.object({ student_id: uuid.optional(), folder_id: uuid.optional() }).strict(),
       request: (i) => ({ method: "GET", url: `/files/links${qs({ studentId: i.student_id, folderId: i.folder_id })}` }),
@@ -169,6 +194,16 @@ export const files: OpGroup = {
             `link_id ${str(l.id)}: ${l.availableToLlm === false ? WITHHELD : `${untrusted(l.title || l.domain)}${l.domain ? ` (${untrusted(l.domain)})` : ""}`} [${str(l.status)}${l.availableToLlm === false ? ", kept out of AI" : ""}]${l.folderId ? ` in folder ${str(l.folderId)}` : ""}${l.studentId ? ` · student ${str(l.studentId)}` : ""}`,
           "No saved links."
         ),
+    }),
+    op({
+      name: "files.read_link",
+      kind: "read",
+      outside: true,
+      title: "Read a saved link's page: summary, key points and the page text (untrusted web content). Answer from saved links with it.",
+      doc: "{ link_id }",
+      input: z.object({ link_id: uuid }).strict(),
+      request: (i) => ({ method: "GET", url: `/files/links/${seg(i.link_id)}/text` }),
+      reply: (body) => linkTextReply(body),
     }),
     op({
       name: "files.create_folder",

@@ -51,6 +51,7 @@ src/
 │   ├── anthropicKeyCheck.ts # /health's key check: only a 401/403 marks the key bad, cached
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
+│   ├── linkText.ts        # a read link's page text for AxIS: stored with the digest, served under the AI switches
 │   ├── oauth.ts           # Google/Microsoft OAuth (code + PKCE), token refresh/revoke
 │   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
 │   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
@@ -3158,6 +3159,16 @@ answer an empty or overlong one. `POST /files/links` answers a failed read's cod
 `url` with `normalizeLink` (no fetch) and refuses a link whose path names a file
 (`fileKindOf`: PDF, Word, images…; "use Add a file") **before** making a folder, and answers
 `url` as it will be stored. Tests: `test/unit/links.test.ts`.
+
+**A read link keeps its page text for AxIS** (`lib/linkText.ts`, migration `20261123000001`,
+`document_links.page_text`, at most 40,000 characters). The read stores the extracted text with the
+digest (`digestUpdate`), only onto a link still open to AI; the keep-out trigger clears it with the
+summary. `GET /files/links` never selects it (`LINK_LIST_COLUMNS`). AxIS reads it through the
+`files.read_link` lookup (`GET /files/links/:id/text`, counselors, 120 a minute): served only while the
+link is "AI may read it", read, and the practice has both AI summaries and document reading on, else a
+409 in words; at most 12,000 characters, inside one untrusted `web page:<domain>` block, and the lookup
+is `outside` (changes after it wait for a click). Before the migration the read retries its write
+without the column and the route answers "read it again". Tests: `test/unit/link-text.test.ts`.
 
 ### Connected apps (Google / Microsoft OAuth)
 
