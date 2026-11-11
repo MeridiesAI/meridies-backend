@@ -32,6 +32,7 @@
 import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyRequest } from "fastify";
 import { fromPostgrest } from "./errors.js";
+import { googleEventHtmlLink } from "./calendarLink.js";
 import { publicBookingReady } from "./publicBookingStore.js";
 import type { Role } from "./serialize.js";
 
@@ -78,6 +79,11 @@ export type CalendarFeedItem = {
    * `meeting`, no student, `ref` the booking's id. Not a `meetings` row, so not editable through /meetings.
    */
   publicBooking?: boolean;
+  /**
+   * Public bookings only: the Google event's own page on the counselor's calendar (lib/calendarLink.ts), when the
+   * booking's event is on Google and the feed was built with `googleAccountEmail`. Absent otherwise.
+   */
+  htmlLink?: string | null;
 };
 
 export type EventTypeDto = {
@@ -187,6 +193,11 @@ export type FeedContext = {
    * batches of FEED_ID_CHUNK, so a big practice works.
    */
   caseload?: string[];
+  /**
+   * The owner's connected Google address, read only when a public booking has a Google event, for its `htmlLink`.
+   * The app's feed passes it; the subscribed iCal feed doesn't (it says only "Meeting").
+   */
+  googleAccountEmail?: () => Promise<string | null>;
 };
 
 /** Ids named in one `.in()` filter (a URL), so a caseload of any size is read in batches. */
@@ -413,7 +424,7 @@ async function loadPublicBookings(
   if (!(await publicBookingReady(db))) return [];
   let b = db
     .from("public_bookings")
-    .select("id, type_name, name, email, phone, note, starts_at, ends_at, status")
+    .select("id, type_name, name, email, phone, note, starts_at, ends_at, status, calendar_provider, calendar_event_id")
     .eq("counselor_id", counselorId)
     .gte("starts_at", fromInstant)
     .lt("starts_at", toInstant);
@@ -747,6 +758,9 @@ export async function buildCalendarFeed(
 
   // A booking through the counselor's public link shows as a meeting "<type> with <name>", with no student
   // (`publicBooking: true`: it isn't a `meetings` row, so the app doesn't open it with /meetings/:id).
+  const googleBooked = publicRows.some((r) => r.calendar_provider === "google" && Boolean(r.calendar_event_id));
+  const googleAddress =
+    googleBooked && ctx.googleAccountEmail ? await ctx.googleAccountEmail().catch(() => null) : null;
   for (const r of publicRows) {
     const startsAt = s(r.starts_at);
     const date = dayIn(startsAt, q.tz);
@@ -770,6 +784,12 @@ export async function buildCalendarFeed(
       done: false,
       meetingStatus: s(r.status),
       publicBooking: true,
+      ...(ctx.googleAccountEmail
+        ? {
+            htmlLink:
+              r.calendar_provider === "google" ? googleEventHtmlLink(ns(r.calendar_event_id), googleAddress) : null,
+          }
+        : {}),
     });
   }
 

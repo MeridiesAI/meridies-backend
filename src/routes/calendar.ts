@@ -32,6 +32,7 @@ import {
 import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { fullCaseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { connectedAccountEmail } from "../lib/oauth.js";
 
 type Row = Record<string, unknown>;
 
@@ -123,7 +124,8 @@ export default async function calendarRoutes(app: FastifyInstance) {
       const role = request.profile.role;
       const whole = role === "counselor" && !studentId;
       const caseload = whole ? await fullCaseloadStudentIds(request.db, request.auth.userId) : undefined;
-      return buildCalendarFeed({ db: request.db, ownerId: request.auth.userId, role, caseload }, {
+      const googleAccountEmail = () => connectedAccountEmail(request.auth.userId, "google");
+      return buildCalendarFeed({ db: request.db, ownerId: request.auth.userId, role, caseload, googleAccountEmail }, {
         from: q.from,
         to: q.to,
         tz: q.tz ?? profileZone(request.profile.timezone) ?? "UTC",
