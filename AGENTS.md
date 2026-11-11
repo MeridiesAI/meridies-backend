@@ -2959,8 +2959,8 @@ nothing to report gets no draft. The job never sends. Tests:
 `test/unit/weekly-digest.test.ts`, `test/integration/weekly-digest.test.mjs`.
 
 **What a student's parents receive** (`lib/familyVisibility.ts`, `GET`/`PUT /accountability/family-visibility`;
-needs the migration that adds `student_alert_prefs.parents_get_tasks | parents_get_colleges | parents_get_essays`,
-booleans default true). There is no parent login or portal: a family only receives email and text, and these are the
+migration `20261117000001` adds `student_alert_prefs.parents_get_tasks | parents_get_colleges | parents_get_essays`,
+booleans default true, either deploy order). There is no parent login or portal: a family only receives email and text, and these are the
 counselor's per-student switches for the kinds of information Meridies sends a family **on its own**. Every switch on is
 exactly what was sent before they existed, and the weekly report is then returned untouched. The kinds are only the ones
 something automatic sends: `tasks` (the weekly report's "Finished this week" and "Coming up or overdue", and the
@@ -2971,7 +2971,8 @@ that needs it. Not filtered, because the counselor writes or decides them at tha
 `familyVisibility` as a reminder; null when unreadable, it never fails the composer), a hand-sent parent alert, a blast,
 a meeting that invites the guardians, and any non-weekly family report (written or edited by the counselor).
 Enforced at send time, failing closed (`loadFamilyVisibility` throws on a read error; "column not found" alone means
-not switched on yet: `available: false`, everything on, and the PUT answers 503 `family_visibility_unavailable`):
+not switched on yet, i.e. a database without `20261117000001`: `available: false`, everything on, and the PUT answers 503
+`family_visibility_unavailable`):
 `GET /reports/family/:id/recipients` and `approve-send` filter a weekly report's stored text section by section
 (`DIGEST_HEADERS` in `weeklyDigestContent.ts`, shared with the builder so they can't drift), the summary's counts too
 (a summary of another shape is dropped and the text falls back to the filtered body); the preview answers
