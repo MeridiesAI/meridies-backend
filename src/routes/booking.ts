@@ -8,6 +8,11 @@
  *   PUT    /booking/settings        save any of them (weekly hours checked in full, zone must be IANA), and the
  *                                    Google Calendar booking page link (`bookingPageUrl`, `bookingPageMode`:
  *                                    lib/bookingPage.ts; 503 `booking_page_unavailable` before its migration)
+ *                                    Both also carry the public booking link (20261121000001, once applied):
+ *                                    `publicSlug` (made on the first read of a row without one) and
+ *                                    `publicBookingEnabled`, which PUT accepts (503 `public_booking_unavailable`
+ *                                    before the migration; GET then leaves both fields out)
+ *   POST   /booking/public-link/rotate  a new link (new suffix): { publicSlug }; the old one stops working
  *   GET    /booking/types           the counselor's meeting types, active or not
  *   POST   /booking/types           add one (name, 15-180 minutes, google-meet | teams | in-person | phone)
  *   PATCH  /booking/types/:id
@@ -16,7 +21,7 @@
  * Before the migration every route answers 503 `booking_unavailable`.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   BOOKING_MODES,
@@ -29,9 +34,12 @@ import {
 import { parseWeeklyHours } from "../lib/bookingSlots.js";
 import { BOOKING_PAGE_MODES, bookingPageReady, bookingPageUnavailable, parseBookingPageUrl } from "../lib/bookingPage.js";
 import { isTimeZone } from "../lib/calendarFeed.js";
-import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { isPublicSlug, writeSlug } from "../lib/publicBooking.js";
+import { publicBookingReady, publicBookingUnavailable } from "../lib/publicBookingStore.js";
+import { serviceClient } from "../lib/supabase.js";
 
 type Row = Record<string, unknown>;
 
@@ -50,6 +58,8 @@ const settingsBody = z
     /** The counselor's Google Calendar booking page (lib/bookingPage.ts); null or "" removes it. */
     bookingPageUrl: z.string().max(2000).nullable(),
     bookingPageMode: z.enum(BOOKING_PAGE_MODES),
+    /** The public booking link (lib/publicBooking.ts); 503 `public_booking_unavailable` before its migration. */
+    publicBookingEnabled: z.boolean(),
   })
   .partial()
   .strict();
@@ -69,17 +79,47 @@ const DUPLICATE_TYPE = "You already have a meeting type with that name";
 export default async function bookingRoutes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
 
+  /**
+   * A settings row that has no public link slug yet gets one (lib/publicBooking.ts writeSlug, service role: a
+   * user session can't write the column). Without the service key the slug stays null until a later read.
+   */
+  async function withSlug(request: FastifyRequest, row: Row | null, publicReady: boolean): Promise<Row | null> {
+    if (!row || !publicReady || isPublicSlug(row.public_slug)) return row;
+    const svc = serviceClient();
+    if (!svc) return row;
+    const slug = await writeSlug(svc, request.auth.userId, request.profile.full_name ?? null, { onlyIfMissing: true });
+    return { ...row, public_slug: slug };
+  }
+
   app.get("/settings", { preHandler: counselor }, async (request) => {
     await requireBookingReady(request.db);
-    const pageReady = await bookingPageReady(request.db);
+    const [pageReady, publicReady] = await Promise.all([bookingPageReady(request.db), publicBookingReady(request.db)]);
     const { data, error } = await request.db
       .from("booking_settings")
-      .select(settingsColumns(pageReady))
+      .select(settingsColumns(pageReady, publicReady))
       .eq("counselor_id", request.auth.userId)
       .maybeSingle();
     if (error) throw fromPostgrest(error);
-    return toSettings((data as unknown as Row | null) ?? null, pageReady);
+    const row = await withSlug(request, (data as unknown as Row | null) ?? null, publicReady);
+    return toSettings(row, pageReady, publicReady);
   });
+
+  /**
+   * POST /booking/public-link/rotate: a new suffix for the counselor's public booking link; the old link stops
+   * working at once. 409 `booking_not_set_up` before the first settings save (there is no link to rotate yet).
+   */
+  app.post(
+    "/public-link/rotate",
+    { preHandler: [...counselor, limit("booking:public-link:rotate", 10, 3600)] },
+    async (request) => {
+      await requireBookingReady(request.db);
+      const svc = serviceClient();
+      if (!svc || !(await publicBookingReady(request.db))) throw publicBookingUnavailable();
+      const publicSlug = await writeSlug(svc, request.auth.userId, request.profile.full_name ?? null, { onlyIfMissing: false });
+      if (!publicSlug) throw new HttpError(409, "Save your booking settings first", "booking_not_set_up");
+      return { publicSlug };
+    }
+  );
 
   app.put(
     "/settings",
@@ -88,11 +128,13 @@ export default async function bookingRoutes(app: FastifyInstance) {
       const b = settingsBody.parse(request.body ?? {});
       if (Object.keys(b).length === 0) throw badRequest("Nothing to change");
       await requireBookingReady(request.db);
-      const pageReady = await bookingPageReady(request.db);
+      const [pageReady, publicReady] = await Promise.all([bookingPageReady(request.db), publicBookingReady(request.db)]);
       const namesPage = b.bookingPageUrl !== undefined || b.bookingPageMode !== undefined;
       if (namesPage && !pageReady) throw bookingPageUnavailable();
+      if (b.publicBookingEnabled !== undefined && !publicReady) throw publicBookingUnavailable();
 
       const row: Row = { counselor_id: request.auth.userId };
+      if (b.publicBookingEnabled !== undefined) row.public_booking_enabled = b.publicBookingEnabled;
       if (b.bookingPageUrl !== undefined) {
         const raw = b.bookingPageUrl?.trim() ?? "";
         if (raw === "") row.booking_page_url = null;
@@ -131,10 +173,10 @@ export default async function bookingRoutes(app: FastifyInstance) {
       const { data, error } = await request.db
         .from("booking_settings")
         .upsert(row, { onConflict: "counselor_id" })
-        .select(settingsColumns(pageReady))
+        .select(settingsColumns(pageReady, publicReady))
         .single();
       if (error) throw fromPostgrest(error);
-      return toSettings(data as unknown as Row, pageReady);
+      return toSettings(await withSlug(request, data as unknown as Row, publicReady), pageReady, publicReady);
     }
   );
 
