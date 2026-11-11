@@ -114,6 +114,8 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
+│   ├── myGuardians.ts     # a student's own parents (/me/guardians): validation, who may change what, the store
+│   ├── parentNotice.ts    # the email a parent gets when a student adds them: once per address, RESEND_PARENTS_FROM
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
@@ -182,6 +184,7 @@ src/
 │   ├── meetingSummary.ts  # /ai/meeting-summary   a counselor's pasted notes -> a draft summary + action items (stores nothing)
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
+│   ├── myGuardians.ts     # /me/guardians the student's parents: list, add, edit, remove (their own additions)
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
 │   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
@@ -716,6 +719,41 @@ forget it.
   and the app must not resend without it (that would widen the audience). **Rollback caution:** an API older than
   this ignores `filters.aid` when the cron sends a queued blast, so cancel queued aid-filtered blasts before rolling
   back. Tests: `test/unit/blast-aid-filter.test.ts`, `test/integration/blasts-aid.test.mjs`.
+- **A student manages the parents they added** (`20261122000001`; `routes/myGuardians.ts`, `lib/myGuardians.ts`,
+  `lib/parentNotice.ts`). Onboarding's Parents step and the student's Settings › Parents call `GET/POST /me/guardians`
+  and `PATCH/DELETE /me/guardians/:id` (student-only, no student id taken). **The rows are `guardians`**, the same ones
+  the Communication page, Parent contacts, blasts and alerts read: nothing is copied, so a parent a student adds is on
+  every counselor screen at once. The migration adds `guardians.added_by` (stamped by the insert trigger from
+  `auth.uid()`, never from the client; null for older rows and service-role inserts; the update trigger never changes
+  it) and two student policies. **The product call of `20261007000006` stands:** a student's addition starts with
+  alerts off and only the counselor switches it on (`PATCH /accountability/guardians/:id {alerts_enabled}`; the app's
+  composer has **Turn on** on the chip). What a student may do, enforced by RLS + `guardians_student_update_guard` and
+  mirrored in the DTO's `editable` / `removable`: a parent they added and the counselor hasn't switched on, anything
+  (name, relationship, email, phone; remove); one the counselor switched on, the name and relationship only (an email
+  or phone change raises 42501, the API says 403 `guardian_contact_locked`; no delete); one the counselor added, or
+  with no `added_by`, nothing (403 `guardian_locked`). A student never changes `alerts_enabled`, `receives_reports`,
+  `preferred_channel`, `is_primary`, `student_id` or `added_by` (the trigger keeps the old values), so a student can
+  never redirect or silence where their counselor's alerts go. Body: `{ name (1-120), relationship: Mother | Father |
+  Guardian | Other, email (required, lowercased), phone? (7-15 digits) }`, strict. Up to 4 parents in all
+  (`guardians_full`), one address once per student (`guardian_exists`). Limits per student: list 120/min, add 12/hour,
+  edit 30/hour, remove 30/hour. 503 `guardians_unavailable` until the migration is applied (the app says "isn't
+  switched on yet"). The composer's `family[]` and `/guardians/roster` rows carry `addedByStudent` (absent before the
+  migration: both fall back to the old columns on 42703), which the app shows as "Added by {first}".
+  **The parent notice** (`lib/parentNotice.ts`): when a student adds a parent or changes their email, that address gets
+  one short email: "{Student} added you as a parent on Meridies; {counselor} is their counselor and may email you
+  updates about {first}'s college applications; nothing to sign up for". No link of any kind (there is no parent
+  portal). Reply-To is the counselor's routed address (`replyAddressFor`, party parent) or their own email; with no
+  counselor yet the copy says one may write once the student connects, and there is no Reply-To. Same
+  `RESEND_API_KEY`, its own sender `RESEND_PARENTS_FROM` (falls back to `INVITE_FROM_EMAIL`; must be on a domain
+  verified in Resend), template `parent-added`, Resend tag `category=parent-added`, recorded in `message_deliveries`
+  (`recipient_kind` guardian) so the delivery webhook tracks it. **Once per address per student:** any earlier
+  `parent-added` row to that address for this student that reached the provider (queued, sent, delivered, bounced)
+  means no new email, so remove-and-re-add or a name fix sends nothing; a send that failed before leaving may be
+  retried. An address this student's messages bounced at or that marked one as spam gets none. At most 8 notices a
+  student a day; Resend's Idempotency-Key covers two adds racing. It never fails the add (`notice: sent |
+  already_sent | not_sent` in the answer). Tests: `test/unit/my-guardians.test.ts` (rules, the email's words, the
+  routes on a memory store: validation, ownership, no double email, the rate limit), `test/integration/my-guardians.test.mjs`
+  (RLS and the trigger straight through PostgREST, the counselor's views, the email once), `hardening.test.mjs`.
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
@@ -4574,6 +4612,7 @@ npm run dev               # http://localhost:4000
 | `SUPABASE_ANON_KEY` | The key every user-scoped query runs under |
 | `SUPABASE_SERVICE_ROLE_KEY` | Optional; rate limits/quotas/audit degrade without it |
 | `ANTHROPIC_API_KEY` | Optional; `/ai/*` returns 503 without it |
+| `RESEND_PARENTS_FROM` | Optional; the sender of the notice a parent gets when a student adds them ("Name <address>" on a domain verified in Resend). Unset: `INVITE_FROM_EMAIL`. Same `RESEND_API_KEY` |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Optional; without them (and a sender) SMS is recorded `queued`, never sent |
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
