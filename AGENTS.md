@@ -3768,9 +3768,30 @@ column and tables.
   API splits one answer into text blocks at citation boundaries, so
   `parseCandidates` joins the blocks in order and gives each JSON candidate
   object the citations of every block that overlaps it; an object that overlaps
-  no citation is dropped. At most 8 candidates and 5 sources each. Colleges
-  search the official-site allowlist (`researchDomains`); activities search the
-  open web minus the blocklist.
+  no citation is dropped, with one exception for colleges: the model often
+  writes its citation into the JSON as text, which the API can't attach, so a
+  college object with no citation takes up to two pages the run really saw
+  (search results and fetches, `extractSeenPages` -> `ResearchResult.seenPages`)
+  whose title, or a part of it split at " | ", " - ", ": ", starts with the
+  college's whole name of two or more words (`sourcesByTitle`; "State
+  University" never takes a "Ball State University" page). Those still go
+  through the keeper below; the run logs how many were `recovered`. At most 8
+  candidates and 5 sources each. Colleges search the official-site allowlist
+  (`researchDomains`); activities search the open web minus the blocklist.
+- **A balanced list.** The college ask wants about a third reach, target and
+  likely, judged against the brief's GPA and test bands (highly selective
+  reach and target schools when the bands are high), spread across the country
+  with two or three near the brief's region; "options near the region are
+  welcome" is said only for activities. The match step keeps every reasonable
+  candidate (drops only clear misfits or schools already on the list), and may
+  set `fit` (reach / target / likely, optional in `MATCH_SCHEMA`); a valid fit is
+  stored in `details.fit` and accepting a college puts it on the list row's fit
+  tag. Spend: no new model call, no change to searches, fetches, turns, model
+  or effort; the research prompt grows by about 120 tokens and each pick by a
+  few output tokens.
+- **Link checks run at once** (`LINK_CHECKS` = 6 at a time, each distinct page
+  once): one check can take its 10-second timeout, and checking one after
+  another made a run with a few slow sites wait most of a minute.
 - **Before anything is stored** (`validatePicks`): a pick must name a real,
   unused candidate and have an effort of low, medium or high; `why` is at most
   200 characters and two sentences, otherwise the pick is dropped whole (never
@@ -3806,7 +3827,7 @@ column and tables.
   match step or the reason checks) is stored as `succeeded` with an empty list
   but expires at once, so the next request runs again. Each run logs its counts
   with the run id (numbers only): answer parts, candidate objects found,
-  candidates parsed, kept by the keeper, picked, stored. The scanner steps into an
+  candidates parsed, recovered by title, kept by the keeper, picked, stored. The scanner steps into an
   object with no string `title`, so a `{"candidates":[...]}` wrapper yields its
   inner candidates. Failed and discarded runs are never served.
 - **Recommendations.** `recommendations` and `research_runs` are readable by a
