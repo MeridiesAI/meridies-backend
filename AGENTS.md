@@ -62,6 +62,7 @@ src/
 │   ├── parentAlertDelivery.ts # carries a queued parent alert; records what happened
 │   ├── massInvite.ts      # Mass invite: deterministic parse first, AxIS sorts second
 │   ├── outcomes.ts        # admission outcomes read per high school; CDS flags only with data
+│   ├── pastStudents.ts    # GET /alumni/analysis: alumni + GPA/scale, scores, activities, schools and results (pure)
 │   ├── studentPage.ts     # info card, derived polygon scores, recorded-growth scrubber
 │   ├── studentApplication.ts # College list board + Application DTOs and rules
 │   ├── supplementDocs.ts  # supplement Google Docs under drive.file
@@ -1552,6 +1553,19 @@ school and no per-year figure, so neither is claimed) and `bySchool` is one row 
 (what the manual award-letter form saves: a total and no line items, and what the comparator uses), else its scholarship
 line items added up; a letter with one scholarship line is named by it, otherwise "Scholarships". Grants and zeros are left
 out. The two lists are never added together and `wonCents` is still the tracker's alone. At most 25 of each per student.
+
+### Past students (`GET /alumni/analysis`, no migration)
+
+A past student is an `alumni_records` row (Close cycle writes one per senior). `GET /alumni/analysis` (counselor,
+`limit("alumni:analysis", 30, 60)`, `request.db`) answers `{ students, truncated }` in one read: per alum `gradYear`,
+`cycle`, `highSchool`, `gpa: { unweighted, weighted, scale }` (live `student_academics`, never shown without the
+scale), `sat` (superscore), `act`, `activities: { count, top }` (first 3 by `sort_order`: name, else position, else
+organization), `schools` (`{ name, collegeId, result, round, decisionDate }`: the college list's statuses in the app's
+words, `submitted` as `result: null`; an `admission_outcomes` row fills a school the list doesn't have, matched by
+college id or name, `admitted` read as `accepted`/`enrolled`) and `enrolled` (the alum record's institution, else the
+list's `enrolled` row). Scoped by `caseloadStudentIds` (unscoped under RLS past 250), at most 500 alumni
+(`truncated`), child tables read in 100-id slices paged under `max_rows`. Nothing is aggregated, so no small-number
+rule applies. Rules in `lib/pastStudents.ts`, tested by `test/unit/past-students.test.ts`.
 
 ### School-specific scholarships (`20261111000006`)
 

@@ -12,6 +12,7 @@ const FANOUT_READS: Array<[file: string, path: string, after?: string]> = [
   ["overviewSummaries.ts", "/student-summaries"],
   ["pins.ts", "/"],
   ["outcomes.ts", "/", "export async function alumniRoutes"], // GET /alumni
+  ["outcomes.ts", "/analysis", "export async function alumniRoutes"], // GET /alumni/analysis (past students)
   ["outcomes.ts", "/cycles"],
   ["invites.ts", "/building"],
   ["workItems.ts", "/"],
