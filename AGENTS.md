@@ -542,10 +542,36 @@ forget it.
   PaymentIntent makes it idempotent. Money above what the package has left is
   held as credit (the counselor's "record the extra as credit", made for them
   because the money has moved). `charge.refunded` (and the refund update
-  events, which re-read the charge) set `refunded_cents` to Stripe's running
-  total, never an increment; a refund of a Meridies charge whose payment isn't
-  recorded yet answers 503 so Stripe retries. `account.updated` and
-  `account.application.deauthorized` set the flags. Handled event ids go in
+  events) re-read the charge from Stripe and set `refunded_cents` to its running
+  total, never an increment and never the payload's copy (Stripe doesn't promise
+  event order, so a late first-partial-refund event can't lower it); a refund of
+  a Meridies charge whose payment isn't recorded yet answers 503 so Stripe
+  retries. `account.updated` re-reads the account (a stale event can't flip
+  `charges_enabled`; an account Stripe won't read any more is off) and
+  `account.application.deauthorized` turns the flags off. **An event of the
+  other mode than the platform key is ignored** (`keyLivemode`: a live Connect
+  endpoint also receives connected accounts' test-mode events, and a test
+  payment must never count). **Failed payments and disputes**
+  (`lib/cardIssues.ts`): `payment_intent.payment_failed` (a card declined on
+  Checkout; the session stays open and the family can try another card) and
+  `checkout.session.async_payment_failed` are noted against the invoice with
+  Stripe's reason (`last_payment_error.message`, `decline_code`/`code`), after
+  the same account check as a payment, and are never a payment. `charge.dispute.*`
+  flags the card payment with the dispute's status and reason; it is not a
+  refund and changes nothing that counts (a lost dispute is the counselor's to
+  record). `checkout.session.expired` does nothing (an abandoned Checkout; the
+  pay link still works). Both are kept one row per Stripe event in
+  `pipeline_card_issues` (event id unique), a **proposed migration not yet in
+  this repo** (the SQL is in the PR that added this): until it is applied
+  (`cardIssuesReady`) the webhook writes an `audit_log` row instead
+  (`pipeline.card_payment_failed` / `pipeline.card_dispute`, entity the invoice)
+  and answers 200, and the tracker shows nothing new. Derived on every read
+  (`withCardIssues`): an invoice still owed carries `cardFailure: { reason,
+  code, amountCents, failedAt }` (its latest failure, unless a card payment on
+  it was recorded since), a card payment carries `dispute: { status, reason,
+  amountCents, openedAt, updatedAt }`, both null otherwise; the pay page says
+  "Your last card payment didn't go through (reason), and nothing was charged".
+  A read error on the table never fails the tracker. Handled event ids go in
   `stripe_webhook_events`. **A refunded amount stops counting** (`netOfRefund`
   in `lib/payments.ts`): it comes off the payment's held credit first, then off
   what it paid, so the invoice reads as owed again; `pipeline_credit_available`
@@ -4434,7 +4460,7 @@ npm run dev               # http://localhost:4000
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 | `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |
 | `STRIPE_SECRET_KEY` | Optional; the Meridies platform account's secret key (`sk_live_…`, or a restricted `rk_live_…`). Payment Tracker card payments (Stripe Connect). Without it, or without the next one, the service role key, `PUBLIC_API_URL` or migration `20261102000001`, `GET /pipeline/stripe` answers `configured: false` and the other Stripe routes 503 `stripe_unavailable` |
-| `STRIPE_WEBHOOK_SECRET` | Optional; signing secret (`whsec_…`) of the Connect webhook endpoint `<PUBLIC_API_URL>/webhooks/stripe` ("Events on connected accounts": `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`, `charge.refund.updated`, `account.updated`, `account.application.deauthorized`) |
+| `STRIPE_WEBHOOK_SECRET` | Optional; signing secret (`whsec_…`) of the Connect webhook endpoint `<PUBLIC_API_URL>/webhooks/stripe` ("Events on connected accounts": `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `payment_intent.payment_failed`, `charge.refunded`, `charge.refund.updated`, `charge.dispute.created`, `charge.dispute.updated`, `charge.dispute.closed`, `account.updated`, `account.application.deauthorized`). Test mode: an `sk_test_` key and a test endpoint's secret; events of the other mode are ignored |
 | `PUBLIC_API_URL` | This API's public origin: Twilio's status callback, the access review link, and card payments' pay links (`/pay/<token>`) |
 
 `GET /health` reports `{ status, database, schema, anthropic, serviceRole }` — presence
