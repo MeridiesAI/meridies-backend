@@ -134,6 +134,8 @@ src/
 │   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
 │   ├── listLearning.ts    # list-builder learning: what Build College Lists showed and what was added/removed/recommended (service role, never awaited)
 │   ├── listContract.ts    # the list-match contract: core features, opportunity categories, card -> feature map, match and learning numbers (definitions only)
+│   ├── listMatch.ts       # list matching (LIST_MATCH_ENABLED): student weights, core/opportunity/final scores, order inside a band, the explain check (pure)
+│   ├── listMatchLoad.ts   # list matching's reads: the student's record, the cached interest vector, core features, the opportunities RPC
 │   ├── embeddings.ts      # in-process text embeddings (Supabase/gte-small, 384, fp32) for college_opportunities; model downloaded on first use
 │   ├── studentToolPrompts.ts # the student-addressed system prompts and filters for the AI tools a student may run (the counselor's are asserted unchanged)
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
@@ -2631,8 +2633,57 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
   **fp32 on purpose**: the 8-bit model's vectors shift with the rest of the batch. Input past 512 tokens (about 400
   words) is cut off silently. The model (about 130 MB) downloads from the Hugging Face Hub on first use into
   `node_modules/@huggingface/transformers/.cache` (lost on each Railway deploy); `warmEmbeddings()` loads it and never
-  throws, but nothing calls it at boot yet. `.npmrc` sets `onnxruntime-node-install=skip` so installs on Linux don't
+  throws; `src/index.ts` calls it at boot when `LIST_MATCH_ENABLED=true` (and only then). `.npmrc` sets `onnxruntime-node-install=skip` so installs on Linux don't
   download onnxruntime's CUDA libraries. `test/unit/embeddings.test.ts` is the one unit test that uses the network.
+
+## List matching (`LIST_MATCH_ENABLED`, `20261124000001`; `lib/listMatch.ts`, `lib/listMatchLoad.ts`)
+
+Build College Lists orders each band (reach / target / likely) by a match score instead of odds alone. **Odds still
+decide the band**, and no school is removed or moved to another band for its score. **Off by default**: with
+`LIST_MATCH_ENABLED` unset or `false`, `POST /colleges/list-builder` answers exactly what it did (no new keys, the same
+order, the same explain prompt), nothing new is read and the embedding model is never loaded. Real feature data
+doesn't exist yet (`college_core_features` and `college_opportunities` are empty), so with the flag on and empty
+tables every school has no score and the list stays in odds order.
+
+- **Weights** (`studentWeights`). Card ratings map evenly from `love` +1 to `really-bad` -1 (`RATINGS` in
+  `lib/preferences.ts`), are centred on the student's own average over every card they rated, and rescaled so their
+  most extreme card is ±1 (`cardSignals`): a student who rates everything the same gets 0 everywhere. Through
+  `CARD_FEATURE_MAP` (with its sign): a **taste** feature's weight is the card's (0 with no card: no taste is
+  guessed); a **universal** feature's is `UNIVERSAL_DEFAULT_WEIGHT` (0.5) plus the card's, held to 0..1, so a card can
+  raise it or switch it off but never turn it against a school. No card sort: every universal feature 0.5, every taste
+  feature 0.
+- **Core score** (`coreScore`): over the features the school has a value for only (null or missing is skipped, never
+  0), sum of weight x (2v - 1) over sum of |weight|, mapped to 0-1. The value is centred because 0 means the feature's
+  absence or opposite: uncentred, a student who wants a fixed core (curriculum_flexibility weight negative) could never
+  score a school above neutral. Null with no known feature or all weights 0.
+- **Opportunity score**: `public.match_college_opportunities(p_college_ids, p_embedding, p_weights, p_top_k)`
+  (SECURITY INVOKER, EXECUTE to authenticated, read as the caller) returns each college's `MATCH_CONFIG.topK` active
+  opportunities by cosine similarity to the student's interest vector, each times its category's prior weight (passed
+  in from `OPPORTUNITY_CATEGORIES`; a category with no weight is left out). The raw score is their average
+  (`opportunityRaw`: 40 weak matches can't beat 3 strong), min-max rescaled across the list's schools (best 1, worst 0;
+  no spread 0.5). **Final** = `coreShare` x core + `opportunityShare` x opportunity, or the one that exists.
+- **Order** (`buildList(student, schools, criteria, match?)`, `rankWithinBands`): inside a band, scored schools by
+  score, then the rest in the odds order; each band keeps its slots in the flat list. Each pick carries `match`
+  (`matchScore`, `coreScore`, `opportunityScore`, `topOpportunities`), and so does each school in the answer
+  (`listPickDto`: `topOpportunities` as `{ name, category, quote, sourceUrl }`). The impression snapshot
+  (`learningFeatures`) adds the three scores, numbers only.
+- **The interest vector** (`interestParagraph`, `interestVector`): intended majors, the headline, up to 8 activities
+  and the prompts of the cards rated `love`, read on the caller's client through `columns()` (the allowlist gains
+  `student_preference_cards.rating` and `preference_cards.card_key, prompt`), at most 1,600 characters, most telling
+  first. Embedded in process and sent to no model; cached in `student_interest_embeddings` (service role only, no
+  client grants, approval gate, cascades with the student) by the sha256 of the model name and the paragraph, so it
+  is embedded again only when the paragraph changes. The request waits at most `EMBED_DEADLINE_MS` (2.5 s) for it;
+  past that the run has no opportunity scores and the vector is cached when it arrives.
+- **Explain** (`explain: true`, counselor): with matching on, each school's `topOpportunities` go into the prompt as
+  untrusted data with keys (`p1`, `p2`, ...); a reason lists the keys it cites, and `reasonCitesOnlyOwn` drops any
+  reason citing another school's key, naming another school's program, or (with its own program names taken out)
+  still using a program word (program, center, lab, research, honors, abroad, internship...).
+- **Never fails the list.** Every read is soft: a failure is logged by code and that part is left out; nothing left
+  is the odds order. A missing migration (`20261119000001` for the features, `20261124000001` for the RPC) warns once
+  and that part isn't asked for 5 minutes. The model's library is imported lazily; if it can't load, core scores only.
+- **Deploy order:** either; not in `REQUIRED_SCHEMA`. Turning it on: apply `20261119000001` and `20261124000001`, set
+  `LIST_MATCH_ENABLED=true` on Railway (each deploy downloads the model again at boot, about 130 MB). Tests:
+  `test/unit/list-match.test.ts` (fixtures only: centering, defaults, unknown features, top K, band order, flag off).
 
 ## Anthropic / AI rules
 
@@ -4720,6 +4771,7 @@ npm run dev               # http://localhost:4000
 | `IMPORT_HOLD_EXPIRY_ENABLED` | Optional; `true` turns on held-data expiry and warning emails in the import sweep. Off until the Ready-to-apply page ships |
 | `IMPORTS_ROLLOUT` / `IMPORTS_PILOT` | The Import page: `off`, `pilot` (default; only the practices in `IMPORTS_PILOT`, firm or solo counselor ids, comma-separated) or `all`. Ready to apply is never gated |
 | `IMPORTS_AI` | `on` (default) or `off`: the AI column mapping's kill switch |
+| `LIST_MATCH_ENABLED` | `true` ranks each Build College Lists band by match score and loads the embedding model at boot (see "List matching"); default off, the list is odds order exactly as before |
 | `AGREEMENTS_ENABLED` | `true` turns on agreements (`/agreements`, `/agree/:token`); default off, every route 404 `agreements_off`. Keep off in production until the consent wording in `lib/agreementConsent.ts` is reviewed |
 | `RESEARCH_FAKE` | Tests only (`fixture`): research, match and link check return canned answers, no model or web calls. Works only when `NODE_ENV` is `development` or `test`; the server refuses to start otherwise, and logs a warning whenever it is on |
 | `SWEEP_INTERVAL_MINUTES` | Optional; runs the accountability sweep in-process on this schedule |

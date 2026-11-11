@@ -24,6 +24,11 @@ export const AI_ALLOWLIST = {
   deliverables: ["id", "title", "kind", "status", "due_date", "source"],
   essays: ["title", "prompt", "school", "status", "word_count", "body", "document_id"],
   documents: ["id", "filename", "title", "kind", "available_to_llm", "ai_access", "ferpa_waived", "kind_confirmed", "parsed_data"],
+  // The card sort, read by list matching only (lib/listMatchLoad.ts): the ratings set the feature weights, and the
+  // loved cards' prompts (catalog text) go into the interest paragraph, which is embedded in this process and sent to
+  // no model. counselor_note is not here: it coaches the answer.
+  student_preference_cards: ["rating"],
+  preference_cards: ["card_key", "prompt"],
 } as const;
 
 export type AllowTable = keyof typeof AI_ALLOWLIST;
