@@ -16,6 +16,8 @@ export const unauthorized = (m = "Unauthorized") => new HttpError(401, m);
 export const forbidden = (m = "You don't have access to that") => new HttpError(403, m);
 export const accountPending = () =>
   new HttpError(403, "Your account is waiting for review", "account_pending");
+export const parentAccount = () =>
+  new HttpError(403, "This is a parent account. It can open the Parent view only.", "parent_account");
 export const notFound = (m = "Not found") => new HttpError(404, m);
 export const conflict = (m: string) => new HttpError(409, m);
 export const tooManyRequests = (m = "Too many requests — slow down") => new HttpError(429, m);

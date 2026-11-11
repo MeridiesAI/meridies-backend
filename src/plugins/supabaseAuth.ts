@@ -14,7 +14,8 @@
  *                     answers): `loadProfileBlob` reads it where a route needs it
  *
  * A counselor whose account is not approved is refused here (403,
- * code "account_pending") unless the route sets config.allowPending.
+ * code "account_pending") unless the route sets config.allowPending, and a
+ * parent account (403, code "parent_account") unless it sets config.allowParent.
  */
 
 import fp from "fastify-plugin";
@@ -22,9 +23,9 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { env } from "../env.js";
 import { readMark } from "../lib/axis/ops/trash.js";
 import { userClient } from "../lib/supabase.js";
-import { blockedAsPending } from "../lib/access.js";
+import { blockedAsParent, blockedAsPending } from "../lib/access.js";
 import { touchLastActive } from "../lib/inactivityAlerts.js";
-import { accountPending, unauthorized } from "../lib/errors.js";
+import { accountPending, parentAccount, unauthorized } from "../lib/errors.js";
 import type { AuthProfile } from "../lib/serialize.js";
 
 const ISSUER = `${env.SUPABASE_URL}/auth/v1`;
@@ -96,6 +97,10 @@ export default fp(async (app) => {
     // holds from the next request. A route opts in with config.allowPending.
     if (blockedAsPending(request.profile, request.routeOptions.config.allowPending)) {
       throw accountPending();
+    }
+    // A parent account reads its Parent view and nothing else; the database agrees (private.account_open).
+    if (blockedAsParent(request.profile, request.routeOptions.config.allowParent)) {
+      throw parentAccount();
     }
 
     // The inactivity alert's signal (lib/inactivityAlerts.ts): a student's request marks them active, at

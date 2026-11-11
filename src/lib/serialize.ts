@@ -13,7 +13,8 @@ import { storedValues, withCurrent } from "./handInValues.js";
 import { unsignedAvatarUrl } from "./studentAvatar.js";
 import type { FamilyVisibilityState } from "./familyVisibility.js";
 
-export type Role = "student" | "counselor";
+/** A parent account (20261123000002) reads only its Parent view: every route is closed to it unless it sets allowParent. */
+export type Role = "student" | "counselor" | "parent";
 
 export type Profile = {
   id: string;

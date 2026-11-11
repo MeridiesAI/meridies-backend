@@ -10,6 +10,8 @@ declare module "fastify" {
   interface FastifyContextConfig {
     /** Open this route to a counselor whose account is not approved yet. Closed by default. */
     allowPending?: boolean;
+    /** Open this route to a parent account (role 'parent', the read-only Parent view). Closed by default. */
+    allowParent?: boolean;
   }
 
   interface FastifyRequest {

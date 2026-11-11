@@ -42,6 +42,7 @@ import {
   type RosterStudent,
 } from "../lib/guardianRoster.js";
 import { limit } from "../lib/limits.js";
+import { loadParentAccounts } from "../lib/parentInvites.js";
 import { readPaged, type PageFetch } from "../lib/pagedRead.js";
 
 type Row = Record<string, unknown>;
@@ -143,8 +144,15 @@ export default async function guardianRoutes(app: FastifyInstance) {
       const query = parseRosterQuery(request.query);
       const { students, guardians, sharedNotShown } = await loadDirectory(request, query);
       const page = pageRoster(buildRoster(students, guardians, query.q), query);
+      // The page's parent account states, for the row's Invite (20261123000002). One parent at a time, never a
+      // bulk send: the directory still sends nothing on its own. Left off when unreadable or not switched on.
+      const accounts = await loadParentAccounts(request.db, page.guardians.map((g) => g.studentId), request.log);
       reply.header("Cache-Control", "no-store");
-      return { ...page, sharedNotShown };
+      return {
+        ...page,
+        guardians: accounts ? page.guardians.map((g) => ({ ...g, parentAccount: accounts.get(g.id) ?? { state: "none" as const, invitedAt: null, expiresAt: null, delivery: null } })) : page.guardians,
+        sharedNotShown,
+      };
     }
   );
 

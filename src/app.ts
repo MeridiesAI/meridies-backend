@@ -21,6 +21,8 @@ import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
 import guardianRoutes from "./routes/guardians.js";
 import myGuardianRoutes from "./routes/myGuardians.js";
+import parentRoutes from "./routes/parent.js";
+import parentInviteRoutes from "./routes/parentInvites.js";
 import chatRoutes from "./routes/chat.js";
 import axisRoutes from "./routes/axis.js";
 import axisEvalRoutes from "./routes/axisEval.js";
@@ -254,6 +256,9 @@ export function buildApp() {
   app.register(meRoutes, { prefix: "/me" });
   app.register(myEventRoutes, { prefix: "/me/events" });
   app.register(myGuardianRoutes, { prefix: "/me/guardians" });
+  // Parent accounts (20261123000002): the read-only Parent view and its invitations.
+  app.register(parentRoutes, { prefix: "/parent" });
+  app.register(parentInviteRoutes, { prefix: "/parent-invites" });
   app.register(profileUpdateRoutes);
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
   app.register(resourceRoutes, { prefix: "/resources" });
