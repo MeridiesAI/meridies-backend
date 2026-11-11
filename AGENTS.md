@@ -1562,6 +1562,26 @@ read `importData: null`. Not in `REQUIRED_SCHEMA`. Test: `test/integration/overv
   (the route stays). Migration `20261105000071` sets Stanford's eight prompts (unverified, so the app says to check
   the school's page) and adds both `ai_runs` labels; either deploy order. Tests: `test/unit/application-text.test.ts`,
   `test/unit/application-sheet-fields.test.ts` (every sheet cell's patch is accepted and reads back).
+- **Supplements layout** (`lib/supplementLayout.ts`, no migration). `GET /application/essays` adds
+  `supplementLayout: { preferred, oneDocument }`: `preferred` is the counselor's choice for the student,
+  `"per-school" | "combined" | null`, stored as `supplementsLayout` in `profiles.profile` (read with
+  `profile->>supplementsLayout`, so the blob isn't loaded); `oneDocument` (`detectOneDocument`) is
+  `{ essayIds, schoolCount, name } | null`, set when at least two supplement rows have a source and every one is the
+  same source (`sourceKeyOf`: a Google Doc by its file id, any other link with its fragment dropped, else the
+  supplement Doc, else the `documents` row; a link wins, so two imports of one Drive file are one source). Rows with
+  nothing behind them, the personal statement and materials (`other`) don't count. Deterministic, no model.
+  The app opens Combined when `preferred` is null and `oneDocument` is set; the choice always wins.
+  `PUT /application/supplements-layout { studentId, layout: "per-school" | "combined" | null }` (counselor with
+  edit access; a student gets 403; null clears the choice) merges the key into the profile like `PATCH /students/:id`.
+  `GET /application/supplements/combined?studentId=` (view access) answers `{ sections: [{ essayId, text, from,
+  truncated, wordCount }] }` for the Combined page, in the essays' order: each row's own `body` (`from: "row"`), or, when rows
+  share a source and the same text (one document filed on several prompts), that prompt's part of it
+  (`splitAtPrompts`, the line holding the prompt's wording to the next one, like the supplement Doc sync's
+  `splitAnswers`; `from: "split"`) only when every prompt is found (30+ characters of wording, on one line), else the
+  whole text (`from: "shared"`, which the app shows once). A split part carries its own `wordCount` (`countWords`),
+  since the row's count is the whole document's; otherwise `wordCount` is null. Text is the document's own, cut, never written; 20,000
+  characters per row at most. Either deploy order: an older API has neither field nor route and the app keeps
+  Per school with the choice in the browser. Tests: `test/unit/supplement-layout.test.ts`.
 - **Coherence's activity alignment** (`lib/activityAlignment.ts`). `GET /application/coherence` adds `alignment`:
   the Activities and Honors sheets sorted into Research, Service and Competitions (by category and by the row's own
   words; hours per year from hours per week x weeks per year), the declared majors, which entries connect to a major
