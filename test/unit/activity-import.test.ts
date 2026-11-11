@@ -1,6 +1,7 @@
 // test/unit/activity-import.test.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { markOnSheet } from "../../src/lib/activityListImport.js";
 import { newActivityRows } from "../../src/lib/activityImport.js";
 import { cleanProposals } from "../../src/lib/profileUpdates.js";
 
@@ -15,10 +16,11 @@ const act = (organization: string | null, position: string | null = null) => ({
   hoursPerWeek: 4,
   weeksPerYear: 30,
 });
-const proposals = (...entries: Record<string, unknown>[]) => cleanProposals({ entries });
+const proposals = (existing: { organization: string; position: string | null }[], ...entries: Record<string, unknown>[]) =>
+  markOnSheet(cleanProposals({ entries }), existing);
 
 test("an activity becomes an AI-sourced row with the organization as its name", () => {
-  const { rows, skippedDuplicates } = newActivityRows(S, [], proposals(act("Debate Team", "Captain")));
+  const { rows, skippedDuplicates } = newActivityRows(S, 0, proposals([], act("Debate Team", "Captain")));
   assert.equal(skippedDuplicates, 0);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].source, "ai");
@@ -27,31 +29,20 @@ test("an activity becomes an AI-sourced row with the organization as its name", 
   assert.equal(rows[0].sort_order, 0);
 });
 
-test("what the sheet already holds is skipped, whatever the case or punctuation", () => {
-  const existing = [{ organization: "debate team!", position: "captain" }];
-  const { rows, skippedDuplicates } = newActivityRows(S, existing, proposals(act("Debate Team", "Captain"), act("Robotics Club", "Member")));
+test("what the sheet already holds is skipped and counted, the rest is added", () => {
+  const existing = [{ organization: "Debate Team", position: "Captain" }];
+  const { rows, skippedDuplicates } = newActivityRows(S, 1, proposals(existing, act("Debate Team", "Captain"), act("Robotics Club", "Member")));
   assert.deepEqual(rows.map((r) => r.organization), ["Robotics Club"]);
   assert.equal(skippedDuplicates, 1);
-});
-
-test("the same organization with an unstated position on either side is the same activity", () => {
-  const existing = [{ organization: "Debate Team", position: null }];
-  assert.equal(newActivityRows(S, existing, proposals(act("Debate Team", "Captain"))).rows.length, 0);
-  assert.equal(newActivityRows(S, [{ organization: "Debate Team", position: "Captain" }], proposals(act("Debate Team", null))).rows.length, 0);
-});
-
-test("two different positions at one organization are both kept", () => {
-  const { rows } = newActivityRows(S, [{ organization: "Debate Team", position: "Member" }], proposals(act("Debate Team", "Captain")));
-  assert.equal(rows.length, 1);
+  assert.equal(rows[0].sort_order, 1);
 });
 
 test("an activity with no organization and any honor are not written", () => {
-  const { rows } = newActivityRows(S, [], proposals(act(null, "Captain"), { kind: "honor", title: "National Merit Semifinalist", level: "national", gradeLevels: ["12"] }));
+  const { rows } = newActivityRows(S, 0, proposals([], act(null, "Captain"), { kind: "honor", title: "National Merit Semifinalist", level: "national", gradeLevels: ["12"] }));
   assert.equal(rows.length, 0);
 });
 
 test("rows stop at the sheet's 30-row cap and sort after the existing ones", () => {
-  const existing = Array.from({ length: 29 }, (_, i) => ({ organization: `Club ${i}`, position: null }));
-  const { rows } = newActivityRows(S, existing, proposals(act("New One"), act("New Two")));
+  const { rows } = newActivityRows(S, 29, proposals([], act("New One"), act("New Two")));
   assert.deepEqual(rows.map((r) => [r.organization, r.sort_order]), [["New One", 29]]);
 });

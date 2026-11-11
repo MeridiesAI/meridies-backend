@@ -29,7 +29,7 @@ import https from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { Readable } from "node:stream";
 import zlib from "node:zlib";
-import { badRequest } from "./errors.js";
+import { badRequest, HttpError } from "./errors.js";
 import { sniffImage } from "./imageConvert.js";
 import { asciiLower, replaceBlocks, replaceTags } from "./linearText.js";
 
@@ -128,7 +128,7 @@ async function resolvePublic(hostname: string): Promise<PinnedAddress[]> {
   const literal = isIP(host);
   if (literal) {
     if (isBlockedAddress(host, literal)) {
-      throw badRequest("That address isn't reachable from Meridies");
+      throw linkError("link_private");
     }
     return [{ address: host, family: literal === 6 ? 6 : 4 }];
   }
@@ -137,14 +137,14 @@ async function resolvePublic(hostname: string): Promise<PinnedAddress[]> {
   try {
     addresses = await resolveHost(host);
   } catch {
-    throw badRequest("That domain doesn't resolve");
+    throw linkError("link_dns");
   }
-  if (addresses.length === 0) throw badRequest("That domain doesn't resolve");
+  if (addresses.length === 0) throw linkError("link_dns");
   const pinned: PinnedAddress[] = [];
   for (const { address, family } of addresses) {
     const fam = family === 6 ? 6 : family === 4 ? 4 : isIP(address);
     if ((fam !== 4 && fam !== 6) || isBlockedAddress(address, fam)) {
-      throw badRequest("That address isn't reachable from Meridies");
+      throw linkError("link_private");
     }
     pinned.push({ address, family: fam });
   }
@@ -176,32 +176,131 @@ export function pinnedLookup(pinned: readonly PinnedAddress[]): LookupFunction {
 /** One validated hop: the URL and the only addresses it may connect to. */
 type Hop = { url: URL; pinned: PinnedAddress[] };
 
+/** The longest link read or saved. Past this it is nearly always a pasted tracking blob. */
+export const LINK_MAX_CHARS = 2000;
+
+/**
+ * Why a link was refused or couldn't be read, each in a sentence a counselor can act on.
+ * The code travels with the 400 (`{ error, code }`) so the app can branch on it.
+ */
+export const LINK_ERRORS = {
+  link_empty: "Paste a link to a web page, starting with https://.",
+  link_invalid: "That doesn't look like a web address. Paste a link like https://admissions.example.edu.",
+  link_too_long: `That link is too long to read (over ${LINK_MAX_CHARS.toLocaleString("en-US")} characters). Open the page and copy its address again.`,
+  link_scheme: "Only web links can be read: paste one that starts with https://.",
+  link_credentials: "That link has a username or password in it. Remove them and paste it again.",
+  link_port: "That link uses an unusual port. Only standard web addresses can be read.",
+  link_private: "That link points to a private or local address, which isn't reachable from Meridies.",
+  link_dns: "We couldn't find that website. Check the address for typos.",
+  link_unreachable: "That website didn't answer. Check the link, or try again later.",
+  link_timeout: "That page took too long to respond. Try again later.",
+  link_redirects: "That link keeps redirecting, so it couldn't be read.",
+  link_not_found: "That page wasn't found on the site. Check the link.",
+  link_refused: "That site doesn't let Meridies read its pages.",
+  link_http_error: "That site answered with an error. Try again later.",
+  link_not_page: "That link is a file, not a web page. Download it and upload it as a document instead.",
+  link_too_large: "That page is too large to read.",
+  link_no_text: "That page has almost no text to read.",
+} as const;
+
+export type LinkErrorCode = keyof typeof LINK_ERRORS;
+
+/** A 400 with the link's reason; `message` overrides the stock sentence. */
+export const linkError = (code: LinkErrorCode, message: string = LINK_ERRORS[code]) =>
+  new HttpError(400, message, code);
+
+/** The error for a page that answered `status` (not 2xx, not a redirect). */
+function statusError(status: number): HttpError {
+  if (status === 404 || status === 410) return linkError("link_not_found");
+  if (status === 401 || status === 403 || status === 429) return linkError("link_refused");
+  return linkError("link_http_error", `That site answered with an error (${status}). Try again later.`);
+}
+
+/** A host with at least one dot, an optional port, then a path or nothing: "www.bucknell.edu/apply". */
+const BARE_HOST = /^[a-z0-9-]+(\.[a-z0-9-]+)+(:\d+)?([/?#]|$)/i;
+const HOST_PORT = /^[a-z0-9-]+(\.[a-z0-9-]+)*:\d+([/?#]|$)/i;
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * What a counselor pasted, trimmed and with "https://" added to a bare address
+ * ("bucknell.edu", "www.bucknell.edu/apply", "//cdn.example.edu/x"), refused when
+ * empty or too long. Everything else (scheme, port, credentials, the address) is
+ * `validateUrl`'s. The patterns are anchored and run on at most LINK_MAX_CHARS.
+ */
+export function prepareLink(raw: string): string {
+  const s = raw.trim();
+  if (!s) throw linkError("link_empty");
+  if (s.length > LINK_MAX_CHARS) throw linkError("link_too_long");
+  if (s.startsWith("//")) return `https:${s}`;
+  // "localhost:3000" and "www.x.edu:8080" read as a scheme to URL; they are hosts.
+  if (HAS_SCHEME.test(s) && !HOST_PORT.test(s)) return s;
+  if (BARE_HOST.test(s) || /^localhost(:\d+)?([/?#]|$)/i.test(s)) return `https://${s}`;
+  return s;
+}
+
 /** Parse + validate one hop. Throws a 400 the client can act on. */
 async function validateUrl(raw: string): Promise<Hop> {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw badRequest("That doesn't look like a URL");
+    throw linkError("link_invalid");
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw badRequest("Only http and https links can be read");
-  }
-  if (url.username || url.password) {
-    throw badRequest("Remove the credentials from that URL");
-  }
-  if (url.port && url.port !== "80" && url.port !== "443") {
-    throw badRequest("Only standard web ports can be read");
-  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw linkError("link_scheme");
+  if (url.username || url.password) throw linkError("link_credentials");
+  if (url.port && url.port !== "80" && url.port !== "443") throw linkError("link_port");
+  if (!url.hostname) throw linkError("link_invalid");
   return { url, pinned: await resolvePublic(url.hostname) };
 }
 
-/** Public entry point for validation alone, used before a row is written. */
+/**
+ * Public entry point for validation alone, used before a row is written. Takes
+ * what the user pasted (a bare "bucknell.edu" included) and answers the URL to store.
+ */
 export async function normalizeLink(
   raw: string
 ): Promise<{ url: string; domain: string }> {
-  const { url } = await validateUrl(raw);
-  return { url: url.toString(), domain: url.hostname.replace(/^www\./, "") };
+  const { url } = await validateUrl(prepareLink(raw));
+  const href = url.toString();
+  if (href.length > LINK_MAX_CHARS) throw linkError("link_too_long");
+  return { url: href, domain: url.hostname.replace(/^www\./, "") };
+}
+
+const FILE_KINDS: Record<string, string> = {
+  pdf: "a PDF",
+  doc: "a Word file",
+  docx: "a Word file",
+  xls: "a spreadsheet",
+  xlsx: "a spreadsheet",
+  csv: "a spreadsheet",
+  ppt: "a slide deck",
+  pptx: "a slide deck",
+  zip: "a zip file",
+  jpg: "an image",
+  jpeg: "an image",
+  png: "an image",
+  gif: "an image",
+  webp: "an image",
+  mp4: "a video",
+  mov: "a video",
+  mp3: "an audio file",
+};
+
+/**
+ * "a PDF" when the link's path names a file the reader can't take (by its
+ * extension), else null. A page that serves a PDF without saying so in its
+ * path is still caught by the Content-Type check when it is read.
+ */
+export function fileKindOf(href: string): string | null {
+  let path: string;
+  try {
+    path = new URL(href).pathname.toLowerCase();
+  } catch {
+    return null;
+  }
+  const dot = path.lastIndexOf(".");
+  if (dot < 0 || dot < path.lastIndexOf("/")) return null;
+  return FILE_KINDS[path.slice(dot + 1)] ?? null;
 }
 
 function decodeEntities(s: string): string {
@@ -405,14 +504,14 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
         },
       });
     } catch (err) {
-      throw badRequest(isAbort(err) ? "That page took too long to respond" : "Couldn't reach that page");
+      throw linkError(isAbort(err) ? "link_timeout" : "link_unreachable");
     }
 
     if (res.status >= 300 && res.status < 400) {
       res.body.destroy();
       const location = header(res.headers, "location");
-      if (!location) throw badRequest("That link redirects nowhere");
-      if (hop === MAX_REDIRECTS) throw badRequest("That link redirects too many times");
+      if (!location) throw linkError("link_redirects");
+      if (hop === MAX_REDIRECTS) throw linkError("link_redirects");
       // Re-validate the target: this is the hop an SSRF attempt rides on.
       current = await validateUrl(new URL(location, current.url).toString());
       continue;
@@ -420,21 +519,19 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
 
     if (res.status < 200 || res.status >= 300) {
       res.body.destroy();
-      throw badRequest(`That page returned ${res.status}`);
+      throw statusError(res.status);
     }
 
     const contentType = (header(res.headers, "content-type") ?? "").toLowerCase();
     if (!READABLE_TYPES.some((t) => contentType.includes(t))) {
       res.body.destroy();
-      throw badRequest(
-        "That link isn't a readable web page. Upload a PDF as a document instead."
-      );
+      throw linkError("link_not_page");
     }
 
     const declared = Number(header(res.headers, "content-length") ?? 0);
     if (declared > MAX_BYTES) {
       res.body.destroy();
-      throw badRequest("That page is too large to read");
+      throw linkError("link_too_large");
     }
 
     // Stream with a hard cap: content-length is a claim, not a promise.
@@ -443,7 +540,7 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
       raw = (await readCapped(res.body)).toString("utf8");
     } catch (err) {
       res.body.destroy();
-      throw badRequest(isAbort(err) ? "That page took too long to respond" : "Couldn't read that page");
+      throw linkError(isAbort(err) ? "link_timeout" : "link_unreachable");
     }
     const isHtml = contentType.includes("html") || contentType.includes("xml");
     const { title, text } = isHtml
@@ -461,7 +558,7 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
     };
   }
 
-  throw badRequest("That link redirects too many times");
+  throw linkError("link_redirects");
 }
 
 // ---- Page metadata and one image (college lookup) ------------------------------------------
@@ -489,31 +586,31 @@ async function fetchBytes(
         headers: { "User-Agent": "Meridies-LinkReader/1.0 (+https://meridiesai.com)", Accept: o.accept },
       });
     } catch (err) {
-      throw badRequest(isAbort(err) ? "That page took too long to respond" : "Couldn't reach that page");
+      throw linkError(isAbort(err) ? "link_timeout" : "link_unreachable");
     }
 
     if (res.status >= 300 && res.status < 400) {
       res.body.destroy();
       const location = header(res.headers, "location");
-      if (!location) throw badRequest("That link redirects nowhere");
-      if (hop === MAX_REDIRECTS) throw badRequest("That link redirects too many times");
+      if (!location) throw linkError("link_redirects");
+      if (hop === MAX_REDIRECTS) throw linkError("link_redirects");
       current = await validateUrl(new URL(location, current.url).toString());
       continue;
     }
     if (res.status < 200 || res.status >= 300) {
       res.body.destroy();
-      throw badRequest(`That page returned ${res.status}`);
+      throw statusError(res.status);
     }
 
     const contentType = (header(res.headers, "content-type") ?? "").toLowerCase();
     if (!o.types.some((t) => contentType.includes(t))) {
       res.body.destroy();
-      throw badRequest("That link isn't the kind of file we can read");
+      throw linkError("link_not_page", "That link isn't the kind of file we can read.");
     }
     const declared = Number(header(res.headers, "content-length") ?? 0);
     if (!o.truncate && declared > o.maxBytes) {
       res.body.destroy();
-      throw badRequest("That file is too large to read");
+      throw linkError("link_too_large", "That file is too large to read.");
     }
 
     const chunks: Buffer[] = [];
@@ -523,7 +620,7 @@ async function fetchBytes(
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
         total += buf.byteLength;
         if (total > o.maxBytes) {
-          if (!o.truncate) throw badRequest("That file is too large to read");
+          if (!o.truncate) throw linkError("link_too_large", "That file is too large to read.");
           chunks.push(buf.subarray(0, buf.byteLength - (total - o.maxBytes)));
           break;
         }
@@ -532,12 +629,12 @@ async function fetchBytes(
     } catch (err) {
       res.body.destroy();
       if (err instanceof Error && "statusCode" in err) throw err;
-      throw badRequest(isAbort(err) ? "That page took too long to respond" : "Couldn't read that page");
+      throw linkError(isAbort(err) ? "link_timeout" : "link_unreachable");
     }
     res.body.destroy();
     return { finalUrl: current.url, contentType, bytes: Buffer.concat(chunks) };
   }
-  throw badRequest("That link redirects too many times");
+  throw linkError("link_redirects");
 }
 
 export type PageMeta = {

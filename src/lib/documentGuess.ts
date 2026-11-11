@@ -1,13 +1,15 @@
 /**
- * What a picked file probably is (spec §4.3.1). Pure, no model, no I/O: filename, Google file
- * type and a few printed phrases. The text it reads is used here and dropped; `matched` is one
- * of our own labels below, never document text. A sensitive signal anywhere wins, so a doubtful
- * file errs toward being kept out of AI.
+ * What a file probably is (spec §4.3.1): a Drive or OneDrive pick, and every upload (Files, My documents,
+ * hand-ins; `POST /files/documents/guess` and `POST /files/documents` without a kind). Pure, no model, no I/O:
+ * filename, Google file type, printed phrases and the shape of the text (a resume's section headings, a
+ * spreadsheet's activity columns, an essay's paragraphs). The text it reads is used here and dropped; `matched`
+ * is one of our own labels below, never document text. A sensitive signal anywhere wins, so a doubtful file errs
+ * toward being kept out of AI.
  */
 
 export type GuessKind =
   | "transcript" | "test-report" | "financial" | "iep-504"
-  | "award-letter" | "recommendation-letter" | "resume" | "activity-list";
+  | "award-letter" | "recommendation-letter" | "resume" | "activity-list" | "essay";
 
 export type KindGuess = {
   kind: GuessKind | null;
@@ -54,9 +56,43 @@ const TEXT_RULES: Rule[] = [
   { kind: "recommendation-letter", label: "Recommendation for", re: /\brecommendation\s+for\b/i },
   { kind: "resume", label: "Resume", re: /\br[eé]sum[eé]\b/i },
   { kind: "resume", label: "Curriculum Vitae", re: /\bcurriculum\s+vitae\b/i },
-  { kind: "activity-list", label: "Activities List", re: /\bactivities\s+list\b/i },
+  { kind: "activity-list", label: "Activities List", re: /\b(?:activities|activity)\s+list\b/i },
   { kind: "activity-list", label: "Extracurricular Activities", re: /\bextracurricular\s+activities\b/i },
+  // The Common App's own columns, as an exported or hand-made list prints them.
+  { kind: "activity-list", label: "Hours per week", re: /\b(?:hours?|hrs?)\s*(?:per|\/|a)\s*(?:week|wk)\b/i },
+  { kind: "activity-list", label: "Weeks per year", re: /\b(?:weeks?|wks?)\s*(?:per|\/|a)\s*(?:year|yr)\b/i },
+  { kind: "activity-list", label: "Activity type", re: /\bactivity\s+type\b/i },
+  { kind: "activity-list", label: "Position/Leadership", re: /\bposition\s*\/\s*leadership\b/i },
+  { kind: "essay", label: "Personal Statement", re: /\bpersonal\s+statement\b/i },
+  { kind: "essay", label: "Supplemental Essay", re: /\bsupplement(?:al)?\s+essay\b/i },
+  { kind: "essay", label: "Essay prompt", re: /^\s*(?:essay\s+)?prompt\s*[:\-]/im },
+  { kind: "essay", label: "Word count", re: /\bword\s+count\b/i },
 ];
+
+/** A resume's usual section headings, each on a line of its own. */
+const RESUME_HEADINGS =
+  /^\s*(?:education|(?:work|professional|relevant|research|volunteer|leadership)?\s*experience|skills(?:\s*(?:&|and)\s*interests)?|honors(?:\s*(?:&|and)\s*awards)?|awards|leadership|activities|interests|certifications|summary|objective)\s*:?\s*$/gim;
+const CONTACT = /[\w.+-]+@[\w-]+\.[\w.-]+|\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}/;
+
+/**
+ * Signals from the text's shape, for files that never print their type. Three or more resume headings are a
+ * resume ("resume sections"), and a contact line near the top of such a file is a second, separate signal, so
+ * a stray "5 hours per week" in a bullet doesn't tie it. Long first-person paragraphs are an essay, but only
+ * when nothing was printed at all (`phrases`): a recommendation letter is first-person prose too.
+ */
+function shapeMatches(text: string, phrases: number): { kind: GuessKind; label: string }[] {
+  const headings = new Set((text.match(RESUME_HEADINGS) ?? []).map((h) => h.trim().toLowerCase().replace(/[:\s]+$/, "")));
+  if (headings.size >= 3) {
+    const out = [{ kind: "resume" as const, label: "resume sections" }];
+    if (CONTACT.test(text.slice(0, 400))) out.push({ kind: "resume", label: "contact line" });
+    return out;
+  }
+  if (phrases > 0 || headings.size > 0) return [];
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const paragraphs = text.split(/\n/).filter((p) => p.split(/\s+/).filter(Boolean).length >= 40).length;
+  const firstPerson = (text.match(/\b(?:I|my|me)\b/g) ?? []).length;
+  return words >= 150 && paragraphs >= 2 && firstPerson >= 6 ? [{ kind: "essay", label: "written as an essay" }] : [];
+}
 
 const FILENAME_WORDS = new Map<string, GuessKind>(Object.entries({
   transcript: "transcript", transcripts: "transcript",
@@ -66,7 +102,9 @@ const FILENAME_WORDS = new Map<string, GuessKind>(Object.entries({
   resume: "resume", cv: "resume",
   recommendation: "recommendation-letter",
   award: "award-letter",
-  activities: "activity-list",
+  activities: "activity-list", activity: "activity-list", extracurricular: "activity-list", extracurriculars: "activity-list",
+  ecs: "activity-list",
+  essay: "essay", essays: "essay", supplement: "essay", supplemental: "essay",
 } satisfies Record<string, GuessKind>));
 
 const SHEETS = new Set([
@@ -101,10 +139,12 @@ export function guessKind(input: { filename: string; mimeType: string | null; te
   const text = (input.text ?? "").slice(0, GUESS_TEXT_LIMIT);
   const textFound = text.trim().length >= 20;
 
-  const fromText = textFound ? TEXT_RULES.filter((r) => r.re.test(text)).map((r) => ({ kind: r.kind, label: r.label })) : [];
+  const printed = textFound ? TEXT_RULES.filter((r) => r.re.test(text)).map((r) => ({ kind: r.kind, label: r.label })) : [];
+  const fromText = textFound ? [...printed, ...shapeMatches(text, printed.length)] : [];
   const ws = words(input.filename);
   const fromName = ws.flatMap((w) => { const k = FILENAME_WORDS.get(w); return k ? [{ kind: k, label: w }] : []; });
   if (ws.includes("rec") && ws.includes("letter")) fromName.push({ kind: "recommendation-letter", label: "rec letter" });
+  if (ws.includes("personal") && ws.includes("statement")) fromName.push({ kind: "essay", label: "personal statement" });
 
   // A sensitive signal anywhere wins, text or filename.
   const sensitive = [...fromText, ...fromName].find((m) => SENSITIVE.includes(m.kind));

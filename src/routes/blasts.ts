@@ -2,9 +2,9 @@
  * Email blast.
  *
  * The Communication tab is gone; this is the popup behind it. Audiences are
- * derived from the roster rather than maintained as lists: three filters that
+ * derived from the roster rather than maintained as lists: four filters that
  * combine (class year, colleges the students are applying to, application
- * status), then the students left ticked, then who it goes to (the students or
+ * status, financial aid status), then the students left ticked, then who it goes to (the students or
  * their parents). A counselor never curates a mailing list that silently goes
  * stale.
  *
@@ -30,7 +30,10 @@ import {
   resolveAudience,
   scheduleReady,
   scheduleUnavailable,
+  storedFilters,
   validScheduleTime,
+  AID_STATUSES,
+  NO_AID_STATUS,
 } from "../lib/blasts.js";
 import { HttpError, badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
@@ -87,6 +90,31 @@ export default async function blastRoutes(app: FastifyInstance) {
         }
       }
 
+      // Financial aid status, FAFSA and CSS Profile, as the Financial aid page shows it. A student
+      // without an aid record is `none` (the page reads it as "Not started").
+      const aidRows: Row[] = [];
+      for (let i = 0; i < ids.length; i += 200) {
+        const { data, error } = await request.db
+          .from("student_aid_profiles")
+          .select("student_id, fafsa_status, css_status")
+          .in("student_id", ids.slice(i, i + 200))
+          .limit(5000);
+        if (error) throw fromPostgrest(error);
+        aidRows.push(...((data ?? []) as Row[]));
+      }
+      const aidCounts = (column: "fafsa_status" | "css_status", values: readonly string[]) => {
+        const counts = new Map<string, number>(values.map((v) => [v, 0]));
+        for (const r of aidRows) {
+          const v = String(r[column] ?? "");
+          if (counts.has(v)) counts.set(v, (counts.get(v) ?? 0) + 1);
+        }
+        counts.set(NO_AID_STATUS, ids.length - aidRows.length);
+        // A status the page never offers ("not-applicable") is listed only when someone has it.
+        return [...counts.entries()]
+          .filter(([v, count]) => count > 0 || v !== "not-applicable")
+          .map(([value, count]) => ({ value, count }));
+      };
+
       const byCount = (a: { value: string; count: number }, b: { value: string; count: number }) =>
         b.count - a.count || a.value.localeCompare(b.value);
 
@@ -97,6 +125,10 @@ export default async function blastRoutes(app: FastifyInstance) {
           .sort((a, b) => a.value.localeCompare(b.value)),
         schools: [...schools.values()].map((s) => ({ value: s.value, count: s.students.size })).sort(byCount),
         statuses: [...statuses.entries()].map(([value, set]) => ({ value, count: set.size })).sort(byCount),
+        aidStatuses: {
+          fafsa: aidCounts("fafsa_status", AID_STATUSES.fafsa),
+          css: aidCounts("css_status", AID_STATUSES.css),
+        },
       };
     }
   );
@@ -254,7 +286,7 @@ export default async function blastRoutes(app: FastifyInstance) {
           ...(ready
             ? {
                 recipient_type: b.recipientType,
-                filters: { classYears: b.classYears, colleges: b.colleges, statuses: b.statuses },
+                filters: storedFilters(b),
                 student_ids: b.studentIds ?? null,
                 scheduled_for: b.scheduledFor ?? null,
                 repeat_yearly: b.repeatYearly === true,

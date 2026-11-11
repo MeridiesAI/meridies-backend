@@ -47,11 +47,13 @@ export type PageFetch = (from: number, to: number) => PromiseLike<{ data: unknow
 
 /**
  * Reads pages [from, to] (inclusive, PostgREST's `range`) until an empty page or `cap` rows. An error is
- * returned with the rows read so far, never thrown; `onPage` may throw (ReadStopped) to stop.
+ * returned with the rows read so far, never thrown; `onPage` may throw (ReadStopped) to stop, discarding the
+ * read. `stop`, asked after each page, ends it the way the cap does instead: the rows so far are kept, and a
+ * one-row probe decides `truncated` (a size budget that runs out; lib/axisChatExport.ts).
  */
 export async function readPaged(
   fetchPage: PageFetch,
-  opts: { pageSize?: number; cap?: number; onPage?: (rows: Row[]) => void } = {}
+  opts: { pageSize?: number; cap?: number; onPage?: (rows: Row[]) => void; stop?: () => boolean } = {}
 ): Promise<{ rows: Row[]; truncated: boolean; error: unknown }> {
   const pageSize = opts.pageSize ?? PAGE_SIZE;
   const cap = opts.cap ?? TABLE_ROW_CAP;
@@ -67,8 +69,9 @@ export async function readPaged(
     // Only an empty page ends the table: a short one may just be the server's max_rows, which can be lower
     // than the page asked for. `from` moves on by the rows actually received.
     if (page.length === 0) return { rows, truncated: false, error: null };
+    if (opts.stop?.()) break;
   }
-  const probe = await fetchPage(cap, cap);
+  const probe = await fetchPage(rows.length, rows.length);
   if (probe.error) return { rows, truncated: false, error: probe.error };
   return { rows, truncated: (probe.data ?? []).length > 0, error: null };
 }

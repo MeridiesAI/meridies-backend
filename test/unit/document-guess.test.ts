@@ -49,7 +49,7 @@ test("the Google file type is the weakest signal", () => {
 });
 
 test("false friends and odd names stay unknown without throwing", () => {
-  for (const name of ["Contract.pdf", "Pact essay.docx", "IMG_2041.HEIC", "Relevé de notes – 2026.pdf", "", "actual-draft.pdf", "$1,099 receipt.pdf"]) {
+  for (const name of ["Contract.pdf", "Pact.docx", "IMG_2041.HEIC", "Relevé de notes – 2026.pdf", "", "actual-draft.pdf", "$1,099 receipt.pdf"]) {
     const r = g(name, null);
     assert.equal(r.kind, null, name);
     assert.equal(r.basis, null, name);
@@ -80,4 +80,83 @@ test("a tie between filename words is unknown, even for a spreadsheet", () => {
   assert.equal(r.kind, null);
   assert.equal(r.basis, null);
   assert.equal(g("Resume activities.pdf").kind, null);
+});
+
+// ---- Files auto-sort: the printed text of realistic uploads (the app's e2e/fixtures/autosortFiles.ts) ----------
+
+const RESUME = [
+  "Jordan Lee",
+  "jordan.lee@example.com | (555) 201-3344 | Austin, TX",
+  "EDUCATION",
+  "Westlake High School, Austin, TX - Class of 2027, GPA 3.9 unweighted",
+  "EXPERIENCE",
+  "Robotics Club - Team Captain, 2023-present: led 14 students to the state finals",
+  "City Library - Volunteer Tutor, 2022-present: tutored 6 middle-school students in math, 3 hours per week",
+  "SKILLS",
+  "Python, CAD (Fusion 360), Spanish (conversational)",
+].join("\n");
+
+const ACTIVITY_SHEET = [
+  "Activity type, Position, Organization, Description, Grades, Hours per week, Weeks per year",
+  "Robotics, Team Captain, Westlake Robotics Club, Led 14 students, 10, 11, 12, 8, 30",
+  "Community Service (Volunteer), Volunteer Tutor, Austin Public Library, Tutored math, 9, 10, 11, 3, 40",
+].join("\n");
+
+const ACTIVITY_DOC = [
+  "Activities List - Jordan Lee",
+  "1. Westlake Robotics Club - Team Captain (Grades 10-12, 8 hours per week, 30 weeks per year)",
+  "2. Austin Public Library - Volunteer Tutor (Grades 9-11, 3 hours per week, 40 weeks per year)",
+].join("\n");
+
+const TRANSCRIPT = [
+  "Westlake High School - Unofficial Transcript",
+  "Student: Jordan Lee   Student ID: 204-118   Grade: 11",
+  "AP Calculus AB              2025-26  A       1.0",
+  "Cumulative GPA: 3.92 (unweighted)   Class Rank: 18 / 512",
+].join("\n");
+
+const PARAGRAPH =
+  "The first time I held a soldering iron I burned my thumb, and the second time I burned the table. My grandfather, who fixed radios in Manila for forty years, laughed and handed me the iron again, and I sat with him until the light went. ";
+const ESSAY_PLAIN = [PARAGRAPH.repeat(2), PARAGRAPH.replace("first", "last").repeat(2), PARAGRAPH.repeat(1)].join("\n\n");
+const ESSAY_LABELLED = ["Personal Statement", "Prompt: Some students have a background, identity, interest, or talent...", PARAGRAPH, "Word count: 612"].join("\n");
+
+test("auto-sort: a resume with no title is read from its sections and contact line", () => {
+  assert.deepEqual(g("Jordan_Lee_final.docx", RESUME), { kind: "resume", basis: "text", matched: "resume sections", textFound: true, keepOut: false });
+  // One stray "hours per week" in a bullet doesn't tie a resume with an activity list.
+  assert.equal(g("x.pdf", `RESUME\n${RESUME}`).kind, "resume");
+});
+
+test("auto-sort: an activity list is read from the Common App's columns, in a sheet or a document", () => {
+  assert.equal(g("my stuff.csv", ACTIVITY_SHEET, "text/csv").kind, "activity-list");
+  assert.equal(g("Jordan ECs.xlsx", ACTIVITY_SHEET, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").kind, "activity-list");
+  assert.equal(g("Jordan - list.docx", ACTIVITY_DOC).kind, "activity-list");
+  assert.equal(g("x.pdf", "Hrs/wk 5, wks/yr 30 and the Position/Leadership column").kind, "activity-list");
+});
+
+test("auto-sort: a transcript keeps winning on its printed phrases", () => {
+  assert.equal(g("Scan_0042.pdf", TRANSCRIPT).kind, "transcript");
+});
+
+test("auto-sort: an essay is read from its labels, or from long first-person paragraphs", () => {
+  assert.deepEqual(g("draft v3.docx", ESSAY_LABELLED), { kind: "essay", basis: "text", matched: "Personal Statement", textFound: true, keepOut: false });
+  assert.deepEqual(g("draft v3.docx", ESSAY_PLAIN), { kind: "essay", basis: "text", matched: "written as an essay", textFound: true, keepOut: false });
+  // A recommendation letter is first-person prose too; its printed phrase wins and the shape is not counted.
+  assert.equal(g("x.pdf", `Letter of Recommendation for Jordan Lee\n\n${PARAGRAPH.repeat(3)}\n\n${PARAGRAPH.repeat(2)}`).kind, "recommendation-letter");
+  // A short note in the first person is not an essay.
+  assert.equal(g("x.docx", "I will send my forms on Friday. My counselor has my transcript.").kind, null);
+});
+
+test("auto-sort: filenames for the new categories, with word boundaries", () => {
+  assert.equal(g("Activities List.xlsx", null).kind, "activity-list");
+  assert.equal(g("Activity list.pdf", null).kind, "activity-list");
+  assert.equal(g("Extracurriculars.docx", null).kind, "activity-list");
+  assert.equal(g("Why Stanford essay.docx", null).kind, "essay");
+  assert.equal(g("Personal Statement - Satya.docx", null).kind, "essay");
+  assert.equal(g("Said yes to Duke.pdf", null).kind, null); // "aid" inside a word is no aid form
+  assert.equal(g("Common App Activities.csv", null, "text/csv").kind, "activity-list"); // "act" inside a word is no ACT
+});
+
+test("auto-sort: a sensitive phrase still wins over the new signals", () => {
+  assert.equal(g("Jordan ECs.xlsx", `${ACTIVITY_SHEET}\nFAFSA submitted`).kind, "financial");
+  assert.equal(g("essay.docx", `${ESSAY_LABELLED}\nMy IEP taught me`).keepOut, true);
 });

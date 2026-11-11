@@ -1,45 +1,32 @@
 /**
- * Auto-fill the Activities sheet from an uploaded activity list. AxIS reads the file
- * (`proposalsFromDocument`, the same reader the student's Profile Update uses) and the
- * activities it finds are written straight onto the sheet as `source = 'ai'` rows, adding
- * only what the sheet doesn't already hold. Existing rows are never changed or removed.
+ * Auto-fill the Activities sheet from an uploaded activity list. `activityProposalsFromDocument` reads the file
+ * (a Common App spreadsheet without a model, anything else through AxIS) and marks what the sheet already has;
+ * the activities it doesn't have are written straight onto the sheet as `source = 'ai'` rows. Existing rows are
+ * never changed or removed.
  */
 
 import type { FastifyRequest } from "fastify";
-import { fromPostgrest, notFound } from "./errors.js";
-import { MAX_SHEET_ROWS, type Proposal } from "./profileUpdates.js";
-import { proposalsFromDocument } from "./profileUpdateDocument.js";
+import { activityProposalsFromDocument, type ActivityProposal } from "./activityListImport.js";
+import { fromPostgrest } from "./errors.js";
+import { MAX_SHEET_ROWS } from "./profileUpdates.js";
 
 type Row = Record<string, unknown>;
-export type ExistingActivity = { organization: string | null; position: string | null };
 
-const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-
-// The same activity when the organization matches and the positions match or either is unstated.
-function same(a: ExistingActivity, b: ExistingActivity): boolean {
-  if (norm(a.organization) !== norm(b.organization)) return false;
-  const pa = norm(a.position);
-  const pb = norm(b.position);
-  return !pa || !pb || pa === pb;
-}
-
-/** The sheet rows to insert: activities with an organization, not already on the sheet, within the cap. Pure. */
+/** The sheet rows to insert: activities with an organization the sheet doesn't have yet, within the cap. Pure. */
 export function newActivityRows(
   studentId: string,
-  existing: ExistingActivity[],
-  proposals: Proposal[]
+  existingCount: number,
+  proposals: ActivityProposal[]
 ): { rows: Row[]; skippedDuplicates: number } {
-  const known = [...existing];
   const rows: Row[] = [];
   let skippedDuplicates = 0;
-  for (const { draft: d } of proposals) {
+  for (const { draft: d, onSheet } of proposals) {
     if (d.kind !== "activity" || !d.organization) continue;
-    const candidate = { organization: d.organization, position: d.position };
-    if (known.some((k) => same(k, candidate))) {
+    if (onSheet) {
       skippedDuplicates++;
       continue;
     }
-    if (known.length >= MAX_SHEET_ROWS) break;
+    if (existingCount + rows.length >= MAX_SHEET_ROWS) break;
     rows.push({
       student_id: studentId,
       // On the sheet the organization is the row's name (routes/application.ts capRows).
@@ -52,37 +39,28 @@ export function newActivityRows(
       hours_per_week: d.hoursPerWeek,
       weeks_per_year: d.weeksPerYear,
       source: "ai",
-      sort_order: Math.min(known.length, 999),
+      sort_order: Math.min(existingCount + rows.length, 999),
     });
-    known.push(candidate);
   }
   return { rows, skippedDuplicates };
 }
 
 export type ActivityImportResult = { added: number; skippedDuplicates: number; full: boolean };
 
-export async function importActivitiesFromDocument(request: FastifyRequest, documentId: string): Promise<ActivityImportResult> {
-  // Read on the caller's client, so RLS decides which file and which sheet they can see.
-  const { data: doc, error } = await request.db.from("documents").select("student_id").eq("id", documentId).maybeSingle();
-  if (error) throw fromPostgrest(error);
-  if (!doc?.student_id) throw notFound("That file isn't on file");
-  const studentId = String(doc.student_id);
-
-  const { data: current, error: currentErr } = await request.db
-    .from("activities")
-    .select("organization, position")
-    .eq("student_id", studentId);
-  if (currentErr) throw fromPostgrest(currentErr);
-  const existing = (current ?? []) as ExistingActivity[];
+/** The caller has already shown it can edit `studentId`; RLS decides the rest on the caller's own client. */
+export async function importActivitiesFromDocument(request: FastifyRequest, studentId: string, documentId: string): Promise<ActivityImportResult> {
+  const { count, error: countErr } = await request.db.from("activities").select("id", { count: "exact", head: true }).eq("student_id", studentId);
+  if (countErr) throw fromPostgrest(countErr);
+  const existing = count ?? 0;
   // A full sheet takes nothing, so don't pay for the read.
-  if (existing.length >= MAX_SHEET_ROWS) return { added: 0, skippedDuplicates: 0, full: true };
+  if (existing >= MAX_SHEET_ROWS) return { added: 0, skippedDuplicates: 0, full: true };
 
-  // Throws in words when the file can't be read (the practice's switch, a kept-out file, a format AxIS can't open).
-  const proposals = await proposalsFromDocument(request, documentId);
+  // Throws in words when the file can't be read (the practice's switch, a kept-out or sensitive file, a format AxIS can't open).
+  const { proposals } = await activityProposalsFromDocument(request, studentId, documentId);
   const { rows, skippedDuplicates } = newActivityRows(studentId, existing, proposals);
   if (rows.length > 0) {
-    const { error: insertErr } = await request.db.from("activities").insert(rows);
-    if (insertErr) throw fromPostgrest(insertErr);
+    const { error } = await request.db.from("activities").insert(rows);
+    if (error) throw fromPostgrest(error);
   }
-  return { added: rows.length, skippedDuplicates, full: existing.length + rows.length >= MAX_SHEET_ROWS };
+  return { added: rows.length, skippedDuplicates, full: existing + rows.length >= MAX_SHEET_ROWS };
 }

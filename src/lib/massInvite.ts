@@ -488,7 +488,9 @@ export function groundModelEntries(
         : parsed.ready.find((r) => editDistance(r.email, email) <= 2 && r.email.split("@")[0] === local);
       if ((fragment || near) && pasteLower.includes(local)) {
         if (fragment) usedFragments.add(fragment.raw);
-        if (near) known.delete(near.email);
+        // `near` stays in `known`: the address the rules found is the floor, so a
+        // model "repair" of a valid address (jane@gmail.com -> jane@gmai1.com) can
+        // only add a flagged variant beside it, never take its place.
         accepted = {
           email,
           name: (near?.name ?? null) || groundedName(entry.name),

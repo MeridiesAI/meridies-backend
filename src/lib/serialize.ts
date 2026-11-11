@@ -10,6 +10,7 @@
 
 import { accessStatusOf, type AccessStatus } from "./access.js";
 import { storedValues, withCurrent } from "./handInValues.js";
+import { unsignedAvatarUrl } from "./studentAvatar.js";
 
 export type Role = "student" | "counselor";
 
@@ -49,7 +50,16 @@ export type MeridiesUser = {
   onboardingComplete: boolean;
   counselorId: string | null;
   counselorName: string | null;
+  /**
+   * A URL an <img> can load, or null. A photo uploaded to Storage is a short-lived signed URL (routes sign it with
+   * `signAvatarUrls`, lib/studentAvatar.ts, and pass it as `opts.avatarUrl`); an https URL on file passes through.
+   */
   avatarUrl: string | null;
+  /**
+   * Present only where a route decided it: whether this caller may set or remove the photo
+   * (the student themselves, or their primary counselor).
+   */
+  avatarEditable?: boolean;
   /** IANA time zone the user saved (PATCH /auth/me), or null when none is on file. */
   timezone: string | null;
   /** Counselors: "pending" until Meridies approves the account. null for students. */
@@ -66,7 +76,7 @@ const num = (v: unknown): number | undefined =>
 /** Base user, with `profile` carrying only the scalar fields. */
 export function toMeridiesUser(
   p: Profile,
-  opts: { counselorName?: string | null; extraProfile?: Row } = {}
+  opts: { counselorName?: string | null; extraProfile?: Row; avatarUrl?: string | null; avatarEditable?: boolean } = {}
 ): MeridiesUser {
   const blob = (p.profile ?? {}) as Row;
 
@@ -79,7 +89,9 @@ export function toMeridiesUser(
     onboardingComplete: p.onboarding_complete,
     counselorId: p.counselor_id,
     counselorName: opts.counselorName ?? null,
-    avatarUrl: p.avatar_url,
+    // Never the raw column: a stored `storage:` reference is not a URL, and only a route that signed it may show it.
+    avatarUrl: opts.avatarUrl !== undefined ? opts.avatarUrl : unsignedAvatarUrl(p.avatar_url),
+    ...(opts.avatarEditable !== undefined ? { avatarEditable: opts.avatarEditable } : {}),
     timezone: p.timezone?.trim() ? p.timezone : null,
     accessStatus: accessStatusOf(p),
     profile: {

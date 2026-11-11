@@ -37,10 +37,13 @@ import { AGREEMENT_CONSENT_VERSION } from "../lib/agreementConsent.js";
 import {
   AGREEMENT_COLUMNS,
   AGREEMENT_TOKEN,
-  BODY_MAX,
-  TITLE_MAX,
   acceptanceEmails,
+  agreementBodyText,
   agreementForToken,
+  agreementsError,
+  agreementsOff,
+  agreementsUnavailable,
+  agreementTitle,
   agreementPageBody,
   agreementSentEmail,
   agreementsEnabled,
@@ -66,14 +69,7 @@ import { serviceClient } from "../lib/supabase.js";
 type Row = Record<string, unknown>;
 type PgError = { code?: string; message?: string } | null;
 
-const unavailable = () => new HttpError(503, "Agreements aren't switched on yet", "agreements_unavailable");
-
-/** A missing table or function is the migration not being in; anything else is the CRM's usual mapping. */
-function agreementsError(error: PgError): HttpError {
-  if (isResultsNotApplied(error)) return unavailable();
-  if (error?.code === "42501") return new HttpError(403, "Only the contact's consultant or a firm admin can do that", "agreement_forbidden");
-  return crmError(error);
-}
+const unavailable = agreementsUnavailable;
 
 // ---- DTOs ----------------------------------------------------------------------------
 
@@ -139,24 +135,7 @@ const FORM_ERROR = "Type your full name (2 to 120 characters) and tick the box t
 
 const uuid = z.string().uuid();
 const idParam = z.object({ id: uuid }).strict();
-const createBody = z
-  .object({
-    contactId: uuid,
-    title: z
-      .string()
-      .trim()
-      .min(1)
-      .max(TITLE_MAX)
-      // eslint-disable-next-line no-control-regex
-      .refine((s) => !/[\u0000-\u001f\u007f]/.test(s), "The title can't contain control characters"),
-    bodyText: z
-      .string()
-      .min(1)
-      .max(BODY_MAX)
-      .refine((s) => s.trim().length > 0, "Write the agreement first")
-      .refine((s) => !s.includes("\u0000"), "The text can't contain a null character"),
-  })
-  .strict();
+const createBody = z.object({ contactId: uuid, title: agreementTitle, bodyText: agreementBodyText }).strict();
 
 export default async function agreementRoutes(app: FastifyInstance) {
   // The accept form is the only body the public page takes; kept raw for the strict parse.
@@ -166,7 +145,8 @@ export default async function agreementRoutes(app: FastifyInstance) {
   app.addHook("onRequest", async (request, reply) => {
     if (agreementsEnabled()) return;
     if ((request.routeOptions.url ?? "").startsWith("/agree/")) return page(reply, 404, NOT_AVAILABLE);
-    return reply.code(404).send({ error: "Agreements aren't switched on", code: "agreements_off" });
+    const off = agreementsOff();
+    return reply.code(off.statusCode).send({ error: off.message, code: off.code });
   });
 
   const counselor = [app.authenticate, requireRole("counselor")];

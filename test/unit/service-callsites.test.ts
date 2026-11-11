@@ -64,6 +64,10 @@ const REVIEWED = [
   // request; it asks approvedCounselorIds before finalizing or emailing anyone, and reads/writes only kpi_*
   // rows plus recipients' sign-in emails. routes/kpiUnsubscribe.ts: public, the hashed token decides; it only
   // switches that one row's monthly_email off.
+  // routes/preferences.ts: inside an approved counselor's own request (authenticate; the role is re-read per
+  // request), reads only counselor_note of the catalog preference_cards rows the caller's RLS client already
+  // returned, by id. No caller-supplied id, no student data; a follow-up migration takes the column out of
+  // the client SELECT grant.
   // routes/pipelineUnsubscribe.ts: public, the hashed token decides; it only stamps that one contact's
   // email_opted_out_at. The sequence dispatcher (lib/pipelineSequences.ts) is handed its client by the
   // cron route in routes/internal.ts and asks approvedCounselorIds before sending for anyone.
@@ -108,6 +112,19 @@ const REVIEWED = [
   // mints a signed upload URL for a path the API names, reads back an object a save names (only once ownBrandingPath
   // put it in the caller's folder) and removes one a save replaced, cleared or that wasn't the image it claimed.
   "routes/branding.ts",
+  // routes/studentAvatar.ts: a student's profile picture, inside the student's own request or their approved primary
+  // counselor's (authenticate, resolveStudentId(..., "edit"), then the caller's own RLS client read the student's row
+  // and the counselor_id check ran). The service role only touches the private student-banners bucket under that
+  // student's own folder: it mints a signed upload URL for a path the API names (the insert policy is student-self
+  // only), reads back the object a save names (isOwnAvatarPath first), removes the photo a save replaced or cleared,
+  // one that wasn't a JPEG, and the student's own abandoned avatar-*.jpg uploads. profiles.avatar_url is written on
+  // the caller's own client. The signed read URLs come from lib/studentAvatar.ts's signAvatarUrls.
+  "routes/studentAvatar.ts",
+  // routes/students.ts: GET /students, GET/PATCH /students/:id hand the service client to signAvatarUrls
+  // (lib/studentAvatar.ts) to sign read URLs for the photos of exactly the rows the caller's own RLS query returned;
+  // a stored reference is honoured only inside the row's own student folder. Nothing is written. routes/auth.ts
+  // (listed below) does the same for the caller's own row in GET and PATCH /auth/me.
+  "routes/students.ts",
   // lib/driveExport.ts: only the DRIVE_EXPORT_FAKE test double (refused at boot outside development/test) reads the
   // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
   // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
@@ -161,7 +178,7 @@ const REVIEWED = [
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

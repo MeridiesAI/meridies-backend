@@ -8,7 +8,7 @@
  *   Essays         GET /essays, POST /essays, PATCH/DELETE /essays/:id,
  *                  POST /essays/from-document, POST /essays/sync,
  *                  POST /supplement-docs (a real Google Doc per school)
- *   Sheets         GET /sheets, CRUD /activities and /honors
+ *   Sheets         GET /sheets, CRUD /activities and /honors, POST /activities/from-document
  *
  * The AI pieces (AxIS recommended schools, Narrative Coherence, Activities
  * Build) live in routes/applicationAi.ts under the same prefix.
@@ -16,21 +16,30 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { activityProposalsFromDocument } from "../lib/activityListImport.js";
 import { registerCollection } from "../lib/collection.js";
 import { collegeLogoUrls } from "../lib/collegeLogos.js";
 import { essayOnly, readStoredText } from "../lib/applicationText.js";
 import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
 import { loadCollegePhotos } from "../lib/collegePhotos.js";
-import { hasAnthropic } from "../env.js";
 import { importActivitiesFromDocument } from "../lib/activityImport.js";
-import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { serializeErr } from "../lib/requestLog.js";
-import { requireRoleIn, resolveStudentId } from "../lib/guards.js";
+import { resolveStudentId } from "../lib/guards.js";
 import { loadIntakeFills, questionnaireRowIds } from "../lib/intakeFills.js";
 import { limit } from "../lib/limits.js";
 import { resultsUnavailable } from "../lib/resultsAvailability.js";
 import { getRemoteFile, exportGoogleDocText } from "../lib/suiteApi.js";
 import { essayBodyChanged } from "../lib/inactivity.js";
+import { isProfileTooLarge, mergeProfile } from "../lib/profileSize.js";
+import {
+  combinedSections,
+  detectOneDocument,
+  LAYOUT_PROFILE_KEY,
+  readLayoutPreference,
+  SUPPLEMENT_LAYOUTS,
+  type SupplementLayout,
+} from "../lib/supplementLayout.js";
 import { noticeEssayEdit } from "../lib/essayNotice.js";
 import {
   catalogDeadline,
@@ -666,7 +675,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const rows = await listRows(request, studentId);
       const collegeIds = rows.map((r) => r.college_id).filter((v): v is string => typeof v === "string");
 
-      const [essays, prompts, docs] = await Promise.all([
+      const [essays, prompts, docs, layout] = await Promise.all([
         request.db
           .from("essays")
           .select(ESSAY_SELECT)
@@ -683,6 +692,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
               .order("sort_order")
           : Promise.resolve({ data: [] as Row[], error: null }),
         request.db.from("supplement_docs").select("*").eq("student_id", studentId).order("created_at").limit(100),
+        loadLayoutPreference(request, studentId),
       ]);
       if (essays.error) throw fromPostgrest(essays.error);
       if (prompts.error) throw fromPostgrest(prompts.error);
@@ -703,7 +713,85 @@ export default async function applicationRoutes(app: FastifyInstance) {
           ...toSupplementDoc(r as Row, cycle),
           ownedByMe: (r as Row).owner_id === request.auth.userId,
         })),
+        /**
+         * How the Supplements open (lib/supplementLayout.ts): the counselor's
+         * choice, and whether every supplement comes from one document (then
+         * the page opens Combined unless a choice was made).
+         */
+        supplementLayout: {
+          preferred: layout,
+          oneDocument: detectOneDocument((essays.data ?? []) as Row[]),
+        },
       };
+    }
+  );
+
+  /** The counselor's layout choice for a student, from `profiles.profile`; null when none (or unreadable). */
+  async function loadLayoutPreference(request: FastifyRequest, studentId: string): Promise<SupplementLayout | null> {
+    const { data, error } = await request.db
+      .from("profiles")
+      .select(`layout:profile->>${LAYOUT_PROFILE_KEY}`)
+      .eq("id", studentId)
+      .maybeSingle<{ layout: unknown }>();
+    if (error || !data) return null;
+    return readLayoutPreference({ [LAYOUT_PROFILE_KEY]: data.layout });
+  }
+
+  /**
+   * The counselor picks how a student's Supplements are laid out: "per-school"
+   * or "combined", or null to go back to the automatic choice. Stored per
+   * student in `profiles.profile.supplementsLayout` (no migration). The
+   * counselor's call: a student sees it but doesn't set it.
+   */
+  app.put(
+    "/supplements-layout",
+    { preHandler: [app.authenticate, limit("application:supplements-layout", 60, 60)] },
+    async (request) => {
+      if (isStudent(request)) throw forbidden("Your counselor chooses how supplements are laid out");
+      const b = z
+        .object({ studentId: uuid, layout: z.enum(SUPPLEMENT_LAYOUTS).nullable() })
+        .strict()
+        .parse(request.body);
+      const studentId = await resolveStudentId(request, b.studentId, "edit");
+      const read = await request.db.from("profiles").select("profile").eq("id", studentId).maybeSingle<{ profile: unknown }>();
+      if (read.error) throw fromPostgrest(read.error);
+      if (!read.data) throw notFound("That student isn't on your roster");
+      const base = read.data.profile && typeof read.data.profile === "object" && !Array.isArray(read.data.profile)
+        ? { ...(read.data.profile as Row) }
+        : {};
+      delete base[LAYOUT_PROFILE_KEY];
+      const { merged, tooLarge } = mergeProfile(base, b.layout ? { [LAYOUT_PROFILE_KEY]: b.layout } : {});
+      if (tooLarge) throw badRequest("Profile is too large");
+      const { data, error } = await request.db.from("profiles").update({ profile: merged }).eq("id", studentId).select("id").maybeSingle();
+      if (isProfileTooLarge(error)) throw badRequest("Profile is too large");
+      if (error) throw fromPostgrest(error);
+      if (!data) throw notFound("That student isn't on your roster");
+      return { preferred: b.layout };
+    }
+  );
+
+  /**
+   * The Combined layout's text: each supplement row's own text, or, for one
+   * document filed on several prompts, that prompt's part of it (cut at the
+   * prompts' own lines, lib/supplementLayout.ts). Read-only, the student's
+   * words only; nothing is written or rewritten.
+   */
+  app.get(
+    "/supplements/combined",
+    { preHandler: [app.authenticate, limit("application:supplements-combined", 60, 60)] },
+    async (request) => {
+      const q = studentQuery.parse(request.query);
+      const studentId = await resolveStudentId(request, q.studentId, "view");
+      const { data, error } = await request.db
+        .from("essays")
+        .select("id, essay_kind, student_college_id, document_id, supplement_doc_id, external_url, body, prompt, document:documents(external_web_url, filename), supplement_doc:supplement_docs(web_url)")
+        .eq("student_id", studentId)
+        .eq("essay_kind", "supplement")
+        .order("sort_order", { ascending: true })
+        .order("created_at", { ascending: true })
+        .limit(300);
+      if (error) throw fromPostgrest(error);
+      return { sections: combinedSections((data ?? []) as Row[]) };
     }
   );
 
@@ -1198,6 +1286,20 @@ export default async function applicationRoutes(app: FastifyInstance) {
     idempotent: true,
   });
 
+  // An activity list in the student's Files, offered to this sheet (lib/activityListImport.ts): proposed rows
+  // only, nothing stored. A spreadsheet with the Common App's columns is read without a model; any other file goes
+  // to AxIS (Profile Updates' reader, its usual gates). The counselor adds each row they confirm (POST
+  // /activities, or /activities/batch); the student files theirs through Profile Updates.
+  app.post(
+    "/activities/from-document",
+    { preHandler: [app.authenticate, limit("activities:from-document", 20, 60)] },
+    async (request) => {
+      const b = z.object({ studentId: uuid.optional(), documentId: uuid }).strict().parse(request.body);
+      const student = await resolveStudentId(request, b.studentId, "edit");
+      return activityProposalsFromDocument(request, student, b.documentId);
+    }
+  );
+
   // Several rows at once, each answered on its own (an AxIS card with a row per activity): a row the cap or the
   // database refuses fails alone and the rest still save. Rows go in order, so the cap counts the earlier ones.
   app.post("/activities/batch", { preHandler: [app.authenticate, limit("activities:batch", 60, 60)] }, async (request) => {
@@ -1221,21 +1323,16 @@ export default async function applicationRoutes(app: FastifyInstance) {
     return { results };
   });
 
-  // An uploaded activity list becomes Activities rows: AxIS reads the file and adds what the sheet doesn't already
-  // hold (source 'ai', capped at 30 rows, nothing existing changed). The app calls it after an upload of that kind.
+  // An uploaded activity list becomes Activities rows: the same reading as /activities/from-document, but what the
+  // sheet doesn't hold is WRITTEN (source 'ai', capped at 30 rows, nothing existing changed). The app calls it after
+  // an upload filed as an activity list.
   app.post(
     "/activities/import-from-document",
-    {
-      preHandler: [
-        app.authenticate,
-        requireRoleIn("counselor", "student"),
-        limit("activities:import-document", 20, 3600, "That's a lot of activity lists. Try again in an hour."),
-      ],
-    },
+    { preHandler: [app.authenticate, limit("activities:import-document", 20, 3600, "That's a lot of activity lists. Try again in an hour.")] },
     async (request) => {
-      const { documentId } = z.object({ documentId: z.string().uuid() }).strict().parse(request.body);
-      if (!hasAnthropic) throw unavailable("AI features aren't configured yet. Set ANTHROPIC_API_KEY.");
-      return importActivitiesFromDocument(request, documentId);
+      const b = z.object({ studentId: uuid.optional(), documentId: uuid }).strict().parse(request.body);
+      const student = await resolveStudentId(request, b.studentId, "edit");
+      return importActivitiesFromDocument(request, student, b.documentId);
     }
   );
 

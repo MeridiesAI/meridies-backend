@@ -302,6 +302,19 @@ export async function createTaskForStudent(
     if (documents.length !== b.documentIds.length) {
       throw badRequest("One of those documents isn't available to attach");
     }
+    // And about this student: another roster student's file on this task would
+    // reach this student by name, by the tracker and by the assignment email.
+    if (documents.some((d) => d.student_id && d.student_id !== b.studentId)) {
+      throw badRequest("One of those documents belongs to another student");
+    }
+  }
+  if (b.essayId) {
+    const { data: essay } = await request.db.from("essays").select("student_id").eq("id", b.essayId).maybeSingle();
+    if (!essay || essay.student_id !== b.studentId) throw badRequest("That essay isn't this student's");
+  }
+  if (b.studentCollegeId) {
+    const { data: sc } = await request.db.from("student_colleges").select("student_id").eq("id", b.studentCollegeId).maybeSingle();
+    if (!sc || sc.student_id !== b.studentId) throw badRequest("That college isn't on this student's list");
   }
 
   const { data: task, error } = await request.db
@@ -777,11 +790,14 @@ export default async function taskRoutes(app: FastifyInstance) {
 
       const { data: docs, error: docError } = await request.db
         .from("documents")
-        .select("id")
+        .select("id, student_id")
         .in("id", b.documentIds);
       if (docError) throw fromPostgrest(docError);
       if ((docs ?? []).length !== b.documentIds.length) {
         throw badRequest("One of those documents isn't available to attach");
+      }
+      if ((docs ?? []).some((d) => d.student_id && d.student_id !== studentId)) {
+        throw badRequest("One of those documents belongs to another student");
       }
 
       const { error } = await request.db.from("deliverable_documents").upsert(

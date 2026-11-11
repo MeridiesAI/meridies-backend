@@ -13,6 +13,8 @@ import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js
 import { assertCanEditStudent, assertCanViewStudent, canArchive, requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
+import { signAvatarUrls } from "../lib/studentAvatar.js";
+import { serviceClient } from "../lib/supabase.js";
 import {
   toActivity,
   toAward,
@@ -69,7 +71,8 @@ export default async function studentRoutes(app: FastifyInstance) {
     // difference between a snappy dashboard and a spinner. The counselor's own
     // read on each student (where they have overruled what the work implies)
     // is fetched alongside, because the sidebar renders it.
-    const [{ data: deadlines }, { data: overrides }] = await Promise.all([
+    // Photos: one signing batch, only for the rows this counselor's own RLS query just returned.
+    const [{ data: deadlines }, { data: overrides }, avatars] = await Promise.all([
       request.db
         .from("deadlines")
         .select("*")
@@ -77,6 +80,7 @@ export default async function studentRoutes(app: FastifyInstance) {
         .eq("done", false)
         .order("due_date", { ascending: true, nullsFirst: false }),
       request.db.from("student_status_overrides").select("*").in("student_id", ids),
+      signAvatarUrls(serviceClient(), rows),
     ]);
 
     const next = new Map<string, unknown>();
@@ -91,7 +95,10 @@ export default async function studentRoutes(app: FastifyInstance) {
     }
 
     return rows.map((row) => ({
-      ...toMeridiesUser(row as never, { counselorName: request.profile.full_name }),
+      ...toMeridiesUser(row as never, {
+        counselorName: request.profile.full_name,
+        avatarUrl: avatars.get(row.id as string) ?? null,
+      }),
       nextDeadline: next.get(row.id as string) ?? null,
       counselorStatus: status.get(row.id as string) ?? null,
     }));
@@ -149,8 +156,15 @@ export default async function studentRoutes(app: FastifyInstance) {
       counselorName = data?.full_name ?? null;
     }
 
+    // The photo is signed only after the caller's own client returned the row (assertCanViewStudent ran too).
+    const avatars = await signAvatarUrls(serviceClient(), [profile.data]);
     const user = toMeridiesUser(profile.data as never, {
       counselorName,
+      avatarUrl: avatars.get(id) ?? null,
+      // The student themselves, or their primary counselor (profiles' update policy); routes/studentAvatar.ts.
+      avatarEditable:
+        profile.data.role === "student" &&
+        (request.auth.userId === id || profile.data.counselor_id === request.auth.userId),
       extraProfile: {
         gpaWeighted: a?.gpa_weighted ?? undefined,
         gpaUnweighted: a?.gpa_unweighted ?? undefined,
@@ -225,7 +239,8 @@ export default async function studentRoutes(app: FastifyInstance) {
       if (isProfileTooLarge(error)) throw badRequest("Profile is too large");
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That student isn't on your roster");
-      return toMeridiesUser(data as never, { counselorName: request.profile.full_name });
+      const avatars = await signAvatarUrls(serviceClient(), [data]);
+      return toMeridiesUser(data as never, { counselorName: request.profile.full_name, avatarUrl: avatars.get(id) ?? null });
     }
   );
 

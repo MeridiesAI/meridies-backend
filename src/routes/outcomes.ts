@@ -13,9 +13,10 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
 import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
-import { assertCanEditStudent, assertCanViewStudent, requireRole } from "../lib/guards.js";
+import { assertCanEditStudent, assertCanViewStudent, caseloadStudentIds, requireRole } from "../lib/guards.js";
 import { fourPointGpa } from "../lib/gpa.js";
 import { limit } from "../lib/limits.js";
+import { unsignedAvatarUrl } from "../lib/studentAvatar.js";
 import {
   HOOKS,
   OUTCOME_COLUMNS,
@@ -30,6 +31,7 @@ import {
   toOutcome,
   unexpected,
 } from "../lib/outcomes.js";
+import { buildPastStudents, chunk } from "../lib/pastStudents.js";
 
 type Row = Record<string, unknown>;
 
@@ -291,7 +293,7 @@ function toAlum(r: Row, photos: Map<string, CollegePhotoRow> = new Map()) {
     studentId: String(r.student_id),
     name: s.full_name ? String(s.full_name) : null,
     email: s.email ? String(s.email) : null,
-    avatarUrl: s.avatar_url ? String(s.avatar_url) : null,
+    avatarUrl: unsignedAvatarUrl(s.avatar_url),
     gradYear: s.grad_year ? String(s.grad_year) : null,
     highSchool: s.high_school ? String(s.high_school) : null,
     cycle: String(r.cycle),
@@ -328,6 +330,46 @@ const alumPatch = z
   .partial()
   .strict();
 
+/** Past students read at once; past this the page says it shows the newest. */
+const PAST_STUDENTS_MAX = 500;
+/** Students per `in` filter, so the URL stays short. */
+const ID_CHUNK = 100;
+/** PostgREST's row cap (`max_rows`): a slice is read page by page under it. */
+const PAGE = 1000;
+
+/**
+ * Every row of `table` for these students, read in slices of ids and pages of
+ * rows (an alum can have dozens of activities). A failed read throws.
+ */
+async function readByStudent(
+  request: FastifyRequest,
+  ids: string[],
+  table: string,
+  columns: string,
+  key = "student_id",
+  /** A unique column, so the pages neither skip nor repeat a row. */
+  orderBy = "id"
+): Promise<Row[]> {
+  const out: Row[] = [];
+  await Promise.all(
+    chunk(ids, ID_CHUNK).map(async (slice) => {
+      for (let from = 0; ; from += PAGE) {
+        const { data, error } = await request.db
+          .from(table)
+          .select(columns)
+          .in(key, slice)
+          .order(orderBy)
+          .range(from, from + PAGE - 1);
+        if (error) throw fromPostgrest(error);
+        const rows = (data ?? []) as unknown as Row[];
+        out.push(...rows);
+        if (rows.length < PAGE) return;
+      }
+    })
+  );
+  return out;
+}
+
 export async function alumniRoutes(app: FastifyInstance) {
   app.get(
     "/",
@@ -344,6 +386,58 @@ export async function alumniRoutes(app: FastifyInstance) {
       const rows = (data ?? []) as unknown as Row[];
       const photos = await alumPhotos(request, rows);
       return rows.map((r) => toAlum(r, photos));
+    }
+  );
+
+  /**
+   * Past students: every alum on the caseload with their GPA (and its scale),
+   * scores, activities, the schools they applied to with each result, and
+   * where they enrolled (`lib/pastStudents.ts`). One request for the page;
+   * the app filters by class year and outcome itself.
+   */
+  app.get(
+    "/analysis",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("alumni:analysis", 30, 60)] },
+    async (request, reply) => {
+      const caseload = await caseloadStudentIds(request);
+      let alumniQuery = request.db
+        .from("alumni_records")
+        .select("student_id, cycle, college_id, institution_name");
+      if (caseload) alumniQuery = alumniQuery.in("student_id", caseload);
+      const { data, error } = await alumniQuery
+        .order("cycle", { ascending: false })
+        .order("student_id")
+        .limit(PAST_STUDENTS_MAX + 1);
+      if (error) throw fromPostgrest(error);
+      const all = (data ?? []) as unknown as Row[];
+      const alumni = all.slice(0, PAST_STUDENTS_MAX);
+      const ids = alumni.map((a) => String(a.student_id));
+
+      const [profiles, academics, activities, colleges, outcomes] = await Promise.all([
+        readByStudent(request, ids, "profiles", "id, full_name, email, grad_year, high_school", "id"),
+        readByStudent(
+          request,
+          ids,
+          "student_academics",
+          "student_id, gpa_unweighted, gpa_weighted, gpa_scale, sat_superscore, act_composite",
+          "student_id",
+          "student_id"
+        ),
+        readByStudent(request, ids, "activities", "id, student_id, name, position, organization, sort_order"),
+        readByStudent(request, ids, "student_colleges", "id, student_id, college_id, name, status, round, decision_date"),
+        readByStudent(
+          request,
+          ids,
+          "admission_outcomes",
+          "id, student_id, college_id, college_name, round, result, enrolled"
+        ),
+      ]);
+
+      reply.header("Cache-Control", "no-store");
+      return {
+        students: buildPastStudents({ alumni, profiles, academics, activities, colleges, outcomes }),
+        truncated: all.length > PAST_STUDENTS_MAX,
+      };
     }
   );
 

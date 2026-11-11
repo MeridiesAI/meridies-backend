@@ -1,12 +1,29 @@
 name: CI
 
+# Only PRs into main and pushes to main; docs-only changes don't run it.
 on:
   pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
+      # Tests read the READMEs beside the seed data and fixtures.
+      - "scripts/**"
+      - "test/**"
   push:
     branches: [main]
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
+      # Tests read the READMEs beside the seed data and fixtures.
+      - "scripts/**"
+      - "test/**"
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 # Nothing here writes to the repository: a read-only token, as the other two workflows carry.
@@ -15,11 +32,13 @@ permissions:
 
 jobs:
   build:
-    name: Typecheck, build, unit tests
+    name: Typecheck, build, unit tests, workflow lint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
@@ -30,15 +49,7 @@ jobs:
       # The import parser's child process, from dist/ (the unit tests run the source).
       - run: node scripts/smoke/parse-worker.mjs
       - run: npm test
-
-  workflows:
-    name: Lint GitHub workflows
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
+      # Was its own job; a step here saves a runner spin-up (billed as a whole minute).
       # actionlint 1.7.7, checked against the release's published sha256; the
       # runner's own shellcheck lints the run: scripts.
       - name: actionlint
@@ -51,6 +62,8 @@ jobs:
 
   integration:
     name: Migrations + RLS persona suite (local Supabase)
+    # The slow job: skipped on draft PRs, runs once the PR is ready and on main.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -64,7 +77,8 @@ jobs:
         with:
           version: 2.121.0
       - run: npm ci
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      # The runner image already ships psql; install only if it is missing.
+      - run: command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
 
       # A throwaway Supabase project with this repo's migrations, in order.
       - name: Start Supabase with every migration

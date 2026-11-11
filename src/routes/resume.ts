@@ -18,6 +18,7 @@ import { FAST_MODEL, runStructured } from "../lib/anthropic.js";
 import { HttpError, badRequest, fromPostgrest, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { assertAiAllowed } from "../lib/practiceSettings.js";
 import {
   RESUME_DRAFT_SCHEMA,
   RESUME_DRAFT_SYSTEM,
@@ -124,6 +125,7 @@ export default async function resumeRoutes(app: FastifyInstance) {
     const b = adjustBody.parse(request.body);
     if (!hasAnthropic) throw new HttpError(503, "The Resume adjuster isn't switched on yet", "resume_adjust_unavailable");
     const studentId = await resolveStudentId(request, b.studentId, "edit");
+    await assertAiAllowed(request, "resume-adjust");
 
     const { data: doc, error: docError } = await request.db.from("documents").select("*").eq("id", b.documentId).maybeSingle();
     if (docError) throw fromPostgrest(docError);

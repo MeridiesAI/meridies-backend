@@ -55,13 +55,15 @@ src/
 │   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
 │   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
 │   ├── liveDocuments.ts   # live edit times of linked files, for the task tracker
-│   ├── documentGuess.ts   # the type guess for an unconfirmed import: printed phrases, filename, Google type; no model
+│   ├── documentGuess.ts   # the type guess (imports and every upload): printed phrases, text shape, filename, Google type; no model
+│   ├── documentSort.ts    # Files auto-sort: the guess for bytes (POST /files/documents/guess) or a stored object (an upload with no kind)
 │   ├── documentExtraction.ts # confirmed files to text: durable queue, 2-minute leases, recovery, retry
 │   ├── pdfText.ts         # PDF text in a capped worker thread (+ pdfText.extract / .options / .worker); unpdf 1.8.1. Line breaks are kept (`pageTextFromItems`: PDF.js `hasEOL`, else a changed baseline), so a resume reads as its lines, not one blob
 │   ├── serialize.ts       # rows -> the DTOs meridies-app declares
 │   ├── parentAlertDelivery.ts # carries a queued parent alert; records what happened
 │   ├── massInvite.ts      # Mass invite: deterministic parse first, AxIS sorts second
 │   ├── outcomes.ts        # admission outcomes read per high school; CDS flags only with data
+│   ├── pastStudents.ts    # GET /alumni/analysis: alumni + GPA/scale, scores, activities, schools and results (pure)
 │   ├── studentPage.ts     # info card, derived polygon scores, recorded-growth scrubber
 │   ├── studentApplication.ts # College list board + Application DTOs and rules
 │   ├── supplementDocs.ts  # supplement Google Docs under drive.file
@@ -101,10 +103,12 @@ src/
 │   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── branding.ts        # logo/banner/accent: scope, the branding bucket's URL and path rules, image sniffing
+│   ├── studentAvatar.ts   # a student's photo: object path, the `storage:` reference, batch-signed read URLs, cleanup
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
+│   ├── activityListImport.ts # an activity list in Files -> proposed Activities rows (a sheet's columns without a model; else AxIS); stores nothing
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
@@ -112,6 +116,7 @@ src/
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
+│   ├── invoiceDocument.ts # the invoice layout: email (HTML + text) and pay page; formats, never computes
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -123,6 +128,7 @@ src/
 │   ├── heartbeat.ts       # job_heartbeats: each cron's last clean run, for /internal/status
 │   ├── accountDeletion.ts # DELETE /account's preconditions (deletionBlocker) and its one deletion path (deleteAccount)
 │   ├── accountClosure.ts  # Leave Meridies: 30-day grace dates, the closure DTO and emails, the purge (off by default)
+│   ├── axisChatExport.ts  # AxIS chats in the data exports: the caller's own, four parts, file text budgeted
 │   ├── collegeIntel.ts    # NL search filters, proposal rules, the per-student summary (no model)
 │   ├── catalogProposals.ts # cited proposals from a school's own pages: page picking, quote grounding, fact keys (+ Run, Fake)
 │   ├── studentView.ts     # the student's own preferences (banner, theme, reminder channels)
@@ -151,6 +157,7 @@ src/
 │   ├── records.ts, intake.ts, aid.ts, accountability.ts
 │   ├── tasks.ts, files.ts, blasts.ts, firms.ts, colleges.ts
 │   ├── branding.ts        # /branding     logo, banner, accent colour (firm or solo); signed image uploads
+│   ├── studentAvatar.ts   # /students/:id/avatar   a student's profile picture: signed upload, save, remove
 │   ├── preferences.ts, meetings.ts, notifications.ts
 │   ├── integrations.ts, reports.ts, roster.ts
 │   ├── opportunities.ts, ai.ts, chat.ts
@@ -277,9 +284,13 @@ on existing rows (`20261104000001` VALIDATEs the constraint `20261029000002`
 added NOT VALID; it fails if any row breaks the rule, so run
 `scripts/migrations/gpa-scale-violations.sql` first; the routes apply the same
 rule in code either way),
-CSV import extras on invitations (`20261029000003`) and card payments
+CSV import extras on invitations (`20261029000003`), card payments
 (`20261102000001`: without it `GET /pipeline/stripe` answers `configured:
-false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`).
+false` and the other Stripe routes 503 `stripe_unavailable`, `stripeReady`)
+and the 2026-11-05 audit's database guards (`20261115000001`: SVG/HTML kept
+out of the documents bucket by stored type, a pipeline contact's owner
+changed only by its owner or a firm admin, no client INSERT on `profiles`;
+the API enforces each already).
 None is in `REQUIRED_SCHEMA`; each feature degrades without its file, never
 500s (`DATABASE_MIGRATION_INSTRUCTIONS.md`, "Where production stands"). Keep
 writing new features that way: a migration lands minutes from its code in
@@ -545,6 +556,19 @@ forget it.
   `stripeReady`); otherwise status says `configured: false`, the other routes
   and the pay page answer 503, and the tracker is what it was. Not in
   `REQUIRED_SCHEMA`.
+- **One invoice layout** (`lib/invoiceDocument.ts`): the invoice email (table-based, inline styles, `color-scheme:
+  light only`, plain-text twin) and the pay page draw the same document as the app's `InvoiceDocument`: the
+  practice's logo (else its name in the brand serif), a status pill (Paid / Due / Overdue / Void; "Due" is
+  `open`), bill-to (the family, parent, address), invoice number and issue/due dates, one line item (the package,
+  with the invoice's label), Subtotal, Credit applied, Already paid, Amount due, Pay by card while something is
+  owed and there is a link, and a footer. **It does no arithmetic**: a draft passes `planInvoice`'s split, a saved
+  invoice `deriveAccount`'s figures and `invoiceOwed`. The practice is `readPractice`: a firm's `name`, `logo_url`,
+  `accent_color`; a solo counselor's name and `counselor_branding`; a failed read gives the name alone. The accent
+  is darkened until white text on it reads 4.5:1 (`readableAccent`). Only an https (or loopback http) logo is
+  loaded, and the pay page's CSP allows exactly that logo's origin (`payCsp`). `POST
+  /contacts/:id/invoices/preview` also answers `practice`, `issuedOn`, `packageName`, `plan`, `payByCard` (no
+  token minted), and `GET /pipeline/payments` answers `practice` (both additive). Tests:
+  `test/unit/invoice-document.test.ts`.
 - **Agreements: typed-name acceptance, NOT a certified e-signature, switched OFF** (`20261111000010`;
   `routes/agreements.ts`, `lib/agreements.ts`, `lib/agreementConsent.ts`). A counselor who may bill a Contact Pipeline
   contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;
@@ -582,6 +606,24 @@ forget it.
   decisions: ESIGN/UETA consumer disclosures, retention versus deletion on request. **Deploy order:** either; without
   the file the routes answer 503 `agreements_unavailable`; not in `REQUIRED_SCHEMA`. Tests: `test/unit/agreements.test.ts`,
   `test/integration/agreements.test.mjs` (CI runs the API with the switch on).
+- **An agreement can go with an invoice** (`lib/invoiceAgreement.ts`; no migration). `POST
+  /pipeline/contacts/:id/invoices`, its `/preview`, and `POST /pipeline/invoices/:id/send` (Send again) take an
+  optional `agreement`: `{ agreementId }` (one of **that contact's** agreements, draft or sent; another family's is 404,
+  accepted or void 409 `agreement_closed`) or `{ title, bodyText }` (a new one, saved as a draft exactly as `POST
+  /agreements` saves it, only when the invoice goes out). The family gets **one** email: the invoice document with an
+  "Agreement to review" block **above** the bill-to and a "Review and accept the agreement" button to the usual
+  `/agree/:token` page, then the invoice and its Pay by card button (agree first, then pay; paying never depends on
+  accepting, and the block says "before you pay" only when there is a Pay button). The link is minted with
+  `mintAgreementLink` on the caller's client, the same as `POST /agreements/:id/send` (draft|sent -> sent, 30 days, a
+  resend expires the earlier links). **The link between them is the email only**: the delivery record (template
+  `pipeline-invoice-agreement`, the invoice's `message_delivery_id`) names the agreement and keeps its link out
+  (`recordText`, "[private agreement link omitted]"); nothing is stored on the invoice or the agreement. The preview
+  answers `agreement: { id | null, title }` and mints and saves nothing. Refusals come before the invoice is numbered
+  (a bad agreement leaves no invoice); `send: false` with an agreement is 400 `agreement_needs_send`, no address 400
+  `contact_no_email`. **Switch:** with `AGREEMENTS_ENABLED` off, asking for one is 404 `agreements_off` before anything
+  is written, and a request without one is byte for byte the invoice email it always was; without the migration 503
+  `agreements_unavailable`. Responses add `agreement: { id, title }` only when one went. Tests:
+  `test/unit/invoice-agreement.test.ts`, `test/integration/invoice-agreement.test.mjs`.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a
@@ -595,9 +637,9 @@ forget it.
   "Needs a fix" (flag `gpa_over_scale`) against the file's scale, else the
   student's scale on record, and holds a typed fix to the same rule, because
   one refusal at commit would fail the whole save.
-- **Email blasts** (`routes/blasts.ts`, `lib/blasts.ts`, `20261030000001`). An audience is three filters that
+- **Email blasts** (`routes/blasts.ts`, `lib/blasts.ts`, `20261030000001`). An audience is four filters that
   combine (class year, a college on the students' lists, an application status; a college and a status are read
-  from the same list row), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
+  from the same list row; and financial aid status, below), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
   `students` (their sign-in email) or `parents` (guardians with an address and alerts on, one email per address,
   a student nobody can reach kept as a skipped row). `{first}`, `{student}` and `{me}` are filled per recipient (the
   guardian's first name for a parent; the student's first name, "Ana and Luis" when siblings share one parent address
@@ -626,6 +668,19 @@ forget it.
   who else the consultant works with; don't batch the sends. Tests:
   `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`, `test/integration/blasts-separate.test.mjs`
   (checks the real To/Cc/Bcc in Mailpit, for a send now and the cron).
+- **The blast's financial aid filter** (`aid` on the audience; no migration). `{ form: "fafsa" | "css", mode:
+  "include" | "exclude", statuses: [...] }`: the FAFSA's or the CSS Profile's status, exactly the two statuses the
+  Financial aid page shows (`student_aid_profiles.fafsa_status` / `css_status`), never anything from inside a form.
+  `none` is a student with no `student_aid_profiles` row (the page reads that as "Not started", the filter keeps it
+  apart, so "is none of Not started" doesn't silently keep or drop students nobody has looked at). A FAFSA filter
+  refuses a CSS-only status. It is stored in `email_blasts.filters.aid` only when set, so a blast without it is
+  stored as before, and the dispatcher re-reads it at send time like the other filters; a stored aid filter that no
+  longer parses ends the run `failed` (fail closed: never widened to everyone). `GET /blasts/audiences` adds
+  `aidStatuses: { fafsa, css }` with counts (`none` included); an app reads its absence as an older API and hides
+  the filter. **Deploy the backend first:** the audience schema is strict, so an older API refuses `aid` with a 400,
+  and the app must not resend without it (that would widen the audience). **Rollback caution:** an API older than
+  this ignores `filters.aid` when the cron sends a queued blast, so cancel queued aid-filtered blasts before rolling
+  back. Tests: `test/unit/blast-aid-filter.test.ts`, `test/integration/blasts-aid.test.mjs`.
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
@@ -1069,15 +1124,24 @@ the database (`20261010*`):
   student's own files (PDF, image, .docx/.txt, .xlsx/.csv in the capped parse
   process; the hand-in's document rules and byte cap) and returns proposed
   rows, storing nothing; `POST /profile-updates/file { draft }` files one the
-  student confirmed, under the same checks. **An uploaded activity list fills the sheet by itself**
-  (`POST /application/activities/import-from-document { documentId }`, a student or a counselor who can edit the
-  student, 20 an hour; `lib/activityImport.ts`): the app calls it right after an upload whose kind is `activity-list`.
-  It reads the file with `proposalsFromDocument` (same gates: the practice's document-reading switch, keep-out, a
-  readable format) and writes the activities it finds as `source = 'ai'` rows, **adding only what the sheet doesn't
-  already hold** (same organization, and the same position or one unstated), never changing or removing a row,
-  stopping at 30 rows (a full sheet answers before any model call). Honors in the list are not written. No
-  `profile_updates` log row (that table's insert policy is the student's own). Answers `{ added, skippedDuplicates, full }`;
-  a refusal reads as a 400 in words. Test: `test/unit/activity-import.test.ts`.
+  student confirmed, under the same checks. **`POST /application/activities/from-document { studentId?,
+  documentId }`** (the student, or a counselor who can edit them; 20 a minute) proposes Activities rows from an
+  activity list in the student's Files for the Application page (`lib/activityListImport.ts`): a .xlsx/.csv whose
+  header row names the Common App's columns ("Activity type", "Position", "Organization", "Description", "Grades",
+  "Hours per week", "Weeks per year" and the usual variants; a title row above it is skipped) is read in the capped
+  parse process **without a model**, each row checked by `parseDraft` (description capped at 150, grades and
+  numbers validated, an activity type matched to the Common App list or left missing); any other file goes to
+  `proposalsFromDocument` (now taking the student id; AxIS, Haiku, its usual gates), 503
+  `activity_import_unavailable` without a model key. Answers `{ filename, read: "sheet" | "ai", proposals: [{ draft,
+  missing, onSheet }] }` (`onSheet`: the sheet already has that organization and position). Sensitive kinds are
+  refused. **Nothing is written**: the counselor adds each row they confirm through the sheet's own routes.
+  Tests: `test/unit/activity-list-import.test.ts`.
+  **An activity list can also fill the sheet by itself** (`POST /application/activities/import-from-document { studentId?,
+  documentId }`, same people, 20 an hour; `lib/activityImport.ts`): it takes those proposals and **writes** the
+  activities that aren't `onSheet` as `source = 'ai'` rows (never changing or removing a row, stopping at the 30-row
+  cap, a full sheet answers before any read), and answers `{ added, skippedDuplicates, full }`. The app calls it right
+  after an upload filed as `activity-list`. Honors are not written; no `profile_updates` log row (that table's insert
+  policy is the student's own). Test: `test/unit/activity-import.test.ts`.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
@@ -1419,6 +1483,27 @@ and firm branding reads and saves as before. **Not verified:** real Supabase Sto
 bucket with no policy were tested on the local stack only). Known limits: an upload that is never saved stays in the
 bucket until the next upload URL for that folder cleans it; old firm URLs written through `PATCH /firms/mine` are never removed. Tests:
 `test/unit/branding.test.ts`, `test/integration/branding.test.mjs`.
+### Student profile pictures (no migration; `lib/studentAvatar.ts`, `routes/studentAvatar.ts`)
+
+The student (their own) or their **primary** counselor sets or removes a student's photo; a collaborator, even with
+write access, gets 403 (`profiles`' update policy is the primary counselor's, and the write runs on the caller's own
+client). `POST /students/:id/avatar/upload-url` `{ contentType?: "image/jpeg", sizeBytes }` (≤ 5 MB, 20 an hour)
+answers `{ bucket, path, token, uploadUrl, expiresIn, maxBytes, contentType }`, minted with the service role (the
+private `student-banners` bucket's insert policy is student-self only). The path is `<student id>/avatar-<16 hex>.jpg`,
+named by the API; the app crops to a 512 px JPEG and PUTs the bytes to `uploadUrl`. `PUT /students/:id/avatar
+{ path: string | null }` (60 an hour) accepts only exactly that student's avatar shape (`isOwnAvatarPath`), reads the
+object back (missing: 400 "That photo hasn't finished uploading"; not a JPEG or over 5 MB: removed and 400), writes
+`profiles.avatar_url = 'storage:student-banners/<path>'` (`toAvatarRef`), removes the previous photo best effort, and
+answers `{ avatarUrl }`; null clears it. Before each new upload URL, that student's abandoned `avatar-*.jpg` uploads
+(older than two hours, not the saved one) are removed, and 5 unsaved ones answer 429 `avatar_folder_full`; the banner
+in the same folder is never touched. **Reads:** `avatar_url` is never returned raw. `toMeridiesUser` defaults to
+`unsignedAvatarUrl` (an https URL, e.g. Google's, unchanged; anything else null); `GET /students`, `GET`/`PATCH
+/students/:id` and `GET`/`PATCH /auth/me` sign stored references in one `createSignedUrls` batch (1 hour,
+`signAvatarUrls`) for the rows their own RLS query returned, and only when the reference's folder is the row's own id
+(a student can write any string to their own `avatar_url` through PostgREST). `GET /students/:id` and `GET /auth/me`
+add `avatarEditable`. Without the service key or the bucket the routes answer 503 `avatar_unavailable` and reads show no
+photo. Tests: `test/unit/student-avatar.test.ts`.
+
 ### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
 
 **More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
@@ -1514,6 +1599,26 @@ read `importData: null`. Not in `REQUIRED_SCHEMA`. Test: `test/integration/overv
   (the route stays). Migration `20261105000071` sets Stanford's eight prompts (unverified, so the app says to check
   the school's page) and adds both `ai_runs` labels; either deploy order. Tests: `test/unit/application-text.test.ts`,
   `test/unit/application-sheet-fields.test.ts` (every sheet cell's patch is accepted and reads back).
+- **Supplements layout** (`lib/supplementLayout.ts`, no migration). `GET /application/essays` adds
+  `supplementLayout: { preferred, oneDocument }`: `preferred` is the counselor's choice for the student,
+  `"per-school" | "combined" | null`, stored as `supplementsLayout` in `profiles.profile` (read with
+  `profile->>supplementsLayout`, so the blob isn't loaded); `oneDocument` (`detectOneDocument`) is
+  `{ essayIds, schoolCount, name } | null`, set when at least two supplement rows have a source and every one is the
+  same source (`sourceKeyOf`: a Google Doc by its file id, any other link with its fragment dropped, else the
+  supplement Doc, else the `documents` row; a link wins, so two imports of one Drive file are one source). Rows with
+  nothing behind them, the personal statement and materials (`other`) don't count. Deterministic, no model.
+  The app opens Combined when `preferred` is null and `oneDocument` is set; the choice always wins.
+  `PUT /application/supplements-layout { studentId, layout: "per-school" | "combined" | null }` (counselor with
+  edit access; a student gets 403; null clears the choice) merges the key into the profile like `PATCH /students/:id`.
+  `GET /application/supplements/combined?studentId=` (view access) answers `{ sections: [{ essayId, text, from,
+  truncated, wordCount }] }` for the Combined page, in the essays' order: each row's own `body` (`from: "row"`), or, when rows
+  share a source and the same text (one document filed on several prompts), that prompt's part of it
+  (`splitAtPrompts`, the line holding the prompt's wording to the next one, like the supplement Doc sync's
+  `splitAnswers`; `from: "split"`) only when every prompt is found (30+ characters of wording, on one line), else the
+  whole text (`from: "shared"`, which the app shows once). A split part carries its own `wordCount` (`countWords`),
+  since the row's count is the whole document's; otherwise `wordCount` is null. Text is the document's own, cut, never written; 20,000
+  characters per row at most. Either deploy order: an older API has neither field nor route and the app keeps
+  Per school with the choice in the browser. Tests: `test/unit/supplement-layout.test.ts`.
 - **Coherence's activity alignment** (`lib/activityAlignment.ts`). `GET /application/coherence` adds `alignment`:
   the Activities and Honors sheets sorted into Research, Service and Competitions (by category and by the row's own
   words; hours per year from hours per week x weeks per year), the declared majors, which entries connect to a major
@@ -1542,6 +1647,19 @@ school and no per-year figure, so neither is claimed) and `bySchool` is one row 
 (what the manual award-letter form saves: a total and no line items, and what the comparator uses), else its scholarship
 line items added up; a letter with one scholarship line is named by it, otherwise "Scholarships". Grants and zeros are left
 out. The two lists are never added together and `wonCents` is still the tracker's alone. At most 25 of each per student.
+
+### Past students (`GET /alumni/analysis`, no migration)
+
+A past student is an `alumni_records` row (Close cycle writes one per senior). `GET /alumni/analysis` (counselor,
+`limit("alumni:analysis", 30, 60)`, `request.db`) answers `{ students, truncated }` in one read: per alum `gradYear`,
+`cycle`, `highSchool`, `gpa: { unweighted, weighted, scale }` (live `student_academics`, never shown without the
+scale), `sat` (superscore), `act`, `activities: { count, top }` (first 3 by `sort_order`: name, else position, else
+organization), `schools` (`{ name, collegeId, result, round, decisionDate }`: the college list's statuses in the app's
+words, `submitted` as `result: null`; an `admission_outcomes` row fills a school the list doesn't have, matched by
+college id or name, `admitted` read as `accepted`/`enrolled`) and `enrolled` (the alum record's institution, else the
+list's `enrolled` row). Scoped by `caseloadStudentIds` (unscoped under RLS past 250), at most 500 alumni
+(`truncated`), child tables read in 100-id slices paged under `max_rows`. Nothing is aggregated, so no small-number
+rule applies. Rules in `lib/pastStudents.ts`, tested by `test/unit/past-students.test.ts`.
 
 ### School-specific scholarships (`20261111000006`)
 
@@ -2838,6 +2956,20 @@ turned into text by `extractText` with the linear scanners in
 "<script" with no closing token made the old patterns run for minutes on the
 event loop every tenant shares (see "Text a user supplied" below).
 
+**Every refusal has a code and a sentence** (`LINK_ERRORS` in `lib/links.ts`, sent as
+`{ error, code }` with the 400): `link_empty`, `link_invalid`, `link_too_long` (over
+`LINK_MAX_CHARS`, 2,000), `link_scheme`, `link_credentials`, `link_port`, `link_private`,
+`link_dns`, `link_unreachable`, `link_timeout`, `link_redirects`, `link_not_found` (404/410),
+`link_refused` (401/403/429), `link_http_error`, `link_not_page` (not HTML/text: a PDF),
+`link_too_large`, `link_no_text`. `normalizeLink` takes what was pasted: trimmed, and a
+bare address ("bucknell.edu", "www.x.edu/apply") gets `https://` (`prepareLink`). The routes
+that take a link keep their zod length loose so these sentences, not "Invalid request",
+answer an empty or overlong one. `POST /files/links` answers a failed read's code as
+`errorCode` on that response only (not stored). `POST /colleges/research/folder` checks a
+`url` with `normalizeLink` (no fetch) and refuses a link whose path names a file
+(`fileKindOf`: PDF, Word, images…; "use Add a file") **before** making a folder, and answers
+`url` as it will be stored. Tests: `test/unit/links.test.ts`.
+
 ### Connected apps (Google / Microsoft OAuth)
 
 `GET /integrations/:provider/authorize` (counselor) returns the consent URL
@@ -3097,6 +3229,20 @@ Only a counselor sets `aiAccess` and `ferpaWaived`, on create and on patch: the
 route answers 403 to anyone else, and the `documents_guard_student_restricted`
 trigger refuses a student's write of either, also through PostgREST. The same
 trigger stops a student filing a document they didn't upload under a restricted kind.
+
+**Files auto-sort** (`lib/documentSort.ts`, no migration). Every upload is sorted by `lib/documentGuess.ts` (no
+model): printed phrases (now also an activity list's columns, "Hours per week", "Weeks per year", "Activity type",
+"Position/Leadership", and an essay's "Personal Statement", "Prompt:", "Word count"), the text's shape (three or
+more resume headings is a resume, a contact line near the top a second signal; long first-person paragraphs are an
+essay, but only when nothing was printed, since a recommendation letter is prose too), then whole filename words
+(`activity`, `extracurriculars`, `ecs`, `essay`, `supplement`, "personal statement"). `guessText` reads a CSV's
+start in memory and a workbook's first 40 rows in the capped parse process. **`POST /files/documents/guess`**
+(`?filename=&mimeType=`, body `application/octet-stream` up to 10 MB, empty for the name alone; 120 a minute) answers
+the guess, storing nothing: the counselor's filing popup pre-selects it. **`POST /files/documents` without a `kind`**
+reads the object it registers on the caller's own client (10 MB cap; past it, or unreadable, the filename alone)
+and files it under the guess (`other` when unsure); a sensitive guess comes kept out of AI unless the body says
+otherwise. A body that names a kind is unchanged. `activity-list` was already in `documents_kind_check`. Tests:
+`test/unit/document-guess.test.ts`, `test/unit/activity-list-import.test.ts`.
 
 **Unconfirmed files.** A Google import that names no kind is `kind_confirmed = false`, `available_to_llm = false`,
 with the server's guess in `kind_guess` (`lib/documentGuess.ts`: printed phrases, filename, Google file type; no
@@ -3934,6 +4080,23 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
   the student's own export holds neither).
+  **AxIS chats** (`lib/axisChatExport.ts`; no migration) are in all three exports, in four parts: the chat
+  (`ai_conversations`), its messages, its action cards (`axis_actions`) and its attached files, each file row with
+  the text the server read from it (`extracted_text`, `extract_kind`, `extract_cut`; never the file's bytes). Every
+  chat table is owner-only, so an export only ever holds the caller's own chats: the self export has all of them
+  (`practice.axisChats`, `axisChatMessages`, `axisChatActions`, `axisChatFiles` for a counselor; `records.axis_chats`,
+  `axis_chat_messages`, `axis_chat_actions`, `axis_chat_files` for a student, whose chats predate `20261024000051`),
+  and a student's export (per student and each batch entry, so the app's zip gets one CSV per part) has the caller's
+  chats whose `student_id` is that student, the rule of the app's chat list for a student. That is the student a
+  chat was last about, so a chat filed under one student can mention another the counselor sees. A student's own
+  export never holds their counselor's chats about them. Rows are as stored, read in pages: the chats by owner (and
+  student) named in the query, then the child parts by their chats' ids (`conversation_id`, indexed on each), 100 ids
+  a query under one row cap per part (`readByChats`), so the read never walks other users' rows; ordered oldest chat
+  first with each chat's rows together.
+  File rows are read 50 a page and their text is budgeted (`FILE_TEXT_BUDGET`, 20 MB of UTF-8, over by at most a
+  page): past it the files part stops (`readPaged`'s `stop`) and is listed in `truncated`. The app needs no change:
+  its PDF and Word files read every key of `records` / `practice` (titled "Axis chats" and so on until it names them).
+  Test: `test/integration/account-export-axis.test.mjs`, `test/unit/axis-chat-export.test.ts`.
   **Bulk export** (`lib/studentExport.ts`, `lib/csv.ts`, `lib/driveExport.ts`; no migration):
   `POST /account/export/students` `{ studentIds }` (1-25 uuids, counselor, approved only like the
   per-student export) returns, per id on the caller's caseload (`caseloadStudentIds`, past 250 the same

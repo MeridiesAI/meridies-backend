@@ -32,11 +32,11 @@ import { loadCollegePhotos } from "../lib/collegePhotos.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { hasAnthropic } from "../env.js";
 import { runWebResearch } from "../lib/anthropic.js";
-import { DISCOVERY_MODEL, DISCOVERY_SYSTEM, blockedDomains, discoverForCollege, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
+import { DISCOVERY_MODEL, DISCOVERY_SYSTEM, LOOKUPS_PER_USER_PER_DAY, blockedDomains, discoverForCollege, lookUpSoon, needsLookup } from "../lib/eventsDiscovery.js";
 import { collegesOnLists, listRowsFor, rankColleges } from "../lib/rosterColleges.js";
 import { serviceClient } from "../lib/supabase.js";
 import { requireRole } from "../lib/guards.js";
-import { limit } from "../lib/limits.js";
+import { consumeRateLimit, limit } from "../lib/limits.js";
 import {
   CALENDAR_TARGETS,
   EVENT_KINDS,
@@ -291,7 +291,11 @@ export default async function eventRoutes(app: FastifyInstance) {
         .sort((a, b) => (rank.get(String(a.id)) ?? 0) - (rank.get(String(b.id)) ?? 0))
         .slice(0, 3)
         .map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null }));
-      lookingUp = new Set(lookUpSoon(stale, request.log).map((c) => c.id));
+      // Bounded per caller: each lookup is a research run on the shared budget (lib/eventsDiscovery.ts).
+      const started = stale.length && (await consumeRateLimit(`events:lookup:${request.auth.userId}`, LOOKUPS_PER_USER_PER_DAY, 86_400))
+        ? lookUpSoon(stale, request.log)
+        : [];
+      lookingUp = new Set(started.map((c) => c.id));
     }
     return [...counts.values()]
       .map(({ college, count }) => ({

@@ -344,7 +344,9 @@ export default async function aiRoutes(app: FastifyInstance) {
 
   app.post(
     "/draft-quality",
-    { preHandler: [app.authenticate, aiLimit("draft-quality")] },
+    // Counselor-only: a student iterating their own draft against the AI-likelihood check
+    // until it reads "ok" would leave clean rows for the accountability engine.
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("draft-quality")] },
     async (request) => {
       const b = z
         .object({ studentId: z.string().uuid(), essayId: z.string().uuid() })
@@ -741,7 +743,8 @@ export default async function aiRoutes(app: FastifyInstance) {
    */
   app.post(
     "/essay-review",
-    { preHandler: [app.authenticate, aiLimit("essay-review")] },
+    // Counselor-only: in `edit` mode it writes replacements into the draft's marks.
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("essay-review")] },
     async (request) => {
       const b = z
         .object({

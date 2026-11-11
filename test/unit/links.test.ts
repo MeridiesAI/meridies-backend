@@ -7,7 +7,12 @@ import { gzipSync } from "node:zlib";
 import {
   checkLink,
   fetchReadablePage,
+  fileKindOf,
   isBlockedAddress,
+  LINK_ERRORS,
+  LINK_MAX_CHARS,
+  normalizeLink,
+  prepareLink,
   linkTesting,
   openPinned,
   pinnedLookup,
@@ -216,4 +221,141 @@ test("a 2 MB page of unclosed tags is read without holding the event loop (the r
     }
   }
   restoreResolver();
+});
+
+// ---- A pasted link: what it becomes, and the reason each bad one gets -------------------
+
+/** The `code` an HttpError carries, or the error itself when it isn't one. */
+async function codeOf(p: Promise<unknown>): Promise<string> {
+  try {
+    await p;
+  } catch (err) {
+    return (err as { code?: string }).code ?? String(err);
+  }
+  return "resolved";
+}
+
+test("prepareLink adds https:// to a bare address and leaves a full one alone", () => {
+  assert.equal(prepareLink("  bucknell.edu "), "https://bucknell.edu");
+  assert.equal(prepareLink("www.bucknell.edu/admissions"), "https://www.bucknell.edu/admissions");
+  assert.equal(prepareLink("admissions.cornell.edu/apply?x=1"), "https://admissions.cornell.edu/apply?x=1");
+  assert.equal(prepareLink("//cdn.example.edu/a"), "https://cdn.example.edu/a");
+  assert.equal(prepareLink("https://www.bucknell.edu"), "https://www.bucknell.edu");
+  assert.equal(prepareLink("http://www.bucknell.edu"), "http://www.bucknell.edu");
+  // A host with a port reads as a scheme to URL; it is a host, and the port rule refuses it later.
+  assert.equal(prepareLink("localhost:3000"), "https://localhost:3000");
+  assert.equal(prepareLink("www.bucknell.edu:8080/x"), "https://www.bucknell.edu:8080/x");
+  // Not addresses: left for validateUrl to refuse.
+  assert.equal(prepareLink("javascript:alert(1)"), "javascript:alert(1)");
+  assert.equal(prepareLink("not a url"), "not a url");
+  assert.throws(() => prepareLink("   "), (e: { code?: string }) => e.code === "link_empty");
+  assert.throws(() => prepareLink(`https://a.edu/${"a".repeat(LINK_MAX_CHARS)}`), (e: { code?: string }) => e.code === "link_too_long");
+});
+
+test("normalizeLink: every refusal carries its own code and sentence, before any request", async () => {
+  let opened = 0;
+  const restoreResolver = linkTesting.useResolver(async (host) => {
+    if (host === "localhost") return [{ address: "127.0.0.1", family: 4 }];
+    if (host.endsWith(".invalid")) throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" });
+    return [PUBLIC];
+  });
+  const restoreOpener = linkTesting.useOpener(async () => {
+    opened += 1;
+    return fakeResponse(200, { "content-type": "text/html" });
+  });
+  try {
+    const cases: [string, string][] = [
+      ["", "link_empty"],
+      ["not a url", "link_invalid"],
+      ["abc", "link_invalid"],
+      ["ftp://ftp.example.edu/file", "link_scheme"],
+      ["javascript:alert(1)", "link_scheme"],
+      ["data:text/html,hi", "link_scheme"],
+      ["mailto:admissions@bucknell.edu", "link_scheme"],
+      ["https://user:pass@www.bucknell.edu", "link_credentials"],
+      ["http://www.bucknell.edu:8080/", "link_port"],
+      ["http://127.0.0.1:4424/health", "link_port"],
+      ["http://127.0.0.1/", "link_private"],
+      ["http://localhost/", "link_private"],
+      ["http://169.254.169.254/latest/meta-data", "link_private"],
+      ["http://10.0.0.1/", "link_private"],
+      ["http://[::1]/", "link_private"],
+      ["http://[::ffff:127.0.0.1]/", "link_private"],
+      ["192.168.1.1", "link_private"],
+      ["https://no-such-host.invalid/", "link_dns"],
+      [`https://www.bucknell.edu/${"a".repeat(2100)}`, "link_too_long"],
+    ];
+    for (const [raw, code] of cases) {
+      assert.equal(await codeOf(normalizeLink(raw)), code, raw.slice(0, 60));
+    }
+    assert.equal(opened, 0, "validation alone never opens a connection");
+    for (const code of new Set(cases.map(([, c]) => c))) {
+      const sentence = LINK_ERRORS[code as keyof typeof LINK_ERRORS];
+      assert.match(sentence, /^[A-Z].*\.$/, code);
+      assert.doesNotMatch(sentence, /ENOTFOUND|ECONN|undefined|\bnull\b/, code);
+    }
+
+    assert.deepEqual(await normalizeLink("bucknell.edu"), { url: "https://bucknell.edu/", domain: "bucknell.edu" });
+    assert.deepEqual(await normalizeLink(" https://www.bucknell.edu/admissions "), {
+      url: "https://www.bucknell.edu/admissions",
+      domain: "bucknell.edu",
+    });
+  } finally {
+    restoreResolver();
+    restoreOpener();
+  }
+});
+
+test("reading a pasted link: a dead page, a file, a refusing site and an outage each say which", async () => {
+  const restoreResolver = linkTesting.useResolver(async () => [PUBLIC]);
+  const pages: Record<string, () => PinnedResponse> = {
+    "/gone": () => fakeResponse(404, { "content-type": "text/html" }, "nope"),
+    "/removed": () => fakeResponse(410, {}),
+    "/private": () => fakeResponse(403, {}),
+    "/busy": () => fakeResponse(503, {}),
+    "/cds": () => fakeResponse(200, { "content-type": "application/pdf" }, "%PDF-1.7"),
+    "/loop": () => fakeResponse(302, { location: "/loop" }),
+    "/nowhere": () => fakeResponse(302, {}),
+    "/to-metadata": () => fakeResponse(302, { location: "http://169.254.169.254/latest" }),
+  };
+  const restoreOpener = linkTesting.useOpener(async (hop) => {
+    if (hop.url.pathname === "/down") throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    if (hop.url.pathname === "/slow") throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
+    return (pages[hop.url.pathname] ?? (() => fakeResponse(200, { "content-type": "text/html" }, "<p>ok</p>")))();
+  });
+  try {
+    const expect: [string, string][] = [
+      ["/gone", "link_not_found"],
+      ["/removed", "link_not_found"],
+      ["/private", "link_refused"],
+      ["/busy", "link_http_error"],
+      ["/cds", "link_not_page"],
+      ["/loop", "link_redirects"],
+      ["/nowhere", "link_redirects"],
+      ["/to-metadata", "link_private"],
+      ["/down", "link_unreachable"],
+      ["/slow", "link_timeout"],
+    ];
+    for (const [path, code] of expect) {
+      assert.equal(await codeOf(fetchReadablePage(`https://www.example.edu${path}`)), code, path);
+    }
+    await assert.rejects(fetchReadablePage("https://www.example.edu/busy"), /an error \(503\)/);
+    assert.equal((await fetchReadablePage("https://www.example.edu/fine")).domain, "example.edu");
+  } finally {
+    restoreResolver();
+    restoreOpener();
+  }
+});
+
+test("fileKindOf names a link to a file by its path, and only by its path", () => {
+  assert.equal(fileKindOf("https://www.bucknell.edu/files/cds_2023.pdf"), "a PDF");
+  assert.equal(fileKindOf("https://www.bucknell.edu/files/CDS.PDF?dl=1"), "a PDF");
+  assert.equal(fileKindOf("https://x.edu/a/brochure.docx"), "a Word file");
+  assert.equal(fileKindOf("https://x.edu/campus.jpg"), "an image");
+  assert.equal(fileKindOf("https://www.bucknell.edu/admissions"), null);
+  assert.equal(fileKindOf("https://www.bucknell.edu/"), null);
+  assert.equal(fileKindOf("https://www.bucknell.edu/v1.2/apply"), null);
+  assert.equal(fileKindOf("https://www.bucknell.edu/page.html"), null);
+  assert.equal(fileKindOf("https://www.bucknell.edu/apply?file=x.pdf"), null);
+  assert.equal(fileKindOf("not a url"), null);
 });
