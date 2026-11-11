@@ -13,6 +13,7 @@ import { limit } from "../lib/limits.js";
 import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
 import { toMeridiesUser } from "../lib/serialize.js";
 import { loadProfileBlob } from "../lib/ownProfile.js";
+import { signAvatarUrls } from "../lib/studentAvatar.js";
 import { serviceClient } from "../lib/supabase.js";
 
 const updateMeSchema = z
@@ -47,7 +48,8 @@ export default async function authRoutes(app: FastifyInstance) {
     const p = request.profile;
 
     // The blob and the counselor's name are two independent reads: side by side.
-    const [blob, counselorName] = await Promise.all([
+    // The caller's own photo: signed for their own row only.
+    const [blob, counselorName, avatars] = await Promise.all([
       loadProfileBlob(request),
       p.counselor_id
         ? request.db
@@ -57,9 +59,13 @@ export default async function authRoutes(app: FastifyInstance) {
             .maybeSingle()
             .then(({ data }) => (data?.full_name as string | null | undefined) ?? null)
         : Promise.resolve(null),
+      signAvatarUrls(serviceClient(), [p]),
     ]);
 
-    return toMeridiesUser({ ...p, profile: blob }, { counselorName });
+    return toMeridiesUser(
+      { ...p, profile: blob },
+      { counselorName, avatarUrl: avatars.get(p.id) ?? null, avatarEditable: p.role === "student" }
+    );
   });
 
   app.patch(
@@ -98,7 +104,8 @@ export default async function authRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("Profile not found");
 
-      return toMeridiesUser(data as never, { counselorName: null });
+      const avatars = await signAvatarUrls(serviceClient(), [data]);
+      return toMeridiesUser(data as never, { counselorName: null, avatarUrl: avatars.get(request.auth.userId) ?? null });
     }
   );
 
