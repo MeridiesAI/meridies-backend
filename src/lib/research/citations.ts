@@ -46,6 +46,9 @@ function norm(u: string): string | null {
   return `//${url.host}${url.pathname.replace(/\/$/, "")}${url.search}`;
 }
 
+/** How many link checks run at once. */
+export const LINK_CHECKS = 6;
+
 export async function keepCandidates<C extends Candidate>(
   candidates: C[],
   run: { seenUrls: string[] },
@@ -58,28 +61,37 @@ export async function keepCandidates<C extends Candidate>(
     if (n) seen.add(n);
   }
   const checkedAt = new Date().toISOString();
-  // One link check per page per call; candidates often cite the same URL.
-  const verdicts = new Map<string, boolean>();
-  const isOk = async (url: string, key: string): Promise<boolean> => {
-    const known = verdicts.get(key);
-    if (known !== undefined) return known;
-    let good = false;
-    try {
-      good = (await check(url)).status === "ok";
-    } catch {
-      good = false;
+  // Every distinct page that could count is checked once, LINK_CHECKS at a time: one check can take up to its 10 s
+  // timeout, and checking them one after another made a run with a few slow sites wait most of a minute.
+  const pending = new Map<string, string>();
+  for (const c of candidates) {
+    for (const s of c.sources) {
+      const key = norm(s.url);
+      if (key === null || !seen.has(key) || isBlocked(s.url, blocked) || pending.has(key)) continue;
+      pending.set(key, s.url);
     }
-    verdicts.set(key, good);
-    return good;
+  }
+  const verdicts = new Map<string, boolean>();
+  const queue = [...pending];
+  const worker = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [key, url] = next;
+      let good = false;
+      try {
+        good = (await check(url)).status === "ok";
+      } catch {
+        good = false;
+      }
+      verdicts.set(key, good);
+    }
   };
+  await Promise.all(Array.from({ length: Math.min(LINK_CHECKS, queue.length) }, worker));
   const out: (C & { checkedAt: string })[] = [];
   for (const c of candidates) {
     const sources: Candidate["sources"] = [];
     for (const s of c.sources) {
       const key = norm(s.url);
-      if (key === null || !seen.has(key) || isBlocked(s.url, blocked)) continue;
-      if (!(await isOk(s.url, key))) continue;
-      sources.push(s);
+      if (key !== null && verdicts.get(key) === true) sources.push(s);
     }
     if (sources.length) out.push({ ...c, sources, checkedAt });
   }

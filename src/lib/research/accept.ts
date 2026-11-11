@@ -97,8 +97,10 @@ export async function acceptRecommendation(request: FastifyRequest, id: string):
   let acceptedAs: NonNullable<RecommendationDto["acceptedAs"]>;
   try {
     if (rec.feature === "college_list") {
-      const details = (rec.details ?? {}) as { collegeId?: string };
-      const row = await addToList(request, studentId, { name: rec.title as string, collegeId: details.collegeId ?? undefined }).catch((err: unknown) => {
+      const details = (rec.details ?? {}) as { collegeId?: string; fit?: string };
+      // The match step's reach / target / likely goes on the row's fit tag (the counselor can change it on the board).
+      const fit = details.fit === "reach" || details.fit === "target" || details.fit === "likely" ? details.fit : null;
+      const row = await addToList(request, studentId, { name: rec.title as string, collegeId: details.collegeId ?? undefined, fit }).catch((err: unknown) => {
         // On the list already (added by hand, or by another copy): a code the app can branch on.
         if (err instanceof HttpError && err.statusCode === 409) throw new HttpError(409, err.message, "already_on_list");
         throw err;

@@ -8,6 +8,9 @@ import { fileURLToPath } from "node:url";
 // one means deciding whether it acts for a counselor outside their own request
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
+  // lib/parentNotice.ts: inside a student's own POST/PATCH /me/guardians; the service role reads their counselor's
+  // name and email (for the notice and its Reply-To) and records the delivery. No counselor acts, so no approval check.
+  "lib/parentNotice.ts",
   // lib/profileUpdateDocument.ts: inside a student's own request; the service role only reads their counselor's
   // practice switch (documentReadingAllowed) to decide whether AI may read the file. The file itself is read on
   // the student's own client.

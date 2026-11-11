@@ -101,20 +101,23 @@ async function countGuardiansOf(request: FastifyRequest, studentIds: readonly st
   return total;
 }
 
+const GUARDIAN_COLUMNS = "id, student_id, full_name, email, phone, relationship, alerts_enabled, receives_reports";
+
 async function readGuardians(request: FastifyRequest, studentIds: readonly string[]): Promise<RosterGuardian[]> {
   const out: RosterGuardian[] = [];
   for (const chunk of chunks(studentIds, IN_CHUNK)) {
     // One allowance for the whole request, not one per chunk: the cap is on what a request reads.
-    const rows = await readAll(
-      (from, to) =>
-        request.db
-          .from("guardians")
-          .select("id, student_id, full_name, email, phone, relationship, alerts_enabled, receives_reports")
-          .in("student_id", chunk)
-          .order("id")
-          .range(from, to),
-      ROSTER_READ_CAP - out.length
-    );
+    const page = (columns: string) =>
+      readPaged(
+        (from, to) => request.db.from("guardians").select(columns).in("student_id", chunk).order("id").range(from, to),
+        { cap: ROSTER_READ_CAP - out.length }
+      );
+    // `added_by` (20261122000001) labels a parent the student added; an older database lists the same rows without it.
+    let r = await page(`${GUARDIAN_COLUMNS}, added_by`);
+    if ((r.error as { code?: string } | null)?.code === "42703") r = await page(GUARDIAN_COLUMNS);
+    if (r.error) throw fromPostgrest(r.error as { code?: string; message?: string });
+    if (r.truncated) throw readTooLarge();
+    const rows = r.rows;
     for (const r of rows) out.push(toRosterGuardian(r));
   }
   return out;

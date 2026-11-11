@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { toResearchBrief } from "../../src/lib/research/brief.js";
 import { keepCandidates } from "../../src/lib/research/citations.js";
-import { FOCUS_MARKUP, fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
+import { FOCUS_MARKUP, FOCUS_UNCITED, fakeMatch, fakeResearch, fakeSeam } from "../../src/lib/research/fake.js";
 import {
   buildMatchPrompt, buildResearchQuestion, cleanText, dropStudentInfoInSuggestions, stripModelMarkup, stripModelMarkupMapped, GENERIC_WHY, jsonObjectsWithSpans, parseCandidates, parseCandidatesCounted, RESEARCH_CANDIDATES_SYSTEM,
-  replaceWhysNamingStudent, taskTextFor, validatePicks,
+  replaceWhysNamingStudent, sourcesByTitle, taskTextFor, validatePicks, MATCH_SCHEMA, MATCH_SYSTEM,
 } from "../../src/lib/research/prompt.js";
 import { expiryFor, realSeam, seamFor } from "../../src/lib/research/run.js";
 
@@ -120,6 +120,68 @@ test("the markup fixture: every candidate survives parsing, with no tags in any 
   assert.equal(candidates.find((c) => c.title === "Alpha Example College")!.cost, "There is no application fee.");
 });
 
+// Bug 8: "Research colleges" returned 2 low-reach schools for a top-5% student.
+test("the college ask wants a balanced reach/target/likely list matched to the bands, not only local schools", () => {
+  const q = buildResearchQuestion(toResearchBrief(facts, "college_list", null, now));
+  assert.match(q, /about a third reach/);
+  assert.match(q, /highly selective/);
+  assert.doesNotMatch(q, /Options near the brief's city or region are welcome/);
+  assert.match(buildResearchQuestion(toResearchBrief(facts, "activities", null, now)), /Options near the brief's city or region are welcome/);
+});
+test("the match step keeps every reasonable option and labels a college's fit", () => {
+  assert.match(MATCH_SYSTEM, /Keep every candidate that is a reasonable option/);
+  const item = (MATCH_SCHEMA.properties.picks.items as { properties: Record<string, { enum?: string[] }>; required: string[] });
+  assert.deepEqual(item.properties.fit!.enum, ["reach", "target", "likely"]);
+  assert.ok(!item.required.includes("fit"));
+  const k = [
+    { title: "A", summary: "s", sources: [{ url: "https://example.org/a", title: null }], checkedAt: "2026-10-10T00:00:00.000Z" },
+    { title: "B", summary: "s", sources: [{ url: "https://example.org/b", title: null }], checkedAt: "2026-10-10T00:00:00.000Z" },
+  ];
+  const out = validatePicks({ picks: [{ index: 0, why: "Reach.", effort: "high", fit: "reach" }, { index: 1, why: "Ok.", effort: "low", fit: "dream" }] }, k);
+  assert.equal(out[0]!.details.fit, "reach");
+  assert.equal(out[1]!.details.fit, undefined);
+  assert.equal(out.length, 2);
+});
+test("sourcesByTitle: only pages whose title (or a part of it) starts with the whole college name, at most two", () => {
+  const pages = [
+    { url: "https://www.collegeboard.org/isu", title: "Illinois State University - BigFuture | College Board" },
+    { url: "https://example.org/other", title: "Illinois State Fair" },
+    { url: "https://example.org/isu2", title: "Admissions at Ball Illinois State University" },
+    { url: "https://example.org/isu3", title: "Illinois State University costs" },
+    { url: "https://example.org/null", title: null },
+  ];
+  assert.deepEqual(sourcesByTitle("Illinois State University", pages).map((s) => s.url), ["https://www.collegeboard.org/isu", "https://example.org/isu3"]);
+  assert.deepEqual(sourcesByTitle("Union", [{ url: "https://x.org", title: "Union College" }]), []);
+  assert.deepEqual(sourcesByTitle("State University", [{ url: "https://x.org", title: "Ball State University" }]), []);
+});
+test("an uncited college with a page the run saw under its name is recovered; activities never are", () => {
+  const r = fakeResearch("college_list", FOCUS_UNCITED);
+  const plainParse = parseCandidatesCounted(r.parts);
+  assert.equal(plainParse.candidates.length, 0);
+  const out = parseCandidatesCounted(r.parts, { fallbackSources: (t) => sourcesByTitle(t, r.seenPages ?? []) });
+  assert.deepEqual(out.candidates.map((c) => c.title), ["Listicle Ranked College", "Alpha Example College", "Beta Example University"]);
+  assert.equal(out.recovered, 3);
+  assert.deepEqual(out.candidates[1]!.sources, [{ url: "https://example.org/program-a", title: "Alpha Example College | Admissions" }]);
+});
+test("keepCandidates checks distinct pages at once, not one after another", async () => {
+  let inFlight = 0;
+  let most = 0;
+  const slow = async () => {
+    inFlight++;
+    most = Math.max(most, inFlight);
+    await new Promise((res) => setTimeout(res, 20));
+    inFlight--;
+    return { status: "ok" as const };
+  };
+  const cands = Array.from({ length: 8 }, (_, i) => ({ title: `C${i}`, summary: "s", sources: [{ url: `https://example.org/${i}`, title: null }, { url: "https://example.org/shared", title: null }] }));
+  const seenUrls = [...cands.map((c) => c.sources[0]!.url), "https://example.org/shared"];
+  const t0 = Date.now();
+  const out = await keepCandidates(cands, { seenUrls }, [], slow);
+  assert.equal(out.length, 8);
+  assert.ok(most > 1, "checks ran one at a time");
+  assert.ok(Date.now() - t0 < 9 * 20, "checks did not overlap");
+});
+
 const kept = [
   { title: "A", summary: "s", deadline: "Mar 1", sources: [{ url: "https://example.org/a", title: "Page" }], checkedAt: "2026-10-10T00:00:00.000Z" },
   { title: "B", summary: "s", sources: [{ url: "https://example.org/b", title: null }], checkedAt: "2026-10-10T00:00:00.000Z" },
@@ -169,7 +231,7 @@ test("the fake is used only in fixture mode and never in production", () => {
 test("the fake's research answer is the real result shape, and the keeper leaves the two good candidates", async () => {
   for (const feature of ["activities", "college_list"] as const) {
     const r = fakeResearch(feature);
-    assert.deepEqual(Object.keys(r).sort(), ["parts", "queries", "refused", "runId", "seenUrls", "sources"]);
+    assert.deepEqual(Object.keys(r).sort(), ["parts", "queries", "refused", "runId", "seenPages", "seenUrls", "sources"]);
     const blocked = ["niche.com"];
     const out = await keepCandidates(parseCandidates(r.parts), r, blocked, fakeSeam.check);
     assert.equal(out.length, 2, feature);
@@ -341,7 +403,7 @@ test("an answer with no candidate objects counts zero, however much JSON it hold
 });
 test("an empty run is reusable for a week only when the answer held no candidates", () => {
   const now = Date.parse("2026-10-10T00:00:00Z");
-  const c = (o: Partial<Record<"parts" | "objects" | "parsed" | "kept" | "picked" | "stored", number>>) => ({ parts: 1, objects: 0, parsed: 0, kept: 0, picked: 0, stored: 0, ...o });
+  const c = (o: Partial<Record<"parts" | "objects" | "parsed" | "recovered" | "kept" | "picked" | "stored", number>>) => ({ parts: 1, objects: 0, parsed: 0, recovered: 0, kept: 0, picked: 0, stored: 0, ...o });
   assert.equal(expiryFor(c({}), now), "2026-10-17T00:00:00.000Z");
   assert.equal(expiryFor(c({ objects: 3, parsed: 3, kept: 0 }), now), "2026-10-10T00:00:00.000Z");
   assert.equal(expiryFor(c({ objects: 3, parsed: 3, kept: 2, picked: 0 }), now), "2026-10-10T00:00:00.000Z");

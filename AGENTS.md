@@ -92,6 +92,7 @@ src/
 │   ├── translate.ts       # Translate: the prompts, the checks on the model's answer (links and addresses kept exactly), looksEnglish, TRANSLATE_FAKE
 │   ├── inboundTranslate.ts # a family's reply in English, written on its row by the webhooks; the retry sweep on the dispatch cron
 │   ├── twilioNumbers.ts   # search/buy/release a consultant's own Twilio number
+│   ├── collegeMatch.ts    # which catalog school a research link/file is about: host, admissions domains, path, page title
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
 │   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
@@ -114,6 +115,8 @@ src/
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
 │   ├── blasts.ts          # email blasts: filters to people, delivery, the scheduled-blast dispatcher
 │   ├── guardianRoster.ts  # the parents directory: query, join to students, order, cursor paging, formula-safe CSV; pure
+│   ├── myGuardians.ts     # a student's own parents (/me/guardians): validation, who may change what, the store
+│   ├── parentNotice.ts    # the email a parent gets when a student adds them: once per address, RESEND_PARENTS_FROM
 │   ├── stageTemplates.ts  # seasonal stage emails: the migration probes, the month-and-day rule, class years of a queued blast
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
@@ -182,6 +185,7 @@ src/
 │   ├── meetingSummary.ts  # /ai/meeting-summary   a counselor's pasted notes -> a draft summary + action items (stores nothing)
 │   ├── events.ts          # /events       Events Hub
 │   ├── myEvents.ts        # /me/events    the student's Events tab
+│   ├── myGuardians.ts     # /me/guardians the student's parents: list, add, edit, remove (their own additions)
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
 │   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
@@ -716,6 +720,41 @@ forget it.
   and the app must not resend without it (that would widen the audience). **Rollback caution:** an API older than
   this ignores `filters.aid` when the cron sends a queued blast, so cancel queued aid-filtered blasts before rolling
   back. Tests: `test/unit/blast-aid-filter.test.ts`, `test/integration/blasts-aid.test.mjs`.
+- **A student manages the parents they added** (`20261122000001`; `routes/myGuardians.ts`, `lib/myGuardians.ts`,
+  `lib/parentNotice.ts`). Onboarding's Parents step and the student's Settings › Parents call `GET/POST /me/guardians`
+  and `PATCH/DELETE /me/guardians/:id` (student-only, no student id taken). **The rows are `guardians`**, the same ones
+  the Communication page, Parent contacts, blasts and alerts read: nothing is copied, so a parent a student adds is on
+  every counselor screen at once. The migration adds `guardians.added_by` (stamped by the insert trigger from
+  `auth.uid()`, never from the client; null for older rows and service-role inserts; the update trigger never changes
+  it) and two student policies. **The product call of `20261007000006` stands:** a student's addition starts with
+  alerts off and only the counselor switches it on (`PATCH /accountability/guardians/:id {alerts_enabled}`; the app's
+  composer has **Turn on** on the chip). What a student may do, enforced by RLS + `guardians_student_update_guard` and
+  mirrored in the DTO's `editable` / `removable`: a parent they added and the counselor hasn't switched on, anything
+  (name, relationship, email, phone; remove); one the counselor switched on, the name and relationship only (an email
+  or phone change raises 42501, the API says 403 `guardian_contact_locked`; no delete); one the counselor added, or
+  with no `added_by`, nothing (403 `guardian_locked`). A student never changes `alerts_enabled`, `receives_reports`,
+  `preferred_channel`, `is_primary`, `student_id` or `added_by` (the trigger keeps the old values), so a student can
+  never redirect or silence where their counselor's alerts go. Body: `{ name (1-120), relationship: Mother | Father |
+  Guardian | Other, email (required, lowercased), phone? (7-15 digits) }`, strict. Up to 4 parents in all
+  (`guardians_full`), one address once per student (`guardian_exists`). Limits per student: list 120/min, add 12/hour,
+  edit 30/hour, remove 30/hour. 503 `guardians_unavailable` until the migration is applied (the app says "isn't
+  switched on yet"). The composer's `family[]` and `/guardians/roster` rows carry `addedByStudent` (absent before the
+  migration: both fall back to the old columns on 42703), which the app shows as "Added by {first}".
+  **The parent notice** (`lib/parentNotice.ts`): when a student adds a parent or changes their email, that address gets
+  one short email: "{Student} added you as a parent on Meridies; {counselor} is their counselor and may email you
+  updates about {first}'s college applications; nothing to sign up for". No link of any kind (there is no parent
+  portal). Reply-To is the counselor's routed address (`replyAddressFor`, party parent) or their own email; with no
+  counselor yet the copy says one may write once the student connects, and there is no Reply-To. Same
+  `RESEND_API_KEY`, its own sender `RESEND_PARENTS_FROM` (falls back to `INVITE_FROM_EMAIL`; must be on a domain
+  verified in Resend), template `parent-added`, Resend tag `category=parent-added`, recorded in `message_deliveries`
+  (`recipient_kind` guardian) so the delivery webhook tracks it. **Once per address per student:** any earlier
+  `parent-added` row to that address for this student that reached the provider (queued, sent, delivered, bounced)
+  means no new email, so remove-and-re-add or a name fix sends nothing; a send that failed before leaving may be
+  retried. An address this student's messages bounced at or that marked one as spam gets none. At most 8 notices a
+  student a day; Resend's Idempotency-Key covers two adds racing. It never fails the add (`notice: sent |
+  already_sent | not_sent` in the answer). Tests: `test/unit/my-guardians.test.ts` (rules, the email's words, the
+  routes on a memory store: validation, ownership, no double email, the rate limit), `test/integration/my-guardians.test.mjs`
+  (RLS and the trigger straight through PostgREST, the counselor's views, the email once), `hardening.test.mjs`.
 - **The parents directory is a view, not a mailing list** (`routes/guardians.ts`, `lib/guardianRoster.ts`; no migration).
   `GET /guardians/roster` and `GET /guardians/roster.csv`, approved counselors only (a student 403, a pending
   counselor 403 `account_pending`). It lists the `guardians` rows of the caller's caseload beside the student each
@@ -3159,6 +3198,16 @@ answer an empty or overlong one. `POST /files/links` answers a failed read's cod
 (`fileKindOf`: PDF, Word, images…; "use Add a file") **before** making a folder, and answers
 `url` as it will be stored. Tests: `test/unit/links.test.ts`.
 
+**Which school a research link is filed under** (`lib/collegeMatch.ts`, `POST /colleges/research/folder`):
+the link's host first (the school's catalog `website` or any subdomain of it, by whole labels; else a known
+admissions site off the school's domain, `ADMISSIONS_DOMAINS`, e.g. `mitadmissions.org` → `mit.edu`, keyed by
+main domain so it finds the same school in every environment), then a name or alias in the path's words, and
+only when those find nothing the page's `<title>` (`fetchPageMeta`, at most 6 seconds, a failure is no title).
+Careful by design: whole words, longest match wins ("Penn State" over "Penn"), a tie between two schools is
+General, ordinary-word aliases ("Cal", "Union", "State") never match alone, and in a title an acronym or
+one-word alias matches only as written ("MIT", not "mit"). Add an entry to `ADMISSIONS_DOMAINS` only for a
+site the school itself runs, not a system portal or a blog. Tests: `test/unit/college-match.test.ts`.
+
 ### Connected apps (Google / Microsoft OAuth)
 
 `GET /integrations/:provider/authorize` (counselor) returns the consent URL
@@ -3719,7 +3768,15 @@ column and tables.
   API splits one answer into text blocks at citation boundaries, so
   `parseCandidates` joins the blocks in order and gives each JSON candidate
   object the citations of every block that overlaps it; an object that overlaps
-  no citation is dropped. Before the JSON is read, the model's own markup is
+  no citation is dropped, with one exception for colleges: the model often
+  writes its citation into the JSON as text, which the API can't attach, so a
+  college object with no citation takes up to two pages the run really saw
+  (search results and fetches, `extractSeenPages` -> `ResearchResult.seenPages`)
+  whose title, or a part of it split at " | ", " - ", ": ", starts with the
+  college's whole name of two or more words (`sourcesByTitle`; "State
+  University" never takes a "Ball State University" page). Those still go
+  through the keeper below; the run logs how many were `recovered`.
+  Before the JSON is read, the model's own markup is
   taken out of the joined text (`stripModelMarkupMapped`, spans mapped back to
   the original): citation wrappers it wrote as text (`<cite index="3-1">…</cite>`,
   or `<cite index=\"3-1\">` escaped inside a JSON string, which the API can't
@@ -3730,10 +3787,24 @@ column and tables.
   stored field (title, summary, why, deadline, cost, source titles), and
   `20261122000031_research_strip_model_markup.sql` cleans rows stored before
   (and the task or list row an accept made from them). `RESEARCH_FAKE`'s
-  `fixture:markup` focus returns candidates written that way. At most 8
-  candidates and 5 sources each. Colleges
-  search the official-site allowlist (`researchDomains`); activities search the
-  open web minus the blocklist.
+  `fixture:markup` focus returns candidates written that way.
+  At most 8
+  candidates and 5 sources each. Colleges search the official-site allowlist
+  (`researchDomains`); activities search the open web minus the blocklist.
+- **A balanced list.** The college ask wants about a third reach, target and
+  likely, judged against the brief's GPA and test bands (highly selective
+  reach and target schools when the bands are high), spread across the country
+  with two or three near the brief's region; "options near the region are
+  welcome" is said only for activities. The match step keeps every reasonable
+  candidate (drops only clear misfits or schools already on the list), and may
+  set `fit` (reach / target / likely, optional in `MATCH_SCHEMA`); a valid fit is
+  stored in `details.fit` and accepting a college puts it on the list row's fit
+  tag. Spend: no new model call, no change to searches, fetches, turns, model
+  or effort; the research prompt grows by about 120 tokens and each pick by a
+  few output tokens.
+- **Link checks run at once** (`LINK_CHECKS` = 6 at a time, each distinct page
+  once): one check can take its 10-second timeout, and checking one after
+  another made a run with a few slow sites wait most of a minute.
 - **Before anything is stored** (`validatePicks`): a pick must name a real,
   unused candidate and have an effort of low, medium or high; `why` is at most
   200 characters and two sentences, otherwise the pick is dropped whole (never
@@ -3769,7 +3840,7 @@ column and tables.
   match step or the reason checks) is stored as `succeeded` with an empty list
   but expires at once, so the next request runs again. Each run logs its counts
   with the run id (numbers only): answer parts, candidate objects found,
-  candidates parsed, kept by the keeper, picked, stored. The scanner steps into an
+  candidates parsed, recovered by title, kept by the keeper, picked, stored. The scanner steps into an
   object with no string `title`, so a `{"candidates":[...]}` wrapper yields its
   inner candidates. Failed and discarded runs are never served.
 - **Recommendations.** `recommendations` and `research_runs` are readable by a
@@ -4586,6 +4657,7 @@ npm run dev               # http://localhost:4000
 | `SUPABASE_ANON_KEY` | The key every user-scoped query runs under |
 | `SUPABASE_SERVICE_ROLE_KEY` | Optional; rate limits/quotas/audit degrade without it |
 | `ANTHROPIC_API_KEY` | Optional; `/ai/*` returns 503 without it |
+| `RESEND_PARENTS_FROM` | Optional; the sender of the notice a parent gets when a student adds them ("Name <address>" on a domain verified in Resend). Unset: `INVITE_FROM_EMAIL`. Same `RESEND_API_KEY` |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Optional; without them (and a sender) SMS is recorded `queued`, never sent |
 | `TWILIO_FROM_NUMBER` or `TWILIO_MESSAGING_SERVICE_SID` | The SMS sender: an E.164 number, or a Messaging Service (wins if both) |
 | `CORS_ORIGIN` | Allowed frontend origins, comma-separated |
