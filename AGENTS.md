@@ -98,7 +98,8 @@ src/
 │   ├── collegeMatch.ts    # which catalog school a research link/file is about: host, admissions domains, path, page title
 │   ├── collegesV10.ts     # Colleges search query/cards, official stats + freshness, decision rounds, list builder
 │   ├── scorecardCodes.ts  # labels for the coded Scorecard fields (Carnegie, predominant degree, completion windows)
-│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts
+│   ├── ingest/            # scorecard.ts (catalog), ipeds.ts (admission factors), curated.ts (team CSVs), events.ts (Events Hub CSV), collegePhotos.ts + wikimedia.ts (campus photos), linkCheck.ts, run.ts,
+│   │                      #   collegeFeatures.ts + collegeFeaturesRun.ts + siteCrawl.ts (core features and opportunities from colleges' own pages)
 │   ├── collegePhotos.ts   # a college's campus photo as every college surface serves it; null without the migration
 │   ├── collegeLookup.ts   # Look up info & photo, the picture half: Commons by name, then the site's share images (up to 3)
 │   ├── collegeSiteInfo.ts # Look up info & photo, the facts half: pages picked, one Haiku read, every fact kept only with a quote the pages contain
@@ -106,7 +107,7 @@ src/
 │   ├── imageConvert.ts    # PNG/WebP/JPEG to a 1280 px and a 500 px JPEG with sharp 0.35.5 (loaded lazily; JPEG-only without it)
 │   ├── eventsHub.ts       # Events Hub feed, recommendations, calendar saves
 │   ├── eventsDiscovery.ts # colleges' own upcoming events and visit pages, found and checked weekly
-│   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first
+│   ├── rosterColleges.ts  # which colleges a roster's lists point at, most-listed first (topRosterColleges: across every roster)
 │   ├── crm.ts             # the practice workspace (firm or solo) for pipeline/management
 │   ├── branding.ts        # logo/banner/accent: scope, the branding bucket's URL and path rules, image sniffing
 │   ├── studentAvatar.ts   # a student's photo: object path, the `storage:` reference, batch-signed read URLs, cleanup
@@ -1252,7 +1253,7 @@ forget it.
   seeds the demo's five only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
-  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`, `catalog-proposals`) read
+  `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`, `catalog-proposals`, `college-features`) read
   the current CHECK back and add theirs, so they never drop another area's
   label and re-running one is harmless. Keep the `AiModule` union in
   `lib/anthropic.ts` in step; an unknown label fails the audit insert, not the
@@ -2393,6 +2394,7 @@ there).
 | Weekly (cron) | Library links | automatic | `POST /internal/resources/link-check` |
 | Weekly (cron) | Colleges' upcoming events and visit pages | automatic | `POST /internal/events/discover` |
 | Monthly (cron) | Campus photos (Wikimedia Commons via Wikidata) | automatic; the team edits the picks CSV | `POST /internal/ingest/college-photos` |
+| By hand, when roster lists grow (a re-run skips unchanged sites) | Colleges' own pages: core features and opportunities | engineer | `npm run ingest:features -- --limit N` |
 | When NCES publishes (usually late summer) | IPEDS Admissions (`ADM<year>.zip`) | engineer | `scripts/ingest/ipeds-admissions.ts --year <year>` |
 | August | Common App requirements grid (new cycle) | counselor team compiles, engineer loads | `curated-csv.ts --dataset requirements` |
 | August–October | UC application, Cal State Apply (dates, requirements) | counselor team | `requirements`, and update the library rows' `opens_on`/`closes_on`/`cycle` in a migration |
@@ -2634,6 +2636,64 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
   throws, but nothing calls it at boot yet. `.npmrc` sets `onnxruntime-node-install=skip` so installs on Linux don't
   download onnxruntime's CUDA libraries. `test/unit/embeddings.test.ts` is the one unit test that uses the network.
 
+### College features ingest (`20261124000001`; `lib/ingest/collegeFeatures.ts`, `siteCrawl.ts`, `collegeFeaturesRun.ts`)
+
+Reads colleges' own websites once and fills `college_core_features` and `college_opportunities`. A script, not a
+route or a cron: `npm run ingest:features -- --limit 20` (the most-listed colleges across every roster,
+`topRosterColleges` in `lib/rosterColleges.ts`) or `-- --college <id,...>`; `--dry-run` crawls and extracts and writes
+nothing to the catalog; `--force` re-reads pages whose text hasn't changed; `--concurrency N` (default 3, at most 8).
+Needs the service role key, `ANTHROPIC_API_KEY`, and `20261119000001` + `20261124000001` (it refuses to start
+without them, naming both). A real run holds the `college-features` job lease (6 hours), so two can't overlap.
+
+- **Crawling** (`siteCrawl.ts`; every fetch is `lib/links.ts`). robots.txt per host (RFC 9309): the group naming
+  `Meridies-LinkReader`/`meridies`, else `*`; longest rule wins, Allow on a tie, `*` and `$` matched with `indexOf`
+  (no backtracking). Missing (404/410) allows all; refused, 5xx or unreachable allows nothing and the college reads
+  `blocked`. Crawl-delay is honoured up to 30 s (more: `blocked`). One request a second per host (`HostThrottle`,
+  `www.` and the bare name one host), redirect hops included, through `beforeRequest`, which also refuses a hop off
+  the school's domain (`onSchoolDomain`) before it is sent. Pages come from robots.txt's Sitemap lines, else
+  `/sitemap.xml` (one level of sitemap index, at most three children, never news/events/people), then the home
+  page's links when the sitemap gave too few. They are picked by whole words in the path and link text over six
+  topics (academics/majors/programs, research, honors, co-op/internships, study abroad, centers/institutes), one of
+  each first; news, events, people, admissions, giving, graduate/professional schools, files, dated and long-slug
+  paths are skipped. Up to 10 pages read (16 tried). Text is the page's `<main>` without nav/footer/aside
+  (`extractMainText`), cleaned (`cleanPageText`) and hashed (sha256 of the cleaned text, never the HTML).
+- **Skipping.** `college_source_pages` (service role only) keeps each page's URL, hash, length and fetch time. A page
+  whose hash matches is not sent to the model; a college with no changed page costs no call (`unchanged`). Pages
+  under 200 characters are never sent. The hashes are written last, so a run that fails part way re-reads them.
+- **Extraction.** One Haiku call per college with changed pages (`FAST_MODEL`, module `college-features`, the
+  `college-features` system budget of 1,500 calls a month plus the company line; an `ai_runs` row per call, no
+  actor). Pages go in as `<page url>` blocks, each cut to 6,000 characters and defanged, with the untrusted-content
+  rule. The request is data (`buildExtractionRequest`) and the answer is grounded apart (`groundExtraction`), so the
+  live call can become a Message Batches entry (`toBatchRequest`, `custom_id` = college id) without touching either.
+- **Grounding** (dropped and counted, never repaired): a feature key not in `CORE_FEATURES`, a category not in
+  `OPPORTUNITY_CATEGORIES`, a value outside 0-1, a `source_url` that isn't a page read this call, a quote that isn't
+  on THAT page (`quoteIsOn` from `lib/collegeSiteInfo.ts`: 12+ characters after folding case, quotes, dashes and
+  spaces), an opportunity name not on its page, a description holding a figure its page doesn't (`figures`), and
+  duplicates (first per key; opportunities by normalized name, at most 40). Descriptions are cut to two sentences
+  and 400 characters. A feature the pages don't speak to is not written: unknown stays unknown (null is never
+  written by this job). The quote proves the words are on the page, not that the value is right: a value is the
+  model's reading.
+- **Storing.** Features upsert on (college, key). Opportunities match the college's rows by `opportunityKey` (case,
+  accents, punctuation, "&"/"and", a leading "the" folded): seen -> fields and `last_seen_at` updated, `active` true,
+  `missed_runs` 0; new -> inserted; an active row not found **whose source page the model read this run** ->
+  `missed_runs` + 1, and the second miss in a row (`MISSES_TO_DEACTIVATE`) sets `active = false`. A row on a page not
+  read (unchanged, or no longer picked) isn't touched. Nothing is deleted. New or changed rows are embedded
+  ("name: description", `lib/embeddings.ts`, 16 a batch); `content_hash` is the sha256 of that text and is set only
+  with a vector, so an embedding failure stores the row without one and the next run that sees it embeds it.
+- **Yield report.** Printed at the end and written as one `ai_runs` row (module `college-features`, `input.kind`
+  `run-summary`, the per-college lines and totals in `output`, total tokens): per college pages fetched and read,
+  text characters, features and opportunities found, new/seen/missed, tokens. Low yield is flagged
+  (`lowYieldReason`): pages averaging under 500 characters, a home page with almost no links, or nothing extracted;
+  usually a JavaScript-rendered site, which this job doesn't render (no browser). The run stops on an AI budget
+  refusal (429) or three failed colleges in a row; the rest read `stopped`, exit code 2.
+- **Known limits.** The topics don't target student-life pages, so `greek_life`, `athletics_culture` and
+  `residential` will mostly stay unknown. A partial re-read sends only the changed pages, so a feature is re-judged
+  from them alone (the newest quote wins). An opportunity whose page drops out of the picks is never marked missed.
+  A model that omits a real program on two re-reads of its page in a row deactivates it until it is seen again.
+- **Deploy order:** either; the job is the only reader. Not in `REQUIRED_SCHEMA`. Tests (fixtures, no network):
+  `test/unit/college-features.test.ts` (grounding, the upsert diff over runs, skipping, dry run, stopping, robots,
+  sitemaps, picking, main text, the throttle and the crawl on a fake site).
+
 ## Anthropic / AI rules
 
 **All product AI goes through Anthropic.** No other providers unless the team
@@ -2676,7 +2736,7 @@ failed after it started, which may still be billed: the whole reservation stays)
   month; company-wide `AI_DAILY_CEILING_USD` $100 per UTC day. Weighted input counts each
   token at its price relative to the model's uncached input (cache reads at the model's
   read ratio, writes at 2x until the 5m/1h split is recorded). A system job reserves its
-  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000, `catalog-proposals` 500) and the company
+  own monthly calls (`SYSTEM_CALLS_PER_MONTH`: `events-discovery` 2,000, `catalog-proposals` 500, `college-features` 1,500) and the company
   line; `budget-subjects.test.ts` fails on a budget charged to a made-up account.
 - **Refusals:** a user cap answers 429 "You've hit today's AI limit. It resets in 5
   hours." (hours to 00:00 UTC, rounded up) or "Monthly AI usage limit reached."; the
@@ -3220,7 +3280,13 @@ false`), so a name that answers a public address to the check and 127.0.0.1 to
 the connection (DNS rebinding) never reaches the second answer; the hostname
 still goes out as the Host header and TLS server name.
 If another feature ever needs to fetch a user-supplied URL, route it through
-there rather than calling `fetch` directly. What it reads (up to 2 MB) is
+there rather than calling `fetch` directly. A crawler (the college features
+ingest) passes `beforeRequest`, called with every request's URL, redirect hops
+included, after validation and before anything is sent: it waits its per-host
+turn there and throws to refuse (robots.txt, a hop off the school's site).
+`fetchCrawlFile` reads robots.txt and sitemaps the same way, and `fetchSitePage`
+with `mainContent` returns the page's `<main>` text without menus and footers
+(`extractMainText`, linear). What it reads (up to 2 MB) is
 turned into text by `extractText` with the linear scanners in
 `lib/linearText.ts`, never with a regular expression: a page of "<a" or
 "<script" with no closing token made the old patterns run for minutes on the
