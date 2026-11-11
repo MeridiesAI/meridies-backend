@@ -82,6 +82,10 @@ const envSchema = z.object({
   // "Display Name <address@domain>". Until a domain is verified in Resend, the
   // only deliverable default is Resend's shared onboarding address.
   INVITE_FROM_EMAIL: z.string().default("Meridies <onboarding@resend.dev>"),
+  // The sender of the notice a parent gets when a student adds them (lib/parentNotice.ts): its own identity, same
+  // RESEND_API_KEY. "Display Name <address@domain>" on a domain verified in Resend; unset, it falls back to
+  // INVITE_FROM_EMAIL.
+  RESEND_PARENTS_FROM: blankIsUnset(z.string().regex(/^[^<>\r\n]*<[^<>@\s]+@[^<>@\s]+>$|^[^<>@\s]+@[^<>@\s]+$/, "RESEND_PARENTS_FROM must be an address or \"Name <address>\"").optional()),
   // Local development only: send every email to a Mailpit catcher (the local
   // Supabase stack runs one at http://127.0.0.1:54324) instead of Resend, so
   // invites can be opened without mailing anyone. Ignored in production.
