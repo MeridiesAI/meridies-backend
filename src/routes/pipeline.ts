@@ -55,6 +55,7 @@ import { activeStudentMessage, isValidPhone, missingForActiveStudent } from "../
 import { createInvitation } from "../lib/invites.js";
 import { contactHasSignedAgreement, isSignedAgreementRestrict, SIGNED_AGREEMENT_CONTACT_MESSAGE } from "../lib/agreements.js";
 import { enforceQuota, limit } from "../lib/limits.js";
+import { readCardIssues, withCardIssues } from "../lib/cardIssues.js";
 import { deriveAccount, formatUsd, PAYMENT_METHODS, planInvoice, planLine, planPayment, totals, type AccountDTO } from "../lib/payments.js";
 import {
   CONTACT_EXTRA_COLUMNS,
@@ -422,13 +423,24 @@ async function loadAccount(request: FastifyRequest, contactId: string): Promise<
   if (payments.error) throw crmError(payments.error);
   if (refunds.error) throw crmError(refunds.error);
   if (!pkg.data) return null;
-  return deriveAccount(
+  const account = deriveAccount(
     pkg.data as Row,
     (invoices.data ?? []) as Row[],
     (payments.data ?? []) as Row[],
     todayIn(request.profile.timezone),
     (refunds.data ?? []) as Row[]
   );
+  return withCardIssues(account, await cardIssuesFor(request, [contactId]), (payments.data ?? []) as Row[]);
+}
+
+/** Failed card payments and disputes (lib/cardIssues.ts). Never fails the tracker: without them it reads as before. */
+async function cardIssuesFor(request: FastifyRequest, contactIds: string[]): Promise<Row[]> {
+  try {
+    return await readCardIssues(request.db, contactIds);
+  } catch (err) {
+    request.log.warn({ err: serializeErr(err) }, "pipeline: could not read card issues");
+    return [];
+  }
 }
 
 type InvoiceDraft = {
@@ -1156,8 +1168,14 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     const inv = group((invoices.data ?? []) as Row[]);
     const pay = group((payments.data ?? []) as Row[]);
     const ref = group((refunds.data ?? []) as Row[]);
-    const accounts = ((pkgs.data ?? []) as Row[]).map((p) =>
-      deriveAccount(p, inv.get(String(p.contact_id)) ?? [], pay.get(String(p.contact_id)) ?? [], today, ref.get(String(p.contact_id)) ?? [])
+    const pkgRows = (pkgs.data ?? []) as Row[];
+    const issues = await cardIssuesFor(request, pkgRows.map((p) => String(p.contact_id)));
+    const accounts = pkgRows.map((p) =>
+      withCardIssues(
+        deriveAccount(p, inv.get(String(p.contact_id)) ?? [], pay.get(String(p.contact_id)) ?? [], today, ref.get(String(p.contact_id)) ?? []),
+        issues,
+        pay.get(String(p.contact_id)) ?? []
+      )
     );
     const billed = new Set(accounts.map((a) => a.contactId));
     const unbilled = ((contacts.data ?? []) as Row[])

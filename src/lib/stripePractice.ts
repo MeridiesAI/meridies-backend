@@ -12,6 +12,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import Stripe from "stripe";
 import { env, hasStripe } from "../env.js";
+import { readCardIssues, withCardIssues } from "./cardIssues.js";
 import { deriveAccount, type AccountDTO } from "./payments.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
 import { payUrl } from "./stripeConnect.js";
@@ -135,5 +136,8 @@ export async function readAccount(db: SupabaseClient, contactId: string, today: 
   const error = pkg.error ?? invoices.error ?? payments.error ?? refunds.error;
   if (error) throw new Error(`read account: ${error.code ?? "unknown"}`);
   if (!pkg.data) return null;
-  return deriveAccount(pkg.data as Row, (invoices.data ?? []) as Row[], (payments.data ?? []) as Row[], today, (refunds.data ?? []) as Row[]);
+  const account = deriveAccount(pkg.data as Row, (invoices.data ?? []) as Row[], (payments.data ?? []) as Row[], today, (refunds.data ?? []) as Row[]);
+  // A failed card payment shows on the pay page; it never changes what is owed, so a read error only drops the note.
+  const issues = await readCardIssues(db, [contactId]).catch(() => []);
+  return withCardIssues(account, issues, (payments.data ?? []) as Row[]);
 }

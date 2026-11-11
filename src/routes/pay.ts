@@ -61,6 +61,13 @@ function page(reply: FastifyReply, status: number, body: string, doc: InvoiceDoc
     .send(renderPayPage(doc?.number ? `Invoice ${doc.number}` : "Pay an invoice", body));
 }
 
+/** What the family reads after a card payment on this invoice failed (lib/cardIssues.ts). Nothing was charged. */
+export function failureNote(f: { reason: string } | null): string | null {
+  if (!f) return null;
+  const reason = f.reason.trim().replace(/\.$/, "");
+  return `Your last card payment didn't go through${reason ? ` (${reason})` : ""}, and nothing was charged. You can try again, with another card if you need to.`;
+}
+
 const INVALID = renderPageMessage("This link isn't valid", "Use the pay link in the invoice email you received.");
 const UNAVAILABLE = renderPageMessage(
   "Card payments aren't available right now",
@@ -124,7 +131,7 @@ export default async function payRoutes(app: FastifyInstance) {
       status,
       payUrl: null,
       plan: nth > 0 ? planLine(account, nth) : null,
-      footnote: null,
+      footnote: failureNote(dto.cardFailure ?? null),
     };
     if (status === "void") return { ok: false, status: 410, body: renderInvoicePageBody(base), doc: base };
     if (status === "paid") return { ok: false, status: 200, body: renderInvoicePageBody(base), doc: base };
