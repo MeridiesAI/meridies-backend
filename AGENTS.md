@@ -1294,6 +1294,12 @@ the database (`20261010*`):
   missing, onSheet }] }` (`onSheet`: the sheet already has that organization and position). Sensitive kinds are
   refused. **Nothing is written**: the counselor adds each row they confirm through the sheet's own routes.
   Tests: `test/unit/activity-list-import.test.ts`.
+  **An activity list can also fill the sheet by itself** (`POST /application/activities/import-from-document { studentId?,
+  documentId }`, same people, 20 an hour; `lib/activityImport.ts`): it takes those proposals and **writes** the
+  activities that aren't `onSheet` as `source = 'ai'` rows (never changing or removing a row, stopping at the 30-row
+  cap, a full sheet answers before any read), and answers `{ added, skippedDuplicates, full }`. The app calls it right
+  after an upload filed as `activity-list`. Honors are not written; no `profile_updates` log row (that table's insert
+  policy is the student's own). Test: `test/unit/activity-import.test.ts`.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,
