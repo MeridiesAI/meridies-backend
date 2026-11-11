@@ -20,6 +20,8 @@
  * word count are untouched.
  */
 
+import { countWords } from "./documentText.js";
+
 type Row = Record<string, unknown>;
 
 export const SUPPLEMENT_LAYOUTS = ["per-school", "combined"] as const;
@@ -121,6 +123,12 @@ export type CombinedSection = {
    */
   from: "row" | "split" | "shared";
   truncated: boolean;
+  /**
+   * The words in a `split` section's part, counted the way the database counts
+   * a body (`countWords`), since the row's own count is the whole document's;
+   * null otherwise (the row's count stands).
+   */
+  wordCount: number | null;
 };
 
 /** The shortest prompt wording looked for in a shared document: shorter ones ("Why us?") match ordinary lines. */
@@ -188,8 +196,9 @@ export function combinedSections(rows: Row[]): CombinedSection[] {
     const id = String(r.id);
     const hit = split.get(id);
     const raw = hit ? hit.text : typeof r.body === "string" && r.body.trim() ? r.body.trim() : null;
-    if (raw === null) return { essayId: id, text: null, from: hit?.from ?? "row", truncated: false };
+    const from = hit?.from ?? "row";
+    if (raw === null) return { essayId: id, text: null, from, truncated: false, wordCount: from === "split" ? 0 : null };
     const c = clip(raw);
-    return { essayId: id, text: c.text, from: hit?.from ?? "row", truncated: c.truncated };
+    return { essayId: id, text: c.text, from, truncated: c.truncated, wordCount: from === "split" ? countWords(raw) : null };
   });
 }

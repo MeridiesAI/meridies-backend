@@ -123,6 +123,9 @@ test("one document filed on several prompts is cut at its prompts, verbatim", ()
   assert.equal(a!.from, "split");
   assert.equal(a!.text, "I took apart my grandmother's radio and found a tiny world inside it.");
   assert.equal(b!.text, "My town has one stoplight and a library that stays open late.");
+  // Counted from the part, not the whole document the row's own count covers.
+  assert.equal(a!.wordCount, 13);
+  assert.equal(b!.wordCount, 12);
   // Only the student's words: every slice is in the document.
   for (const s of [a!, b!]) assert.ok(DOC.includes(s.text!));
 });
@@ -133,7 +136,7 @@ test("a shared document whose prompts aren't in it is shown whole, not guessed a
     row({ document_id: "d1", body: DOC, prompt: P2 }),
   ];
   const sections = combinedSections(rows);
-  assert.ok(sections.every((s) => s.from === "shared" && s.text === DOC.trim()));
+  assert.ok(sections.every((s) => s.from === "shared" && s.text === DOC.trim() && s.wordCount === null));
 });
 
 test("short prompts are never looked for", () => {
