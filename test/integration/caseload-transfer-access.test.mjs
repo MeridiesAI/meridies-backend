@@ -62,7 +62,12 @@ try {
     }
     check(`${label}: the API answers 404 to A for ${s.name}`, aSt.every((x) => x === 404), aSt.join(","));
     check(`${label}: the API answers 200 to ${to.name}`, toSt.every((x) => x === 200), toSt.join(","));
-    const info = await call(to.token, "GET", `/student-page/${s.id}/info`);
+    // Read during the other suite's hidden-table window, transferredFrom is null: ask again.
+    let info = await call(to.token, "GET", `/student-page/${s.id}/info`);
+    for (let i = 0; i < 30 && info.status === 200 && !info.body.transferredFrom; i++) {
+      await new Promise((done) => setTimeout(done, 1000));
+      info = await call(to.token, "GET", `/student-page/${s.id}/info`);
+    }
     check(`${label}: the student page says who it came from`, info.body.transferredFrom?.name === A.name, JSON.stringify(info.body.transferredFrom));
 
     const edits = [
