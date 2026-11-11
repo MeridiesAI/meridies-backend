@@ -63,12 +63,25 @@ function fakeSvc(world: (call: Call) => Answer) {
 }
 
 const eqOf = (call: Call, col: string) => call.filters.find((f) => f[0] === "eq" && f[1] === col)?.[2];
+const inOf = (call: Call, col: string) => call.filters.find((f) => f[0] === "in" && f[1] === col)?.[2] as string[] | undefined;
 
-/** A student whose counselor is in FIRM; `exclude` is the firm's flag; `shown` is the newest impression, if any. */
-function practiceWorld(opts: { exclude?: boolean; firmId?: string | null; shown?: { run_id: string; position: number } | null; insertError?: unknown } = {}) {
+/**
+ * A student whose counselor is in FIRM; `exclude` is the firm's flag, `flagged` the counselors whose own flag is on;
+ * `shown` is the newest impression, if any.
+ */
+function practiceWorld(
+  opts: { exclude?: boolean; flagged?: string[]; firmId?: string | null; shown?: { run_id: string; position: number } | null; insertError?: unknown } = {}
+) {
   return (call: Call): Answer => {
     if (call.table === "profiles" && eqOf(call, "id") === STUDENT) return { data: { counselor_id: COUNSELOR }, error: null };
-    if (call.table === "profiles" && eqOf(call, "id") === COUNSELOR) return { data: { firm_id: opts.firmId === undefined ? FIRM : opts.firmId }, error: null };
+    const people = call.table === "profiles" ? inOf(call, "id") : undefined;
+    if (people) {
+      const firm = opts.firmId === undefined ? FIRM : opts.firmId;
+      return {
+        data: people.map((id) => ({ id, firm_id: id === COUNSELOR ? firm : null, exclude_from_learning: (opts.flagged ?? []).includes(id) })),
+        error: null,
+      };
+    }
     if (call.table === "firms") return { data: { exclude_from_learning: opts.exclude ?? false }, error: null };
     if (call.table === "list_builder_impressions" && call.op === "select") return { data: opts.shown ?? null, error: null };
     if (call.op === "insert") return { data: null, error: opts.insertError ?? null };
@@ -76,10 +89,10 @@ function practiceWorld(opts: { exclude?: boolean; firmId?: string | null; shown?
   };
 }
 
-function fakeRequest(over: { role?: string; headers?: Record<string, string>; db?: unknown } = {}) {
+function fakeRequest(over: { role?: string; userId?: string; headers?: Record<string, string>; db?: unknown } = {}) {
   const warnings: unknown[] = [];
   const request = {
-    auth: { userId: COUNSELOR, token: "t" },
+    auth: { userId: over.userId ?? COUNSELOR, token: "t" },
     profile: { role: over.role ?? "counselor" },
     log: { warn: (obj: unknown) => warnings.push(obj) },
     headers: over.headers ?? {},
@@ -140,6 +153,44 @@ test("an excluded firm writes nothing, and reads no impressions", async () => {
   assert.equal(n, 0);
   assert.equal(svc.inserts().length, 0);
   assert.equal(svc.calls.some((c) => c.table === "list_builder_impressions"), false);
+});
+
+test("a flagged counselor's student writes nothing (a solo counselor has no firm to flag)", async () => {
+  const { request } = fakeRequest();
+  for (const firmId of [null, FIRM]) {
+    const svc = fakeSvc(practiceWorld({ firmId, flagged: [COUNSELOR] }));
+    assert.equal(await logChoice(request, { studentId: STUDENT, collegeId: COLLEGE, action: "added", source: "manual" }, { svc: svc.client, now }), 0);
+    assert.equal(await logImpressions(request, run(), { svc: svc.client, now }), 0);
+    assert.equal(svc.inserts().length, 0);
+  }
+  // The student acting for themself is held by their counselor's flag too.
+  const svc = fakeSvc(practiceWorld({ firmId: null, flagged: [COUNSELOR] }));
+  const student = fakeRequest({ role: "student", userId: STUDENT });
+  assert.equal(await logChoice(student.request, { studentId: STUDENT, collegeId: COLLEGE, action: "added", source: "list_builder" }, { svc: svc.client, now }), 0);
+  assert.equal(svc.inserts().length, 0);
+});
+
+test("a flagged counselor acting on a student shared with them writes nothing; an unflagged one is logged", async () => {
+  const OTHER = "88888888-8888-4888-8888-888888888888";
+  const shared = fakeRequest({ userId: OTHER });
+  const flagged = fakeSvc(practiceWorld({ flagged: [OTHER] }));
+  assert.equal(await logChoice(shared.request, { studentId: STUDENT, collegeId: COLLEGE, action: "added", source: "manual" }, { svc: flagged.client, now }), 0);
+  const read = flagged.calls.find((c) => c.table === "profiles" && inOf(c, "id"));
+  assert.deepEqual([...(inOf(read!, "id") ?? [])].sort(), [COUNSELOR, OTHER].sort(), "both the student's counselor and the actor are asked");
+
+  const fine = fakeSvc(practiceWorld());
+  assert.equal(await logChoice(shared.request, { studentId: STUDENT, collegeId: COLLEGE, action: "added", source: "manual" }, { svc: fine.client, now }), 1);
+  assert.equal((fine.inserts()[0]!.values as Record<string, unknown>[])[0]!.firm_id, FIRM, "the firm is the student's counselor's, not the actor's");
+});
+
+test("without the counselor flag column (20261120000001 not applied): nothing is written, one warning", async () => {
+  const missing = fakeSvc((c) =>
+    c.table === "profiles" && inOf(c, "id") ? { data: null, error: { code: "42703", message: "column does not exist" } } : practiceWorld({ firmId: null })(c)
+  );
+  const { request, warnings } = fakeRequest();
+  assert.equal(await logChoice(request, { studentId: STUDENT, collegeId: COLLEGE, action: "added", source: "manual" }, { svc: missing.client, now }), 0);
+  assert.equal(missing.inserts().length, 0);
+  assert.equal(warnings.length, 1);
 });
 
 test("a solo counselor's student (no firm) is logged with no firm, without reading firms", async () => {

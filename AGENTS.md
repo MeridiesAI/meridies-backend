@@ -2447,7 +2447,7 @@ The model never writes a result list and never changes the catalog.
   (`catalogListCandidates`) and, with `explain: true`, adds one AxIS line per
   school shown. The order is always the fit model's.
 
-## List-builder learning (`20261119000001`; `lib/listLearning.ts`)
+## List-builder learning (`20261119000001`, `20261120000001`; `lib/listLearning.ts`)
 
 What Build College Lists showed and what people then did with each school, kept so ranking weights can be learned
 later. **Nothing here changes a ranking**; nothing reads these tables yet.
@@ -2478,10 +2478,14 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
 - **Rules.** Service role only (no grants or policies for anon/authenticated; approval gate attached). Ids, numbers
   and fixed labels only. **Never awaited, never throws**: a failure is a warning; while the tables are missing the
   first failure warns once and nothing is tried for five minutes. The firm is the student's counselor's
-  (`profiles.firm_id` of `counselor_id`); **`firms.exclude_from_learning`** (our team, demo and test firms; set by hand
-  as `postgres`, `update public.firms set exclude_from_learning = true where id = '<firm id>'`; clients read it but
-  can't write it) skips the student entirely, and a firm that can't be read logs nothing (fail closed). A solo
-  counselor without a firm row can't be excluded. Deleting a student's account deletes their rows (`student_id`
+  (`profiles.firm_id` of `counselor_id`). **Leaving accounts out:** `profiles.exclude_from_learning`
+  (`20261120000001`) on the student's counselor, or `firms.exclude_from_learning` on that counselor's firm, skips the
+  student entirely, and a flagged counselor acting on a student shared with them is skipped too. On production every
+  counselor is solo (no `firms` rows, 2026-11-11), so the counselor flag is the one that matters. Both are set by hand
+  as `postgres` (`update public.profiles set exclude_from_learning = true where id in ('<counselor id>', ...)`), read
+  by clients but never written by them, and default to false, so a counselor who signs up later is logged; flag a new
+  team, demo or test account when it is made. Any flag that can't be read logs nothing (fail closed; without
+  `20261120000001` nothing is logged at all). Deleting a student's account deletes their rows (`student_id`
   cascades); deleting the acting account keeps the rows and sets `actor_id` null. **Not in the data export**: the export
   reads as the caller under RLS and no client can read these tables (like `ai_runs` and `audit_log`); what a student
   actually chose is already there as `student_colleges`. Answer a formal access request by `student_id` with SQL.
@@ -2490,8 +2494,8 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
   key)) and `college_opportunities` (programs a college offers, `embedding extensions.vector(384)` with an HNSW cosine
   index, `content_hash`, `first_seen_at` / `last_seen_at`, `active`). pgvector is enabled in `extensions`. Read by any
   signed-in user, written by service_role only, like `college_site_info`.
-- **Deploy order:** either; not in `REQUIRED_SCHEMA`. Without the file the list builder and every list write work as
-  before and log nothing. Tests: `test/unit/list-learning.test.ts`, `test/integration/list-learning.test.mjs`.
+- **Deploy order:** either, for both files; not in `REQUIRED_SCHEMA`. Without them the list builder and every list
+  write work as before and log nothing. Tests: `test/unit/list-learning.test.ts`, `test/integration/list-learning.test.mjs`.
 
 ## Anthropic / AI rules
 
