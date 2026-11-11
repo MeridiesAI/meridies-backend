@@ -110,7 +110,7 @@ test("the card says Plan a visit for a tour or open house and Register otherwise
 });
 
 test("a CSV row's audience defaults by kind and is marked csv", () => {
-  const base = { name: "n", host: "h", start_date: "2099-01-15", url: "https://example.org" };
+  const base = { name: "n", host: "h", start_date: "2099-01-15", url: "https://example.org", source_url: "https://example.org/events", checked_on: "2026-11-10" };
   const { ok, errors } = mapEventsCsv([
     { ...base, name: "tour", kind: "campus-tour" },
     { ...base, name: "conf", kind: "conference" },
