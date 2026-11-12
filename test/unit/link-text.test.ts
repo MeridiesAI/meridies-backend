@@ -1,8 +1,10 @@
 // A saved link's page text reaches AxIS (lib/linkText.ts, GET /files/links/:id/text, the files.read_link lookup).
 // Regression: a link saved from Colleges › "Paste a link" showed as Read in Files, but AxIS answered that it could
 // see only the link's title and address: the read kept a digest and dropped the page text, and no lookup showed it.
+import { Readable } from "node:stream";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { fetchReadablePage, linkTesting } from "../../src/lib/links.js";
 import { freeBlocks } from "../../src/lib/context/freeText.js";
 import { linkTextReply } from "../../src/lib/axis/ops/catalog/files.js";
 import { getOp, READ_OPS } from "../../src/lib/axis/ops/registry.js";
@@ -236,4 +238,46 @@ test("asked about a saved link, AxIS's lookup puts the page's own words in front
   assert.match(out.content, /Two teacher evaluations/);
   assert.ok((out.freeBlocks ?? []).some((b) => /Regular Action: application due January 5/.test(b.text)), "read as untrusted web content");
   assert.equal(ctx.turn.sawOutside, true, "changes after reading a web page wait for the counselor's click");
+});
+
+// The whole path from a page to AxIS, on a fake admissions page served through the fetch layer's test seams (no
+// network): what the read stores is the page's own words, entities decoded, and that is what files.read_link puts in
+// front of the model. The page is WordPress-shaped like mitadmissions.org (an "&#038;" title, a menu of empty tags).
+const ADMISSIONS_HTML = `<!doctype html><html><head><title>Deadlines &#038; requirements | MIT Admissions</title>
+<script>window.menu = "<li>not text</li>";</script></head><body>
+<nav><ul>${"<li> </li>\n".repeat(40)}</ul></nav>
+<h1>First-year applicants: Deadlines &#038; requirements</h1>
+<p>Early Action: application due November 1. Regular Action: application due January 5.</p>
+<p>You&#8217;ll need two teacher evaluations (one math or science, one humanities) and a counselor report.</p>
+<p>The QA fixture school&#8217;s interview deadline is October 20 &middot; book it by then.</p>
+</body></html>`;
+
+test("a fake admissions page, read through the fetch layer, is what AxIS's files.read_link shows the model", async () => {
+  const restoreResolver = linkTesting.useResolver(async () => [{ address: "93.184.215.14", family: 4 }]);
+  const restoreOpener = linkTesting.useOpener(async () => ({
+    status: 200,
+    headers: { "content-type": "text/html; charset=utf-8" },
+    body: Readable.from([Buffer.from(ADMISSIONS_HTML)]),
+  }));
+  let page;
+  try {
+    page = await fetchReadablePage("https://mitadmissions.org/apply/firstyear/deadlines-requirements/");
+  } finally {
+    restoreOpener();
+    restoreResolver();
+  }
+  assert.equal(page.title, "Deadlines & requirements | MIT Admissions");
+  assert.doesNotMatch(page.text, /&#\d+;|not text/);
+  assert.doesNotMatch(page.text, /\n \n/, "a menu of empty tags leaves no lines holding only a space");
+
+  // What the read stores (its digest is the model's; any digest will do here), and what the route then serves.
+  const row = { id: LINK_ID, url: page.finalUrl, domain: page.domain, available_to_llm: true, ...digestUpdate({ title: null, digest: DIGEST, page }, true) };
+  assert.equal(row.page_text, page.text);
+  const served = await loadLinkText(memoryDb(row).db, LINK_ID, ON);
+  assert.equal(served.status, "ok");
+  const reply = linkTextReply(served.status === "ok" ? served.link : null);
+  assert.match(reply, /interview deadline is October 20 · book it by then/);
+  assert.match(reply, /You’ll need two teacher evaluations/);
+  assert.match(reply, /Early Action: application due November 1/);
+  assert.ok(freeBlocks(reply).some((b) => /October 20/.test(b.text)), "inside the untrusted web-page block");
 });

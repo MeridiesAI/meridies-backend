@@ -303,15 +303,29 @@ export function fileKindOf(href: string): string | null {
   return FILE_KINDS[path.slice(dot + 1)] ?? null;
 }
 
+/** Named entities pages print in titles and copy; anything else named is left as written. */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+  middot: "·", bull: "•", hellip: "…", ndash: "–", mdash: "—",
+  lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", laquo: "«", raquo: "»",
+  copy: "©", reg: "®", trade: "™", deg: "°",
+};
+
+/**
+ * HTML entities to their characters, in one pass, so "&amp;#038;" stays "&#038;" (it is not decoded
+ * twice). Numeric ones too: WordPress prints "&" in titles as "&#038;" (mitadmissions.org's
+ * "Deadlines &#038; requirements"), and a stored title or page text used to keep the code.
+ */
 function decodeEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&#x27;/gi, "'");
+  return s.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, name: string) => {
+    if (name[0] === "#") {
+      const code = name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+      // No NUL, surrogates or code points past Unicode: keep those as written.
+      if (code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)) return String.fromCodePoint(code);
+      return whole;
+    }
+    return NAMED_ENTITIES[name.toLowerCase()] ?? whole;
+  });
 }
 
 /**
@@ -363,6 +377,9 @@ export function extractText(html: string): { title: string | null; text: string 
     // `/[ \t\u00a0]+/g` did, without rewriting the single spaces already there
     // (a page of 500,000 of them took 140 ms that way).
     .replace(/[ \t\u00a0]{2,}|[\t\u00a0]/g, " ")
+    // A line holding only a space is blank: drop the space so the blank lines below collapse (a menu
+    // of empty tags left "\n \n \n" runs that took a seventh of a page's stored text).
+    .replace(/ ?\n ?/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
