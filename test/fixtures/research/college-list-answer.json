@@ -1,0 +1,254 @@
+{
+ "note": "Recorded shape of a live college_list answer (real public admissions pages, made-up wording): JSON split at citation boundaries, leaked cite wrappers (escaped and bare), [S#] markers, a listicle source, and one college whose citation the API never attached. `match` is the match model's answer for the kept candidates.",
+ "parts": [
+  {
+   "text": "I searched admissions pages for schools that fit the brief. Here is a balanced list:\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"Carleton College\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "A selective liberal arts college in Minnesota with a strong biology department and close faculty mentoring; a reach for these bands.",
+   "citations": [
+    {
+     "url": "https://www.carleton.edu/admissions/",
+     "title": "Admissions | Carleton College"
+    }
+   ]
+  },
+  {
+   "text": "\", \"deadline\": \"January 15\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"Grinnell College\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "<cite index=\\\"4-2\\\">Grinnell meets full demonstrated need and has a large undergraduate research program.</cite> A reach for these bands.",
+   "citations": [
+    {
+     "url": "https://www.grinnell.edu/admission",
+     "title": "Admission | Grinnell College"
+    }
+   ]
+  },
+  {
+   "text": "\", \"deadline\": \"<cite index=\\\"4-3\\\">January 15</cite>\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"University of Rochester\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "<cite index=\"5-1\">Rochester has an open curriculum and strong life sciences.</cite> A target for these bands.",
+   "citations": [
+    {
+     "url": "https://enrollment.rochester.edu/apply/",
+     "title": "Apply | University of Rochester"
+    }
+   ]
+  },
+  {
+   "text": "\", \"deadline\": \"January 5\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"Case Western Reserve University\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "Strong pre-health and biology programs with research in the first year [S4, S5]. A target for these bands.",
+   "citations": [
+    {
+     "url": "https://case.edu/admission/",
+     "title": "Undergraduate Admission | Case Western Reserve University"
+    }
+   ]
+  },
+  {
+   "text": "\", \"deadline\": \"January 15 [S4]\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"Niche Top Value College\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "Ranked highly by a listicle site.",
+   "citations": [
+    {
+     "url": "https://www.niche.com/colleges/top-value/",
+     "title": "Top Value Colleges | Niche"
+    }
+   ]
+  },
+  {
+   "text": "\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"University of Pittsburgh\", \"summary\": \"<cite index=\\\"7-1\\\">Pitt offers rolling admission and a large biological sciences department.</cite> A target for these bands.\", \"deadline\": \"Rolling\"}\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"Macalester College\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "A liberal arts college in St. Paul with strong biology; a likely-to-target school for these bands.",
+   "citations": [
+    {
+     "url": "https://www.macalester.edu/admissions/",
+     "title": "Admissions | Macalester College"
+    }
+   ]
+  },
+  {
+   "text": "\", \"cost\": \"<cite index=\\\"8-2\\\">No application fee for online applications.</cite>\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "{\"title\": \"Colorado State University\", \"summary\": \"",
+   "citations": []
+  },
+  {
+   "text": "A public research university in Fort Collins with a large biology program; a likely for these bands.",
+   "citations": [
+    {
+     "url": "https://admissions.colostate.edu/",
+     "title": "Admissions | Colorado State University"
+    }
+   ]
+  },
+  {
+   "text": "\", \"deadline\": \"February 1\"}",
+   "citations": []
+  },
+  {
+   "text": "\n\n",
+   "citations": []
+  },
+  {
+   "text": "These span reach, target and likely schools across the country.",
+   "citations": []
+  }
+ ],
+ "seenPages": [
+  {
+   "url": "https://www.carleton.edu/admissions/",
+   "title": "Admissions | Carleton College"
+  },
+  {
+   "url": "https://www.grinnell.edu/admission",
+   "title": "Admission | Grinnell College"
+  },
+  {
+   "url": "https://enrollment.rochester.edu/apply/",
+   "title": "Apply | University of Rochester"
+  },
+  {
+   "url": "https://case.edu/admission/",
+   "title": "Undergraduate Admission | Case Western Reserve University"
+  },
+  {
+   "url": "https://www.niche.com/colleges/top-value/",
+   "title": "Top Value Colleges | Niche"
+  },
+  {
+   "url": "https://admissions.pitt.edu/",
+   "title": "University of Pittsburgh | Office of Admissions"
+  },
+  {
+   "url": "https://www.macalester.edu/admissions/",
+   "title": "Admissions | Macalester College"
+  },
+  {
+   "url": "https://admissions.colostate.edu/",
+   "title": "Admissions | Colorado State University"
+  }
+ ],
+ "seenUrls": [
+  "https://www.carleton.edu/admissions/",
+  "https://www.grinnell.edu/admission",
+  "https://enrollment.rochester.edu/apply/",
+  "https://case.edu/admission/",
+  "https://www.niche.com/colleges/top-value/",
+  "https://admissions.pitt.edu/",
+  "https://www.macalester.edu/admissions/",
+  "https://admissions.colostate.edu/"
+ ],
+ "match": {
+  "picks": [
+   {
+    "index": 0,
+    "why": "A <cite index=\"1-1\">selective</cite> college with the biology depth the student wants.",
+    "effort": "high",
+    "fit": "reach"
+   },
+   {
+    "index": 2,
+    "why": "Open curriculum suits a student exploring biology.",
+    "effort": "medium",
+    "fit": "target"
+   },
+   {
+    "index": 5,
+    "why": "Strong biology with a solid chance for these grades.",
+    "effort": "medium",
+    "fit": "likely"
+   },
+   {
+    "index": 1,
+    "why": "Full-need aid and research in the sciences [S2].",
+    "effort": "high",
+    "fit": "reach"
+   },
+   {
+    "index": 3,
+    "why": "Early research fits the student's pre-health goals.",
+    "effort": "medium",
+    "fit": "target"
+   },
+   {
+    "index": 6,
+    "why": "A large program the student is very likely to get into.",
+    "effort": "low",
+    "fit": "likely"
+   },
+   {
+    "index": 4,
+    "why": "Rolling admission and a big biology department.",
+    "effort": "low",
+    "fit": "target"
+   }
+  ]
+ }
+}
