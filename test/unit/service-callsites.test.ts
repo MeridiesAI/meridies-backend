@@ -147,6 +147,10 @@ const REVIEWED = [
   // a stored reference is honoured only inside the row's own student folder. Nothing is written. routes/auth.ts
   // (listed below) does the same for the caller's own row in GET and PATCH /auth/me.
   "routes/students.ts",
+  // routes/outcomes.ts: GET /alumni, GET/PATCH /alumni/:id hand the service client to signAvatarUrls (alumAvatars) to
+  // sign read URLs for the photos of exactly the alumni rows the caller's own RLS query returned, as routes/students.ts
+  // does for the roster. Nothing is written.
+  "routes/outcomes.ts",
   // lib/driveExport.ts: only the DRIVE_EXPORT_FAKE test double (refused at boot outside development/test) reads the
   // caller's own integration_tokens row (scopes and account email, keyed on the caller's id from the approved
   // counselor's request, never decrypted) to stand in for Google. The real client goes through lib/oauth.ts.
