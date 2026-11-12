@@ -16,7 +16,8 @@ import { badRequest, conflict, fromPostgrest, HttpError, notFound } from "../lib
 import { assertCanEditStudent, assertCanViewStudent, caseloadStudentIds, requireRole } from "../lib/guards.js";
 import { fourPointGpa } from "../lib/gpa.js";
 import { limit } from "../lib/limits.js";
-import { unsignedAvatarUrl } from "../lib/studentAvatar.js";
+import { signAvatarUrls, unsignedAvatarUrl } from "../lib/studentAvatar.js";
+import { serviceClient } from "../lib/supabase.js";
 import {
   HOOKS,
   OUTCOME_COLUMNS,
@@ -286,14 +287,19 @@ const ALUMNI_SELECT =
   "student:profiles!alumni_records_student_id_fkey(full_name, avatar_url, grad_year, high_school, email), " +
   "college:colleges(id, name, slug, initials, brand_color, city, state)";
 
-function toAlum(r: Row, photos: Map<string, CollegePhotoRow> = new Map()) {
+/**
+ * One alum for the app. `avatars` holds the signed photo URLs by student id (`alumAvatars`): an uploaded photo is a
+ * stored reference to a private bucket, so without its signed URL it reads as no photo (an https one passes through).
+ */
+export function toAlum(r: Row, photos: Map<string, CollegePhotoRow> = new Map(), avatars: Map<string, string | null> = new Map()) {
   const s = (r.student ?? {}) as Row;
   const c = r.college as Row | null;
+  const studentId = String(r.student_id);
   return {
-    studentId: String(r.student_id),
+    studentId,
     name: s.full_name ? String(s.full_name) : null,
     email: s.email ? String(s.email) : null,
-    avatarUrl: unsignedAvatarUrl(s.avatar_url),
+    avatarUrl: avatars.has(studentId) ? (avatars.get(studentId) ?? null) : unsignedAvatarUrl(s.avatar_url),
     gradYear: s.grad_year ? String(s.grad_year) : null,
     highSchool: s.high_school ? String(s.high_school) : null,
     cycle: String(r.cycle),
@@ -319,6 +325,18 @@ function toAlum(r: Row, photos: Map<string, CollegePhotoRow> = new Map()) {
 /** The enrolled colleges' photos. Never throws: no photos is a card without one. */
 function alumPhotos(request: FastifyRequest, rows: Row[]) {
   return loadCollegePhotos(request.db, rows.map((r) => (r.college_id as string | null) ?? null), request.log);
+}
+
+/**
+ * The alums' own photos, signed in one batch (lib/studentAvatar.ts), as GET /students does for the roster. Only for
+ * rows the caller's own RLS query returned; the service role only signs reads inside each student's own folder.
+ * Never throws: a failed signing is no photo.
+ */
+export function alumAvatars(rows: Row[], svc = serviceClient()): Promise<Map<string, string | null>> {
+  return signAvatarUrls(
+    svc,
+    rows.map((r) => ({ id: r.student_id, avatar_url: ((r.student ?? {}) as Row).avatar_url }))
+  );
 }
 
 const alumPatch = z
@@ -384,8 +402,8 @@ export async function alumniRoutes(app: FastifyInstance) {
         .limit(1000);
       if (error) throw fromPostgrest(error);
       const rows = (data ?? []) as unknown as Row[];
-      const photos = await alumPhotos(request, rows);
-      return rows.map((r) => toAlum(r, photos));
+      const [photos, avatars] = await Promise.all([alumPhotos(request, rows), alumAvatars(rows)]);
+      return rows.map((r) => toAlum(r, photos, avatars));
     }
   );
 
@@ -459,7 +477,9 @@ export async function alumniRoutes(app: FastifyInstance) {
       if (o.error) throw fromPostgrest(o.error);
       outcomes = ((o.data ?? []) as unknown as Row[]).map(toOutcome);
     }
-    return { ...toAlum(data as unknown as Row, await alumPhotos(request, [data as unknown as Row])), outcomes };
+    const row = data as unknown as Row;
+    const [photos, avatars] = await Promise.all([alumPhotos(request, [row]), alumAvatars([row])]);
+    return { ...toAlum(row, photos, avatars), outcomes };
   });
 
   /** Correct where an alum went (inline edit on the alumni page). */
@@ -483,7 +503,9 @@ export async function alumniRoutes(app: FastifyInstance) {
         .maybeSingle();
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("That student isn't an alum yet");
-      return toAlum(data as unknown as Row, await alumPhotos(request, [data as unknown as Row]));
+      const row = data as unknown as Row;
+      const [photos, avatars] = await Promise.all([alumPhotos(request, [row]), alumAvatars([row])]);
+      return toAlum(row, photos, avatars);
     }
   );
 }
