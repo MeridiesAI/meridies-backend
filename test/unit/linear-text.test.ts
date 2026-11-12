@@ -25,7 +25,7 @@ import {
 import { BUDGET_MS, CAP_BUDGET_MS, elapsed, randomText, seeded } from "./regex-dos-helpers.js";
 
 const HTML_PIECES = [
-  "<", ">", "</", "a", "A", " ", "\t", "\n", "-", "!", "/", "x", "&amp;", "&nbsp;",
+  "<", ">", "</", "a", "A", " ", "\t", "\n", "-", "!", "/", "x", "&amp;", "&nbsp;", "&#038;", "&rsquo;", "&#x2019;", "&bogus;",
   "<script", "</script>", "<SCRIPT", "</Script>", "<style", "</style>", "<noscript", "</noscript>",
   "<!--", "-->", "<p>", "</p>", "</div>", "<br>", "<br/>", "<title>", "</title>", "<TITLE x>", " ",
 ];
@@ -74,20 +74,23 @@ test("trimLineEnds matches /[ \\t]+\\n/g", () => {
   }
 });
 
-// ---- extractText against the old implementation -------------------------------
+// ---- extractText against the regular expressions -------------------------------
 
+/** The entity table extractText decodes (lib/links.ts), as a plain reference. */
+const NAMED: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", middot: "·", bull: "•", hellip: "…", ndash: "–",
+  mdash: "—", lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", laquo: "«", raquo: "»", copy: "©", reg: "®",
+  trade: "™", deg: "°",
+};
 function decodeEntities(s: string): string {
-  return s
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&#x27;/gi, "'");
+  return s.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, n: string) => {
+    if (n[0] !== "#") return NAMED[n.toLowerCase()] ?? whole;
+    const code = /^#x/i.test(n) ? parseInt(n.slice(2), 16) : parseInt(n.slice(1), 10);
+    return code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff) ? String.fromCodePoint(code) : whole;
+  });
 }
 
-/** extractText as it stood before the fix (quadratic on a missing closing token). */
+/** extractText as regular expressions (quadratic on a missing closing token), entities and blank lines as now. */
 function oldExtractText(html: string): { title: string | null; text: string } {
   const titleMatch = html.match(/<title[^>]*>([\s\S]{0,300}?)<\/title>/i);
   const title = titleMatch ? decodeEntities(titleMatch[1]!).trim().slice(0, 300) : null;
@@ -102,12 +105,13 @@ function oldExtractText(html: string): { title: string | null; text: string } {
       .replace(/<[^>]+>/g, " ")
   )
     .replace(/[ \t ]+/g, " ")
+    .replace(/ ?\n ?/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return { title, text };
 }
 
-test("extractText reads a page exactly as before", () => {
+test("extractText reads a page as the regular expressions read it", () => {
   const rand = seeded(5);
   for (let i = 0; i < 3000; i++) {
     const html = randomText(rand, HTML_PIECES, 1 + Math.floor(rand() * 40));
@@ -119,8 +123,21 @@ test("extractText reads a page exactly as before", () => {
   assert.deepEqual(extractText(page), oldExtractText(page));
   assert.deepEqual(extractText(page), {
     title: "Fees & aid",
-    text: "Fees & aid Aid\n Apply by March 1 .\n\n Done",
+    text: "Fees & aid Aid\nApply by March 1 .\n\nDone",
   });
+});
+
+test("extractText decodes numeric and named entities once, and drops lines holding only a space", () => {
+  // mitadmissions.org's own title, and its menu of empty tags.
+  const page =
+    "<title>Deadlines &#038; requirements | MIT Admissions</title>" +
+    "<ul><li> </li>\n<li> </li>\n<li> </li></ul><p>You&#8217;ll apply &middot; Early Action &amp;#038; more&#x2026;</p>";
+  assert.deepEqual(extractText(page), {
+    title: "Deadlines & requirements | MIT Admissions",
+    text: "Deadlines & requirements | MIT Admissions\n\nYou’ll apply · Early Action &#038; more…",
+  });
+  // Unknown names, NUL and surrogates stay as written.
+  assert.equal(extractText("<p>&bogus; &#0; &#xD800; &#1114112;</p>").text, "&bogus; &#0; &#xD800; &#1114112;");
 });
 
 test("extractText keeps the 300-character title window", () => {
