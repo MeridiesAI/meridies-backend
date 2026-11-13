@@ -57,3 +57,36 @@ export async function listRowsFor(db: SupabaseClient, studentIds: string[]): Pro
   }
   return rows;
 }
+
+export type RosterCollege = { id: string; name: string; website: string | null };
+
+/**
+ * The colleges most listed across every roster (students who have a counselor), most students first, with the
+ * website a job reads them from. Used by the events discovery job and the college features ingest. Reads up to
+ * 20,000 students; `svc` is the service client of a job that acts for no one.
+ */
+export async function topRosterColleges(svc: SupabaseClient, max: number): Promise<RosterCollege[]> {
+  const studentIds: string[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await svc
+      .from("profiles")
+      .select("id")
+      .eq("role", "student")
+      .not("counselor_id", "is", null)
+      .order("id")
+      .range(from, from + 999);
+    if (error) throw new Error(`profiles: ${error.message}`);
+    studentIds.push(...((data ?? []) as Row[]).map((r) => String(r.id)));
+    if (!data || data.length < 1000 || studentIds.length >= 20_000) break;
+  }
+  const rows: ListRow[] = await listRowsFor(svc, studentIds);
+  const ids = rankColleges(await collegesOnLists(svc, rows), max);
+  if (!ids.length) return [];
+  const { data, error } = await svc.from("colleges").select("id, name, website").in("id", ids);
+  if (error) throw new Error(`colleges: ${error.message}`);
+  const byId = new Map(((data ?? []) as Row[]).map((r) => [String(r.id), r]));
+  return ids
+    .map((id) => byId.get(id))
+    .filter((r): r is Row => Boolean(r))
+    .map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null }));
+}

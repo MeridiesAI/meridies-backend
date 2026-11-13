@@ -103,7 +103,9 @@ export type AiModule =
   // A message to a family in their own language, and a family's reply back in English (lib/translate.ts); 20261110000002.
   | "message-translate"
   // Cited catalog proposals from a school's own pages (lib/catalogProposals.ts); 20261111000011.
-  | "catalog-proposals";
+  | "catalog-proposals"
+  // Core features and opportunities read off a college's own pages (lib/ingest/collegeFeatures.ts); 20261124000002.
+  | "college-features";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an
@@ -196,7 +198,7 @@ export async function runStructuredUnattended<T>(
  * practice switches to read. The caller passes only public facts, never a student's.
  */
 export async function runSystemStructured<T>(
-  opts: Omit<RunOptions<T>, "request" | "studentId"> & { job: "catalog-proposals"; log: CallContext["log"] }
+  opts: Omit<RunOptions<T>, "request" | "studentId"> & { job: "catalog-proposals" | "college-features"; log: CallContext["log"] }
 ): Promise<T> {
   const { job, log, ...rest } = opts;
   return structuredCall({ ...rest, studentId: null }, { actorId: null, subject: { system: job }, log });
