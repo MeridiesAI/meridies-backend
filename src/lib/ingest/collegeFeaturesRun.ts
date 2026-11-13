@@ -36,7 +36,7 @@ type Log = { info(o: object, m?: string): void; warn(o: object, m?: string): voi
 const LEASE = "college-features";
 /** Twenty colleges take minutes; a few hundred, an hour or two at one request a second per site. */
 const LEASE_TTL_SECONDS = 6 * 60 * 60;
-const MIGRATIONS = "20261119000001_list_builder_learning.sql and 20261124000001_college_source_pages.sql";
+const MIGRATIONS = "20261119000001_list_builder_learning.sql and 20261124000002_college_source_pages.sql";
 
 /** pgvector's text form: "[0.1,0.2,...]". */
 const toVector = (v: number[] | null) => (v ? `[${v.join(",")}]` : null);

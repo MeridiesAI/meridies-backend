@@ -9,7 +9,7 @@
  *   add --concurrency N   colleges at a time (default 3, at most 8); each site still gets one request a second
  *
  * Needs SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY and ANTHROPIC_API_KEY (from .env), and migrations 20261119000001 and
- * 20261124000001 applied. Model calls spend the "college-features" system budget (1,500 a month) and write ai_runs
+ * 20261124000002 applied. Model calls spend the "college-features" system budget (1,500 a month) and write ai_runs
  * rows, dry run or not; a run writes one ai_runs summary row (module college-features, input.kind "run-summary").
  * The first run downloads the embedding model (about 130 MB) unless it is a dry run.
  */

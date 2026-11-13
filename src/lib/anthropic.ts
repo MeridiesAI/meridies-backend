@@ -104,7 +104,7 @@ export type AiModule =
   | "message-translate"
   // Cited catalog proposals from a school's own pages (lib/catalogProposals.ts); 20261111000011.
   | "catalog-proposals"
-  // Core features and opportunities read off a college's own pages (lib/ingest/collegeFeatures.ts); 20261124000001.
+  // Core features and opportunities read off a college's own pages (lib/ingest/collegeFeatures.ts); 20261124000002.
   | "college-features";
 
 /**
