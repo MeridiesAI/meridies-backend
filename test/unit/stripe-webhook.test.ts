@@ -257,6 +257,25 @@ test("paid: checkout.session.completed records one card payment and the invoice 
   await app.close();
 });
 
+test("a passed-on card fee is charged but never counted: the payment is the invoice amount", async () => {
+  const app = await build();
+  // The family paid $500 + a $14.82 fee (meridies_fee_cents in the metadata).
+  const r = await post(app, evt("checkout.session.completed", session({ amount_total: 51482, metadata: { ...meta, meridies_fee_cents: "1482" } })));
+  assert.equal(r.json().outcome, "recorded");
+  assert.equal(payments()[0].amount_cents, 50000);
+  assert.equal((await invoice()).state, "paid");
+  await app.close();
+});
+
+test("a nonsense fee in the metadata is ignored, not trusted", async () => {
+  const app = await build();
+  for (const [i, fee] of ["-5", "abc", "999999", "1.5"].entries()) {
+    await post(app, evt("checkout.session.completed", session({ id: `cs_${i}`, payment_intent: `pi_fee_${i}`, metadata: { ...meta, meridies_fee_cents: fee } })));
+    assert.equal(payments()[i]?.amount_cents, 50000, fee);
+  }
+  await app.close();
+});
+
 test("async paid: an unpaid completion waits, async_payment_succeeded records, a late completed adds nothing", async () => {
   const app = await build();
   assert.equal((await post(app, evt("checkout.session.completed", session({ payment_status: "unpaid" })))).json().outcome, "not paid yet");

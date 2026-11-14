@@ -8,6 +8,17 @@ import { fileURLToPath } from "node:url";
 // one means deciding whether it acts for a counselor outside their own request
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
+  // lib/invoiceDispatch.ts: the scheduled-invoice and reminder crons act for the counselor who composed the draft,
+  // outside any request: they run only for a counselor still approved (approvedCounselorIds, fail closed) who can
+  // still bill that family (userCanBill, the service-role form of private.crm_can_bill), and plan every amount again.
+  // lib/invoiceTexting.ts: reads only whether the CALLER (a counselor in their own request, or the dispatcher's
+  // approved counselor) has an active texting number; nothing is returned but a boolean.
+  // routes/contracts.ts: inside an approved counselor's own request, after loadWorkspace shows them admin of the
+  // practice and their RLS client read the rows: the service role only signs an upload URL for an object the API
+  // named in the practice's own folder, reads that one object back to check it, removes it when it isn't a real
+  // PDF/DOCX, and signs a 60-second view link for a contract their RLS client just returned.
+  // lib/invoiceAgreement.ts: the contract's PDF is read from the private bucket for the email attachment, after the
+  // caller's own RLS client returned the contract row (or the dispatcher's checks passed).
   // lib/parentNotice.ts: inside a student's own POST/PATCH /me/guardians; the service role reads their counselor's
   // name and email (for the notice and its Reply-To) and records the delivery. No counselor acts, so no approval check.
   "lib/parentNotice.ts",
@@ -209,7 +220,7 @@ const REVIEWED = [
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "lib/invoiceTexting.ts", "lib/invoiceAgreement.ts", "routes/contracts.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

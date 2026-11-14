@@ -90,6 +90,7 @@ import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 import invoiceSettingsRoutes from "./routes/invoiceSettings.js";
 import contractRoutes from "./routes/contracts.js";
+import invoiceDraftRoutes from "./routes/invoiceDrafts.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 import calendarIcalRoutes from "./routes/calendarIcal.js";
@@ -245,6 +246,7 @@ export function buildApp() {
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
   app.register(invoiceSettingsRoutes, { prefix: "/pipeline" });
   app.register(contractRoutes, { prefix: "/pipeline" });
+  app.register(invoiceDraftRoutes, { prefix: "/pipeline" });
   // Absolute paths (/pay/:token): the public pay link page.
   app.register(payRoutes);
   app.register(agreementRoutes);

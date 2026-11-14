@@ -215,3 +215,40 @@ begin
   end if;
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- The crons' heartbeats (POST /internal/invoice-drafts/dispatch, /internal/invoice-reminders/dispatch)
+-- ---------------------------------------------------------------------------
+-- Read the current CHECK back and add the labels, so another migration's labels are never dropped.
+do $$
+declare
+  v_def    text;
+  v_values text[];
+  v_label  text;
+begin
+  if to_regclass('public.job_heartbeats') is null then
+    return;
+  end if;
+  select pg_get_constraintdef(c.oid) into v_def
+  from pg_constraint c
+  where c.conrelid = 'public.job_heartbeats'::regclass and c.conname = 'job_heartbeats_job_check';
+
+  select coalesce(array_agg(distinct btrim(v)), '{}') into v_values
+  from regexp_matches(coalesce(v_def, ''), '''([^'']+)''', 'g') as m,
+       lateral unnest(
+         case when left(m[1], 1) = '{' then string_to_array(btrim(m[1], '{}'), ',') else array[m[1]] end
+       ) as v;
+
+  foreach v_label in array array['invoice-drafts', 'invoice-reminders'] loop
+    if not (v_label = any(v_values)) then
+      v_values := array_append(v_values, v_label);
+    end if;
+  end loop;
+  alter table public.job_heartbeats drop constraint if exists job_heartbeats_job_check;
+  execute format('alter table public.job_heartbeats add constraint job_heartbeats_job_check check (job = any (%L::text[]))', v_values);
+
+  insert into public.job_heartbeats (job, expected_every)
+  values ('invoice-drafts', interval '30 minutes'), ('invoice-reminders', interval '1 hour')
+  on conflict (job) do nothing;
+end;
+$$;

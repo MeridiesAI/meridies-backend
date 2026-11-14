@@ -59,7 +59,6 @@ import {
   type FollowupSummary,
 } from "../lib/pipelineExtras.js";
 import { serializeErr } from "../lib/requestLog.js";
-import { serviceClient } from "../lib/supabase.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { invoiceOwed, payLinkBlock, stripeUnavailable } from "../lib/stripeConnect.js";
 import { mintPayLink, practiceAccount, stripeConfigured } from "../lib/stripePractice.js";
@@ -1408,7 +1407,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           .update({ sent_to: phone, sent_at: emailSent ? new Date().toISOString() : null, message_delivery_id: sms.deliveryId })
           .eq("id", String(invoice.id));
       } else if (b.send && to) {
-        const attachments = await contractAttachment(serviceClient(), agreement?.contract);
+        const attachments = await contractAttachment(agreement?.contract);
         const sent = await sendEmail({
           ...(await senderFields(request, id, contact.parent_email ? "parent" : "student")),
           to,

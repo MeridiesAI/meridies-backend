@@ -41,6 +41,7 @@ import {
 } from "./agreements.js";
 import { CONTRACT_ATTACH_MAX_BYTES, CONTRACT_BUCKET, attachmentName, contractsUnavailable, type ContractType } from "./contracts.js";
 import { downloadCapped } from "./storageDownload.js";
+import { serviceClient } from "./supabase.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
 import type { EmailAttachment } from "./email.js";
 import { AGREEMENT_CONSENT_VERSION } from "./agreementConsent.js";
@@ -201,7 +202,7 @@ export async function issueInvoiceAgreement(
  * the private bucket, after the caller has shown the contract is the practice's). A Word file, a larger one or a
  * read that fails sends no attachment: the email's link carries the family to the file.
  */
-export async function contractAttachment(svc: SupabaseClient | null, c: ContractRef | undefined): Promise<EmailAttachment[] | undefined> {
+export async function contractAttachment(c: ContractRef | undefined, svc: SupabaseClient | null = serviceClient()): Promise<EmailAttachment[] | undefined> {
   if (!svc || !c || c.mime !== "application/pdf" || c.sizeBytes > CONTRACT_ATTACH_MAX_BYTES) return undefined;
   const got = await downloadCapped(svc, CONTRACT_BUCKET, c.path, CONTRACT_ATTACH_MAX_BYTES);
   if (got.status !== "ok") return undefined;
