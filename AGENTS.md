@@ -2386,13 +2386,13 @@ there).
   documented shapes (see its README), and the cron route is only tested for
   401 and 409.
 
-### College features ingest (`20261124000002`; `lib/ingest/collegeFeatures.ts`, `siteCrawl.ts`, `collegeFeaturesRun.ts`)
+### College features ingest (`20261124000007`; `lib/ingest/collegeFeatures.ts`, `siteCrawl.ts`, `collegeFeaturesRun.ts`)
 
 Reads colleges' own websites once and fills `college_core_features` and `college_opportunities`. A script, not a
 route or a cron: `npm run ingest:features -- --limit 20` (the most-listed colleges across every roster,
 `topRosterColleges` in `lib/rosterColleges.ts`) or `-- --college <id,...>`; `--dry-run` crawls and extracts and writes
 nothing to the catalog; `--force` re-reads pages whose text hasn't changed; `--concurrency N` (default 3, at most 8).
-Needs the service role key, `ANTHROPIC_API_KEY`, and `20261119000001` + `20261124000002` (it refuses to start
+Needs the service role key, `ANTHROPIC_API_KEY`, and `20261119000001` + `20261124000007` (it refuses to start
 without them, naming both). A real run holds the `college-features` job lease (6 hours), so two can't overlap.
 
 - **Crawling** (`siteCrawl.ts`; every fetch is `lib/links.ts`). robots.txt per host (RFC 9309): the group naming
