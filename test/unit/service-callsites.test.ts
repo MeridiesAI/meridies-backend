@@ -157,6 +157,10 @@ const REVIEWED = [
   // one that wasn't a JPEG, and the student's own abandoned avatar-*.jpg uploads. profiles.avatar_url is written on
   // the caller's own client. The signed read URLs come from lib/studentAvatar.ts's signAvatarUrls.
   "routes/studentAvatar.ts",
+  // routes/counselorAvatar.ts: a counselor's own profile picture, inside their own approved request (requireRole
+  // ran). The service role mints the signed upload URL, reads back and removes objects only inside the caller's
+  // own folder of the avatar bucket; the write itself runs on the caller's own client.
+  "routes/counselorAvatar.ts",
   // routes/students.ts: GET /students, GET/PATCH /students/:id hand the service client to signAvatarUrls
   // (lib/studentAvatar.ts) to sign read URLs for the photos of exactly the rows the caller's own RLS query returned;
   // a stored reference is honoured only inside the row's own student folder. Nothing is written. routes/auth.ts

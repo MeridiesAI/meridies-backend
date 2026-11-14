@@ -1784,6 +1784,13 @@ in the same folder is never touched. **Reads:** `avatar_url` is never returned r
 add `avatarEditable`. Without the service key or the bucket the routes answer 503 `avatar_unavailable` and reads show no
 photo. Tests: `test/unit/student-avatar.test.ts`.
 
+**A counselor's own picture** (`routes/counselorAvatar.ts`; app Settings › Customize). Same storage and rules, no id in the
+address: `POST /profile/avatar/upload-url` and `PUT /profile/avatar` (`requireRole("counselor")`, so a pending counselor
+is refused like everywhere else), the folder is the caller's own id, and the write runs on the caller's own client.
+`GET /auth/me` already signs the caller's `avatar_url`, and now sends `avatarEditable: true` to a counselor, which is how
+the app knows the routes exist (an older API sends none, so the control stays hidden). Without the service key or the
+bucket the routes answer 503 `avatar_unavailable`.
+
 ### Calendar: internal deadlines, test dates and the subscribed feed (`20261111000002`)
 
 **More on the feed** (`lib/calendarFeed.ts`). Besides the school's deadline (`college:<row>`), a college list row's
