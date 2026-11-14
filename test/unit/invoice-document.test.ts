@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  renderInvoiceSms,
   billToOf,
   contrastOnWhite,
   familyLabel,
@@ -15,6 +16,7 @@ import {
   type InvoiceDocument,
 } from "../../src/lib/invoiceDocument.js";
 import { deriveAccount, formatUsd, planInvoice } from "../../src/lib/payments.js";
+import { DEFAULT_STYLE } from "../../src/lib/invoiceStyle.js";
 import { invoiceOwed } from "../../src/lib/stripeConnect.js";
 import { payCsp } from "../../src/routes/pay.js";
 
@@ -234,4 +236,114 @@ test("bill-to is the family, the parent and the address on the card", () => {
     email: "ava@x.com",
   });
   assert.equal(longDate("2026-11-09"), "Nov 9, 2026");
+});
+
+// ---- Invoice composer: style, methods, note, fee, contract ------------------------------------
+
+const composed = (over: Partial<InvoiceDocument> = {}) =>
+  doc({
+    status: "due",
+    style: { ...DEFAULT_STYLE, accentColor: "#1d4ed8", fontKey: "mono", corner: "pill", headerAlign: "center", buttonLabel: "Pay my invoice", footerText: "Thanks <b>so</b> much" },
+    methods: [
+      { key: "card", label: "Card", instructions: "" },
+      { key: "zelle", label: "Zelle", instructions: "pay@northfield.example\nuse the invoice number" },
+      { key: "custom-1a2b3c4d", label: "Venmo <@nf>", instructions: "" },
+    ],
+    note: "Thank you for choosing us.\nSee you in January.",
+    ...over,
+  });
+
+test("a document with no composer fields is drawn exactly as before", () => {
+  const plain = renderInvoiceEmail(doc());
+  const explicit = renderInvoiceEmail(doc({ style: null, methods: [], note: null, feeCents: 0, contract: null }));
+  assert.equal(plain.html, explicit.html);
+  assert.equal(plain.text, explicit.text);
+  assert.equal(renderInvoicePageBody(doc()), renderInvoicePageBody(doc({ style: null, methods: [], note: null })));
+  assert.doesNotMatch(plain.html, /Other ways to pay/);
+});
+
+test("the email and page list the other ways to pay with their instructions, escaped", () => {
+  const { html, text } = renderInvoiceEmail(composed());
+  const page = renderInvoicePageBody(composed());
+  for (const out of [html, page]) {
+    assert.match(out, /Other ways to pay/);
+    assert.ok(out.includes("pay@northfield.example"));
+    assert.ok(out.includes("Venmo &lt;@nf&gt;"), "custom label escaped");
+    assert.ok(!out.includes("Venmo <@nf>"));
+  }
+  assert.match(text, /- Zelle: pay@northfield\.example\nuse the invoice number/);
+  assert.match(text, /- Venmo <@nf>/);
+  assert.doesNotMatch(html, /<strong>Card<\/strong>/, "card is the button, not a listed method");
+});
+
+test("ways to pay show only while something is owed", () => {
+  const paid = composed({ status: "paid", amountDueCents: 0 });
+  assert.doesNotMatch(renderInvoiceEmail(paid).html, /Other ways to pay/);
+  assert.doesNotMatch(renderInvoicePageBody(paid), /Other ways to pay/);
+});
+
+test("the style drives accent, font, corners, header, button label and footer", () => {
+  const { html } = renderInvoiceEmail(composed());
+  assert.ok(html.includes("#1d4ed8") || html.includes("#1c45c8") || /background:#[0-9a-f]{6}/.test(html));
+  assert.ok(html.includes("'Courier New',Courier,monospace"), "font stack");
+  assert.ok(html.includes("border-radius:999px"), "pill corners on the button");
+  assert.ok(html.includes("Pay my invoice"), "button label");
+  assert.ok(html.includes("Thanks &lt;b&gt;so&lt;/b&gt; much"), "footer text escaped");
+  assert.ok(html.includes('align="center" style="padding-bottom:12px;"'), "centered header");
+  const page = renderInvoicePageBody(composed());
+  assert.ok(page.includes("--rb:999px") && page.includes("monospace") && page.includes('class="top center"'));
+  assert.ok(page.includes("Pay my invoice"));
+  // A pale accent is still darkened to a readable one.
+  assert.ok(contrastOnWhite(readableAccent("#ffee00")) >= 4.5);
+});
+
+test("an accent in the style wins over the practice's branding; none falls back to it", () => {
+  const withStyle = renderInvoiceEmail(composed({ practice: { name: "P", logoUrl: null, accentColor: "#aa0000" } })).html;
+  assert.ok(!withStyle.includes("#aa0000"));
+  const without = renderInvoiceEmail(composed({ practice: { name: "P", logoUrl: null, accentColor: "#aa0000" }, style: { ...DEFAULT_STYLE, accentColor: null } })).html;
+  assert.ok(without.includes(readableAccent("#aa0000")));
+});
+
+test("show logo off draws the name, not the picture", () => {
+  const withLogo = doc({ practice: { name: "Northfield", logoUrl: "https://cdn.example/logo.png", accentColor: null } });
+  assert.match(renderInvoiceEmail(withLogo).html, /<img src="https:\/\/cdn\.example\/logo\.png"/);
+  const hidden = { ...withLogo, style: { ...DEFAULT_STYLE, showLogo: false } };
+  assert.doesNotMatch(renderInvoiceEmail(hidden).html, /<img/);
+  assert.doesNotMatch(renderInvoicePageBody(hidden), /<img/);
+});
+
+test("the note and the practice's footer text reach every format, escaped", () => {
+  const d = composed({ note: "<script>x</script> thanks" });
+  const { html, text } = renderInvoiceEmail(d);
+  assert.ok(!html.includes("<script>x"));
+  assert.ok(html.includes("&lt;script&gt;x&lt;/script&gt; thanks"));
+  assert.ok(text.includes("<script>x</script> thanks") && text.includes("Thanks <b>so</b> much"));
+  assert.ok(renderInvoicePageBody(d).includes("&lt;script&gt;"));
+});
+
+test("a passed-on card fee is its own sentence and the button asks for the amount with it", () => {
+  const d = composed({ style: null, feeCents: 4_511 });
+  const { html, text } = renderInvoiceEmail(d);
+  for (const out of [html, text, renderInvoicePageBody(d)]) {
+    assert.ok(out.includes("$45.11 processing fee"), "fee line");
+    assert.ok(out.includes("$1,545.11 in all"));
+  }
+  assert.ok(html.includes("Pay $1,545.11 by card"));
+  assert.ok(text.includes("Pay $1,545.11 by card:"));
+  assert.match(text, /Amount due: \$1,500\n/, "amount due is still what the invoice asks");
+  assert.doesNotMatch(renderInvoiceEmail(composed({ style: null })).html, /processing fee/);
+});
+
+test("a contract shows on the pay page as a button that posts to its own path", () => {
+  const page = renderInvoicePageBody(composed({ contract: { title: "Engagement <letter>", action: "/pay/abc/contract" } }));
+  assert.ok(page.includes('action="/pay/abc/contract"'));
+  assert.ok(page.includes("Engagement &lt;letter&gt;") && page.includes("Review and accept the agreement"));
+  assert.doesNotMatch(renderInvoicePageBody(composed({ status: "void", contract: { title: "T", action: "/pay/abc/contract" } })), /\/pay\/abc\/contract/);
+});
+
+test("the text message is short: who, what, due, and the link", () => {
+  const sms = renderInvoiceSms(doc({ status: "due" }), "Morgan");
+  assert.equal(sms, "Hi Morgan, Northfield Admissions sent invoice INV-1005: $1,500 due Nov 9, 2026. View and pay: https://api.example.com/pay/tok");
+  assert.equal(renderInvoiceSms(doc({ payUrl: null, number: null })), "Northfield Admissions sent an invoice: $1,500 due Nov 9, 2026.");
+  assert.ok(sms.length < 160);
 });

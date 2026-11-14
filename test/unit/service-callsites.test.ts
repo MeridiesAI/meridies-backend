@@ -8,6 +8,17 @@ import { fileURLToPath } from "node:url";
 // one means deciding whether it acts for a counselor outside their own request
 // and, if so, checking approval when it runs (src/lib/access.ts). Then add it here.
 const REVIEWED = [
+  // lib/invoiceDispatch.ts: the scheduled-invoice and reminder crons act for the counselor who composed the draft,
+  // outside any request: they run only for a counselor still approved (approvedCounselorIds, fail closed) who can
+  // still bill that family (userCanBill, the service-role form of private.crm_can_bill), and plan every amount again.
+  // lib/invoiceTexting.ts: reads only whether the CALLER (a counselor in their own request, or the dispatcher's
+  // approved counselor) has an active texting number; nothing is returned but a boolean.
+  // routes/contracts.ts: inside an approved counselor's own request, after loadWorkspace shows them admin of the
+  // practice and their RLS client read the rows: the service role only signs an upload URL for an object the API
+  // named in the practice's own folder, reads that one object back to check it, removes it when it isn't a real
+  // PDF/DOCX, and signs a 60-second view link for a contract their RLS client just returned.
+  // lib/invoiceAgreement.ts: the contract's PDF is read from the private bucket for the email attachment, after the
+  // caller's own RLS client returned the contract row (or the dispatcher's checks passed).
   // lib/parentNotice.ts: inside a student's own POST/PATCH /me/guardians; the service role reads their counselor's
   // name and email (for the notice and its Reply-To) and records the delivery. No counselor acts, so no approval check.
   "lib/parentNotice.ts",
@@ -109,6 +120,20 @@ const REVIEWED = [
   // address of the caller's own counselor (profiles.counselor_id from the row authenticate loaded, never a request
   // value) after asking isCounselorApproved, and writes or reads only inbound_messages rows keyed by the caller's id.
   "lib/studentToCounselor.ts",
+  // lib/parentInvites.ts (parent accounts, 20261123000002): only redeemParentInvite, from the public POST
+  // /parent-invites/accept. It acts for no counselor. It creates an auth user for exactly the address the
+  // database's parent_invite_preview returned for that token's hash (the token only reached that inbox), then calls
+  // parent_invite_redeem (EXECUTE to service_role only), which re-checks everything in one transaction; on any
+  // refusal it deletes that just-made user. No client id reaches the service role. And claimParentInvite (POST
+  // /parent-invites/claim, Google on the parent path, inside the caller's own request): reads only the caller's own
+  // auth user (the JWT's id), redeems for that same id (the function re-checks a matching, verified, role-less
+  // account), and deletes the caller's own account only when the path itself just made it (isFreshAccount).
+  "lib/parentInvites.ts",
+  // lib/parentToCounselor.ts: inside a parent account's own request (authenticate + requireRole("parent"),
+  // allowParent). The counselor is the one parent_children returned on the caller's own client (the live guardian
+  // link), asked isCounselorApproved before reading their address; it writes or reads only inbound_messages rows
+  // whose provider_message_id carries the caller's own id.
+  "lib/parentToCounselor.ts",
   // lib/axisTrash.ts: acts for no counselor. The hourly purge (from the scheduled sweep) deletes trash rows past
   // 30 days; account deletion (DELETE /account, the caller's own id) deletes the trash it made and about it. Both
   // remove only the student-documents objects the database hands back as needed by nothing.
@@ -199,7 +224,7 @@ const REVIEWED = [
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "lib/invoiceTexting.ts", "lib/invoiceAgreement.ts", "routes/contracts.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {

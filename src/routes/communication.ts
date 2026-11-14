@@ -39,6 +39,7 @@ import { plainName } from "../lib/context/identity.js";
 import { loadFamilyVisibility } from "../lib/familyVisibility.js";
 import { toFamilyVisibility } from "../lib/serialize.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
+import { loadParentAccounts } from "../lib/parentInvites.js";
 import { replyAddressFor } from "../lib/replyRouting.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { enforceQuota, limit } from "../lib/limits.js";
@@ -165,6 +166,12 @@ export default async function communicationRoutes(app: FastifyInstance) {
         loadFamilyVisibility(db, student).catch(() => null),
       ]);
       if (!contact) throw notFound("That student isn't on your roster");
+      // Each parent's account state for the chip's Invite / Resend (20261123000002). Absent when it can't be read
+      // or the migration isn't in, which the app reads as "not switched on": no Invite at all.
+      const accounts = await loadParentAccounts(db, [student], request.log);
+      const familyOut = accounts
+        ? family.map((g) => ({ ...g, parentAccount: accounts.get(g.id) ?? { state: "none" as const, invitedAt: null, expiresAt: null, delivery: null } }))
+        : family;
       // Financial aid already knows what some families speak: offered, never copied silently.
       const languageSuggestion = familyLanguage === null ? await loadLanguageSuggestion(db, student) : null;
 
@@ -175,7 +182,7 @@ export default async function communicationRoutes(app: FastifyInstance) {
         languageSuggestion,
         translateAvailable: translateAvailable(),
         translatedSmsMaxSegments: MAX_TRANSLATED_SEGMENTS,
-        family,
+        family: familyOut,
         student: contact,
         counselor: { name: request.profile.full_name ?? null, email: request.profile.email ?? null },
         suggestions: {

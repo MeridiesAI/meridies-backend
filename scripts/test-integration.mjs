@@ -9,7 +9,9 @@
 import { spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 
-const SERIAL = ["alerts", "approval-jobs", "axis-trash-purge"].map((n) => `${n}.test.mjs`);
+// The invoice crons (POST /internal/invoice-drafts/dispatch, /internal/invoice-reminders/dispatch) walk EVERY counselor's due
+// drafts and reminders, so two suites that call them would send each other's drafts and miscount; they run one at a time too.
+const SERIAL = ["alerts", "approval-jobs", "axis-trash-purge", "invoice-drafts", "invoice-dispatch-queue"].map((n) => `${n}.test.mjs`);
 
 const dir = "test/integration";
 const all = readdirSync(dir).filter((f) => f.endsWith(".test.mjs"));

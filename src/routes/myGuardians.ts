@@ -52,6 +52,7 @@ export default async function myGuardianRoutes(app: FastifyInstance, opts: MyGua
       parentName,
       email,
       log: request.log,
+      db: request.db,
     });
   }
 

@@ -50,6 +50,9 @@ const envSchema = z.object({
   // instead of odds alone, and the server loads the embedding model at boot. Off unless "true"; off, the list
   // builder's answer is byte for byte what it was.
   LIST_MATCH_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Invoice composer: pass the card processing fee to the family (lib/invoiceCardFee.ts). Off unless "true"
+  // (surcharge rules vary by state), and then only for an invoice the counselor marked "Pass card fee".
+  INVOICE_CARD_FEE_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any

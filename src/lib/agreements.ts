@@ -113,6 +113,35 @@ export async function mintAgreementLink(
 }
 
 /**
+ * The same link, minted by the service role for the two places with no signed-in counselor: the scheduled
+ * invoice cron and the pay page's "Review" button. The caller has already decided who may have it (the
+ * draft's counselor, still approved and still able to bill; or the invoice the pay token names). Marks a
+ * draft agreement sent. `supersede` expires the earlier links like `issue_agreement_link` does (a resend);
+ * the pay page leaves them, since a family clicking Review mustn't break the link in their email.
+ */
+export async function mintAgreementLinkAsService(
+  svc: SupabaseClient,
+  agreementId: string,
+  opts: { publicApiUrl: string; supersede: boolean; createdBy?: string | null; now?: Date; days?: number }
+): Promise<{ url: string; expiresAt: Date }> {
+  const token = randomBytes(32).toString("base64url");
+  const now = opts.now ?? new Date();
+  const expiresAt = new Date(now.getTime() + (opts.days ?? AGREEMENT_LINK_DAYS) * 86_400_000);
+  const ag = await svc.from("agreements").select("status").eq("id", agreementId).maybeSingle();
+  if (ag.error) throw dbError("read agreement", ag.error);
+  if (!ag.data || !isOpenAgreement((ag.data as Row).status)) throw Object.assign(new Error("This agreement was already accepted or withdrawn"), { code: "P0001" });
+  if (opts.supersede) {
+    const { error } = await svc.from("agreement_tokens").update({ expires_at: now.toISOString() }).eq("agreement_id", agreementId).gt("expires_at", now.toISOString());
+    if (error) throw dbError("expire earlier links", error);
+  }
+  const ins = await svc.from("agreement_tokens").insert({ token_hash: hashAgreementToken(token), agreement_id: agreementId, expires_at: expiresAt.toISOString(), created_by: opts.createdBy ?? null });
+  if (ins.error) throw dbError("mint agreement link", ins.error);
+  const up = await svc.from("agreements").update({ status: "sent" }).eq("id", agreementId).eq("status", "draft");
+  if (up.error) throw dbError("mark agreement sent", up.error);
+  return { url: agreementUrl(opts.publicApiUrl, token), expiresAt };
+}
+
+/**
  * The statuses an agreement can still change from: a `draft` can be sent or voided, a `sent` one sent again (a
  * new link) or voided. `accepted` and `void` are ends; the database's guard refuses any change to them.
  */
@@ -279,8 +308,12 @@ export function agreementPageBody(p: {
   bodyText: string;
   error: string | null;
   accepted?: { signerName: string; acceptedAt: string; bodySha256: string } | null;
+  /** A contract file the text is about (an uploaded PDF or DOCX): where the family opens it. */
+  file?: { href: string } | null;
 }): string {
-  const head = `<h1>${escapeHtml(p.title)}</h1>
+  const head = `<h1>${escapeHtml(p.title)}</h1>${
+    p.file ? `\n<p><a href="${escapeHtml(p.file.href)}" style="font-size:16px"><strong>Open the contract file</strong></a> (read it before you accept)</p>` : ""
+  }
 <pre style="${PRE}">${escapeHtml(p.bodyText)}</pre>`;
   if (p.accepted) {
     return `${head}

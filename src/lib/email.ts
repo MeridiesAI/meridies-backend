@@ -84,6 +84,8 @@ type SendEmailArgs = DeliveryColumns & {
   attachments?: EmailAttachment[];
   /** Where a reply goes when it isn't the From address (a valid address, server-chosen). */
   replyTo?: string;
+  /** Copied on the same message (an invoice's Cc, at most 5, each already validated). Never used for a blast. */
+  cc?: string[];
   /**
    * The sender's name, shown as "Name via Meridies <address>". The address is
    * still ours (the verified one); only the display name changes, so a parent
@@ -151,7 +153,7 @@ export function fromHeader(configured: string, name?: string | null): string {
 /** Mailpit's send API (local development only, see `DEV_MAIL_URL`). */
 async function sendToDevMail(
   base: string,
-  m: { to: string; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string>; fromName?: string | null; from?: string }
+  m: { to: string; cc?: string[]; subject: string; html: string; text: string; attachments?: EmailAttachment[]; replyTo?: string; headers?: Record<string, string>; fromName?: string | null; from?: string }
 ): Promise<{ providerId: string | null; sent: boolean; errorText: string | null }> {
   const configured = m.from ?? env.INVITE_FROM_EMAIL;
   const from = /^(.*?)\s*<([^>]+)>$/.exec(fromHeader(configured, m.fromName));
@@ -162,6 +164,7 @@ async function sendToDevMail(
       body: JSON.stringify({
         From: from ? { Name: from[1], Email: from[2] } : { Email: configured },
         To: [{ Email: m.to }],
+        ...(m.cc?.length ? { Cc: m.cc.slice(0, 5).map((Email) => ({ Email })) } : {}),
         Subject: m.subject,
         HTML: m.html,
         Text: m.text,
@@ -206,6 +209,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       text,
       attachments,
       replyTo: args.replyTo,
+      cc: args.cc,
       headers: args.headers,
       fromName: args.fromName,
       from: args.from,
@@ -219,6 +223,7 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
       const body = JSON.stringify({
         from: fromHeader(args.from ?? env.INVITE_FROM_EMAIL, args.fromName),
         to: [to],
+        ...(args.cc?.length ? { cc: args.cc.slice(0, 5) } : {}),
         subject,
         html,
         text,

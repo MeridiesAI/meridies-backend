@@ -21,6 +21,8 @@ import authRoutes from "./routes/auth.js";
 import blastRoutes from "./routes/blasts.js";
 import guardianRoutes from "./routes/guardians.js";
 import myGuardianRoutes from "./routes/myGuardians.js";
+import parentRoutes from "./routes/parent.js";
+import parentInviteRoutes from "./routes/parentInvites.js";
 import chatRoutes from "./routes/chat.js";
 import axisRoutes from "./routes/axis.js";
 import axisEvalRoutes from "./routes/axisEval.js";
@@ -86,6 +88,9 @@ import pipelineActivityRoutes from "./routes/pipelineActivity.js";
 import pipelineSequenceRoutes from "./routes/pipelineSequences.js";
 import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
+import invoiceSettingsRoutes from "./routes/invoiceSettings.js";
+import contractRoutes from "./routes/contracts.js";
+import invoiceDraftRoutes from "./routes/invoiceDrafts.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
 import calendarIcalRoutes from "./routes/calendarIcal.js";
@@ -239,6 +244,9 @@ export function buildApp() {
   app.register(pipelineSequenceRoutes, { prefix: "/pipeline" });
   app.register(pipelineUnsubscribeRoutes);
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
+  app.register(invoiceSettingsRoutes, { prefix: "/pipeline" });
+  app.register(contractRoutes, { prefix: "/pipeline" });
+  app.register(invoiceDraftRoutes, { prefix: "/pipeline" });
   // Absolute paths (/pay/:token): the public pay link page.
   app.register(payRoutes);
   app.register(agreementRoutes);
@@ -254,6 +262,9 @@ export function buildApp() {
   app.register(meRoutes, { prefix: "/me" });
   app.register(myEventRoutes, { prefix: "/me/events" });
   app.register(myGuardianRoutes, { prefix: "/me/guardians" });
+  // Parent accounts (20261123000002): the read-only Parent view and its invitations.
+  app.register(parentRoutes, { prefix: "/parent" });
+  app.register(parentInviteRoutes, { prefix: "/parent-invites" });
   app.register(profileUpdateRoutes);
   // Machine-to-machine (CRON_SECRET), not the app. See lib/sweepSchedule.ts.
   app.register(resourceRoutes, { prefix: "/resources" });

@@ -8,7 +8,13 @@
  *
  * Sent at most once per parent address per student (`noticeDecision`): a parent removed and added again, or a name
  * corrected, gets nothing new; a changed email is a new address and gets one. An address this student's messages
- * already bounced at (or that marked one as spam) gets none. No login link: there is no parent portal.
+ * already bounced at (or that marked one as spam) gets none.
+ *
+ * It invites the parent to make a parent account (20261123000002): a "Create your parent account" button to a
+ * tokenized /join-parent link minted on the STUDENT's own client (`mintParentInvite`, which the database lets a
+ * student do for their own parent only), or "Open your parent view" when the address already has a parent account.
+ * Before that migration, or for an address that already has another kind of account, the email keeps its old words
+ * ("There's nothing to sign up for"), because then they are true.
  *
  * AUTHORIZATION IS THE CALLER'S. The reads and the reply address use the service role; the caller has already
  * written the guardian row as the student (RLS), so the guardian is theirs and the counselor is their own.
@@ -22,6 +28,8 @@ import { normEmail } from "./parentCopy.js";
 import { replyAddressFor } from "./replyRouting.js";
 import { serviceClient } from "./supabase.js";
 import { consumeRateLimit } from "./limits.js";
+import { INVITE_DAYS, parentJoinUrl, parentLoginUrl, whatParentsSee } from "./parentAccounts.js";
+import { mintParentInvite, recordInviteDelivery, type Minted } from "./parentInvites.js";
 
 type Log = { warn: (obj: unknown, msg?: string) => void; error: (obj: unknown, msg?: string) => void };
 
@@ -40,6 +48,8 @@ export type ParentNoticeCopy = {
   parentName: string;
   /** The student's counselor, null when they haven't connected one yet. */
   counselorName: string | null;
+  /** The parent account link: a new account ("join"), or the parent view of an account they have ("signin"). */
+  invite?: { kind: "join" | "signin"; url: string } | null;
 };
 
 /** What the parent reads. Pure. */
@@ -48,6 +58,7 @@ export function parentAddedEmail(c: ParentNoticeCopy): {
   heading: string;
   paragraphs: string[];
   footnote: string;
+  cta?: { label: string; url: string };
 } {
   const student = oneLine(c.studentName) || "Your child";
   const studentFirst = firstWord(student) || student;
@@ -62,8 +73,13 @@ export function parentAddedEmail(c: ParentNoticeCopy): {
       counselor
         ? `${counselor} is ${studentFirst}'s counselor and may email you updates about ${studentFirst}'s college applications.`
         : `Once ${studentFirst} connects with a counselor on Meridies, the counselor may email you updates about ${studentFirst}'s college applications.`,
-      "There's nothing to sign up for and nothing you need to do.",
+      ...(c.invite?.kind === "join"
+        ? [whatParentsSee(studentFirst, counselor), `Create your parent account with the button below. The link works for ${INVITE_DAYS} days and only once.`]
+        : c.invite?.kind === "signin"
+          ? [`${studentFirst} is on your Meridies parent view now. Sign in to see where things stand.`]
+          : ["There's nothing to sign up for and nothing you need to do."]),
     ],
+    ...(c.invite ? { cta: { label: c.invite.kind === "join" ? "Create your parent account" : "Open your parent view", url: c.invite.url } } : {}),
     footnote: counselor
       ? `Reply to this email to reach ${counselor}. If you weren't expecting it, reply and let them know.`
       : "If you weren't expecting this email, you can ignore it.",
@@ -98,8 +114,11 @@ export type SendParentNoticeArgs = {
   parentName: string;
   email: string;
   log?: Log;
+  /** The student's own client: mints the parent account link (the database allows it for their own parent only). */
+  db?: SupabaseClient;
   /** Tests: stand-ins for the service client and the sender. */
   deps?: {
+    mint?: (guardianId: string) => Promise<Minted>;
     svc?: SupabaseClient | null;
     send?: typeof sendEmail;
     replyTo?: (counselorId: string, studentId: string, guardianId: string) => Promise<string | undefined>;
@@ -157,13 +176,30 @@ export async function sendParentNotice(a: SendParentNoticeArgs): Promise<NoticeO
         undefined)
       : undefined;
 
-    const copy = parentAddedEmail({ studentName: a.studentName, parentName: a.parentName, counselorName: counselor.name });
-    const template = { heading: copy.heading, paragraphs: copy.paragraphs, footnote: copy.footnote };
+    // The parent account link. Never fatal: without it the notice goes in its old words.
+    let minted: Minted = { kind: "unavailable" };
+    try {
+      if (a.deps?.mint) minted = await a.deps.mint(a.guardianId);
+      else if (a.db) minted = await mintParentInvite(a.db, a.guardianId);
+    } catch (err) {
+      a.log?.warn({ err: err instanceof Error ? err.message : String(err) }, "parent notice: no account link");
+    }
+    const invite =
+      minted.kind === "join"
+        ? { kind: "join" as const, url: parentJoinUrl(minted.token) }
+        : minted.kind === "signin"
+          ? { kind: "signin" as const, url: parentLoginUrl() }
+          : null;
+
+    const copy = parentAddedEmail({ studentName: a.studentName, parentName: a.parentName, counselorName: counselor.name, invite });
+    const template = { heading: copy.heading, paragraphs: copy.paragraphs, footnote: copy.footnote, ...(copy.cta ? { cta: copy.cta } : {}) };
     const result = await send({
       to: email,
       subject: copy.subject,
       html: brandedEmail(template),
       text: brandedText(template),
+      // The delivery record never keeps the link: it is the capability to make the account.
+      recordText: brandedText({ ...template, cta: undefined }),
       template: PARENT_NOTICE_TEMPLATE,
       from: parentsFrom(),
       tags: [{ name: "category", value: PARENT_NOTICE_TEMPLATE }],
@@ -175,6 +211,7 @@ export async function sendParentNotice(a: SendParentNoticeArgs): Promise<NoticeO
       idempotencyKey: `${PARENT_NOTICE_TEMPLATE}:${a.studentId}:${createHash("sha256").update(email).digest("hex").slice(0, 32)}`,
       logger: a.log,
     });
+    if (minted.kind === "join" && a.db) await recordInviteDelivery(a.db, minted.inviteId, result.deliveryId ?? null, a.log);
     return result.sent ? "sent" : "not_sent";
   } catch (err) {
     a.log?.error({ err: err instanceof Error ? err.message : String(err) }, "parent notice failed");
