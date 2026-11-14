@@ -74,7 +74,7 @@ export const STUDENT_RECORD_TABLES = [
   "scholarship_matches", "school_reframing", "student_academics", "student_aid_checklist", "student_aid_profiles",
   "student_alert_prefs", "student_college_fit", "student_college_recommendations", "student_colleges",
   "student_messages", "student_personal_details", "student_polygon_axes", "student_preference_cards",
-  "student_private_notes", "student_status_overrides", "supplement_docs", "test_scores",
+  "student_private_notes", "student_stat_nodes", "student_status_overrides", "supplement_docs", "test_scores",
 ] as const;
 
 /**

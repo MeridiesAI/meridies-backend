@@ -29,10 +29,10 @@ const occurrences = (file: string) => src(file).split("\n").filter((l) => l.incl
 
 test("every model call in /ai that reads a student's text carries the untrusted-data rule in its system prompt", () => {
   for (const m of ["profile-summary", "narrative-coherence", "family-report", "school-reframing", "college-list", "concierge",
-    "essay-advice", "draft-quality", "parent-alert"]) {
+    "essay-advice", "draft-quality", "parent-alert", "polygon-estimate"]) {
     assert.ok(callSource("src/routes/ai.ts", m).includes("UNTRUSTED_DATA_RULE"), `/ai ${m} lost UNTRUSTED_DATA_RULE`);
   }
-  assert.equal(occurrences("src/routes/ai.ts"), 9);
+  assert.equal(occurrences("src/routes/ai.ts"), 10);
 });
 test("both coherence calls carry the rule and the layer's context", () => {
   // The system prompts live in lib/studentToolPrompts.ts (one per audience: the counselor's and the student's), so a
