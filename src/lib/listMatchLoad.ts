@@ -11,7 +11,7 @@
  *
  * It never fails the list builder: any read that fails is logged (codes only) and that part of the score is left
  * out; with nothing left the answer is null and the list is ordered by odds, as without the flag. While a
- * migration is missing (20261119000001 or 20261124000001) one warning says so and that part is not asked again for
+ * migration is missing (20261119000001 or 20261124000006) one warning says so and that part is not asked again for
  * five minutes. The embedding waits at most EMBED_DEADLINE_MS (the model may still be loading after a deploy):
  * past it this run has no opportunity score, and the vector is still cached when it arrives.
  */
@@ -41,7 +41,7 @@ type Row = Record<string, unknown>;
 type Log = { warn(obj: unknown, msg?: string): void };
 type Db = Pick<SupabaseClient, "from" | "rpc">;
 
-export const MATCH_MIGRATIONS = ["20261119000001_list_builder_learning", "20261124000001_list_match"];
+export const MATCH_MIGRATIONS = ["20261119000001_list_builder_learning", "20261124000006_list_match"];
 export const INTEREST_TABLE = "student_interest_embeddings";
 /** How long a list-builder answer waits for the student's vector before going on without opportunity scores. */
 export const EMBED_DEADLINE_MS = 2_500;

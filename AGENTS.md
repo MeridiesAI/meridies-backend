@@ -2744,7 +2744,7 @@ later. **Nothing here changes a ranking**; nothing reads these tables yet.
   throws; `src/index.ts` calls it at boot when `LIST_MATCH_ENABLED=true` (and only then). `.npmrc` sets `onnxruntime-node-install=skip` so installs on Linux don't
   download onnxruntime's CUDA libraries. `test/unit/embeddings.test.ts` is the one unit test that uses the network.
 
-## List matching (`LIST_MATCH_ENABLED`, `20261124000001`; `lib/listMatch.ts`, `lib/listMatchLoad.ts`)
+## List matching (`LIST_MATCH_ENABLED`, `20261124000006`; `lib/listMatch.ts`, `lib/listMatchLoad.ts`)
 
 Build College Lists orders each band (reach / target / likely) by a match score instead of odds alone. **Odds still
 decide the band**, and no school is removed or moved to another band for its score. **Off by default**: with
@@ -2787,9 +2787,9 @@ tables every school has no score and the list stays in odds order.
   reason citing another school's key, naming another school's program, or (with its own program names taken out)
   still using a program word (program, center, lab, research, honors, abroad, internship...).
 - **Never fails the list.** Every read is soft: a failure is logged by code and that part is left out; nothing left
-  is the odds order. A missing migration (`20261119000001` for the features, `20261124000001` for the RPC) warns once
+  is the odds order. A missing migration (`20261119000001` for the features, `20261124000006` for the RPC) warns once
   and that part isn't asked for 5 minutes. The model's library is imported lazily; if it can't load, core scores only.
-- **Deploy order:** either; not in `REQUIRED_SCHEMA`. Turning it on: apply `20261119000001` and `20261124000001`, set
+- **Deploy order:** either; not in `REQUIRED_SCHEMA`. Turning it on: apply `20261119000001` and `20261124000006`, set
   `LIST_MATCH_ENABLED=true` on Railway (each deploy downloads the model again at boot, about 130 MB). Tests:
   `test/unit/list-match.test.ts` (fixtures only: centering, defaults, unknown features, top K, band order, flag off).
 

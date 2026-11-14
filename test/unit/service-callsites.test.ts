@@ -56,7 +56,7 @@ const REVIEWED = [
   // reads the student's counselor's firm and its exclude_from_learning flag, reads that student's own impression rows,
   // and inserts rows of ids and labels into the two logging tables, which no client can read or write. It acts for
   // no counselor outside their request, returns nothing to the client, and writes nothing a user can see.
-  // lib/listMatchLoad.ts: list matching (LIST_MATCH_ENABLED, 20261124000001), inside the caller's own POST
+  // lib/listMatchLoad.ts: list matching (LIST_MATCH_ENABLED, 20261124000006), inside the caller's own POST
   // /colleges/list-builder after resolveStudentId authorized them. The service role only reads and upserts that one
   // student's student_interest_embeddings row (a hash and a vector of the paragraph built from what the caller's own
   // RLS client read), a table no client can read or write. Nothing from it reaches the client but the ranking.
