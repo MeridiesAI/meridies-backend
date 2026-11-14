@@ -97,7 +97,9 @@ await sql(`update public.profiles set counselor_approved_at = null where id = '$
 const hc = await cron("/internal/invoice-drafts/dispatch");
 check("a counselor who is no longer approved sends nothing (held, not failed)", hc.body.held >= 1 && (await invoices(C.id)) === 0 && (await drafts(C.id))[0].state === "scheduled", JSON.stringify(hc.body));
 await sql(`update public.profiles set counselor_approved_at = now(), counselor_approved_via = 'team' where id = '${S.id}'`);
-check("approved again, it goes", (await cron("/internal/invoice-drafts/dispatch")).body.sent >= 1 && (await invoices(C.id)) === 1);
+check("(its send time moved an hour on, so it didn't sit at the front of the queue)", Date.parse((await drafts(C.id))[0].send_at) > Date.now() + 50 * 60_000);
+await sql(`update public.pipeline_invoice_drafts set send_at = now() - interval '1 minute' where contact_id = '${C.id}'`);
+check("approved again and an hour on, it goes", (await cron("/internal/invoice-drafts/dispatch")).body.sent >= 1 && (await invoices(C.id)) === 1);
 void held;
 
 // ---- Yearly ----------------------------------------------------------------------------------------------------------------------
