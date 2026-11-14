@@ -54,7 +54,9 @@ export function invoiceEmail(
   status: InvoiceStatus,
   payLink: string | null = null,
   agreement: InvoiceEmailAgreement | null = null,
-  extras: InvoiceExtras | null = null
+  extras: InvoiceExtras | null = null,
+  /** The invoice's own page, when it has no card button; the text message carries it. */
+  viewUrl: string | null = null
 ) {
   const parent = String(contact.parent_email ?? "");
   const own = String(contact.parent_email || contact.student_email || "");
@@ -80,9 +82,11 @@ export function invoiceEmail(
         ? `Sent by ${senderName} through Meridies.`
         : "Sent through Meridies.",
     ...(extras
-      ? { style: extras.style, methods: extras.methods, note: extras.note, feeCents: feeFor(extras, draft.amountDueCents), viewUrl: extras.viewUrl }
+      ? { style: extras.style, methods: extras.methods, note: extras.note, feeCents: feeFor(extras, draft.amountDueCents) }
       : {}),
   };
+  const view = viewUrl ?? extras?.viewUrl ?? null;
+  if (view) doc.viewUrl = view;
   const { html, text, recordText } = renderInvoiceEmail(doc, agreement);
   const subject = `Invoice${number ? ` ${number}` : ""}: ${formatUsd(draft.amountDueCents)} due ${draft.dueOn}`;
   const first = String((toParent ? contact.parent_name : contact.student_name) ?? "").trim().split(/\s+/)[0] || null;

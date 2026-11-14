@@ -74,11 +74,13 @@ export type ExtrasSource = {
   lines?: StoredLine[] | null;
   to?: string | null;
   cc?: string[] | null;
+  /** The body used the composer even if none of the above is set (reminders alone): still record the look. */
+  force?: boolean;
 };
 
 /** Whether the source carries anything the composer added (else the document is the original). */
 export const usesComposer = (s: ExtrasSource): boolean =>
-  Boolean(s.acceptedKeys || s.snapshot || s.styleOverride || s.note || s.passCardFee || s.lines || s.to || (s.cc && s.cc.length));
+  Boolean(s.force || s.acceptedKeys || s.snapshot || s.styleOverride || s.note || s.passCardFee || s.lines || s.to || (s.cc && s.cc.length));
 
 export async function buildExtras(db: SupabaseClient, practiceId: string, s: ExtrasSource): Promise<InvoiceExtras | null> {
   if (!usesComposer(s)) return null;

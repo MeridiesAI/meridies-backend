@@ -64,6 +64,10 @@ export const scheduleFields = { schedule: scheduleInput.optional() };
 export type { SendSchedule };
 export { SEND_HOUR };
 
+/** Whether a body (or a draft's payload) carries any field the composer added (so the invoice records its look and options). */
+export const hasComposerFields = (b: Partial<Record<"lines" | "methods" | "passCardFee" | "note" | "cc" | "reminders" | "to", unknown>>): boolean =>
+  b.lines !== undefined || b.methods !== undefined || b.passCardFee !== undefined || b.note !== undefined || b.cc !== undefined || b.reminders !== undefined || b.to !== undefined;
+
 /** Server-side rules on the composer fields that zod can't say; null when fine. */
 export function composerProblem(b: { lines?: LineItemInput[]; amountCents: number; reminders?: number[]; channel?: string; send?: boolean }): { code: string; message: string } | null {
   if (b.lines) {

@@ -183,11 +183,12 @@ export default async function invoiceSettingsRoutes(app: FastifyInstance) {
     const ws = await loadWorkspace(request);
     requireAdmin(ws);
     const scope = scopeOf(request, ws);
-    const { data, error } = await request.db
-      .from("practice_invoice_style")
-      .upsert({ ...scope, ...styleColumns(b) }, { onConflict: "practice_id" })
-      .select("*")
-      .single();
+    // Select, then update or insert: an upsert would also write the scope columns, which a client can't update.
+    const existing = await request.db.from("practice_invoice_style").select("practice_id").eq("practice_id", scope.practice_id).maybeSingle();
+    if (existing.error) throw settingsError(existing.error);
+    const { data, error } = existing.data
+      ? await request.db.from("practice_invoice_style").update(styleColumns(b)).eq("practice_id", scope.practice_id).select("*").single()
+      : await request.db.from("practice_invoice_style").insert({ ...scope, ...styleColumns(b) }).select("*").single();
     if (error) throw settingsError(error);
     return { style: toStyle(data as Row), fonts, canEdit: true };
   });

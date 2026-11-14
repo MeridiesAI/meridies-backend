@@ -26,7 +26,7 @@ import { approvedCounselorIds } from "./access.js";
 import { todayIn } from "./crm.js";
 import { HttpError } from "./errors.js";
 import { checkInvoiceAgreement, contractAttachment, issueInvoiceAgreement, resolveInvoiceAgreement } from "./invoiceAgreement.js";
-import { toStoredLines } from "./invoiceComposer.js";
+import { hasComposerFields, toStoredLines } from "./invoiceComposer.js";
 import { draftPayload, type DraftPayload } from "./invoiceDrafts.js";
 import { invoiceStatus, readPractice, type PracticeIdentity } from "./invoiceDocument.js";
 import { draftInvoice, draftStatus, invoiceEmail, type InvoiceDraft } from "./invoiceSend.js";
@@ -240,6 +240,7 @@ async function sendDraft(svc: SupabaseClient, draft: Row, creator: string, log: 
     lines: p.lines ? toStoredLines(p.lines) : null,
     to: p.to ?? null,
     cc: p.cc ?? null,
+    force: hasComposerFields(p),
   });
   const composer = extras !== null;
 
@@ -298,7 +299,7 @@ async function sendDraft(svc: SupabaseClient, draft: Row, creator: string, log: 
   const view = !card && (composer || text) ? await viewLink(svc, invoice, creator, log) : null;
   const withView: InvoiceExtras | null = extras && view ? { ...extras, viewUrl: view } : extras;
   const practice = await practiceFor(svc, contact, sender, creator);
-  const mail = invoiceEmail(contact, inv, String(invoice.number), sender.fullName, practice, draftStatus(inv), card, agreement ? { title: agreement.title, url: agreement.url } : null, withView);
+  const mail = invoiceEmail(contact, inv, String(invoice.number), sender.fullName, practice, draftStatus(inv), card, agreement ? { title: agreement.title, url: agreement.url } : null, withView, view);
 
   let sentOk = false;
   let sentTo: string | null = null;

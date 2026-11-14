@@ -63,7 +63,7 @@ import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { invoiceOwed, payLinkBlock, stripeUnavailable } from "../lib/stripeConnect.js";
 import { mintPayLink, practiceAccount, stripeConfigured } from "../lib/stripePractice.js";
 import { buildExtras, composerUnavailable, practiceIdOf, readStyle, settingsError, sourceFromInvoiceRow, type InvoiceExtras } from "../lib/invoiceSettings.js";
-import { composerFields, composerProblem, toStoredLines } from "../lib/invoiceComposer.js";
+import { composerFields, composerProblem, hasComposerFields, toStoredLines } from "../lib/invoiceComposer.js";
 import { snapshotOf, styleFields } from "../lib/invoiceStyle.js";
 import { takesCardMethod } from "../lib/paymentMethods.js";
 import { textingAvailable, textingUnavailable } from "../lib/invoiceTexting.js";
@@ -1189,8 +1189,6 @@ export default async function pipelineRoutes(app: FastifyInstance) {
   const composerShape = { ...composerFields };
   const styleOverrideInput = z.object(styleFields).partial().strict();
   type ComposerBody = z.infer<z.ZodObject<typeof composerShape>> & { amountCents: number; send?: boolean };
-  const hasComposerFields = (b: Partial<ComposerBody>) =>
-    b.lines !== undefined || b.methods !== undefined || b.passCardFee !== undefined || b.note !== undefined || b.cc !== undefined || b.reminders !== undefined || b.to !== undefined;
 
   /** Refuse the composer fields that can't be right (lines that don't add up, bad reminders, a text that isn't sent), before anything is written. */
   function checkComposer(b: ComposerBody): void {
@@ -1209,6 +1207,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       lines: b.lines ? toStoredLines(b.lines) : null,
       to: b.to ?? null,
       cc: b.cc ?? null,
+      force: hasComposerFields(b),
     });
   }
 
@@ -1387,7 +1386,8 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         draftStatus(draft),
         payLink,
         agreement ? { title: agreement.title, url: agreement.url } : null,
-        extras
+        extras,
+        viewLink
       );
       let sentTo: string | null = null;
       if (b.send && text) {
