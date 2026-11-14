@@ -322,14 +322,14 @@ test("the note and the practice's footer text reach every format, escaped", () =
 });
 
 test("a passed-on card fee is its own sentence and the button asks for the amount with it", () => {
-  const d = composed({ style: null, feeCents: 4_620 });
+  const d = composed({ style: null, feeCents: 4_511 });
   const { html, text } = renderInvoiceEmail(d);
   for (const out of [html, text, renderInvoicePageBody(d)]) {
-    assert.ok(out.includes("$46.20 processing fee"), "fee line");
-    assert.ok(out.includes("$1,546.20 in all"));
+    assert.ok(out.includes("$45.11 processing fee"), "fee line");
+    assert.ok(out.includes("$1,545.11 in all"));
   }
-  assert.ok(html.includes("Pay $1,546.20 by card"));
-  assert.ok(text.includes("Pay $1,546.20 by card:"));
+  assert.ok(html.includes("Pay $1,545.11 by card"));
+  assert.ok(text.includes("Pay $1,545.11 by card:"));
   assert.match(text, /Amount due: \$1,500\n/, "amount due is still what the invoice asks");
   assert.doesNotMatch(renderInvoiceEmail(composed({ style: null })).html, /processing fee/);
 });

@@ -29,16 +29,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { crmError, fillTemplate, loadWorkspace, paragraphs, todayIn, type Workspace } from "../lib/crm.js";
 import { brandedEmail, brandedText, sendEmail, sendSms } from "../lib/email.js";
-import {
-  billToOf,
-  invoiceStatus,
-  readPractice,
-  renderInvoiceEmail,
-  type InvoiceDocument,
-  type InvoiceEmailAgreement,
-  type InvoiceStatus,
-  type PracticeIdentity,
-} from "../lib/invoiceDocument.js";
+import { invoiceStatus, readPractice, type PracticeIdentity } from "../lib/invoiceDocument.js";
+import { draftInvoice, draftStatus, invoiceEmail, type InvoiceDraft } from "../lib/invoiceSend.js";
 import {
   checkInvoiceAgreement,
   INVOICE_AGREEMENT_TEMPLATE,
@@ -70,6 +62,8 @@ import { serializeErr } from "../lib/requestLog.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { invoiceOwed, payLinkBlock, stripeUnavailable } from "../lib/stripeConnect.js";
 import { mintPayLink, practiceAccount, stripeConfigured } from "../lib/stripePractice.js";
+import { practiceIdOf, settingsError } from "../lib/invoiceSettings.js";
+import { templateToPackage, toTemplateDTO } from "../lib/packageTemplates.js";
 
 type Row = Record<string, unknown>;
 
@@ -443,20 +437,6 @@ async function cardIssuesFor(request: FastifyRequest, contactIds: string[]): Pro
   }
 }
 
-type InvoiceDraft = {
-  label: string;
-  /** The package it bills: the invoice's one line item. */
-  packageName: string;
-  issuedOn: string;
-  grossCents: number;
-  creditAppliedCents: number;
-  alreadyPaidCents: number;
-  amountDueCents: number;
-  dueOn: string;
-  /** Which payment of the package this is, in words. */
-  plan: string | null;
-};
-
 /** The invoice email, the same for the preview and the send. A pay link adds a "Pay by card" button. */
 /**
  * Who a family hears from and where a reply goes, for every email a counselor
@@ -482,78 +462,6 @@ function practiceOf(request: FastifyRequest, contact: Row): Promise<PracticeIden
   // A solo counselor's own name is already on the request; anyone else's is read.
   const own = !firmId && counselorId === request.auth.userId ? request.profile.full_name ?? null : null;
   return readPractice(request.db, { firmId, counselorId }, own);
-}
-
-/**
- * The invoice email, the same for the preview and the send: the invoice
- * document (lib/invoiceDocument.ts) with every figure as the draft states it.
- * A pay link adds a "Pay by card" button. An agreement (lib/invoiceAgreement.ts) adds its block
- * above the invoice, a subject that says so, and `recordText` with its private link left out;
- * without one the email is exactly the invoice email.
- */
-function invoiceEmail(
-  contact: Row,
-  draft: InvoiceDraft,
-  number: string | null,
-  senderName: string | null,
-  practice: PracticeIdentity,
-  status: InvoiceStatus,
-  payLink: string | null = null,
-  agreement: InvoiceEmailAgreement | null = null
-) {
-  const to = String(contact.parent_email || contact.student_email || "");
-  const toParent = Boolean(contact.parent_email);
-  const doc: InvoiceDocument = {
-    practice,
-    number,
-    issuedOn: draft.issuedOn,
-    dueOn: draft.dueOn,
-    billTo: billToOf(contact),
-    lines: [{ description: draft.packageName, detail: draft.label, amountCents: draft.grossCents }],
-    subtotalCents: draft.grossCents,
-    creditAppliedCents: draft.creditAppliedCents,
-    alreadyPaidCents: draft.alreadyPaidCents,
-    amountDueCents: draft.amountDueCents,
-    status,
-    payUrl: payLink,
-    plan: draft.plan,
-    footnote: toParent
-      ? guardianFootnote(senderName)
-      : senderName
-        ? `Sent by ${senderName} through Meridies.`
-        : "Sent through Meridies.",
-  };
-  const { html, text, recordText } = renderInvoiceEmail(doc, agreement);
-  const subject = `Invoice${number ? ` ${number}` : ""}: ${formatUsd(draft.amountDueCents)} due ${draft.dueOn}`;
-  return {
-    to,
-    recipientKind: contact.parent_email ? ("guardian" as const) : ("student" as const),
-    subject: agreement ? withAgreementSubject(subject) : subject,
-    html,
-    text,
-    ...(recordText !== undefined ? { recordText } : {}),
-  };
-}
-
-/** A new invoice's status: nothing left to ask is paid (as deriveAccount will read it), else due. */
-const draftStatus = (d: InvoiceDraft): InvoiceStatus => (d.amountDueCents <= 0 ? "paid" : "due");
-
-/** Plan an invoice for this account, or the 409 that says why it can't be sent. */
-function draftInvoice(account: AccountDTO, credits: boolean, b: { label: string; amountCents: number; dueOn: string }, issuedOn: string): InvoiceDraft {
-  // Without the migration no credit can be recorded against an invoice.
-  const plan = planInvoice(credits ? account : { ...account, creditCents: 0 }, b.amountCents);
-  if (!plan.ok) throw new HttpError(409, plan.reason, plan.code);
-  return {
-    label: b.label,
-    packageName: account.packageName,
-    issuedOn,
-    grossCents: plan.grossCents,
-    creditAppliedCents: plan.creditAppliedCents,
-    alreadyPaidCents: plan.alreadyPaidCents,
-    amountDueCents: plan.amountDueCents,
-    dueOn: b.dueOn,
-    plan: planLine(account, account.invoices.filter((i) => i.state !== "void").length + 1),
-  };
 }
 
 async function requireAccount(request: FastifyRequest, contactId: string): Promise<AccountDTO> {
@@ -591,6 +499,38 @@ async function takesCards(request: FastifyRequest, practiceId: string): Promise<
   } catch {
     return false;
   }
+}
+
+/** Create or change a family's package (the PUT and the from-template copy share it). */
+async function savePackage(
+  request: FastifyRequest,
+  id: string,
+  b: { packageName: string; totalCents: number; installments: number; durationMonths?: number | null }
+): Promise<AccountDTO> {
+  await loadContactRow(request, id);
+
+  const existing = await request.db.from("pipeline_packages").select("contact_id").eq("contact_id", id).maybeSingle();
+  if (existing.error) throw crmError(existing.error);
+  const row = {
+    package_name: b.packageName,
+    total_cents: b.totalCents,
+    installments: b.installments,
+    ...(b.durationMonths !== undefined ? { duration_months: b.durationMonths } : {}),
+  };
+  const { error } = existing.data
+    ? await request.db.from("pipeline_packages").update(row).eq("contact_id", id)
+    : await request.db.from("pipeline_packages").insert({ ...row, contact_id: id, created_by: request.auth.userId });
+  if (error) {
+    if (error.code === "42501") throw forbidden("Only a firm admin or this family's owner can bill them");
+    // The package-length migration isn't applied: say so, the app resends without it.
+    if (error.code === "42703" && b.durationMonths !== undefined) {
+      throw new HttpError(503, "Package length isn't switched on yet", "package_duration_unavailable");
+    }
+    throw crmError(error);
+  }
+  const account = await loadAccount(request, id);
+  if (!account) throw forbidden("Only a firm admin or this family's owner can bill them");
+  return account;
 }
 
 export default async function pipelineRoutes(app: FastifyInstance) {
@@ -1197,30 +1137,26 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       })
       .strict()
       .parse(request.body);
-    await loadContactRow(request, id);
+    return savePackage(request, id, b);
+  });
 
-    const existing = await request.db.from("pipeline_packages").select("contact_id").eq("contact_id", id).maybeSingle();
-    if (existing.error) throw crmError(existing.error);
-    const row = {
-      package_name: b.packageName,
-      total_cents: b.totalCents,
-      installments: b.installments,
-      ...(b.durationMonths !== undefined ? { duration_months: b.durationMonths } : {}),
-    };
-    const { error } = existing.data
-      ? await request.db.from("pipeline_packages").update(row).eq("contact_id", id)
-      : await request.db.from("pipeline_packages").insert({ ...row, contact_id: id, created_by: request.auth.userId });
-    if (error) {
-      if (error.code === "42501") throw forbidden("Only a firm admin or this family's owner can bill them");
-      // The package-length migration isn't applied: say so, the app resends without it.
-      if (error.code === "42703" && b.durationMonths !== undefined) {
-        throw new HttpError(503, "Package length isn't switched on yet", "package_duration_unavailable");
-      }
-      throw crmError(error);
-    }
-    const account = await loadAccount(request, id);
-    if (!account) throw forbidden("Only a firm admin or this family's owner can bill them");
-    return account;
+  /**
+   * Set a family up from a package in the practice's library: the template is COPIED into the family's package
+   * (name, total, installments, length), which stays editable on its own. Answers the account and the payment
+   * plan the template describes (deposit first, then even installments), so the composer can prefill the first
+   * invoice. 404 for an archived or another practice's template.
+   */
+  app.post("/contacts/:id/package/from-template", { preHandler: write("pipeline:billing", 60) }, async (request) => {
+    const { id } = idParam.parse(request.params);
+    const b = z.object({ templateId: uuid }).strict().parse(request.body);
+    const contact = await loadContactRow(request, id);
+    const { data, error } = await request.db.from("pipeline_package_templates").select("*").eq("id", b.templateId).maybeSingle();
+    if (error) throw settingsError(error);
+    const row = data as Row | null;
+    if (!row || row.archived_at || String(row.practice_id) !== practiceIdOf(contact)) throw notFound("That package isn't in your library");
+    const t = toTemplateDTO(row);
+    const account = await savePackage(request, id, templateToPackage(t));
+    return { account, template: { id: t.id, name: t.name, depositCents: t.depositCents }, plan: t.plan };
   });
 
   const invoiceBody = z.object({

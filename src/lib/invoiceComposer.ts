@@ -55,8 +55,8 @@ export const composerFields = {
   channel: z.enum(["email", "text"]).optional(),
   /** Day offsets from the due date: -3 = three days before, 0 = on the day, 3 = three days after. */
   reminders: z.array(z.number().int()).max(10).optional(),
-  /** A contract_files row to send with it (creates an agreement bound to the file). */
-  contractId: z.string().uuid().optional(),
+  /** Send it to this address instead of the card's (parent, else student). */
+  to: email.optional(),
 };
 
 /** What a draft stores besides the invoice body: when it goes. */
