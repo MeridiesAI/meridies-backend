@@ -232,3 +232,49 @@ export function busyWindow(from: string, to: string, bufferMinutes: number, tz: 
   const end = wallTimeToInstant(addDays(localDate(hi - 1, tz), 1), "00:00", tz);
   return { from: new Date(start).toISOString(), to: new Date(end).toISOString() };
 }
+
+/**
+ * Overlapping or touching busy intervals joined into one, clipped to [from, to) and sorted. Only
+ * start and end survive: what the student sees is "Busy", never which meeting or event made it.
+ * Anything unparseable or empty is dropped.
+ */
+export function mergeBusy(busy: BusyInterval[], from: string, to: string): BusyInterval[] {
+  const lo = Date.parse(from);
+  const hi = Date.parse(to);
+  const spans = busy
+    .map((b) => [Math.max(Date.parse(b.start), lo), Math.min(Date.parse(b.end), hi)] as const)
+    .filter(([s, e]) => Number.isFinite(s) && Number.isFinite(e) && e > s)
+    .sort((a, b) => a[0] - b[0]);
+  const out: [number, number][] = [];
+  for (const [s, e] of spans) {
+    const last = out[out.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else out.push([s, e]);
+  }
+  return out.map(([s, e]) => ({ start: new Date(s).toISOString(), end: new Date(e).toISOString() }));
+}
+
+/**
+ * The counselor's weekly hours as real instants inside [from, to): each local day's ranges read in `tz`
+ * (DST-safe, like the slots), clipped to the window, sorted and joined where they touch. The student's
+ * calendar shades everything outside these as "not available".
+ */
+export function openRanges(input: { timeZone: string; weeklyHours: WeeklyHours; from: string; to: string }): BusyInterval[] {
+  const from = Date.parse(input.from);
+  const to = Date.parse(input.to);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return [];
+  const spans: BusyInterval[] = [];
+  const lastDay = localDate(to, input.timeZone);
+  for (let day = addDays(localDate(from, input.timeZone), -1); day <= lastDay; day = addDays(day, 1)) {
+    const weekday = new Date(`${day}T00:00:00Z`).getUTCDay();
+    const ranges = input.weeklyHours[weekday] ?? input.weeklyHours[String(weekday)] ?? [];
+    for (const r of ranges) {
+      if (minutesOf(r.start) == null || minutesOf(r.end) == null) continue;
+      spans.push({
+        start: new Date(wallTimeToInstant(day, r.start, input.timeZone)).toISOString(),
+        end: new Date(wallTimeToInstant(day, r.end, input.timeZone)).toISOString(),
+      });
+    }
+  }
+  return mergeBusy(spans, input.from, input.to);
+}

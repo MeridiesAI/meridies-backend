@@ -11,6 +11,7 @@
  *   GET    /me/booking/types                         the counselor's active meeting types, or why not
  *                                                     (lib/booking.ts bookingTypesAnswer), and their two change rules
  *   GET    /me/booking/slots?typeId&from&to[&tz]     free start times for one type
+ *   GET    /me/booking/busy?from&to                  the counselor's busy ranges (start/end only) + open hours
  *   POST   /me/booking         { typeId, startsAt }  book one of those starts
  *   PATCH  /me/booking/:id     { startsAt }          move one of my meetings
  *   DELETE /me/booking/:id                           cancel one of my meetings
@@ -18,8 +19,9 @@
  * Slots are the counselor's weekly hours (in their zone) minus their scheduled
  * Meridies meetings and their connected calendar's busy time, each widened by
  * the buffer, after the minimum notice and within max days ahead; one request
- * covers at most 14 days. Only free times leave the server, never what makes a
- * time busy. `tz` is the student's zone, accepted for the app's convenience and
+ * covers at most 14 days. Slots never say what makes a time busy. /busy does say THAT a
+ * time is busy, for the student's calendar to grey out, as merged start/end ranges and nothing
+ * else (no title, id, attendee or provider): a meeting with another student reads like an event. `tz` is the student's zone, accepted for the app's convenience and
  * not used: times are instants, with the counselor's `timeZone` beside them.
  *
  * The writes and their rules are lib/bookingWrite.ts: a booking is accepted
@@ -41,7 +43,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { activeTypes, bookingUnavailable, slotsFor, studentBookingContext, studentBookingTypes, type StudentBookingContext } from "../lib/booking.js";
+import { activeTypes, bookingUnavailable, busyFor, slotsFor, studentBookingContext, studentBookingTypes, type StudentBookingContext } from "../lib/booking.js";
 import {
   counselorCalendarConnected,
   createBookingPlainEvent,
@@ -86,6 +88,10 @@ const slotsQuery = z
     to: z.string().datetime({ offset: true }),
     tz: z.string().trim().max(64).refine(isTimeZone, "That isn't a time zone").optional(),
   })
+  .strict();
+
+const busyQuery = z
+  .object({ from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }) })
   .strict();
 
 const bookBody = z.object({ typeId: z.string().uuid(), startsAt: z.string().datetime({ offset: true }) }).strict();
@@ -335,6 +341,16 @@ export default async function studentBookingRoutes(app: FastifyInstance) {
       const type = (await activeTypes(ctx.svc, ctx.counselorId)).find((t) => t.id === q.typeId);
       if (!type) throw new HttpError(404, "That meeting type isn't available", "type_not_found");
       return slotsFor(request, ctx, type, { from: q.from, to: q.to });
+    }
+  );
+
+  app.get(
+    "/busy",
+    { preHandler: [...student, limit("me:booking:busy", 60, 60)] },
+    async (request) => {
+      const q = busyQuery.parse(request.query);
+      if (Date.parse(q.to) <= Date.parse(q.from)) throw new HttpError(400, "The end has to be after the start");
+      return busyFor(request, await bookingContext(request), { from: q.from, to: q.to });
     }
   );
 

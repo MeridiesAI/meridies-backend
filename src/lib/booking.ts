@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import type { FastifyRequest } from "fastify";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isCounselorApproved } from "./access.js";
-import { busyWindow, clampWindow, computeSlots, type BusyInterval, type HoursRange } from "./bookingSlots.js";
+import { busyWindow, clampWindow, computeSlots, mergeBusy, openRanges, type BusyInterval, type HoursRange } from "./bookingSlots.js";
 import { env } from "../env.js";
 import { HttpError, fromPostgrest } from "./errors.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
@@ -492,5 +492,44 @@ export async function slotsFor(
       startsAt,
       endsAt: new Date(Date.parse(startsAt) + type.durationMinutes * 60_000).toISOString(),
     })),
+  };
+}
+
+export type BusyAnswer = {
+  timeZone: string;
+  from: string | null;
+  to: string | null;
+  /** The counselor's weekly hours as instants in the window: the calendar shades what is outside them. */
+  open: BusyInterval[];
+  busy: BusyInterval[];
+};
+
+/**
+ * What the student's calendar greys out: the counselor's scheduled meetings (any student's) and
+ * connected-calendar events in the window, merged into plain start/end ranges with nothing that
+ * says what they are, beside the counselor's open hours as instants (so the app can shade the rest). Same
+ * window rule and the same failure rule as `slotsFor`: a calendar that can't be read is a 409/503,
+ * never an empty list that would read as "all free". No buffer here: slots widen busy time, the
+ * view shows it as it is.
+ */
+export async function busyFor(
+  request: FastifyRequest,
+  ctx: Extract<StudentBookingContext, { ok: true }>,
+  window: { from: string; to: string },
+  now = new Date()
+): Promise<BusyAnswer> {
+  const s = ctx.settings;
+  const clamped = clampWindow({ from: window.from, to: window.to, now, maxDaysAhead: s.maxDaysAhead });
+  if (!clamped) return { timeZone: s.timeZone, from: null, to: null, open: [], busy: [] };
+  const calWindow = busyWindow(clamped.from, clamped.to, 0, s.timeZone);
+  const [meetings, calendar] = await Promise.all([
+    meetingBusy(ctx.svc, ctx.counselorId, clamped.from, clamped.to, 0),
+    calendarBusy(ctx.svc, ctx.counselorId, calWindow.from, calWindow.to, s.timeZone, request.log),
+  ]);
+  return {
+    timeZone: s.timeZone,
+    ...clamped,
+    open: openRanges({ timeZone: s.timeZone, weeklyHours: s.weeklyHours, ...clamped }),
+    busy: mergeBusy([...meetings, ...calendar], clamped.from, clamped.to),
   };
 }

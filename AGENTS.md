@@ -1209,6 +1209,16 @@ forget it.
   either; not in `REQUIRED_SCHEMA`; without it the routes answer 503 `booking_unavailable` (`bookingReady`). Tests:
   `test/unit/booking-slots.test.ts`, `booking-busy.test.ts`, `booking-service.test.ts`,
   `test/integration/booking-settings.test.mjs`.
+- **Student booking: the busy view** (no migration; `busyFor` in `lib/booking.ts`, `mergeBusy` / `openRanges` in
+  `lib/bookingSlots.ts`, `GET /me/booking/busy?from&to` in `routes/studentBooking.ts`). The student's Calendar greys out
+  the counselor's busy time, like Google Calendar's "Busy". Same gate and window rule as `/slots` (own approved
+  counselor, booking on, clamped to now..max days ahead, 14 days a request); answers `{ timeZone, from, to, open, busy }`:
+  `busy` is the counselor's scheduled Meridies meetings (any student's, public-link bookings included) and connected
+  calendar events merged into plain `{start, end}` ranges, **no buffer, and nothing that says what made them** (no
+  title, id, attendee or provider: another student's meeting reads the same as a dentist's appointment); `open` is the
+  weekly hours as instants (DST-safe), so the app shades the rest and never reads wall-clock hours itself. A calendar that can't
+  be read is the slots' 409 `calendar_reconnect_needed` / 503 `calendar_busy_unavailable`, never an empty `busy` that
+  reads as "all free". Tests: `test/unit/booking-busy-view.test.ts`.
 - **Student self-booking, part 2: book, move, cancel** (`20261111000012`; `lib/bookingWrite.ts`,
   `lib/bookingCalendar.ts`, `routes/studentBooking.ts`). **This reverses "the counselor owns the calendar: a student
   cannot move their meetings"** (routes/meetings.ts's header now says so): a student may move or cancel their own
