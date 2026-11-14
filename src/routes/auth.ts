@@ -64,7 +64,7 @@ export default async function authRoutes(app: FastifyInstance) {
 
     return toMeridiesUser(
       { ...p, profile: blob },
-      { counselorName, avatarUrl: avatars.get(p.id) ?? null, avatarEditable: p.role === "student" }
+      { counselorName, avatarUrl: avatars.get(p.id) ?? null, avatarEditable: p.role === "student" || p.role === "counselor" }
     );
   });
 
