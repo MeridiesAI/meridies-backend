@@ -23,6 +23,17 @@ import {
   type ReferredBy,
 } from "../lib/invites.js";
 import { invitationDeliveries } from "../lib/inviteDelivery.js";
+import {
+  INVITATION_DOCUMENT_COLUMNS,
+  MAX_STAGED_PER_INVITATION,
+  documentCountsByInvitation,
+  invitationDocumentBody,
+  requireInvitationDocuments,
+  stagedPathOk,
+  toInvitationDocument,
+} from "../lib/invitationDocuments.js";
+import { assertPathClaimable, removeDeletedDocumentObject } from "../lib/documentClaim.js";
+import { DOCUMENTS_BUCKET, isActiveContentFile, isSafeStoragePath } from "../lib/storagePath.js";
 import { enforceQuota, limit } from "../lib/limits.js";
 import { anonClient } from "../lib/supabase.js";
 import { toInvitation, toMeridiesUser } from "../lib/serialize.js";
@@ -367,6 +378,10 @@ export default async function inviteRoutes(app: FastifyInstance) {
       );
 
       const imported = await importDataByInvitation(request, rows.map((r) => String(r.id)));
+      const documentCounts = await documentCountsByInvitation(
+        request,
+        rows.filter((r) => r.status === "pending").map((r) => String(r.id))
+      );
 
       return rows.map((r) => {
         const detail = toInvitationDetail(r);
@@ -379,6 +394,8 @@ export default async function inviteRoutes(app: FastifyInstance) {
           // The CSV columns this student came in with; null for anyone else.
           importData: imported.get(detail.id) ?? null,
           studentId: r.accepted_by ? String(r.accepted_by) : null,
+          // Files staged for a student who hasn't joined yet; 0 once they have (they are in the student's folder).
+          documentCount: documentCounts.get(detail.id) ?? 0,
           profileStatus: profile?.status ?? null,
           delivery: deliveries.get(detail.id) ?? null,
           intakeItems: detail.intakeRequests.map((q) => {
@@ -396,6 +413,114 @@ export default async function inviteRoutes(app: FastifyInstance) {
           canConfirm: canConfirm({ status: detail.status, requests: detail.intakeRequests }),
         };
       });
+    }
+  );
+
+  /**
+   * Documents for a student who hasn't joined yet. The file goes straight from the browser to the documents
+   * bucket at `<counselor id>/<invitation id>/<ts>-<name>`; these routes list, register and remove the row that
+   * holds it against the invitation. The moment the student accepts, a database trigger files each one in their
+   * folder (20261124000008), so after that the app uses the student's own Files routes.
+   */
+  const pendingInvitation = async (request: FastifyRequest, id: string): Promise<void> => {
+    await requireInvitationDocuments(request);
+    const { data, error } = await request.db
+      .from("invitations")
+      .select("status")
+      .eq("id", id)
+      .eq("counselor_id", request.auth.userId)
+      .maybeSingle();
+    if (error) throw fromPostgrest(error);
+    if (!data) throw notFound("No invitation of yours matches that");
+    if (data.status === "accepted") {
+      throw new HttpError(409, "They've joined. Add the file to their folder instead.", "invitation_accepted");
+    }
+    if (data.status !== "pending") throw new HttpError(409, "That invitation is no longer open.", "invitation_closed");
+  };
+
+  app.get(
+    "/:id/documents",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:documents", 240, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      await requireInvitationDocuments(request);
+      const { data, error } = await request.db
+        .from("invitation_documents")
+        .select(INVITATION_DOCUMENT_COLUMNS)
+        .eq("invitation_id", id)
+        .eq("counselor_id", request.auth.userId)
+        .order("created_at", { ascending: true })
+        .limit(MAX_STAGED_PER_INVITATION);
+      if (error) throw fromPostgrest(error);
+      return (data ?? []).map((r) => toInvitationDocument(r as unknown as Record<string, unknown>));
+    }
+  );
+
+  app.post(
+    "/:id/documents",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:documents:add", 120, 60)] },
+    async (request, reply) => {
+      const { id } = idParam.parse(request.params);
+      const b = invitationDocumentBody.parse(request.body);
+      await pendingInvitation(request, id);
+      // Same rules as POST /files/documents: only the documents bucket, a path of the shape the app writes, no
+      // SVG/HTML, never over someone else's object. Here the path must also be this invitation's own.
+      if (!isSafeStoragePath(b.storagePath) || !stagedPathOk(b.storagePath, request.auth.userId, id)) {
+        throw badRequest("That file path isn't one the app uploads to");
+      }
+      if (isActiveContentFile(b.filename, b.mimeType) || isActiveContentFile(b.storagePath, null)) {
+        throw badRequest("SVG and HTML files can't be added. Save it as a PDF or an image instead.");
+      }
+      await assertPathClaimable(request, b.storagePath);
+      await enforceQuota(request.auth.userId, "uploads", "day", 500, "You've registered a lot of files today.");
+
+      const { count, error: countError } = await request.db
+        .from("invitation_documents")
+        .select("id", { count: "exact", head: true })
+        .eq("invitation_id", id);
+      if (countError) throw fromPostgrest(countError);
+      if ((count ?? 0) >= MAX_STAGED_PER_INVITATION) {
+        throw new HttpError(409, `You can add up to ${MAX_STAGED_PER_INVITATION} files before they join.`, "too_many_documents");
+      }
+
+      const { data, error } = await request.db
+        .from("invitation_documents")
+        .insert({
+          invitation_id: id,
+          counselor_id: request.auth.userId,
+          bucket: DOCUMENTS_BUCKET,
+          storage_path: b.storagePath,
+          filename: b.filename,
+          title: b.title ?? null,
+          mime_type: b.mimeType ?? null,
+          size_bytes: b.sizeBytes ?? null,
+          kind: b.kind,
+        })
+        .select(INVITATION_DOCUMENT_COLUMNS)
+        .single();
+      if (error) throw fromPostgrest(error);
+      return reply.code(201).send(toInvitationDocument(data as unknown as Record<string, unknown>));
+    }
+  );
+
+  app.delete(
+    "/:id/documents/:docId",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:documents:remove", 120, 60)] },
+    async (request, reply) => {
+      const { id, docId } = z.object({ id: z.string().uuid(), docId: z.string().uuid() }).parse(request.params);
+      await requireInvitationDocuments(request);
+      const { data, error } = await request.db
+        .from("invitation_documents")
+        .delete()
+        .eq("id", docId)
+        .eq("invitation_id", id)
+        .eq("counselor_id", request.auth.userId)
+        .select("bucket, storage_path")
+        .maybeSingle();
+      if (error) throw fromPostgrest(error);
+      if (!data) throw notFound("No document of yours matches that");
+      await removeDeletedDocumentObject(request, data as { bucket?: unknown; storage_path?: unknown });
+      return reply.code(204).send();
     }
   );
 

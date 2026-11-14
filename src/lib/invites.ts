@@ -12,6 +12,7 @@ import { env } from "../env.js";
 import { sendInviteEmail } from "./email.js";
 import { fromPostgrest } from "./errors.js";
 import { assertAddressFreeFor } from "./imports/heldAddresses.js";
+import { moveStagedDocuments } from "./invitationDocuments.js";
 
 /** Unguessable capability. base64url of 24 random bytes ≈ 192 bits. */
 export function newInviteToken(): string {
@@ -91,12 +92,13 @@ export async function insertInvitation(
   const email = input.email.trim().toLowerCase();
   await assertAddressFreeFor(request, email, input.fullName, { item: input.importItemId, resendOf: input.resendOf });
 
-  const { error: supersedeError } = await request.db
+  const { data: superseded, error: supersedeError } = await request.db
     .from("invitations")
     .update({ status: "revoked" })
     .eq("counselor_id", request.auth.userId)
     .eq("email", email)
-    .eq("status", "pending");
+    .eq("status", "pending")
+    .select("id");
   if (supersedeError) throw fromPostgrest(supersedeError);
 
   const token = newInviteToken();
@@ -125,6 +127,12 @@ export async function insertInvitation(
     ({ data, error } = await insert(base));
   }
   if (error) throw fromPostgrest(error);
+  // Documents the counselor staged on the invitation this one replaces come along.
+  await moveStagedDocuments(
+    request,
+    (superseded ?? []).map((r) => String((r as Row).id)),
+    String((data as unknown as Row).id)
+  );
   return { row: data as unknown as Row, token };
 }
 
