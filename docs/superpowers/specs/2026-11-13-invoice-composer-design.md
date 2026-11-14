@@ -70,7 +70,7 @@ coalesce(firm_id, counselor_id)`). **Read**: anyone who works in the practice. *
 | `practice_invoice_style` | One row per practice (`practice_id` PK). `accent_color #RRGGBB|null`, `font_key serif|sans|modern|classic|humanist|mono`, `header_align left|center`, `corner square|rounded|pill`, `button_label ≤40`, `footer_text ≤300`, `show_logo`. No row = defaults. |
 | `pipeline_package_templates` | `name`, `years_tag ≤40`, `total_cents`, `deposit_cents ≤ total`, `installments 1..60` (the deposit counts as the first), `duration_months`, `inclusions text[] ≤20`, `archived_at`. Archived, never deleted. |
 | `pipeline_invoice_drafts` | `contact_id`, `payload jsonb` (§6.5), `state`, `send_at`, `repeat_yearly`, `sent_invoice_id`, `sent_at`, `attempts`, `last_error`, `claimed_at`, `created_by`. A client can only move a draft between `draft|scheduled|cancelled` and edit it. |
-| `pipeline_invoices` (new nullable cols) | `line_items jsonb`, `accepted_methods text[]`, `pass_card_fee bool default false`, `note ≤1000`, `cc text[] ≤5`, `reminders int[] ≤5`, `reminders_sent jsonb` (`{"-3": "<iso>"}`), `style_snapshot jsonb`, `agreement_id uuid` (the one column a client may update, after the insert). All null/false on an invoice made without the composer. |
+| `pipeline_invoices` (new nullable cols) | `line_items jsonb`, `accepted_methods text[]`, `pass_card_fee bool default false`, `note ≤1000`, `cc text[] ≤5`, `reminders int[] ≤5`, `reminders_sent jsonb` (`{"-3": "<iso>"}`), `style_snapshot jsonb`, `agreement_id uuid` (the one column a client may update, after the insert; `ON DELETE SET NULL`: an agreement also goes with the profile that wrote it, and the invoice just loses the pointer; the AxIS trash covers the set-null). All null/false on an invoice made without the composer. A trigger (`pipeline_invoices_composer_guard`) refuses `line_items` that aren't valid lines or don't add up to `amount_cents`, and `reminders` outside ±30 days (23514 → 400). |
 | `pipeline_payments.method` | Now also accepts `paypal`. |
 | `contract_files` | `name ≤160`, `storage_path` (`<practice id>/<uuid>.<pdf|docx>`), `mime`, `size_bytes ≤10 MB`, `sha256`, `archived_at`. |
 | `agreements` (changed) | `+ contract_file_id`; `storage_path` is now `null` or the contract's path (was always null). |
@@ -210,7 +210,9 @@ configured: the text is recorded `queued`). Refusals happen **before** the invoi
 
 What a composer invoice stores: `line_items`, `accepted_methods`, `pass_card_fee`, `note`, `cc`, `reminders` (sorted,
 unique), `style_snapshot` (the practice's saved style at send). A request using **none** of the composer fields writes
-none of these and sends the original email.
+none of these and sends the original email. Readers that run on the service role (the pay page, reminders, Send again) don't trust the row: lines that aren't valid, or
+don't add up to the invoice amount, read as none (the invoice shows its single package line), and damaged method keys, Cc addresses and
+note are dropped.
 
 The invoice email/page: the lines (else the one package line), Subtotal/Credit/Already paid/Amount due as before, a
 **Pay by card** button (label per the style) only when card is accepted **and** the practice takes cards; **Other ways to
@@ -244,7 +246,7 @@ create (400 with the same codes, plus `due_passed` and `send_time_passed`) and, 
 `tomorrow` = tomorrow 9:00; `before_due` = `dueOn − daysBefore` 9:00; `date` = that day 9:00; `now` (or no schedule) =
 due on the next cron run. A time already past is 400 `send_time_passed`. `repeatYearly` needs `state: "scheduled"`. A
 `draft` has `sendAt: null` and is never sent by anything. A `failed` draft is rescheduled with `PUT { state: "scheduled" }`
-(attempts reset). A client can't mark a draft `sent`.
+(attempts reset). A client can't mark a draft `sent`. **While the cron holds a draft** (it claims it for up to ten minutes) an edit or cancel is refused: `PUT`/`DELETE` answer 409 `draft_sending` ("This invoice is being sent right now. Try again in a minute."), and the database trigger refuses a direct change too; a claim older than ten minutes (a dead run) no longer holds it.
 
 ### 6.7 Contracts
 
@@ -262,8 +264,16 @@ Flow: `upload-url` → `PUT uploadUrl` the bytes (Supabase Storage signed upload
 field and the file under the empty field name, the way `uploadToSignedUrl` sends it) → `POST /pipeline/contracts { path, name }`.
 Registering reads the object back: it must exist, be ≤10 MB and really be a PDF (`%PDF-`) or a Word `.docx` (a zip with
 `word/document.xml`) of the type its path says, else 400 and the object is removed. Admin only (403); 409
-`contracts_full` at 100 live contracts; 409 `contract_exists` for a path registered twice; 503 `contracts_unavailable`
+`contracts_full` at 100 live contracts; 429 `contracts_folder_full` at 100 fresh unregistered uploads (the folder's listing is walked a
+page at a time and only UNREGISTERED objects count; an unregistered object older than three hours is removed, a registered or archived one
+never is); 409 `contract_exists` for a path registered twice; 503 `contracts_unavailable`
 before migration `…05`. Attach with `agreement: { contractId }` (§6.5/6.6).
+
+**Known limit, mitigated.** A signed upload URL stays valid for two hours after the upload. Tested on the local Supabase Storage: a
+second `PUT` to a used URL, even with `x-upsert: true`, is refused (409 `KeyAlreadyExists`), so registered bytes can't be replaced that way.
+As defence in depth the API also re-hashes the bytes it serves: `GET /agree/:token/file` and the email attachment refuse (503 / no
+attachment) any object whose SHA-256 isn't the one recorded in `contract_files`. The counselor's 60-second view link (`/contracts/:id/url`)
+is a plain signed Storage URL and is not re-hashed.
 
 ### 6.8 What the family sees
 
@@ -282,17 +292,25 @@ before migration `…05`. Attach with `agreement: { contractId }` (§6.5/6.6).
 
 An invoice's `reminders` are day offsets from its due date (`-3` = three days before, `0` = the day, `3` = three days
 after), sent at 9:00 in the sending counselor's zone, by email (or by text when the invoice was texted) while something is
-still owed. Each is claimed once (`reminders_sent`); one that misses its day by more than 36 hours is dropped, not sent
-late; a paid or voided invoice gets none. Subject `Reminder: Invoice INV-1005: $1,500 due 2026-11-20` (`Past due: …` after).
+still owed, and only while the counselor who sent it is still approved **and still able to bill that family** (a consultant removed
+from the firm, or a family handed to someone else, stops getting their old invoices' reminders: counted in `held`, never claimed, so
+they resume if the right is restored). Each is claimed once (`reminders_sent`); one that misses its day by more than 36 hours is dropped, not sent
+late; a paid or voided invoice gets none. The cron pages through every invoice with reminders in the ±36-day window (500 a page, up
+to 100 pages), so a large number of reminder invoices can't starve a due one; offsets outside ±30 days in a stored row are ignored. Subject `Reminder: Invoice INV-1005: $1,500 due 2026-11-20` (`Past due: …` after).
 
 ### 6.10 Cron endpoints
 
 `POST /internal/invoice-drafts/dispatch` → `{ ran, sent, failed, retried, held, rolled, reason? }`;
 `POST /internal/invoice-reminders/dispatch` → `{ ran, sent, skipped, held, failed, reason? }`. `Authorization: Bearer $CRON_SECRET`.
-Dispatch: claims each due draft; the counselor must still be approved and able to bill the family; amounts are planned again;
-the draft is spent the moment its invoice is numbered; a counselor sends at most 100 a day (the rest wait); a refusal
-(`409`, no email address, a vanished family, a past due date) fails the draft with its reason in `lastError`; a transient
-fault retries an hour later, three times. `repeat_yearly` writes next year's draft (same payload, due date a year later,
+Dispatch: claims each due draft (every later update keys on its own claim); the counselor must still be approved and able
+to bill the family; the payload is re-validated with the composer's rules and the amounts are planned again; the draft is
+spent the moment its invoice is numbered (the row count is checked and a mismatch is logged loudly); a counselor sends at
+most 100 a day. **A draft the run can't act on never stays at the front of the queue**: one whose counselor isn't (or is no
+longer) approved, or who hit the daily cap, is pushed an hour forward (`sendAt` moves, state stays `scheduled`; counted in
+`held`), and a run reads further batches (up to 20 of 50) so a practice's backlog can't hide another's draft; a draft whose
+composer profile no longer exists (`created_by` null) fails with "The person who scheduled this no longer has an account".
+A refusal (`409`, no email address, a vanished family, a past due date) fails the draft with its reason in `lastError`; a
+transient fault retries an hour later, three times. `repeat_yearly` writes next year's draft (same payload, due date a year later,
 Feb 29 → 28) after the send.
 
 ## 7. Card-fee pass-through (flagged, droppable)
@@ -302,7 +320,8 @@ paying **by card** is asked for `gross = ceil((owed + 30) / (1 − 0.029))` cent
 practice nets the invoice amount). The invoice, email and pay page show the fee as its own sentence ("Paying by card adds a $45.11
 processing fee ($1,545.11 in all). Other ways to pay have no fee."); the Pay button asks for the total; **Amount due stays the
 invoice amount**. Checkout charges `owed + fee` and puts the fee in the session metadata (`meridies_fee_cents`); the Stripe
-webhook records the payment as `amount_total − fee`, so the recorded payment is the invoice amount, never the fee (a nonsense fee
+webhook records the payment as `amount_total − fee`, so the recorded payment is the invoice amount, never the fee (a refund of only the fee, read from the charge's metadata, leaves the invoice paid: the first `fee` cents refunded are the fee coming back, and a
+partial refund is read as eating the fee first; a nonsense fee
 value in metadata is ignored). With the flag off nothing is computed anywhere. To drop the feature: delete `lib/invoiceCardFee.ts`,
 the `feeFor` calls in `lib/invoiceSettings.ts` and the `META_FEE` lines in `routes/pay.ts` / `lib/stripeConnect.ts`.
 

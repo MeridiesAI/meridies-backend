@@ -27,16 +27,23 @@ export type DraftPayload = z.infer<typeof draftPayload>;
 export const draftStates = ["draft", "scheduled", "sent", "cancelled", "failed"] as const;
 export type DraftState = (typeof draftStates)[number];
 
+/** The body's own rules, with no clock: the composer's (lines add up, reminders in range, a text is sent) and a text carries no agreement. */
+export function payloadProblem(p: DraftPayload): { code: string; message: string; status: number } | null {
+  const c = composerProblem({ ...p, send: true });
+  if (c) return { ...c, status: 400 };
+  if (p.channel === "text" && p.agreement) return { code: "text_no_agreement", message: "An agreement goes with the invoice email, so it can't go in a text", status: 400 };
+  return null;
+}
+
 /** A draft's body rules (the composer's, plus: a scheduled one needs a schedule that resolves to a future time). */
 export function draftProblem(
   p: DraftPayload,
   state: "draft" | "scheduled",
   ctx: { tz: string | null | undefined; now: number; today: string }
 ): { code: string; message: string; status: number } | null {
-  const c = composerProblem({ ...p, send: true });
-  if (c) return { ...c, status: 400 };
+  const body = payloadProblem(p);
+  if (body) return body;
   if (p.dueOn < ctx.today) return { code: "due_passed", message: "The due date has already passed", status: 400 };
-  if (p.channel === "text" && p.agreement) return { code: "text_no_agreement", message: "An agreement goes with the invoice email, so it can't go in a text", status: 400 };
   if (state === "scheduled") {
     const t = resolveSendTime(p.schedule ?? { mode: "now" }, { dueOn: p.dueOn, tz: ctx.tz, now: ctx.now });
     if (!t.ok) return { code: t.code, message: t.reason, status: 400 };

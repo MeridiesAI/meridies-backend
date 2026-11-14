@@ -28,6 +28,10 @@ type Row = Record<string, unknown>;
 const idParam = z.object({ id: z.string().uuid() }).strict();
 const unavailable = () => new HttpError(503, "Saved and scheduled invoices aren't switched on yet", "invoice_drafts_unavailable");
 const dbError = (e: { code?: string; message?: string } | null) => (isResultsNotApplied(e) ? unavailable() : crmError(e));
+/** The cron holds a claim for up to ten minutes (the blasts' rule); an edit or cancel waits for it. */
+const CLAIM_MS = 10 * 60_000;
+const notClaimed = () => `claimed_at.is.null,claimed_at.lt.${new Date(Date.now() - CLAIM_MS).toISOString()}`;
+const sending = () => new HttpError(409, "This invoice is being sent right now. Try again in a minute.", "draft_sending");
 
 export default async function invoiceDraftRoutes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
@@ -113,10 +117,15 @@ export default async function invoiceDraftRoutes(app: FastifyInstance) {
       })
       .eq("id", id)
       .in("state", ["draft", "scheduled", "failed"])
+      .or(notClaimed())
       .select(DRAFT_COLUMNS)
       .maybeSingle();
     if (error) throw dbError(error);
-    if (!data) throw new HttpError(409, "This invoice was just sent or cancelled", "draft_closed");
+    if (!data) {
+      const now = await request.db.from("pipeline_invoice_drafts").select("state").eq("id", id).maybeSingle();
+      const st = String((now.data as Row | null)?.state ?? "");
+      throw st === "scheduled" ? sending() : new HttpError(409, "This invoice was just sent or cancelled", "draft_closed");
+    }
     return toDraftDTO(data as unknown as Row);
   });
 
@@ -127,6 +136,7 @@ export default async function invoiceDraftRoutes(app: FastifyInstance) {
       .update({ state: "cancelled" })
       .eq("id", id)
       .in("state", ["draft", "scheduled", "failed"])
+      .or(notClaimed())
       .select(DRAFT_COLUMNS)
       .maybeSingle();
     if (error) throw dbError(error);
@@ -134,6 +144,7 @@ export default async function invoiceDraftRoutes(app: FastifyInstance) {
       const exists = await request.db.from("pipeline_invoice_drafts").select("state").eq("id", id).maybeSingle();
       if (!exists.data) throw notFound("No saved invoice of yours matches that");
       const state = String((exists.data as Row).state);
+      if (state === "scheduled") throw sending();
       if (state === "cancelled") return toDraftDTO((await request.db.from("pipeline_invoice_drafts").select(DRAFT_COLUMNS).eq("id", id).single()).data as unknown as Row);
       throw new HttpError(409, "This invoice was already sent", "draft_closed");
     }

@@ -28,6 +28,23 @@ export type StoredLine = { description: string; detail: string | null; amountCen
 export const toStoredLines = (lines: LineItemInput[]): StoredLine[] =>
   lines.map((l) => ({ description: l.description, detail: l.detail?.trim() || null, amountCents: l.amountCents }));
 
+/**
+ * Stored lines read back from an invoice row. The API wrote them, but the readers that matter (the pay page, the
+ * reminders, Send again) run on the service role and shouldn't trust a row: a list that isn't valid, or doesn't add
+ * up to the invoice amount, reads as none and the invoice falls back to its single package line.
+ */
+const storedLineSchema = z.object({
+  description: text(200).min(1),
+  detail: z.string().max(200).nullable().optional(),
+  amountCents: z.number().int().min(0).max(100_000_000),
+});
+export function readStoredLines(v: unknown, amountCents: number): StoredLine[] | null {
+  const r = z.array(storedLineSchema).min(1).max(MAX_LINES).safeParse(v);
+  if (!r.success) return null;
+  const lines = r.data.map((l) => ({ description: l.description, detail: l.detail?.trim() || null, amountCents: l.amountCents }));
+  return checkLines(lines, amountCents).ok ? lines : null;
+}
+
 export type LinesCheck = { ok: true } | { ok: false; code: "lines_sum_mismatch"; reason: string };
 /** The lines add up to the amount, to the cent. */
 export function checkLines(lines: Array<{ amountCents: number }>, amountCents: number): LinesCheck {

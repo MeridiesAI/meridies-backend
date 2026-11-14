@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
-import { checkLines, composerFields, composerProblem, toStoredLines } from "../../src/lib/invoiceComposer.js";
+import { checkLines, composerFields, composerProblem, hasComposerFields, readStoredLines, toStoredLines } from "../../src/lib/invoiceComposer.js";
 import { acceptedMethods, BUILTIN_METHODS, builtinRows, isCustomKey, newCustomKey, recordedMethod, takesCardMethod, toMethodDTO } from "../../src/lib/paymentMethods.js";
 import { PAYMENT_METHODS } from "../../src/lib/payments.js";
 import { DEFAULT_STYLE, FONT_KEYS, FONTS, styleFromSnapshot, snapshotOf, toStyle, styleFields } from "../../src/lib/invoiceStyle.js";
+import { esc, renderInvoiceEmailHtml, type InvoiceDocument } from "../../src/lib/invoiceDocument.js";
+import { sourceFromInvoiceRow } from "../../src/lib/invoiceSettings.js";
+import { usableOffsets } from "../../src/lib/invoiceSchedule.js";
 import { installmentPlan, templateProblem, templateToPackage, toTemplateDTO } from "../../src/lib/packageTemplates.js";
 
 // ---- Line items ---------------------------------------------------------------------------------
@@ -150,4 +153,52 @@ test("a template DTO carries its plan and a summary", () => {
   assert.equal(t.plan.length, 3);
   assert.equal(t.summary, "$6,000 in 3 payments, $1,000 deposit first");
   assert.deepEqual(t.inclusions, ["Essays"]);
+});
+
+// ---- Stored rows are not trusted by the readers that run on the service role ----------------------------
+
+test("stored lines read back only when valid and adding up to the invoice amount", () => {
+  assert.deepEqual(readStoredLines([{ description: "A", detail: null, amountCents: 100 }, { description: "B", detail: "x", amountCents: 50 }], 150), [
+    { description: "A", detail: null, amountCents: 100 },
+    { description: "B", detail: "x", amountCents: 50 },
+  ]);
+  assert.equal(readStoredLines([{ description: 5, amountCents: 150 }], 150), null, "a non-string description");
+  assert.equal(readStoredLines([{ description: "A", amountCents: 100 }], 150), null, "a mismatched sum");
+  assert.equal(readStoredLines([{ description: "A", amountCents: 1.5 }], 1.5), null);
+  assert.equal(readStoredLines([{ description: "A", amountCents: -1 }], -1), null);
+  assert.equal(readStoredLines([], 0), null);
+  assert.equal(readStoredLines("nope", 1), null);
+  assert.equal(readStoredLines({ description: "A" }, 1), null);
+});
+
+test("an invoice row with damaged composer columns reads as a plain invoice, never throws", () => {
+  const src = sourceFromInvoiceRow({ amount_cents: 150, line_items: [{ description: 5 }], accepted_methods: ["zelle", 7, "<b>"], cc: ["a@b.co", "not an email", 3], note: 4, reminders: [1] });
+  assert.equal(src.lines, null);
+  assert.deepEqual(src.acceptedKeys, ["zelle"]);
+  assert.deepEqual(src.cc, ["a@b.co"]);
+  assert.equal(src.note, null);
+  assert.equal(sourceFromInvoiceRow({ amount_cents: 1 }).acceptedKeys, null);
+});
+
+test("reminder offsets from a row: whole days within 30, unique, at most five", () => {
+  assert.deepEqual(usableOffsets([-3, 0, 3, 3]), [-3, 0, 3]);
+  assert.deepEqual(usableOffsets([31, -31, 99, 1.5, "2", null, 7]), [7]);
+  assert.deepEqual(usableOffsets("nope"), []);
+  assert.equal(usableOffsets([1, 2, 3, 4, 5, 6, 7]).length, 5);
+});
+
+test("esc takes any value without throwing", () => {
+  assert.equal(esc(5), "5");
+  assert.equal(esc(null), "");
+  assert.equal(esc(undefined), "");
+  assert.equal(esc({ toString: () => "<x>" }), "&lt;x&gt;");
+  const d = { practice: { name: "P", logoUrl: null, accentColor: null }, number: "1", issuedOn: "2026-11-01", dueOn: "2026-11-02", billTo: { name: "N", contactName: null, email: null },
+    lines: [{ description: 5 as unknown as string, detail: null, amountCents: 100 }], subtotalCents: 100, creditAppliedCents: 0, alreadyPaidCents: 0, amountDueCents: 100, status: "due", payUrl: null, plan: null, footnote: null } as InvoiceDocument;
+  assert.ok(renderInvoiceEmailHtml(d).includes(">5<"));
+});
+
+test("hasComposerFields is true for any composer field, false for an old payload", () => {
+  assert.equal(hasComposerFields({}), false);
+  assert.equal(hasComposerFields({ reminders: [0] }), true);
+  assert.equal(hasComposerFields({ note: "" }), true);
 });

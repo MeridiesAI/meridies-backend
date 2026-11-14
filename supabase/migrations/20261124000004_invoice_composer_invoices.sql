@@ -34,12 +34,60 @@ alter table public.pipeline_invoices add column if not exists reminders_sent jso
   check (reminders_sent is null or (jsonb_typeof(reminders_sent) = 'object' and pg_column_size(reminders_sent) <= 2048));
 alter table public.pipeline_invoices add column if not exists style_snapshot jsonb
   check (style_snapshot is null or (jsonb_typeof(style_snapshot) = 'object' and pg_column_size(style_snapshot) <= 4096));
--- No ON DELETE action: an agreement goes only with its contact, and a contact with invoices can't be deleted
--- (invoices RESTRICT it), so the pointer never dangles; a SET NULL would also need an AxIS trash rule for no gain.
+-- ON DELETE SET NULL: an agreement goes with its contact, but also with the profile that wrote it (agreements.counselor_id
+-- cascades), which can be a different counselor from the contact's own; a plain reference would make that account's
+-- deletion fail with 23503. The invoice keeps existing and just loses its "agreement came with it" pointer (the pay
+-- page then offers no contract). The AxIS trash rule at the end of this file covers the set-null.
 alter table public.pipeline_invoices add column if not exists agreement_id uuid;
 alter table public.pipeline_invoices drop constraint if exists pipeline_invoices_agreement_id_fkey;
 alter table public.pipeline_invoices add constraint pipeline_invoices_agreement_id_fkey
-  foreign key (agreement_id) references public.agreements(id);
+  foreign key (agreement_id) references public.agreements(id) on delete set null;
+
+-- The database holds the composer's own rules too (the API checks them first, service-role readers trust the rows):
+-- line items are an array of { description 1-200 chars, detail string|null, amountCents whole number } that add up to
+-- the invoice amount, and reminder offsets are whole days within 30 of the due date. Old rows have neither column set.
+create or replace function private.pipeline_invoices_composer_guard()
+returns trigger
+language plpgsql
+set search_path to 'private', 'public'
+as $$
+declare
+  e     jsonb;
+  v_sum bigint := 0;
+  r     integer;
+begin
+  if new.line_items is not null then
+    for e in select * from jsonb_array_elements(new.line_items) loop
+      if jsonb_typeof(e) is distinct from 'object'
+         or jsonb_typeof(e -> 'description') is distinct from 'string'
+         or length(btrim(e ->> 'description')) not between 1 and 200
+         or jsonb_typeof(e -> 'amountCents') is distinct from 'number'
+         or (e ->> 'amountCents') !~ '^[0-9]{1,9}$'
+         or (e ? 'detail' and jsonb_typeof(e -> 'detail') not in ('string', 'null')) then
+        raise exception 'The line items aren''t valid' using errcode = '23514';
+      end if;
+      v_sum := v_sum + (e ->> 'amountCents')::bigint;
+    end loop;
+    if v_sum <> new.amount_cents then
+      raise exception 'The line items must add up to the invoice amount' using errcode = '23514';
+    end if;
+  end if;
+  if new.reminders is not null then
+    foreach r in array new.reminders loop
+      if r is null or r not between -30 and 30 then
+        raise exception 'Reminders are whole days, up to 30 before or after the due date' using errcode = '23514';
+      end if;
+    end loop;
+  end if;
+  return new;
+end;
+$$;
+
+revoke all on function private.pipeline_invoices_composer_guard() from public, anon, authenticated;
+
+drop trigger if exists pipeline_invoices_composer_guard on public.pipeline_invoices;
+create trigger pipeline_invoices_composer_guard before insert or update of line_items, reminders on public.pipeline_invoices
+  for each row execute function private.pipeline_invoices_composer_guard();
 
 -- The API links the agreement it minted to the invoice right after the insert (a client can't set any other composer
 -- column after the fact). The pay page checks the agreement is the invoice's own contact's before it mints a link.
@@ -106,6 +154,10 @@ begin
     new.attempts := 0;
     new.last_error := null;
   elsif coalesce(current_setting('role', true), 'none') in ('authenticated', 'anon') then
+    -- The cron has claimed it (claimed_at, fresh for ten minutes, the blasts' rule): no edit or cancel until it is done.
+    if old.claimed_at is not null and old.claimed_at > now() - interval '10 minutes' then
+      raise exception 'This invoice is being sent right now. Try again in a minute.' using errcode = 'P0001';
+    end if;
     -- A client moves a draft between draft, scheduled and cancelled (and edits it); only the cron sends.
     new.id := old.id;
     new.contact_id := old.contact_id;
@@ -206,16 +258,19 @@ grant execute on function public.claim_invoice_reminder(uuid, integer, timestamp
 grant execute on function public.release_invoice_reminder(uuid, integer) to service_role;
 
 -- ---------------------------------------------------------------------------
--- AxIS trash (20261108000003): a deleted contact's drafts are kept, like its card issues
+-- AxIS trash (20261108000003): a deleted contact's drafts are kept, like its card issues; an invoice's agreement pointer too
 -- ---------------------------------------------------------------------------
 do $$
 begin
   if to_regclass('private.axis_trash_rules') is not null
      and to_regprocedure('private.attach_axis_trash(regclass, text[], boolean)') is not null then
     insert into private.axis_trash_rules (table_name, rule, columns, student_col) values
-      ('pipeline_invoice_drafts', 'parent', '{contact_id}', null)
+      ('pipeline_invoice_drafts', 'parent', '{contact_id}', null),
+      ('pipeline_invoices', 'parent', '{contact_id}', null)
     on conflict (table_name) do update set rule = excluded.rule, columns = excluded.columns, student_col = excluded.student_col;
     perform private.attach_axis_trash('public.pipeline_invoice_drafts');
+    -- An invoice is never deleted; only its agreement pointer can be set null (ON DELETE SET NULL above).
+    perform private.attach_axis_trash('public.pipeline_invoices', '{agreement_id}', false);
   end if;
 end;
 $$;

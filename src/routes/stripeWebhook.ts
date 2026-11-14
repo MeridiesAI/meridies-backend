@@ -47,6 +47,7 @@ import {
   isDuplicate,
   keyLivemode,
   planStripeEvent,
+  feeOfCharge,
   refundedFor,
   refundWithoutPayment,
   stripeUnavailable,
@@ -228,7 +229,7 @@ async function noteDispute(svc: SupabaseClient, a: Extract<StripeAction, { kind:
   );
 }
 
-async function applyRefund(svc: SupabaseClient, chargeId: string, paymentIntentId: string | null, amountRefunded: number): Promise<"updated" | "missing"> {
+async function applyRefund(svc: SupabaseClient, chargeId: string, paymentIntentId: string | null, amountRefunded: number, feeCents: number): Promise<"updated" | "missing"> {
   const q = svc.from("pipeline_payments").select("id, amount_cents, refunded_cents").eq("via_stripe", true);
   const found = paymentIntentId
     ? await q.eq("stripe_payment_intent_id", paymentIntentId).maybeSingle()
@@ -236,7 +237,7 @@ async function applyRefund(svc: SupabaseClient, chargeId: string, paymentIntentI
   if (found.error) dbFail("read payment", found.error);
   const row = found.data as Row | null;
   if (!row) return "missing";
-  const refunded = refundedFor(Number(row.amount_cents), amountRefunded);
+  const refunded = refundedFor(Number(row.amount_cents), amountRefunded, feeCents);
   const { error } = await svc
     .from("pipeline_payments")
     .update({ refunded_cents: refunded, stripe_charge_id: chargeId })
@@ -250,7 +251,7 @@ async function liveCharge(stripe: WebhookStripe | null, chargeId: string, accoun
   if (!stripe) throw stripeUnavailable();
   const charge = await stripe.charges.retrieve(chargeId, {}, { stripeAccount: account });
   const pi = typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent?.id ?? null);
-  return { id: charge.id, paymentIntentId: pi, amountRefunded: charge.amount_refunded };
+  return { id: charge.id, paymentIntentId: pi, amountRefunded: charge.amount_refunded, feeCents: feeOfCharge((charge as { metadata?: unknown }).metadata) };
 }
 
 /** Stripe refuses to read an account that disconnected the platform. */
@@ -277,13 +278,13 @@ export async function handleStripeAction(deps: Pick<WebhookDeps, "stripe">, svc:
       return noteDispute(svc, action, log);
     case "refund": {
       const live = await liveCharge(deps.stripe, action.chargeId, action.account);
-      const r = await applyRefund(svc, live.id, live.paymentIntentId ?? action.paymentIntentId, live.amountRefunded);
+      const r = await applyRefund(svc, live.id, live.paymentIntentId ?? action.paymentIntentId, live.amountRefunded, live.feeCents);
       if (r === "missing" && refundWithoutPayment(action) === "retry") throw retry("Payment not recorded yet");
       return r === "missing" ? "not a Meridies payment" : "refund recorded";
     }
     case "refund-recheck": {
       const live = await liveCharge(deps.stripe, action.chargeId, action.account);
-      const r = await applyRefund(svc, live.id, live.paymentIntentId, live.amountRefunded);
+      const r = await applyRefund(svc, live.id, live.paymentIntentId, live.amountRefunded, live.feeCents);
       return r === "missing" ? "not a Meridies payment" : "refund rechecked";
     }
     case "account": {

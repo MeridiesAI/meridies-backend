@@ -27,11 +27,11 @@ import { todayIn } from "./crm.js";
 import { HttpError } from "./errors.js";
 import { checkInvoiceAgreement, contractAttachment, issueInvoiceAgreement, resolveInvoiceAgreement } from "./invoiceAgreement.js";
 import { hasComposerFields, toStoredLines } from "./invoiceComposer.js";
-import { draftPayload, type DraftPayload } from "./invoiceDrafts.js";
+import { draftPayload, payloadProblem, type DraftPayload } from "./invoiceDrafts.js";
 import { invoiceStatus, readPractice, type PracticeIdentity } from "./invoiceDocument.js";
 import { draftInvoice, draftStatus, invoiceEmail, type InvoiceDraft } from "./invoiceSend.js";
 import { buildExtras, practiceIdOf, sourceFromInvoiceRow, type InvoiceExtras } from "./invoiceSettings.js";
-import { nextYearlyDraft, reminderState } from "./invoiceSchedule.js";
+import { nextYearlyDraft, reminderState, usableOffsets } from "./invoiceSchedule.js";
 import { snapshotOf } from "./invoiceStyle.js";
 import { textingAvailable } from "./invoiceTexting.js";
 import { sendEmail, sendSms } from "./email.js";
@@ -128,82 +128,109 @@ class Permanent extends Error {}
 /** The draft's owner is not (or no longer) someone who may send: wait, don't fail. */
 class Held extends Error {}
 
+/** Batches a run reads: a held draft is pushed an hour forward, so the next batch reaches what was behind it. */
+const MAX_PASSES = 20;
+
 export async function dispatchDueInvoiceDrafts(svc: SupabaseClient, log: Log, max = 50): Promise<DraftTally & { ran: boolean }> {
   const tally: DraftTally = { sent: 0, failed: 0, retried: 0, held: 0, rolled: 0 };
   const now = new Date();
   const stale = new Date(now.getTime() - CLAIM_MS).toISOString();
-  const { data, error } = await svc
-    .from("pipeline_invoice_drafts")
-    .select("*")
-    .eq("state", "scheduled")
-    .lte("send_at", now.toISOString())
-    .or(`claimed_at.is.null,claimed_at.lt.${stale}`)
-    .order("send_at", { ascending: true })
-    .limit(max);
-  if (error && isResultsNotApplied(error)) return { ran: false, ...tally };
-  if (error) throw new Error(`read invoice drafts failed (${error.code ?? "unknown"})`);
-  const due = (data ?? []) as Row[];
-  if (due.length === 0) return { ran: true, ...tally };
-  const approved = await approvedCounselorIds(svc, due.map((d) => String(d.created_by ?? "")).filter(Boolean));
+  const later = new Date(now.getTime() + RETRY_MS).toISOString();
+  /** Move a draft this run can't act on out of the front of the queue (never a state change a counselor could see as a failure). */
+  const postpone = (id: string) => svc.from("pipeline_invoice_drafts").update({ send_at: later }).eq("id", id).eq("state", "scheduled").or(`claimed_at.is.null,claimed_at.lt.${stale}`);
 
-  for (const draft of due) {
-    const id = String(draft.id);
-    const creator = draft.created_by ? String(draft.created_by) : "";
-    if (!creator || !approved.has(creator)) {
-      tally.held += 1; // fail closed: a pending, revoked or deleted counselor sends nothing
-      continue;
-    }
-    if (!(await consumeRateLimit(`invoice-draft:${creator}`, INVOICE_DAILY_CAP, 86_400))) {
-      await svc.from("pipeline_invoice_drafts").update({ send_at: new Date(now.getTime() + RETRY_MS).toISOString() }).eq("id", id).eq("state", "scheduled");
-      tally.held += 1;
-      continue;
-    }
-    // Claim it. Two overlapping runs can't both win this update.
-    const claim = await svc
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
+    const { data, error } = await svc
       .from("pipeline_invoice_drafts")
-      .update({ claimed_at: now.toISOString() })
-      .eq("id", id)
+      .select("*")
       .eq("state", "scheduled")
+      .lte("send_at", now.toISOString())
       .or(`claimed_at.is.null,claimed_at.lt.${stale}`)
-      .select("id")
-      .maybeSingle();
-    if (claim.error || !claim.data) continue;
+      .order("send_at", { ascending: true })
+      .limit(max);
+    if (error && isResultsNotApplied(error)) return { ran: false, ...tally };
+    if (error) throw new Error(`read invoice drafts failed (${error.code ?? "unknown"})`);
+    const due = (data ?? []) as Row[];
+    if (due.length === 0) break;
+    const approved = await approvedCounselorIds(svc, due.map((d) => String(d.created_by ?? "")).filter(Boolean));
 
-    try {
-      const rolled = await sendDraft(svc, draft, creator, log);
-      tally.sent += 1;
-      if (rolled) tally.rolled += 1;
-    } catch (err) {
-      const message = err instanceof HttpError || err instanceof Permanent ? err.message : "Something went wrong sending it";
-      if (err instanceof Held) {
-        await svc.from("pipeline_invoice_drafts").update({ claimed_at: null }).eq("id", id).eq("state", "scheduled");
+    for (const draft of due) {
+      const id = String(draft.id);
+      const creator = draft.created_by ? String(draft.created_by) : "";
+      if (!creator) {
+        // The composing profile is gone: nobody can send this, and it must not sit at the front of every run.
+        await svc
+          .from("pipeline_invoice_drafts")
+          .update({ state: "failed", claimed_at: null, last_error: "The person who scheduled this no longer has an account" })
+          .eq("id", id)
+          .eq("state", "scheduled");
+        tally.failed += 1;
+        continue;
+      }
+      if (!approved.has(creator)) {
+        await postpone(id); // fail closed: a pending or revoked counselor sends nothing, and waits behind the others
         tally.held += 1;
         continue;
       }
-      const permanent = err instanceof Permanent || (err instanceof HttpError && err.statusCode < 500);
-      const attempts = Number(draft.attempts ?? 0) + 1;
-      if (!(err instanceof HttpError || err instanceof Permanent)) log.error({ err: serializeErr(err), draft: id }, "invoice dispatch: a scheduled invoice failed");
-      if (permanent || attempts >= MAX_ATTEMPTS) {
-        await svc.from("pipeline_invoice_drafts").update({ state: "failed", claimed_at: null, attempts, last_error: message.slice(0, 300) }).eq("id", id).eq("state", "scheduled");
-        tally.failed += 1;
-      } else {
-        await svc
-          .from("pipeline_invoice_drafts")
-          .update({ claimed_at: null, attempts, last_error: message.slice(0, 300), send_at: new Date(now.getTime() + RETRY_MS).toISOString() })
-          .eq("id", id)
-          .eq("state", "scheduled");
-        tally.retried += 1;
+      if (!(await consumeRateLimit(`invoice-draft:${creator}`, INVOICE_DAILY_CAP, 86_400))) {
+        await postpone(id);
+        tally.held += 1;
+        continue;
+      }
+      // Claim it. Two overlapping runs can't both win this update, and a client can't edit or cancel it while claimed.
+      const claim = await svc
+        .from("pipeline_invoice_drafts")
+        .update({ claimed_at: now.toISOString() })
+        .eq("id", id)
+        .eq("state", "scheduled")
+        .or(`claimed_at.is.null,claimed_at.lt.${stale}`)
+        .select("id")
+        .maybeSingle();
+      if (claim.error || !claim.data) continue;
+      const claimedAt = now.toISOString();
+      /** Updates to this draft key on OUR claim, so a run that lost its claim to a later one can't overwrite it. */
+      const mine = () => svc.from("pipeline_invoice_drafts");
+
+      try {
+        const rolled = await sendDraft(svc, draft, creator, claimedAt, log);
+        tally.sent += 1;
+        if (rolled) tally.rolled += 1;
+      } catch (err) {
+        const message = err instanceof HttpError || err instanceof Permanent ? err.message : "Something went wrong sending it";
+        if (err instanceof Held) {
+          await mine().update({ claimed_at: null }).eq("id", id).eq("state", "scheduled").eq("claimed_at", claimedAt);
+          tally.held += 1;
+          continue;
+        }
+        const permanent = err instanceof Permanent || (err instanceof HttpError && err.statusCode < 500);
+        const attempts = Number(draft.attempts ?? 0) + 1;
+        if (!(err instanceof HttpError || err instanceof Permanent)) log.error({ err: serializeErr(err), draft: id }, "invoice dispatch: a scheduled invoice failed");
+        if (permanent || attempts >= MAX_ATTEMPTS) {
+          await mine().update({ state: "failed", claimed_at: null, attempts, last_error: message.slice(0, 300) }).eq("id", id).eq("state", "scheduled").eq("claimed_at", claimedAt);
+          tally.failed += 1;
+        } else {
+          await mine()
+            .update({ claimed_at: null, attempts, last_error: message.slice(0, 300), send_at: later })
+            .eq("id", id)
+            .eq("state", "scheduled")
+            .eq("claimed_at", claimedAt);
+          tally.retried += 1;
+        }
       }
     }
+    if (due.length < max) break;
   }
   return { ran: true, ...tally };
 }
 
 /** Send one claimed draft. Returns whether it rolled a yearly copy. Throws Permanent / HttpError for what can never work as written. */
-async function sendDraft(svc: SupabaseClient, draft: Row, creator: string, log: Log): Promise<boolean> {
+async function sendDraft(svc: SupabaseClient, draft: Row, creator: string, claimedAt: string, log: Log): Promise<boolean> {
   const parsed = draftPayload.safeParse(draft.payload);
   if (!parsed.success) throw new Permanent("This saved invoice is no longer valid. Open it and save it again.");
   const p: DraftPayload = parsed.data;
+  // The shape parsed; the composer's own rules (lines add up, reminders in range, a text carries no agreement) hold now too.
+  const rule = payloadProblem(p);
+  if (rule) throw new Permanent(rule.message);
   const contactId = String(draft.contact_id);
 
   const { data: c, error: cErr } = await svc.from("pipeline_contacts").select("*").eq("id", contactId).maybeSingle();
@@ -275,12 +302,20 @@ async function sendDraft(svc: SupabaseClient, draft: Row, creator: string, log: 
   const invoice = ins.data as Row;
 
   // Numbered: the draft is spent now, whatever the email does next.
+  // Keyed on our own claim, and the row count is checked: a draft someone else changed or re-claimed is a loud error,
+  // not a silent no-op (the invoice exists either way, and is the only thing left to reconcile).
   const done = await svc
     .from("pipeline_invoice_drafts")
     .update({ state: "sent", sent_invoice_id: String(invoice.id), sent_at: new Date().toISOString(), claimed_at: null, last_error: null })
     .eq("id", String(draft.id))
-    .eq("state", "scheduled");
-  if (done.error) log.error({ draft: String(draft.id), invoice: String(invoice.id) }, "invoice dispatch: could not mark the draft sent");
+    .eq("claimed_at", claimedAt)
+    .select("id");
+  if (done.error || (done.data ?? []).length === 0) {
+    log.error(
+      { draft: String(draft.id), invoice: String(invoice.id), code: done.error?.code ?? "no-row-matched" },
+      "invoice dispatch: the invoice was numbered but its draft could not be marked sent (changed or re-claimed meanwhile); reconcile by hand"
+    );
+  }
 
   // The contract / agreement, linked to the invoice, with a link the family can use.
   let agreement: Awaited<ReturnType<typeof issueInvoiceAgreement>> | null = null;
@@ -371,73 +406,91 @@ export function reminderWords(offset: number): { prefix: string; line: string } 
   return { prefix: "Past due", line: `This invoice is ${offset} day${offset === 1 ? "" : "s"} past due.` };
 }
 
-export async function dispatchInvoiceReminders(svc: SupabaseClient, log: Log, max = 300): Promise<ReminderTally & { ran: boolean }> {
+/** Invoices read per page, and the most pages a run walks (50,000 invoices: far past any real practice, and logged if reached). */
+const REMINDER_PAGE = 500;
+const REMINDER_MAX_PAGES = 100;
+
+export async function dispatchInvoiceReminders(svc: SupabaseClient, log: Log, pageSize = REMINDER_PAGE): Promise<ReminderTally & { ran: boolean }> {
   const tally: ReminderTally = { sent: 0, skipped: 0, held: 0, failed: 0 };
   const now = Date.now();
   const day = 86_400_000;
-  const { data, error } = await svc
-    .from("pipeline_invoices")
-    .select("*")
-    .not("reminders", "is", null)
-    .is("voided_at", null)
-    .gte("due_on", new Date(now - 36 * day).toISOString().slice(0, 10))
-    .lte("due_on", new Date(now + 36 * day).toISOString().slice(0, 10))
-    .order("due_on", { ascending: true })
-    .limit(max);
-  if (error && isResultsNotApplied(error)) return { ran: false, ...tally };
-  if (error) throw new Error(`read invoices for reminders failed (${error.code ?? "unknown"})`);
-  const invoices = (data ?? []) as Row[];
-  if (invoices.length === 0) return { ran: true, ...tally };
-
+  const from = new Date(now - 36 * day).toISOString().slice(0, 10);
+  const to = new Date(now + 36 * day).toISOString().slice(0, 10);
   const creators = new Map<string, Sender>();
-  const approvedAll = await approvedCounselorIds(svc, invoices.map((i) => String(i.created_by ?? "")).filter(Boolean));
 
-  for (const invoice of invoices) {
-    const creator = invoice.created_by ? String(invoice.created_by) : "";
-    const offsets = ((invoice.reminders as number[] | null) ?? []).filter((n) => Number.isInteger(n));
-    const sent = (invoice.reminders_sent as Record<string, unknown> | null) ?? {};
-    if (!creator || offsets.length === 0) continue;
-    if (!creators.has(creator)) creators.set(creator, await senderOf(svc, creator));
-    const sender = creators.get(creator) as Sender;
-    const dueNow = offsets.filter((o) => sent[String(o)] === undefined && reminderState(String(invoice.due_on), o, now, sender.timezone) === "due");
-    if (dueNow.length === 0) continue;
-    if (!approvedAll.has(creator)) {
-      tally.held += 1;
-      continue;
-    }
-    try {
-      const contactRes = await svc.from("pipeline_contacts").select("*").eq("id", String(invoice.contact_id)).maybeSingle();
-      const contact = contactRes.data as Row | null;
-      if (contactRes.error || !contact) continue;
-      const today = todayIn(sender.timezone);
-      const account = await readAccount(svc, String(invoice.contact_id), today);
-      if (!account) continue;
-      const { state, owedCents, invoice: dto } = invoiceOwed(account, String(invoice.id));
-      if (!dto || state === "void" || state === "paid" || owedCents <= 0) {
-        tally.skipped += dueNow.length; // paid or voided: nothing to remind about
-        continue;
-      }
-      // One reminder per run per invoice: if two offsets fell due together (the cron was down), the latest says it.
-      const offset = Math.max(...dueNow);
-      if (!(await consumeRateLimit(`invoice-reminder:${creator}`, INVOICE_DAILY_CAP, 86_400))) {
+  for (let page = 0; page < REMINDER_MAX_PAGES; page++) {
+    // Every invoice with reminders in the window, a page at a time (a stable order, so no page skips or repeats one).
+    const { data, error } = await svc
+      .from("pipeline_invoices")
+      .select("*")
+      .not("reminders", "is", null)
+      .is("voided_at", null)
+      .gte("due_on", from)
+      .lte("due_on", to)
+      .order("due_on", { ascending: true })
+      .order("id", { ascending: true })
+      .range(page * pageSize, page * pageSize + pageSize - 1);
+    if (error && isResultsNotApplied(error)) return { ran: false, ...tally };
+    if (error) throw new Error(`read invoices for reminders failed (${error.code ?? "unknown"})`);
+    const invoices = (data ?? []) as Row[];
+    if (invoices.length === 0) break;
+    if (page === REMINDER_MAX_PAGES - 1 && invoices.length === pageSize) log.warn({ pages: REMINDER_MAX_PAGES }, "invoice dispatch: reminders stopped at the page limit");
+    const approvedAll = await approvedCounselorIds(svc, invoices.map((i) => String(i.created_by ?? "")).filter(Boolean));
+
+    for (const invoice of invoices) {
+      const creator = invoice.created_by ? String(invoice.created_by) : "";
+      const offsets = usableOffsets(invoice.reminders);
+      const sent = (invoice.reminders_sent as Record<string, unknown> | null) ?? {};
+      if (!creator || offsets.length === 0) continue;
+      if (!creators.has(creator)) creators.set(creator, await senderOf(svc, creator));
+      const sender = creators.get(creator) as Sender;
+      const dueNow = offsets.filter((o) => sent[String(o)] === undefined && reminderState(String(invoice.due_on), o, now, sender.timezone) === "due");
+      if (dueNow.length === 0) continue;
+      if (!approvedAll.has(creator)) {
         tally.held += 1;
         continue;
       }
-      const claim = await svc.rpc("claim_invoice_reminder", { p_invoice: String(invoice.id), p_offset: offset });
-      if (claim.error || claim.data !== true) continue;
-      for (const other of dueNow.filter((o) => o !== offset)) await svc.rpc("claim_invoice_reminder", { p_invoice: String(invoice.id), p_offset: other });
+      try {
+        const contactRes = await svc.from("pipeline_contacts").select("*").eq("id", String(invoice.contact_id)).maybeSingle();
+        const contact = contactRes.data as Row | null;
+        if (contactRes.error || !contact) continue;
+        // Authority is re-read, never inherited from when the invoice was sent: a consultant removed from the firm, or a
+        // family handed to someone else, stops their old invoices' reminders.
+        if (!(await userCanBill(svc, contact, creator))) {
+          tally.held += 1;
+          continue;
+        }
+        const today = todayIn(sender.timezone);
+        const account = await readAccount(svc, String(invoice.contact_id), today);
+        if (!account) continue;
+        const { state, owedCents, invoice: dto } = invoiceOwed(account, String(invoice.id));
+        if (!dto || state === "void" || state === "paid" || owedCents <= 0) {
+          tally.skipped += dueNow.length; // paid or voided: nothing to remind about
+          continue;
+        }
+        // One reminder per run per invoice: if two offsets fell due together (the cron was down), the latest says it.
+        const offset = Math.max(...dueNow);
+        if (!(await consumeRateLimit(`invoice-reminder:${creator}`, INVOICE_DAILY_CAP, 86_400))) {
+          tally.held += 1;
+          continue;
+        }
+        const claim = await svc.rpc("claim_invoice_reminder", { p_invoice: String(invoice.id), p_offset: offset });
+        if (claim.error || claim.data !== true) continue;
+        for (const other of dueNow.filter((o) => o !== offset)) await svc.rpc("claim_invoice_reminder", { p_invoice: String(invoice.id), p_offset: other });
 
-      const ok = await sendReminder(svc, invoice, contact, account, creator, sender, offset, log);
-      if (ok) tally.sent += 1;
-      else {
-        await svc.rpc("release_invoice_reminder", { p_invoice: String(invoice.id), p_offset: offset });
-        for (const other of dueNow.filter((o) => o !== offset)) await svc.rpc("release_invoice_reminder", { p_invoice: String(invoice.id), p_offset: other });
+        const ok = await sendReminder(svc, invoice, contact, account, creator, sender, offset, log);
+        if (ok) tally.sent += 1;
+        else {
+          await svc.rpc("release_invoice_reminder", { p_invoice: String(invoice.id), p_offset: offset });
+          for (const other of dueNow.filter((o) => o !== offset)) await svc.rpc("release_invoice_reminder", { p_invoice: String(invoice.id), p_offset: other });
+          tally.failed += 1;
+        }
+      } catch (err) {
+        log.error({ err: serializeErr(err), invoice: String(invoice.id) }, "invoice dispatch: a reminder failed");
         tally.failed += 1;
       }
-    } catch (err) {
-      log.error({ err: serializeErr(err), invoice: String(invoice.id) }, "invoice dispatch: a reminder failed");
-      tally.failed += 1;
     }
+    if (invoices.length < pageSize) break;
   }
   return { ran: true, ...tally };
 }

@@ -58,7 +58,7 @@ import {
   OPEN_AGREEMENT_STATUSES,
 } from "../lib/agreements.js";
 import { crmError } from "../lib/crm.js";
-import { attachmentName, CONTRACT_BUCKET, CONTRACT_MAX_BYTES } from "../lib/contracts.js";
+import { attachmentName, CONTRACT_BUCKET, CONTRACT_MAX_BYTES, sha256OfBytes } from "../lib/contracts.js";
 import { downloadCapped } from "../lib/storageDownload.js";
 import { sendEmail } from "../lib/email.js";
 import { HttpError, notFound } from "../lib/errors.js";
@@ -354,6 +354,13 @@ export default async function agreementRoutes(app: FastifyInstance) {
       if (!path) return page(reply, 404, INVALID);
       const got = await downloadCapped(o.svc, CONTRACT_BUCKET, path, CONTRACT_MAX_BYTES);
       if (got.status !== "ok") return page(reply, 503, UNAVAILABLE);
+      // Serve only the bytes whose SHA-256 the agreement's text names (a signed upload URL outlives registration, and
+      // Storage may honour its overwrite header): anything else is refused, loudly.
+      const rec = await o.svc.from("contract_files").select("sha256").eq("storage_path", path).maybeSingle();
+      if (rec.error || !rec.data || sha256OfBytes(got.bytes) !== String((rec.data as Row).sha256)) {
+        request.log.error({ agreement: String(lookup.agreement.id) }, "agree: the contract file doesn't match its recorded SHA-256; not served");
+        return page(reply, 503, UNAVAILABLE);
+      }
       const pdf = path.endsWith(".pdf");
       const name = attachmentName(String(lookup.agreement.title), pdf ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
       return reply

@@ -118,9 +118,67 @@ await sql(`update public.pipeline_invoices set agreement_id = '${otherAg.body.id
 check("(and one to another family's agreement is refused)", (await pub("POST", `/pay/${payPath}/contract`)).status === 404 && !(await pub("GET", `/pay/${payPath}`)).text.includes("Theirs"));
 void ag2;
 
+// ---- An agreement can be removed without orphaning the invoice that points at it ------------------------------------------
+const sent3 = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, { label: `Third ${tag}`, amountCents: 100000, dueOn: due, methods: ["zelle"], agreement: { contractId: reg.body.id } });
+const ag3 = await sql(`select agreement_id from public.pipeline_invoices where number = '${sent3.body.invoiceNumber}' and contact_id = '${contact.id}'`);
+check("a third invoice points at its agreement", sent3.status === 201 && ag3.length === 36, JSON.stringify(sent3.body));
+// agreements.counselor_id cascades from the profile that wrote it, so an account deletion deletes agreements.
+const del = await sql(`with d as (delete from public.agreements where id = '${ag3}' returning id) select count(*) from d`).catch((e) => `ERR ${e.message}`);
+check("deleting the agreement works (the pointer is ON DELETE SET NULL, not a blocker)", del === "1", del);
+check("...the invoice stays and just loses the pointer", (await sql(`select coalesce(agreement_id::text, 'null') from public.pipeline_invoices where number = '${sent3.body.invoiceNumber}' and contact_id = '${contact.id}'`)) === "null");
+
+// ---- Bytes that aren't the recorded ones are never served ------------------------------------------------------------------
+const bytes2 = Buffer.from(`%PDF-1.4\n% second ${tag}\n%%EOF\n`);
+const up2 = await upload(S, bytes2);
+const reg2 = await call(S.token, "POST", "/pipeline/contracts", { path: up2.u.body.path, name: "Second letter" });
+const sent4 = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, { label: `Fourth ${tag}`, amountCents: 100000, dueOn: due, methods: ["zelle"], agreement: { contractId: reg2.body.id } });
+const m4 = await mailWith(parentEmail, `Invoice ${sent4.body.invoiceNumber}`);
+const tok4 = /\/agree\/([A-Za-z0-9_-]{43})/.exec(m4?.Text ?? "")?.[1];
+check("a second contract is served as uploaded", reg2.status === 201 && tok4 && Buffer.from((await pub("GET", `/agree/${tok4}/file`)).text, "latin1").equals(bytes2));
+// The signed upload URL outlives registration (two hours). Does Storage let it overwrite, with an x-upsert header?
+const evil = Buffer.from(`%PDF-1.4\n% SWAPPED ${tag}\n%%EOF\n`);
+const fd = new FormData();
+fd.append("cacheControl", "3600");
+fd.append("", new Blob([evil], { type: "application/pdf" }));
+const again = await fetch(up2.u.body.uploadUrl, { method: "PUT", headers: { "x-upsert": "true" }, body: fd });
+const overwritten = again.ok;
+console.log(`INFO  a second PUT to a used signed upload URL with x-upsert: true answered ${again.status} ${(await again.text()).slice(0, 120)}${overwritten ? " (Storage OVERWROTE the object)" : " (refused)"}`);
+const after = await pub("GET", `/agree/${tok4}/file`);
+check(overwritten ? "swapped bytes are refused at serve time (hash mismatch -> 503), never served" : "the object could not be overwritten and is still served as registered",
+  overwritten ? after.status === 503 && !after.text.includes("SWAPPED") : after.status === 200 && Buffer.from(after.text, "latin1").equals(bytes2), `${after.status}`);
+if (overwritten) {
+  const sent5 = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, { label: `Fifth ${tag}`, amountCents: 100000, dueOn: due, methods: ["zelle"], agreement: { contractId: reg2.body.id } });
+  const m5 = await mailWith(parentEmail, `Invoice ${sent5.body.invoiceNumber}`);
+  check("...and the swapped bytes are not attached to an email either", sent5.status === 201 && m5 && !(m5.Attachments ?? []).length, JSON.stringify(m5?.Attachments));
+}
+
+// ---- A practice with a big archive can still upload; a registered file is never taken for abandoned --------------------------
+const B = await user("ct-big");
+const bytes3 = Buffer.from(`%PDF-1.4\n% big ${tag}\n%%EOF\n`);
+const sha3 = createHash("sha256").update(bytes3).digest("hex");
+const svcHeaders = { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, "Content-Type": "application/pdf" };
+const names = Array.from({ length: 215 }, (_, i) => `${B.id}/${("00000000" + i.toString(16)).slice(-8)}-1111-4111-8111-${("000000000000" + i.toString(16)).slice(-12)}.pdf`);
+for (let i = 0; i < names.length; i += 15) {
+  await Promise.all(names.slice(i, i + 15).map((n) => fetch(`${process.env.SUPABASE_URL}/storage/v1/object/contracts/${n}`, { method: "POST", headers: svcHeaders, body: bytes3 })));
+}
+await sql(`insert into public.contract_files (firm_id, counselor_id, practice_id, name, storage_path, mime, size_bytes, sha256, archived_at, created_by)
+           select null, '${B.id}', '${B.id}', 'Archived ' || n, n, 'application/pdf', ${bytes3.length}, '${sha3}', case when i < 5 then null else now() end, '${B.id}'
+           from unnest(array[${names.map((n) => `'${n}'`).join(",")}]) with ordinality as t(n, i)`);
+await sql(`update storage.objects set created_at = now() - interval '10 hours' where bucket_id = 'contracts' and name like '${B.id}/%'`);
+const bigUrl = await call(B.token, "POST", "/pipeline/contracts/upload-url", { contentType: "application/pdf", sizeBytes: bytes3.length });
+check("215 registered files (210 archived) don't lock the practice out of uploading", bigUrl.status === 200, `${bigUrl.status} ${JSON.stringify(bigUrl.body).slice(0, 150)}`);
+check("...and not one registered, old file was taken for abandoned", Number(await sql(`select count(*) from storage.objects where bucket_id = 'contracts' and name like '${B.id}/%'`)) === 215);
+// An old unregistered object is cleaned; a fresh one is kept.
+const staleName = `${B.id}/ffffffff-2222-4222-8222-ffffffffffff.pdf`;
+const freshName = `${B.id}/eeeeeeee-2222-4222-8222-eeeeeeeeeeee.pdf`;
+for (const n of [staleName, freshName]) await fetch(`${process.env.SUPABASE_URL}/storage/v1/object/contracts/${n}`, { method: "POST", headers: svcHeaders, body: bytes3 });
+await sql(`update storage.objects set created_at = now() - interval '5 hours' where bucket_id = 'contracts' and name = '${staleName}'`);
+check("(another upload URL)", (await call(B.token, "POST", "/pipeline/contracts/upload-url", { contentType: "application/pdf", sizeBytes: bytes3.length })).status === 200);
+check("an abandoned object (unregistered, hours old) is removed; a fresh unregistered one stays", Number(await sql(`select count(*) from storage.objects where bucket_id = 'contracts' and name = '${staleName}'`)) === 0 && Number(await sql(`select count(*) from storage.objects where bucket_id = 'contracts' and name = '${freshName}'`)) === 1);
+
 // ---- Archive ---------------------------------------------------------------------------------------------------------------
 const arch = await call(S.token, "DELETE", `/pipeline/contracts/${reg.body.id}`);
-check("DELETE archives (the agreements made from it stay)", arch.status === 200 && arch.body.archivedAt && (await call(S.token, "GET", "/pipeline/contracts")).body.contracts.length === 0 && (await call(S.token, "GET", "/pipeline/contracts?includeArchived=true")).body.contracts.length === 1);
+check("DELETE archives (the agreements made from it stay)", arch.status === 200 && arch.body.archivedAt && (await call(S.token, "GET", "/pipeline/contracts")).body.contracts.map((c) => c.id).join() === reg2.body.id && (await call(S.token, "GET", "/pipeline/contracts?includeArchived=true")).body.contracts.length === 2);
 check("an archived contract can't be attached again", (await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, { label: "X", amountCents: 1000, dueOn: due, agreement: { contractId: reg.body.id } })).status === 404);
 check("a contract agreement's text can't be edited, even by the owner through PostgREST", (await rest(S.token, "PATCH", `/rest/v1/agreements?id=eq.${ag2}`, { body_text: "changed" }, { Prefer: "return=representation" })).status >= 400 || (await sql(`select body_text from public.agreements where id = '${ag2}'`)) === `Contract file: Engagement letter\nFile SHA-256: ${reg.body.sha256}`);
 console.log("done");

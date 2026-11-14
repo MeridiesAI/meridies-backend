@@ -442,8 +442,20 @@ export function isDuplicate(error: { code?: string } | null): boolean {
   return error?.code === "23505";
 }
 
-/** Stripe's running total for a charge, never above what the payment was. */
-export function refundedFor(paymentAmountCents: number, chargeAmountRefunded: number): number {
-  return Math.min(Math.max(0, Math.trunc(chargeAmountRefunded)), paymentAmountCents);
+/**
+ * Stripe's running total for a charge, never above what the payment was. A passed-on card fee (META_FEE) was charged on
+ * top of the payment, so the first `feeCents` refunded are the fee coming back, not the invoice: refunding only the fee
+ * leaves the invoice paid. (A partial refund is read as eating the fee first; the rest is the invoice's.)
+ */
+export function refundedFor(paymentAmountCents: number, chargeAmountRefunded: number, feeCents = 0): number {
+  const fee = Number.isInteger(feeCents) && feeCents > 0 ? feeCents : 0;
+  return Math.min(Math.max(0, Math.trunc(chargeAmountRefunded) - fee), paymentAmountCents);
+}
+
+/** The card fee a charge carried, from the metadata Checkout copied onto it; 0 when none or not a whole number of cents. */
+export function feeOfCharge(metadata: unknown): number {
+  const v = metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>)[META_FEE] : undefined;
+  const n = Number(typeof v === "string" ? v : NaN);
+  return Number.isInteger(n) && n > 0 && n <= 100_000_000 ? n : 0;
 }
 

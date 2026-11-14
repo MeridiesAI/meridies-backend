@@ -39,7 +39,7 @@ import {
   mintAgreementLink,
   mintAgreementLinkAsService,
 } from "./agreements.js";
-import { CONTRACT_ATTACH_MAX_BYTES, CONTRACT_BUCKET, attachmentName, contractsUnavailable, type ContractType } from "./contracts.js";
+import { CONTRACT_ATTACH_MAX_BYTES, CONTRACT_BUCKET, attachmentName, contractsUnavailable, sha256OfBytes, type ContractType } from "./contracts.js";
 import { downloadCapped } from "./storageDownload.js";
 import { serviceClient } from "./supabase.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
@@ -89,14 +89,14 @@ export async function resolveInvoiceAgreement(
   input: InvoiceAgreementInput
 ): Promise<ResolvedAgreement> {
   if ("contractId" in input) {
-    const { data, error } = await db.from("contract_files").select("id, name, storage_path, mime, size_bytes, archived_at").eq("id", input.contractId).maybeSingle();
+    const { data, error } = await db.from("contract_files").select("id, name, storage_path, mime, size_bytes, sha256, archived_at").eq("id", input.contractId).maybeSingle();
     if (error) throw isResultsNotApplied(error) ? contractsUnavailable() : agreementsError(error);
     const file = data as unknown as Row | null;
     if (!file || file.archived_at) throw notFound("That contract isn't in your library");
     return {
       id: null,
       title: String(file.name).slice(0, 160),
-      contract: { id: String(file.id), name: String(file.name), path: String(file.storage_path), mime: String(file.mime) as ContractType, sizeBytes: Number(file.size_bytes) },
+      contract: { id: String(file.id), name: String(file.name), path: String(file.storage_path), mime: String(file.mime) as ContractType, sizeBytes: Number(file.size_bytes), sha256: String(file.sha256) },
     };
   }
   if (!("agreementId" in input)) return { id: null, title: input.title };
@@ -114,7 +114,7 @@ export async function resolveInvoiceAgreement(
 }
 
 /** The file a contract agreement is bound to. */
-export type ContractRef = { id: string; name: string; path: string; mime: ContractType; sizeBytes: number };
+export type ContractRef = { id: string; name: string; path: string; mime: ContractType; sizeBytes: number; sha256: string };
 export type ResolvedAgreement = { id: string | null; title: string; contract?: ContractRef };
 
 /** A new agreement written in the invoice form, saved as a draft (exactly as `POST /agreements` saves one). */
@@ -205,6 +205,7 @@ export async function issueInvoiceAgreement(
 export async function contractAttachment(c: ContractRef | undefined, svc: SupabaseClient | null = serviceClient()): Promise<EmailAttachment[] | undefined> {
   if (!svc || !c || c.mime !== "application/pdf" || c.sizeBytes > CONTRACT_ATTACH_MAX_BYTES) return undefined;
   const got = await downloadCapped(svc, CONTRACT_BUCKET, c.path, CONTRACT_ATTACH_MAX_BYTES);
-  if (got.status !== "ok") return undefined;
+  // The bytes must be the ones whose hash was recorded (a signed upload URL can outlive the registration).
+  if (got.status !== "ok" || sha256OfBytes(got.bytes) !== c.sha256) return undefined;
   return [{ filename: attachmentName(c.name, c.mime), content: got.bytes.toString("base64"), contentType: c.mime }];
 }

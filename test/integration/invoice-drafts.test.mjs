@@ -53,6 +53,20 @@ check("a send time in the past is refused", (await call(S.token, "POST", "/pipel
 check("RLS: another counselor can't see or change it", (await rest((await user("dr-other")).token, "GET", `/rest/v1/pipeline_invoice_drafts?select=id`)).body?.length === 0);
 check("a client can't mark a draft sent", (await rest(S.token, "PATCH", `/rest/v1/pipeline_invoice_drafts?id=eq.${d1.body.id}`, { state: "sent" }, { Prefer: "return=representation" })).status >= 400);
 
+// ---- A claimed draft can't be edited or cancelled under the cron ---------------------------------------------------------
+const K = await mk("Kit");
+const kd = await call(S.token, "POST", "/pipeline/invoice-drafts", { contactId: K.id, payload: payload({ note: "before" }), state: "scheduled" });
+await sql(`update public.pipeline_invoice_drafts set claimed_at = now() where id = '${kd.body.id}'`);
+const kPut = await call(S.token, "PUT", `/pipeline/invoice-drafts/${kd.body.id}`, { payload: payload({ note: "during" }) });
+check("an edit while the cron holds the claim is 409 draft_sending", kPut.status === 409 && kPut.body.code === "draft_sending", JSON.stringify(kPut.body));
+const kDel = await call(S.token, "DELETE", `/pipeline/invoice-drafts/${kd.body.id}`);
+check("so is a cancel", kDel.status === 409 && kDel.body.code === "draft_sending", JSON.stringify(kDel.body));
+const kRest = await rest(S.token, "PATCH", `/rest/v1/pipeline_invoice_drafts?id=eq.${kd.body.id}`, { state: "cancelled" }, { Prefer: "return=representation" });
+check("...and a direct PostgREST change is refused by the trigger too", kRest.status >= 400 && /being sent/.test(JSON.stringify(kRest.body)), JSON.stringify(kRest.body));
+check("the draft is exactly as it was", (await sql(`select state || '|' || (payload->>'note') from public.pipeline_invoice_drafts where id = '${kd.body.id}'`)) === "scheduled|before");
+await sql(`update public.pipeline_invoice_drafts set claimed_at = now() - interval '11 minutes' where id = '${kd.body.id}'`);
+check("a claim older than ten minutes (a dead run) doesn't hold it", (await call(S.token, "PUT", `/pipeline/invoice-drafts/${kd.body.id}`, { payload: payload({ note: "after" }) })).status === 200 && (await call(S.token, "DELETE", `/pipeline/invoice-drafts/${kd.body.id}`)).body?.state === "cancelled");
+
 // ---- Dispatch --------------------------------------------------------------------------------------------------
 await sql(`update public.pipeline_invoice_drafts set send_at = now() - interval '1 minute' where id = '${d1.body.id}'`);
 const [r1, r2] = await Promise.all([cron("/internal/invoice-drafts/dispatch"), cron("/internal/invoice-drafts/dispatch")]);

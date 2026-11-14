@@ -184,8 +184,8 @@ export function readableAccent(hex: string | null | undefined): string {
  * Text and attribute-safe: double quotes too, since names land in alt="".
  * Every attribute here is double-quoted, so an apostrophe ("O'Brien") stays as typed.
  */
-export function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
+export function esc(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
 }
 
 /** A logo address an email or the pay page may load: https, or plain http on a loopback host (the local stack). */

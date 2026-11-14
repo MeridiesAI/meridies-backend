@@ -14,7 +14,7 @@ import { DEFAULT_STYLE, styleFromSnapshot, toStyle, type InvoiceStyle } from "./
 import { cardFeeCents } from "./invoiceCardFee.js";
 import { takesCardMethod } from "./paymentMethods.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
-import type { StoredLine } from "./invoiceComposer.js";
+import { readStoredLines, type StoredLine } from "./invoiceComposer.js";
 
 type Row = Record<string, unknown>;
 
@@ -106,12 +106,13 @@ export function feeFor(extras: InvoiceExtras | null, owedCents: number): number 
 
 /** An invoice row's composer columns as a source (Send again, the pay page, reminders). */
 export function sourceFromInvoiceRow(r: Row): ExtrasSource {
+  const strings = (v: unknown, ok: (s: string) => boolean): string[] | null => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && ok(s)) : null);
   return {
-    acceptedKeys: Array.isArray(r.accepted_methods) ? (r.accepted_methods as string[]) : null,
+    acceptedKeys: strings(r.accepted_methods, (s) => /^[a-z0-9][a-z0-9_-]{0,39}$/.test(s)),
     snapshot: r.style_snapshot ?? null,
-    note: (r.note as string | null) ?? null,
+    note: typeof r.note === "string" ? r.note : null,
     passCardFee: r.pass_card_fee === true,
-    lines: Array.isArray(r.line_items) ? (r.line_items as StoredLine[]) : null,
-    cc: Array.isArray(r.cc) ? (r.cc as string[]) : null,
+    lines: readStoredLines(r.line_items, Number(r.amount_cents)),
+    cc: strings(r.cc, (s) => /^[^\s@<>",;]+@[^\s@<>",;]+$/.test(s) && s.length <= 320)?.slice(0, 5) ?? null,
   };
 }

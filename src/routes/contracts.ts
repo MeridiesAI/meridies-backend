@@ -43,6 +43,11 @@ type Row = Record<string, unknown>;
 const idParam = z.object({ id: z.string().uuid() }).strict();
 const err = (e: { code?: string; message?: string } | null) => (isResultsNotApplied(e) ? contractsUnavailable() : fromPostgrest(e));
 const ABANDONED_AFTER_MS = 3 * 3_600_000;
+/** Objects listed per page, pages walked (5,000 objects), and fresh unregistered uploads allowed at once. */
+// (50 names keep the registered-names lookup well inside a request URL.)
+const LIST_PAGE = 50;
+const LIST_MAX_PAGES = 100;
+const UNSAVED_MAX = 100;
 
 export default async function contractRoutes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
@@ -69,21 +74,33 @@ export default async function contractRoutes(app: FastifyInstance) {
     if (!svc) throw contractsUnavailable();
 
     // The folder cleans itself: an object nobody registered within a few hours is removed, so unsaved uploads can't pile up.
-    const known = await request.db.from("contract_files").select("storage_path").eq("practice_id", practiceId).limit(1000);
-    if (known.error) throw err(known.error);
-    const keep = new Set(((known.data ?? []) as Row[]).map((r) => String(r.storage_path)));
-    const listed = await svc.storage.from(CONTRACT_BUCKET).list(practiceId, { limit: 200, sortBy: { column: "created_at", order: "asc" } });
-    if (listed.error) {
-      if (/bucket not found/i.test(listed.error.message)) throw contractsUnavailable();
-      request.log.warn({ err: listed.error }, "contracts folder list failed");
-      throw contractsUnavailable();
-    }
+    // The listing is walked a page at a time and each page asks which of ITS names are registered (registered or archived,
+    // so a file a contract agreement is bound to is never taken for abandoned); only unregistered objects are counted.
     const now = Date.now();
-    const stale = (listed.data ?? [])
-      .filter((o) => !keep.has(`${practiceId}/${o.name}`) && now - Date.parse(String(o.created_at ?? 0)) > ABANDONED_AFTER_MS)
-      .map((o) => `${practiceId}/${o.name}`);
+    const stale: string[] = [];
+    let unsaved = 0;
+    for (let page = 0; page < LIST_MAX_PAGES; page++) {
+      const listed = await svc.storage.from(CONTRACT_BUCKET).list(practiceId, { limit: LIST_PAGE, offset: page * LIST_PAGE, sortBy: { column: "created_at", order: "asc" } });
+      if (listed.error) {
+        if (!/bucket not found/i.test(listed.error.message)) request.log.warn({ err: listed.error }, "contracts folder list failed");
+        throw contractsUnavailable();
+      }
+      const objects = listed.data ?? [];
+      if (objects.length === 0) break;
+      const paths = objects.map((o) => `${practiceId}/${o.name}`);
+      const known = await request.db.from("contract_files").select("storage_path").eq("practice_id", practiceId).in("storage_path", paths);
+      if (known.error) throw err(known.error);
+      const registered = new Set(((known.data ?? []) as Row[]).map((r) => String(r.storage_path)));
+      objects.forEach((o, i) => {
+        const path = paths[i] as string;
+        if (registered.has(path)) return;
+        if (now - Date.parse(String(o.created_at ?? "")) > ABANDONED_AFTER_MS) stale.push(path);
+        else unsaved += 1;
+      });
+      if (objects.length < LIST_PAGE) break;
+    }
     if (stale.length) await svc.storage.from(CONTRACT_BUCKET).remove(stale).catch(() => undefined);
-    if ((listed.data ?? []).length - stale.length >= 200) throw new HttpError(429, "Too many unsaved uploads. Save one, or try again in a few hours.", "contracts_folder_full");
+    if (unsaved >= UNSAVED_MAX) throw new HttpError(429, "Too many unsaved uploads. Save one, or try again in a few hours.", "contracts_folder_full");
 
     const path = contractObjectPath(practiceId, b.contentType);
     const { data, error } = await svc.storage.from(CONTRACT_BUCKET).createSignedUploadUrl(path);

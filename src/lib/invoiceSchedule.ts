@@ -59,6 +59,11 @@ export function validateReminderOffsets(raw: number[]): { ok: true; offsets: num
   return { ok: true, offsets };
 }
 
+/** The offsets worth acting on from a stored value: whole days within the limit (a forged or damaged row can't ask for more). */
+export function usableOffsets(raw: unknown): number[] {
+  return Array.isArray(raw) ? [...new Set(raw.filter((n): n is number => Number.isInteger(n) && Math.abs(n as number) <= MAX_REMINDER_DAYS))].slice(0, MAX_REMINDERS) : [];
+}
+
 /** Whether a reminder at `offset` days from `dueOn` is not yet time, due now, or too old to send. */
 export function reminderState(dueOn: string, offset: number, now: number, tz: string | null | undefined): "later" | "due" | "stale" {
   const at = Date.parse(zonedToUtc(addDays(dueOn, offset), SEND_TIME, zoneOf(tz)));

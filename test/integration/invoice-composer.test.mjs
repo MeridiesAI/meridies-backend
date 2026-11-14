@@ -127,6 +127,19 @@ for (let i = 0; i < 24 && !resent; i++) {
 }
 check("...and the resend keeps the look it went out with (a sent invoice never re-skins)", resent && /Courier/.test(resent.HTML) && !/Helvetica,Arial,sans-serif/.test(resent.HTML.split("Pay")[0] ?? ""));
 
+// The database holds the composer's rules too, and the readers don't trust a row.
+const trig = (cols, vals) => sql(`insert into public.pipeline_invoices (contact_id, label, amount_cents, issued_on, due_on, created_by, ${cols}) values ('${contact.id}', 'Guard', 100, current_date, current_date + 1, '${S.id}', ${vals})`).then(() => "ok", (e) => String(e.message));
+check("the database refuses line items that don't add up", /add up/.test(await trig("line_items", `'[{"description":"A","amountCents":99}]'::jsonb`)));
+check("...or aren't valid lines", /aren't valid/.test(await trig("line_items", `'[{"description":5,"amountCents":100}]'::jsonb`)) && /aren't valid/.test(await trig("line_items", `'[{"description":"A","amountCents":1.5}]'::jsonb`)));
+check("...and reminder offsets beyond 30 days", /up to 30/.test(await trig("reminders", `'{99}'`)) && /up to 30/.test(await trig("reminders", `'{-31}'`)));
+check("a valid composer row goes in", (await trig("line_items, reminders", `'[{"description":"A","detail":null,"amountCents":100}]'::jsonb, '{-30,0,30}'`)) === "ok");
+await sql(`delete from public.pipeline_invoices where contact_id = '${contact.id}' and label = 'Guard'`);
+await sql(`set session_replication_role = replica; update public.pipeline_invoices set line_items = '[{"description":5,"amountCents":150000}]'::jsonb, accepted_methods = '{zelle,"<b>"}', cc = '{"x@y.co","bad address"}' where id = '${invoiceId}'`);
+const damaged = viewUrl ? await pub("GET", new URL(viewUrl).pathname) : { status: 0, text: "" };
+check("a damaged row doesn't break the invoice page: it falls back to the package line", damaged.status === 200 && damaged.text.includes("Senior package") && !damaged.text.includes(">5<") && damaged.text.includes("Zelle to pay@cora.test"), `${damaged.status}`);
+const dResend = await call(S.token, "POST", `/pipeline/invoices/${invoiceId}/send`);
+check("...and Send again still works", dResend.status === 200 && dResend.body.emailSent === true, JSON.stringify(dResend.body));
+
 // Old payloads are the invoices they always were.
 const plain = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, body({ label: `Plain ${tag}` }));
 check("an old payload still sends", plain.status === 201 && plain.body.emailSent === true, JSON.stringify(plain.body));
