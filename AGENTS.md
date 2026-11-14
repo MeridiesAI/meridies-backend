@@ -1544,6 +1544,29 @@ the database (`20261010*`):
   task `complete` (the guard trigger). `GET /invites/building` lists
   invitations with `confirmed_at` null, each request with its status, files,
   answer and AxIS's read.
+- **A counselor can add a student's documents before the student joins** (`20261124000008`;
+  `lib/invitationDocuments.ts`, `routes/invites.ts`). An invitation is the only record of a new student until they
+  accept (no `profiles` row, no student folder), so files are **staged against the invitation**:
+  `invitation_documents` (counselor-owned RLS, approval gate; no anon grant). The browser uploads to
+  `student-documents` at `<counselor id>/<invitation id>/<ts>-<name>` (the first segment is the uploader's own id, which
+  the bucket policy already accepts) and registers it with `POST /invites/:id/documents { storagePath, filename, kind?,
+  title?, mimeType?, sizeBytes? }` (counselor only; the path must be exactly that shape, no SVG/HTML, `assertPathClaimable`,
+  500 a day, at most 50 per invitation; 409 `invitation_accepted` once they have joined, so the app switches to the
+  student's own Files routes; 409 `invitation_closed` for a revoked one). `GET /invites/:id/documents` lists,
+  `DELETE /invites/:id/documents/:docId` removes the row and the object. `GET /invites/building` adds `documentCount`
+  (staged files on a pending invitation; 0 once accepted). **On accept** the trigger `invitation_documents_on_accepted`
+  (SECURITY DEFINER, after update on `invitations`, the pipeline-contact trigger's pattern) calls
+  `ensure_student_folder`, files each staged row as a `documents` row in it (owner and uploader the counselor, `source
+  'upload'`; financial, IEP/504 and counselor-only kinds are kept out of AI and not queued for extraction, the rest are
+  queued), and deletes the staged rows; the object never moves. **A resend or a second send** revokes the pending
+  invitation and inserts a new one, so `insertInvitation` moves the staged rows onto it (`moveStagedDocuments`).
+  **The student guard** `private.documents_guard_student_restricted` is redefined in the same migration to hold only the
+  `authenticated` and `anon` roles: `accept_invitation` runs in the STUDENT's session, so without that the trigger's own
+  insert was refused (it queues extraction and files restricted kinds under the counselor). Not in `REQUIRED_SCHEMA`;
+  without the file the routes answer 503 `invitation_documents_unavailable` (`invitationDocumentsReady`) and
+  `documentCount` reads 0. **Not done:** staged files of a revoked or dismissed invitation stay in Storage; nothing
+  creates essay or activity rows from them. Tests: `test/unit/invitation-documents.test.ts`,
+  `test/integration/invitation-documents.test.mjs`.
 - **Setup steps clear themselves** (`lib/studentSetup.ts`). For a confirmed
   student, `GET /work-items?includeDerived=true` adds `origin: "setup"` rows
   (GPA & scores, strength profile, recommend colleges, activities, guardian,
