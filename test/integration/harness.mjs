@@ -36,6 +36,9 @@ export async function user(tag, role = "counselor", { approved = true } = {}) {
   await fetch(`${SB}/rest/v1/rpc/confirm_user_role`, { method: "POST", headers: { apikey: ANON, Authorization: `Bearer ${t.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ p_role: role }) });
   if (role === "counselor" && approved) {
     await sql(`update public.profiles set counselor_approved_at = now(), counselor_approved_via = 'team' where id = '${u.id}'`);
+    // Approval seeds a default "Meeting" type (20261125000001); the booking suites start a counselor with none.
+    // booking-default-type.test.mjs approves counselors itself to test the seed.
+    await sql(`delete from public.booking_meeting_types where counselor_id = '${u.id}'`);
   }
   return { id: u.id, email, password, token: t.access_token };
 }

@@ -1219,6 +1219,16 @@ forget it.
   weekly hours as instants (DST-safe), so the app shades the rest and never reads wall-clock hours itself. A calendar that can't
   be read is the slots' 409 `calendar_reconnect_needed` / 503 `calendar_busy_unavailable`, never an empty `busy` that
   reads as "all free". Tests: `test/unit/booking-busy-view.test.ts`.
+- **Every approved counselor starts with one meeting type** (`20261125000001`; no code). "Book a time" needs booking on AND an
+  active type, and a type was only ever made by hand, so a counselor who switched booking on still showed students
+  nothing. `private.seed_default_booking_type(uuid)` (SECURITY DEFINER, no client EXECUTE) inserts `Meeting`, 30 minutes,
+  `google-meet`, active, first, for an approved counselor with NO type rows (`on conflict do nothing` on the unique name
+  index, under an advisory lock); the migration backfills every such counselor once, and a trigger on `profiles` seeds one
+  at approval (null to set, or an approved row inserted; a failure there is a WARNING, never an error that blocks approval).
+  Seeded once, never again: the trigger fires only at approval, so a counselor who deletes or renames it keeps their choice
+  (only revoke-then-approve again re-seeds). Booking itself stays off until the counselor switches it on. The integration
+  harness (`user()`) deletes the seeded row after approving a test counselor so the booking suites still start from none;
+  `test/integration/booking-default-type.test.mjs` tests the seed. Not in `REQUIRED_SCHEMA`.
 - **Student self-booking, part 2: book, move, cancel** (`20261111000012`; `lib/bookingWrite.ts`,
   `lib/bookingCalendar.ts`, `routes/studentBooking.ts`). **This reverses "the counselor owns the calendar: a student
   cannot move their meetings"** (routes/meetings.ts's header now says so): a student may move or cancel their own
