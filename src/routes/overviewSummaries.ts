@@ -5,7 +5,7 @@
  * counts the derived axes are computed from), GPA and test scores, class rank
  * as recorded, how many schools are on the list, and the next scheduled
  * meeting. Every table is read once with `.in("student_id", ids)`, so a
- * 60-student roster is nine queries, not 540. Roster-wide, so it carries the
+ * 60-student roster is ten queries, not 600. Roster-wide, so it carries the
  * DB-backed limiter (AGENTS.md read rule).
  *
  * Each card also carries its college results (accepted / waitlisted / denied,
@@ -46,7 +46,7 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
       if (ids.length === 0) return [];
       const gradYearBy = new Map(((roster ?? []) as Row[]).map((r) => [String(r.id), r.grad_year ? String(r.grad_year) : null]));
 
-      const [academics, axes, activities, awards, essays, colleges, meetings] = await Promise.all([
+      const [academics, axes, activities, awards, essays, colleges, meetings, recTasks] = await Promise.all([
         db
           .from("student_academics")
           .select(
@@ -66,8 +66,10 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
           .gte("starts_at", new Date().toISOString())
           .order("starts_at", { ascending: true })
           .limit(2000),
+        // Recommendation-letter tasks: the card's "Recs" stat counts them.
+        db.from("deliverables").select("student_id, status").in("student_id", ids).eq("kind", "recommendation").limit(20_000),
       ]);
-      for (const r of [academics, axes, activities, awards, essays, colleges, meetings]) {
+      for (const r of [academics, axes, activities, awards, essays, colleges, meetings, recTasks]) {
         if (r.error) throw fromPostgrest(r.error);
       }
 
@@ -187,6 +189,14 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
         const id = String(r.student_id);
         essaysBy.set(id, [...(essaysBy.get(id) ?? []), String(r.status)]);
       }
+      const recsBy = new Map<string, { planned: number; done: number }>();
+      for (const r of (recTasks.data ?? []) as Row[]) {
+        const id = String(r.student_id);
+        const cur = recsBy.get(id) ?? { planned: 0, done: 0 };
+        cur.planned += 1;
+        if (r.status === "complete") cur.done += 1;
+        recsBy.set(id, cur);
+      }
       const meetingBy = new Map<string, Row>();
       for (const r of (meetings.data ?? []) as Row[]) {
         const id = String(r.student_id);
@@ -214,6 +224,8 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
           activityCount: activityCount.get(id) ?? 0,
           awardCount: awardCount.get(id) ?? 0,
           essayStatuses: essaysBy.get(id) ?? [],
+          /** Recommendation-letter tasks assigned and how many are complete (the card's "Recs"). */
+          recommendations: recsBy.get(id) ?? { planned: 0, done: 0 },
           applications: applications.get(id) ?? 0,
           gradYear: gradYearBy.get(id) ?? null,
           /** What the student typed for "Applying to N"; null until they do. */

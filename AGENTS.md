@@ -1968,7 +1968,9 @@ scholarship is a `scholarship_matches` row: `POST /aid/scholarships` adds one by
 once awarded: winning with no figure assumes the amount applied for, any other outcome clears it), `deadline`
 and `requirements` (`[{ id, label, done }]`). "Applying to N" is `student_personal_details.colleges_planned`
 (`collegesPlanned` on the info routes). `GET /overview/student-summaries` adds `gradYear`, `collegesPlanned`,
-`applying`, `results` and `scholarships` per student. `lib/resultsAvailability.ts` turns a missing column into
+`applying`, `results` and `scholarships` per student, and `recommendations` (`{ planned, done }`: the student's
+`deliverables` of kind `recommendation`, and how many are `complete`; the card's "Recs" stat, no migration, the app
+treats it as optional). `lib/resultsAvailability.ts` turns a missing column into
 `503 college_results_unavailable`; the summaries read the new columns separately so they degrade, never fail.
 `scholarships.awards` is what the Overview's per-student dropdown shows, and it is detail only (a failed read leaves it
 empty, never fails the page): `won` is the tracker's awarded rows by name (`{ name, cents }`; the tracker stores no
