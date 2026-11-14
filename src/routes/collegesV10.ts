@@ -40,6 +40,10 @@ import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto,
 import { requireRole, requireRoleIn, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { logChoices, logImpressions } from "../lib/listLearning.js";
+import { reasonCitesOnlyOwn, type ExplainProgram } from "../lib/listMatch.js";
+import { defaultMatchDeps, listMatchEnabled, loadListMatch } from "../lib/listMatchLoad.js";
+import { OPPORTUNITY_CATEGORIES } from "../lib/listContract.js";
+import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { collegeLogoUrls, loadCollegeLogos, logoUrlOf } from "../lib/collegeLogos.js";
 import { lookUpLogoOnly, lookUpMediaSoon } from "../lib/collegeMediaLookup.js";
 import { lookUpCollege } from "../lib/collegeLookup.js";
@@ -90,8 +94,10 @@ import {
   toSearchStats,
   toProfileFacts,
   toWebinarTip,
+  listPickDto,
   type Fit,
   type ListCriteria,
+  type ListPick,
   type ListSchool,
 } from "../lib/collegesV10.js";
 
@@ -374,28 +380,56 @@ export async function runSearch(request: FastifyRequest, q: SearchQuery) {
 /**
  * One short line per pick, saying why it sits in its tier, from the facts the
  * fit model used. Bullets for the counselor (the essay guardrail's filter),
- * never a ranking: the order is the fit model's.
+ * never a ranking: the order is the fit model's (or, with list matching on, the
+ * match score's).
+ *
+ * With list matching on (the picks carry `match`), each school's best-matching
+ * programs go into the prompt as untrusted data, each with a key; a reason may
+ * mention only its own school's programs, citing their keys, and one that cites
+ * or names anything else is dropped (lib/listMatch.ts reasonCitesOnlyOwn).
  */
 async function explainPicks(
   request: FastifyRequest,
   studentId: string,
   student: Awaited<ReturnType<typeof studentNumbers>>,
-  picks: { school: ListSchool; fit: Fit; odds: number | null; miles: number | null }[]
+  picks: ListPick[]
 ): Promise<Map<string, string>> {
   if (!picks.length) return new Map();
+  const matching = picks.some((p) => p.match);
+  let n = 0;
+  const programs = new Map<string, (ExplainProgram & { line: string })[]>(
+    picks.map((p) => [
+      p.school.collegeId,
+      (p.match?.topOpportunities ?? []).map((o) => {
+        const key = `p${++n}`;
+        const label = OPPORTUNITY_CATEGORIES[o.category as keyof typeof OPPORTUNITY_CATEGORIES]?.label ?? o.category;
+        const quote = o.quote ? ` - "${o.quote.slice(0, 200)}"` : "";
+        return { key, name: o.name, line: `${key}: ${o.name} (${label})${quote}` };
+      }),
+    ])
+  );
   const facts = picks
-    .map(
-      (p) =>
+    .map((p) => {
+      const line =
         `${p.school.collegeId} | ${p.school.name} | tier ${p.fit} | admit ${p.school.admit ?? "?"}% | SAT mid ${p.school.satMid ?? "?"} | ` +
-        `test ${p.school.testPolicy ?? "?"} | ${sizeLabel(p.school.undergrads) ?? "?"} | ${p.school.setting ?? "?"}${p.miles != null ? ` | ${p.miles} mi` : ""}`
-    )
+        `test ${p.school.testPolicy ?? "?"} | ${sizeLabel(p.school.undergrads) ?? "?"} | ${p.school.setting ?? "?"}${p.miles != null ? ` | ${p.miles} mi` : ""}`;
+      const own = programs.get(p.school.collegeId) ?? [];
+      return matching && own.length ? `${line}\n${wrapUntrusted("school programs", own.map((o) => o.line).join("\n"))}` : line;
+    })
     .join("\n");
-  const out = await runStructured<{ reasons: { collegeId: string; reason: string }[] }>({
+  const reasonProps: Record<string, unknown> = { collegeId: { type: "string" }, reason: { type: "string", maxLength: 200 } };
+  if (matching) reasonProps.cites = { type: "array", items: { type: "string" }, maxItems: 3 };
+  const out = await runStructured<{ reasons: { collegeId: string; reason: string; cites?: string[] }[] }>({
     request,
     module: "list-explain",
     studentId,
-    system:
-      "For each school, write one short reason (under 25 words) a counselor can read, why it sits in its tier, using only the facts given. No praise, no facts that aren't listed.",
+    system: matching
+      ? "For each school, write one short reason (under 25 words) a counselor can read, why it fits this student, using only the facts given. " +
+        "A school may list programs, each with a key (p1, p2, ...). A reason may mention only programs listed for its own school, by their exact name, " +
+        "and puts each one's key in cites (empty when it mentions none). Mention no other program, center, lab, research or opportunity. " +
+        "No praise, no facts that aren't listed. " +
+        UNTRUSTED_DATA_RULE
+      : "For each school, write one short reason (under 25 words) a counselor can read, why it sits in its tier, using only the facts given. No praise, no facts that aren't listed.",
     prompt: `Student: SAT ${student.numbers.sat ?? "none"}, unweighted GPA ${student.numbers.gpaText ?? "none"}, majors ${student.intendedMajors.join(", ") || "undecided"}.\n${facts}`,
     schema: {
       type: "object",
@@ -406,8 +440,8 @@ async function explainPicks(
           items: {
             type: "object",
             additionalProperties: false,
-            properties: { collegeId: { type: "string" }, reason: { type: "string", maxLength: 200 } },
-            required: ["collegeId", "reason"],
+            properties: reasonProps,
+            required: matching ? ["collegeId", "reason", "cites"] : ["collegeId", "reason"],
           },
         },
       },
@@ -417,10 +451,18 @@ async function explainPicks(
     maxTokens: 1500,
   });
   const ids = new Set(picks.map((p) => p.school.collegeId));
+  const all = [...programs.values()].flat();
   const why = new Map<string, string>();
   for (const r of out.reasons ?? []) {
+    const id = String(r.collegeId);
     const [ok] = enforceNoProse([String(r.reason ?? "")]);
-    if (ok && ids.has(String(r.collegeId))) why.set(String(r.collegeId), ok);
+    if (!ok || !ids.has(id)) continue;
+    if (matching) {
+      const own = programs.get(id) ?? [];
+      const cites = Array.isArray(r.cites) ? r.cites.map(String) : [];
+      if (!reasonCitesOnlyOwn(ok, cites, own, all.filter((p) => !own.includes(p)))) continue;
+    }
+    why.set(id, ok);
   }
   return why;
 }
@@ -1154,11 +1196,13 @@ export default async function collegeV10Routes(app: FastifyInstance) {
       ...(await catalogListCandidates(request, b.criteria as ListCriteria, new Set(curated.map((s) => s.collegeId)))),
     ];
     const excluded = new Set(b.exclude ?? []);
-    const { picks, relaxed } = buildList(
-      student.numbers,
-      schools.filter((s) => !excluded.has(s.collegeId)),
-      b.criteria as ListCriteria
-    );
+    const candidates = schools.filter((s) => !excluded.has(s.collegeId));
+    // List matching (LIST_MATCH_ENABLED): match data per school orders each band; null (off, or nothing could be
+    // read) leaves the list exactly as before. It never throws.
+    const match = listMatchEnabled()
+      ? await loadListMatch(await defaultMatchDeps(request.db, request.log), b.studentId, candidates.map((s) => s.collegeId))
+      : null;
+    const { picks, relaxed } = buildList(student.numbers, candidates, b.criteria as ListCriteria, match ?? undefined);
 
     const perTier = b.perTier ?? 4;
     const bands = (["reach", "target", "likely"] as const).map((fit) => {
@@ -1172,22 +1216,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
         fit,
         heading: fit === "likely" ? "Safety" : fit === "reach" ? "Reach" : "Target",
         total: all.length,
-        schools: shown.map((p) => ({
-          collegeId: p.school.collegeId,
-          slug: p.school.slug,
-          name: p.school.name,
-          initials: p.school.initials,
-          brandColor: p.school.brandColor,
-          city: p.school.city,
-          state: p.school.state,
-          website: p.school.website,
-          miles: p.miles,
-          size: sizeLabel(p.school.undergrads),
-          setting: p.school.setting,
-          testPolicy: p.school.testPolicy,
-          regularDeadline: p.school.regularDeadline,
-          fit: p.fit,
-        })),
+        schools: shown.map(listPickDto),
       };
     });
 

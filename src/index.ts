@@ -7,6 +7,7 @@ import { meetingSummaryFakeRefusal } from "./lib/meetingSummary.js";
 import { translateFakeRefusal } from "./lib/translate.js";
 import { evalClockRefusal } from "./lib/axis/clock.js";
 import { driveFakeRefusal } from "./lib/driveExport.js";
+import { listMatchEnabled } from "./lib/listMatchLoad.js";
 
 const app = buildApp();
 
@@ -63,6 +64,20 @@ app.listen({ port: env.PORT, host: "0.0.0.0" }).catch((err) => {
   app.log.error(err);
   process.exit(1);
 });
+
+// List matching embeds a student's interest paragraph during a list-builder request: load the model now (about
+// 130 MB, downloaded again on each Railway deploy) so the first list doesn't wait for it. Off with the flag, so an
+// instance that doesn't match never loads it. Never fails boot; a failed load is retried by the first embed().
+if (listMatchEnabled()) {
+  const warnLoad = (err: unknown) =>
+    app.log.warn({ err: err instanceof Error ? err.message : String(err) }, "List match: the embedding model didn't load at boot; the first list will try again");
+  void import("./lib/embeddings.js")
+    .then(({ warmEmbeddings }) => warmEmbeddings(warnLoad))
+    .then((ready) => {
+      if (ready) app.log.info("List match: embedding model loaded");
+    })
+    .catch(warnLoad);
+}
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, async () => {
