@@ -34,8 +34,12 @@ alter table public.pipeline_invoices add column if not exists reminders_sent jso
   check (reminders_sent is null or (jsonb_typeof(reminders_sent) = 'object' and pg_column_size(reminders_sent) <= 2048));
 alter table public.pipeline_invoices add column if not exists style_snapshot jsonb
   check (style_snapshot is null or (jsonb_typeof(style_snapshot) = 'object' and pg_column_size(style_snapshot) <= 4096));
-alter table public.pipeline_invoices add column if not exists agreement_id uuid
-  references public.agreements(id) on delete set null;
+-- No ON DELETE action: an agreement goes only with its contact, and a contact with invoices can't be deleted
+-- (invoices RESTRICT it), so the pointer never dangles; a SET NULL would also need an AxIS trash rule for no gain.
+alter table public.pipeline_invoices add column if not exists agreement_id uuid;
+alter table public.pipeline_invoices drop constraint if exists pipeline_invoices_agreement_id_fkey;
+alter table public.pipeline_invoices add constraint pipeline_invoices_agreement_id_fkey
+  foreign key (agreement_id) references public.agreements(id);
 
 -- The API links the agreement it minted to the invoice right after the insert (a client can't set any other composer
 -- column after the fact). The pay page checks the agreement is the invoice's own contact's before it mints a link.
