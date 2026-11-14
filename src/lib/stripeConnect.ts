@@ -26,6 +26,8 @@ type Row = Record<string, unknown>;
 export const META_INVOICE = "meridies_invoice_id";
 export const META_CONTACT = "meridies_contact_id";
 export const META_PRACTICE = "meridies_practice_id";
+/** The card processing fee passed on to the family, in cents (lib/invoiceCardFee.ts): charged, never counted as paid toward the invoice. */
+export const META_FEE = "meridies_fee_cents";
 
 export const STRIPE_UNAVAILABLE_MESSAGE = "Card payments aren't switched on yet";
 export const stripeUnavailable = () => new HttpError(503, STRIPE_UNAVAILABLE_MESSAGE, "stripe_unavailable");
@@ -287,8 +289,12 @@ export function planStripeEvent(event: StripeEventLike, opts: { livemode?: boole
       // A card session completes paid; an async method completes unpaid and succeeds later.
       if (o.payment_status !== "paid") return ignore("not paid yet");
       if (String(o.currency ?? "").toLowerCase() !== "usd") return ignore("not in USD");
-      const amountCents = Number(o.amount_total);
-      if (!Number.isInteger(amountCents) || amountCents < 1 || amountCents > 100_000_000) return ignore("amount out of range");
+      const charged = Number(o.amount_total);
+      if (!Number.isInteger(charged) || charged < 1 || charged > 100_000_000) return ignore("amount out of range");
+      // A passed-on card fee was charged with the invoice amount; only the invoice amount is a payment.
+      const fee = Number(str(meta[META_FEE]) ?? 0);
+      const amountCents = Number.isInteger(fee) && fee > 0 && fee < charged ? charged - fee : charged;
+      if (amountCents < 1) return ignore("amount out of range");
       const paymentIntentId = ref(o.payment_intent);
       const sessionId = str(o.id);
       if (!paymentIntentId || !sessionId) return ignore("no PaymentIntent");

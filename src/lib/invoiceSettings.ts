@@ -59,6 +59,8 @@ export type InvoiceExtras = {
   lines: StoredLine[] | null;
   to: string | null;
   cc: string[];
+  /** The invoice's own page link when it has no card button (set by the route once the link exists). */
+  viewUrl: string | null;
 };
 
 export type ExtrasSource = {
@@ -91,6 +93,7 @@ export async function buildExtras(db: SupabaseClient, practiceId: string, s: Ext
     lines: s.lines ?? null,
     to: s.to ?? null,
     cc: s.cc ?? [],
+    viewUrl: null,
   };
 }
 

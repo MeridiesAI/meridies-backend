@@ -59,10 +59,17 @@ import {
   type FollowupSummary,
 } from "../lib/pipelineExtras.js";
 import { serializeErr } from "../lib/requestLog.js";
+import { serviceClient } from "../lib/supabase.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { invoiceOwed, payLinkBlock, stripeUnavailable } from "../lib/stripeConnect.js";
 import { mintPayLink, practiceAccount, stripeConfigured } from "../lib/stripePractice.js";
-import { practiceIdOf, settingsError } from "../lib/invoiceSettings.js";
+import { buildExtras, composerUnavailable, practiceIdOf, readStyle, settingsError, sourceFromInvoiceRow, type InvoiceExtras } from "../lib/invoiceSettings.js";
+import { composerFields, composerProblem, toStoredLines } from "../lib/invoiceComposer.js";
+import { snapshotOf, styleFields } from "../lib/invoiceStyle.js";
+import { takesCardMethod } from "../lib/paymentMethods.js";
+import { textingAvailable, textingUnavailable } from "../lib/invoiceTexting.js";
+import { contractAttachment } from "../lib/invoiceAgreement.js";
+import { isResultsNotApplied as columnsMissing } from "../lib/resultsAvailability.js";
 import { templateToPackage, toTemplateDTO } from "../lib/packageTemplates.js";
 
 type Row = Record<string, unknown>;
@@ -487,6 +494,20 @@ async function payLinkIfCards(request: FastifyRequest, invoice: Row, owedCents: 
     return await mintPayLink(request.db, String(invoice.id), request.auth.userId);
   } catch (err) {
     request.log.warn({ err: serializeErr(err) }, "pipeline: could not make a pay link");
+    return null;
+  }
+}
+
+/**
+ * The invoice's own page link when it has no card button (it names ways to pay that aren't card, or the practice
+ * doesn't take cards yet): a pay token the page opens with, view only. Never fails the caller: without the card
+ * migration (no tokens table) there is simply no link.
+ */
+async function viewLinkFor(request: FastifyRequest, invoice: Row): Promise<string | null> {
+  try {
+    return await mintPayLink(request.db, String(invoice.id), request.auth.userId);
+  } catch (err) {
+    request.log.warn({ err: serializeErr(err) }, "pipeline: could not make a view link");
     return null;
   }
 }
@@ -1165,6 +1186,40 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     dueOn: isoDate,
   });
 
+  /** The composer's optional fields (lib/invoiceComposer.ts): all absent on an old payload, which then means what it always did. */
+  const composerShape = { ...composerFields };
+  const styleOverrideInput = z.object(styleFields).partial().strict();
+  type ComposerBody = z.infer<z.ZodObject<typeof composerShape>> & { amountCents: number; send?: boolean };
+  const hasComposerFields = (b: Partial<ComposerBody>) =>
+    b.lines !== undefined || b.methods !== undefined || b.passCardFee !== undefined || b.note !== undefined || b.cc !== undefined || b.reminders !== undefined || b.to !== undefined;
+
+  /** Refuse the composer fields that can't be right (lines that don't add up, bad reminders, a text that isn't sent), before anything is written. */
+  function checkComposer(b: ComposerBody): void {
+    const problem = composerProblem(b);
+    if (problem) throw new HttpError(400, problem.message, problem.code);
+  }
+
+  /** The document extras for a preview or a send: null for a plain invoice, so its document is the original. */
+  async function composeExtras(request: FastifyRequest, contact: Row, b: Partial<ComposerBody>, styleOverride?: z.infer<typeof styleOverrideInput>): Promise<InvoiceExtras | null> {
+    const practiceId = practiceIdOf(contact);
+    return buildExtras(request.db, practiceId, {
+      acceptedKeys: b.methods ?? null,
+      styleOverride: styleOverride ? { ...(await readStyle(request.db, practiceId)), ...styleOverride } : null,
+      note: b.note ?? null,
+      passCardFee: b.passCardFee ?? null,
+      lines: b.lines ? toStoredLines(b.lines) : null,
+      to: b.to ?? null,
+      cc: b.cc ?? null,
+    });
+  }
+
+  /** The text-message address on the card (parent first), or a 400 naming what to add. */
+  const phoneOf = (contact: Row): string => {
+    const phone = String(contact.parent_phone || contact.student_phone || "").trim();
+    if (!phone) throw new HttpError(400, "Add a phone number to the contact's card first", "contact_no_phone");
+    return phone;
+  };
+
   /**
    * What "Send to parent" would send, without sending it or numbering it: the
    * recipient, subject and text, and the amount, credit applied and amount due.
@@ -1175,17 +1230,23 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     { preHandler: [...counselor, limit("pipeline:invoice-preview", 60, 60)] },
     async (request) => {
       const { id } = idParam.parse(request.params);
-      const b = invoiceBody.extend({ agreement: invoiceAgreementInput.optional() }).strict().parse(request.body);
+      const b = invoiceBody
+        .extend({ agreement: invoiceAgreementInput.optional(), style: styleOverrideInput.optional(), ...composerShape })
+        .strict()
+        .parse(request.body);
+      checkComposer(b);
       const contact = await loadContactRow(request, id);
       const account = await requireAccount(request, id);
       const today = todayIn(request.profile.timezone);
       if (b.dueOn < today) throw badRequest("The due date has already passed");
       const draft = draftInvoice(account, await paymentCreditsReady(request), b, today);
       // An agreement to go with it: checked and read, nothing saved and no link minted.
-      checkInvoiceAgreement(b.agreement, { to: String(contact.parent_email || contact.student_email || ""), send: true });
+      checkInvoiceAgreement(b.agreement, { to: b.to || String(contact.parent_email || contact.student_email || ""), send: true });
       const agreement = b.agreement ? await resolveInvoiceAgreement(request.db, id, b.agreement) : null;
       const practiceId = String(contact.firm_id ?? contact.counselor_id);
-      const [practice, cards] = await Promise.all([practiceOf(request, contact), takesCards(request, practiceId)]);
+      const [practice, cards, extras] = await Promise.all([practiceOf(request, contact), takesCards(request, practiceId), composeExtras(request, contact, b, b.style)]);
+      // Card button: only when cards are accepted on this invoice (an invoice with no list takes them, as always).
+      const cardOk = takesCardMethod(b.methods ?? null);
       const mail = invoiceEmail(
         contact,
         draft,
@@ -1195,8 +1256,9 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         draftStatus(draft),
         // With an agreement, a stand-in pay link so its block reads as the email will ("before you pay");
         // without one, the preview is what it always was.
-        agreement && cards && draft.amountDueCents > 0 ? "" : null,
-        agreement ? { title: agreement.title, url: null } : null
+        (agreement || extras) && cards && cardOk && draft.amountDueCents > 0 ? "" : null,
+        agreement ? { title: agreement.title, url: null } : null,
+        extras
       );
       return {
         to: mail.to || null,
@@ -1211,9 +1273,18 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         issuedOn: today,
         packageName: draft.packageName,
         plan: draft.plan,
-        payByCard: cards && draft.amountDueCents > 0,
+        payByCard: cards && cardOk && draft.amountDueCents > 0,
         // Only when one was asked for (additive): what the agreement block will say.
         ...(agreement ? { agreement: { id: agreement.id, title: agreement.title } } : {}),
+        // The composer's live preview (additive): the email as HTML, the text message, and what shapes them.
+        html: mail.html,
+        sms: mail.sms,
+        cc: mail.cc,
+        style: extras?.style ?? null,
+        methods: extras?.methods ?? [],
+        lines: extras?.lines ?? [{ description: draft.packageName, detail: draft.label, amountCents: draft.grossCents }],
+        feeCents: mail.doc.feeCents ?? 0,
+        textAvailable: await textingAvailable(request.auth.userId),
       };
     }
   );
@@ -1229,19 +1300,29 @@ export default async function pipelineRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { id } = idParam.parse(request.params);
       const b = invoiceBody
-        .extend({ send: z.boolean().default(true), agreement: invoiceAgreementInput.optional() })
+        .extend({ send: z.boolean().default(true), agreement: invoiceAgreementInput.optional(), ...composerShape })
         .strict()
         .parse(request.body);
+      checkComposer(b);
       const contact = await loadContactRow(request, id);
       const account = await requireAccount(request, id);
       const today = todayIn(request.profile.timezone);
       if (b.dueOn < today) throw badRequest("The due date has already passed");
       const credits = await paymentCreditsReady(request);
       const draft = draftInvoice(account, credits, b, today);
-      const to = String(contact.parent_email || contact.student_email || "");
+      const text = b.channel === "text";
+      const to = b.to || String(contact.parent_email || contact.student_email || "");
       // An agreement to send with it is checked before the invoice is numbered, so a refusal leaves nothing behind.
       checkInvoiceAgreement(b.agreement, { to, send: b.send });
+      if (text) {
+        if (b.agreement) throw new HttpError(400, "An agreement goes with the invoice email, so it can't go in a text", "text_no_agreement");
+        phoneOf(contact);
+        if (b.send && !(await textingAvailable(request.auth.userId))) throw textingUnavailable();
+      }
       const resolved = b.agreement ? await resolveInvoiceAgreement(request.db, id, b.agreement) : null;
+      const composer = hasComposerFields(b);
+      let extras = await composeExtras(request, contact, b);
+      const cardOk = takesCardMethod(b.methods ?? null);
 
       const { data, error } = await request.db
         .from("pipeline_invoices")
@@ -1253,18 +1334,34 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           issued_on: today,
           due_on: b.dueOn,
           created_by: request.auth.userId,
+          // The composer's columns are named only when the composer was used, so an old payload is the insert it always was.
+          ...(composer && extras
+            ? {
+                line_items: b.lines ? toStoredLines(b.lines) : null,
+                accepted_methods: b.methods ?? null,
+                pass_card_fee: b.passCardFee === true,
+                note: b.note?.trim() || null,
+                cc: b.cc ?? null,
+                reminders: b.reminders ? [...new Set(b.reminders)].sort((x, y) => x - y) : null,
+                style_snapshot: snapshotOf(extras.style),
+              }
+            : {}),
         })
         .select("*")
         .single();
+      if (composer && columnsMissing(error)) throw composerUnavailable();
       if (isCreditGuard(error)) throw new HttpError(409, "The family's credit changed. Open the invoice again to see what's due.", "credit_changed");
       if (error) throw crmError(error);
       const invoice = data as Row;
 
       let emailSent = false;
-      let agreement: { id: string; title: string; url: string } | null = null;
+      let agreement: { id: string; title: string; url: string; contract?: Awaited<ReturnType<typeof issueInvoiceAgreement>>["contract"] } | null = null;
       if (b.agreement && resolved) {
         try {
           agreement = await issueInvoiceAgreement(request.db, { contactId: id, counselorId: request.auth.userId, input: b.agreement, resolved });
+          // Which agreement came with this invoice, so the pay page can offer it (a failure here costs only that link).
+          const linked = await request.db.from("pipeline_invoices").update({ agreement_id: agreement.id }).eq("id", String(invoice.id));
+          if (linked.error) request.log.warn({ code: linked.error.code }, "pipeline: could not link the agreement to the invoice");
         } catch (err) {
           // Rare (the agreement was read a moment ago): the invoice is on file, unsent. Say so.
           const e = err instanceof HttpError ? err : new HttpError(500, "Something went wrong");
@@ -1275,7 +1372,12 @@ export default async function pipelineRoutes(app: FastifyInstance) {
           );
         }
       }
-      const payLink = b.send && to ? await payLinkIfCards(request, invoice, draft.amountDueCents) : null;
+      const wantsLink = b.send && (to || text);
+      const cardLink = wantsLink && cardOk ? await payLinkIfCards(request, invoice, draft.amountDueCents) : null;
+      // An invoice that names its ways to pay always gets its own page: the card link when there is one, else a view-only link.
+      const viewLink = wantsLink && (composer || text) && !cardLink ? await viewLinkFor(request, invoice) : null;
+      if (extras && viewLink) extras = { ...extras, viewUrl: viewLink };
+      const payLink = cardLink;
       const practice = await practiceOf(request, contact);
       const mail = invoiceEmail(
         contact,
@@ -1285,21 +1387,44 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         practice,
         draftStatus(draft),
         payLink,
-        agreement ? { title: agreement.title, url: agreement.url } : null
+        agreement ? { title: agreement.title, url: agreement.url } : null,
+        extras
       );
-      if (b.send && to) {
+      let sentTo: string | null = null;
+      if (b.send && text) {
+        const phone = phoneOf(contact);
+        const sms = await sendSms({
+          to: phone,
+          body: mail.sms,
+          template: "pipeline-invoice-sms",
+          recipient_kind: contact.parent_phone ? "guardian" : "student",
+          counselorId: request.auth.userId,
+          logger: request.log,
+        });
+        emailSent = sms.status === "sent";
+        sentTo = phone;
+        await request.db
+          .from("pipeline_invoices")
+          .update({ sent_to: phone, sent_at: emailSent ? new Date().toISOString() : null, message_delivery_id: sms.deliveryId })
+          .eq("id", String(invoice.id));
+      } else if (b.send && to) {
+        const attachments = await contractAttachment(serviceClient(), agreement?.contract);
         const sent = await sendEmail({
           ...(await senderFields(request, id, contact.parent_email ? "parent" : "student")),
           to,
+          ...(mail.cc.length ? { cc: mail.cc } : {}),
           subject: mail.subject,
           html: mail.html,
           text: mail.text,
           ...(mail.recordText !== undefined ? { recordText: mail.recordText } : {}),
+          // A contract's PDF (5 MB or less) goes along with the email; the link in it opens the file for the family.
+          ...(attachments ? { attachments } : {}),
           template: agreement ? INVOICE_AGREEMENT_TEMPLATE : "pipeline-invoice",
           recipient_kind: mail.recipientKind,
           logger: request.log,
         });
         emailSent = sent.sent;
+        sentTo = to;
         await request.db
           .from("pipeline_invoices")
           .update({
@@ -1313,7 +1438,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       return reply.code(201).send({
         account: await requireAccount(request, id),
         invoiceNumber: String(invoice.number),
-        sentTo: b.send && to ? to : null,
+        sentTo: b.send ? sentTo : null,
         emailSent,
         ...(agreement ? { agreement: { id: agreement.id, title: agreement.title } } : {}),
       });
@@ -1416,7 +1541,13 @@ export default async function pipelineRoutes(app: FastifyInstance) {
             resolved: await resolveInvoiceAgreement(request.db, contactId, b.agreement),
           })
         : null;
-      const payLink = await payLinkIfCards(request, invoice, owedCents);
+      // An invoice the composer made resends with the look, ways to pay, lines and note it went out with.
+      let extras = await buildExtras(request.db, practiceIdOf(contact), sourceFromInvoiceRow(invoice));
+      const payLink = takesCardMethod(extras?.acceptedKeys) ? await payLinkIfCards(request, invoice, owedCents) : null;
+      if (extras && !payLink) {
+        const view = await viewLinkFor(request, invoice);
+        if (view) extras = { ...extras, viewUrl: view };
+      }
       // Which payment of the package this invoice is: its place among the live invoices, oldest first.
       const live = account.invoices
         .filter((i) => i.state !== "void")
@@ -1441,11 +1572,13 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         practice,
         invoiceStatus(dto.state),
         payLink,
-        agreement ? { title: agreement.title, url: agreement.url } : null
+        agreement ? { title: agreement.title, url: agreement.url } : null,
+        extras
       );
       const sent = await sendEmail({
         ...(await senderFields(request, String(contact.id), contact.parent_email ? "parent" : "student")),
         to,
+        ...(mail.cc.length ? { cc: mail.cc } : {}),
         subject: mail.subject,
         html: mail.html,
         text: mail.text,

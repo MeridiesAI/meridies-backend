@@ -62,6 +62,8 @@ export type InvoiceDocument = {
   note?: string | null;
   /** The card processing fee passed to the family; shown only by card. Absent/0: none. */
   feeCents?: number;
+  /** The invoice's own page, for an invoice with no pay button (manual ways to pay only). */
+  viewUrl?: string | null;
   /** A contract on the pay page: its title, and the path a click on "Review" posts to. */
   contract?: { title: string; action: string } | null;
 };
@@ -385,6 +387,10 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEma
     .join("")}
 </td></tr>`
     : "";
+  const viewHtml =
+    d.viewUrl && !showsPayButton(d)
+      ? `<tr><td style="padding:16px 32px 0;font-family:${FONT};font-size:13px;"><a href="${esc(d.viewUrl)}" style="color:${accent};">View this invoice online</a></td></tr>`
+      : "";
   const noteHtml = d.note
     ? `<tr><td style="padding:20px 32px 0;"><div dir="auto" style="font-family:${FONT};font-size:14px;line-height:1.6;color:${INK};white-space:pre-line;border-left:3px solid ${accent};padding-left:12px;">${esc(d.note)}</div></td></tr>`
     : "";
@@ -450,6 +456,7 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEma
   ${pay}
   ${feeHtml}
   ${waysHtml}
+  ${viewHtml}
   ${noteHtml}
   ${plan}
   <tr><td style="padding:28px 32px 28px;">
@@ -501,6 +508,7 @@ export function renderInvoiceEmailText(d: InvoiceDocument, agreement: InvoiceEma
   if (fee) out.push(fee);
   const ways = waysToPay(d).filter((m) => m.key !== "card");
   if (ways.length) out.push("", "Other ways to pay:", ...ways.map((m) => `- ${m.label}${m.instructions ? `: ${m.instructions}` : ""}`));
+  if (d.viewUrl && !showsPayButton(d)) out.push("", `View this invoice online: ${d.viewUrl}`);
   if (d.note) out.push("", d.note);
   if (d.plan) out.push("", d.plan);
   out.push("");
@@ -519,7 +527,7 @@ export function renderInvoiceSms(d: InvoiceDocument, recipientFirst: string | nu
   const hi = recipientFirst ? `Hi ${recipientFirst}, ` : "";
   const what = d.number ? `invoice ${d.number}` : "an invoice";
   const owed = d.amountDueCents > 0 ? `${formatUsd(d.amountDueCents)} due ${longDate(d.dueOn)}` : "nothing due";
-  const link = d.payUrl ? ` View and pay: ${d.payUrl}` : "";
+  const link = d.payUrl ? ` View and pay: ${d.payUrl}` : d.viewUrl ? ` View it here: ${d.viewUrl}` : "";
   return `${hi}${d.practice.name} sent ${what}: ${owed}.${link}`;
 }
 

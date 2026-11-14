@@ -80,7 +80,7 @@ export function invoiceEmail(
         ? `Sent by ${senderName} through Meridies.`
         : "Sent through Meridies.",
     ...(extras
-      ? { style: extras.style, methods: extras.methods, note: extras.note, feeCents: feeFor(extras, draft.amountDueCents) }
+      ? { style: extras.style, methods: extras.methods, note: extras.note, feeCents: feeFor(extras, draft.amountDueCents), viewUrl: extras.viewUrl }
       : {}),
   };
   const { html, text, recordText } = renderInvoiceEmail(doc, agreement);
