@@ -15,6 +15,7 @@ import {
   payLinkBlock,
   payUrl,
   planStripeEvent,
+  feeOfCharge,
   refundedFor,
   refundWithoutPayment,
   stripeStatus,
@@ -196,6 +197,13 @@ test("idempotency: a duplicate insert is recognised, and a refund is Stripe's to
   assert.equal(refundedFor(50000, 20000), 20000);
   assert.equal(refundedFor(50000, 90000), 50000, "never above the payment");
   assert.equal(refundedFor(50000, -5), 0);
+  // A passed-on card fee comes back first: refunding only the fee refunds none of the payment.
+  assert.equal(refundedFor(50000, 1482, 1482), 0);
+  assert.equal(refundedFor(50000, 51482, 1482), 50000);
+  assert.equal(refundedFor(50000, 21482, 1482), 20000);
+  assert.equal(refundedFor(50000, 20000, -3), 20000, "a nonsense fee counts as none");
+  assert.equal(feeOfCharge({ meridies_fee_cents: "1482" }), 1482);
+  assert.equal(feeOfCharge({ meridies_fee_cents: "1.5" }) + feeOfCharge({ meridies_fee_cents: "-4" }) + feeOfCharge(null) + feeOfCharge({}), 0);
 });
 
 // ---- Pay links and status --------------------------------------------------------

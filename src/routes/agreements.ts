@@ -58,6 +58,8 @@ import {
   OPEN_AGREEMENT_STATUSES,
 } from "../lib/agreements.js";
 import { crmError } from "../lib/crm.js";
+import { attachmentName, CONTRACT_BUCKET, CONTRACT_MAX_BYTES, sha256OfBytes } from "../lib/contracts.js";
+import { downloadCapped } from "../lib/storageDownload.js";
 import { sendEmail } from "../lib/email.js";
 import { HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
@@ -314,7 +316,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
     return { svc, lookup };
   }
 
-  async function acceptedPage(svc: NonNullable<ReturnType<typeof serviceClient>>, agreement: Row): Promise<string> {
+  async function acceptedPage(svc: NonNullable<ReturnType<typeof serviceClient>>, agreement: Row, file: { href: string } | null = null): Promise<string> {
     const acc = await svc.from("agreement_acceptances").select("signer_name, accepted_at, body_sha256").eq("agreement_id", String(agreement.id)).maybeSingle();
     if (acc.error || !acc.data) throw new Error(`read acceptance: ${acc.error?.code ?? "missing"}`);
     const a = acc.data as Row;
@@ -323,8 +325,59 @@ export default async function agreementRoutes(app: FastifyInstance) {
       bodyText: String(agreement.body_text),
       error: null,
       accepted: { signerName: String(a.signer_name), acceptedAt: new Date(String(a.accepted_at)).toISOString(), bodySha256: String(a.body_sha256) },
+      file,
     });
   }
+
+  /** The contract file an agreement is bound to, if any. Tolerant: a database without the contracts migration has none. */
+  async function contractOf(svc: NonNullable<ReturnType<typeof serviceClient>>, agreementId: string): Promise<string | null> {
+    const r = await svc.from("agreements").select("storage_path").eq("id", agreementId).maybeSingle();
+    const path = (r.data as Row | null)?.storage_path;
+    return !r.error && typeof path === "string" ? path : null;
+  }
+
+  /**
+   * The contract file itself, for the family the link was sent to: the same token, the same checks as the page
+   * (a void, expired or unknown link gets nothing), read from the private bucket with the service role and sent
+   * inline (a PDF) or as a download (a Word file). It can't run a script: nosniff and a sandboxing CSP.
+   */
+  app.get("/agree/:token/file", async (request, reply) => {
+    const { token } = request.params as { token: string };
+    try {
+      if (!(await withinLimits(request, token, "view"))) return page(reply, 429, TOO_MANY);
+      const o = await open(request, token);
+      if ("status" in o) return page(reply, o.status, o.body);
+      if (o.lookup.state === "expired") return page(reply, 410, EXPIRED);
+      const lookup = o.lookup;
+      if (lookup.state !== "open" && lookup.state !== "accepted") return page(reply, 404, INVALID);
+      const path = await contractOf(o.svc, String(lookup.agreement.id));
+      if (!path) return page(reply, 404, INVALID);
+      const got = await downloadCapped(o.svc, CONTRACT_BUCKET, path, CONTRACT_MAX_BYTES);
+      if (got.status !== "ok") return page(reply, 503, UNAVAILABLE);
+      // Serve only the bytes whose SHA-256 the agreement's text names (a signed upload URL outlives registration, and
+      // Storage may honour its overwrite header): anything else is refused, loudly.
+      const rec = await o.svc.from("contract_files").select("sha256").eq("storage_path", path).maybeSingle();
+      if (rec.error || !rec.data || sha256OfBytes(got.bytes) !== String((rec.data as Row).sha256)) {
+        request.log.error({ agreement: String(lookup.agreement.id) }, "agree: the contract file doesn't match its recorded SHA-256; not served");
+        return page(reply, 503, UNAVAILABLE);
+      }
+      const pdf = path.endsWith(".pdf");
+      const name = attachmentName(String(lookup.agreement.title), pdf ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      return reply
+        .code(200)
+        .header("Cache-Control", "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Robots-Tag", "noindex")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Content-Security-Policy", "default-src 'none'; sandbox")
+        .header("Content-Disposition", `${pdf ? "inline" : "attachment"}; filename="${name.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "'")}"`)
+        .type(pdf ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        .send(got.bytes);
+    } catch (err) {
+      request.log.error({ err: serializeErr(err) }, "agree: could not show the contract file");
+      return page(reply, 503, UNAVAILABLE);
+    }
+  });
 
   app.get("/agree/:token", async (request, reply) => {
     const { token } = request.params as { token: string };
@@ -334,9 +387,11 @@ export default async function agreementRoutes(app: FastifyInstance) {
       if ("status" in o) return page(reply, o.status, o.body);
       const { svc, lookup } = o;
       if (lookup.state === "expired") return page(reply, 410, EXPIRED);
-      if (lookup.state === "accepted") return page(reply, 200, await acceptedPage(svc, lookup.agreement));
+      if (lookup.state === "invalid") return page(reply, 404, INVALID);
+      const file = (await contractOf(svc, String(lookup.agreement.id))) ? { href: `/agree/${token}/file` } : null;
+      if (lookup.state === "accepted") return page(reply, 200, await acceptedPage(svc, lookup.agreement, file));
       if (lookup.state !== "open") return page(reply, 404, INVALID);
-      return page(reply, 200, agreementPageBody({ title: String(lookup.agreement.title), bodyText: String(lookup.agreement.body_text), error: null }));
+      return page(reply, 200, agreementPageBody({ title: String(lookup.agreement.title), bodyText: String(lookup.agreement.body_text), error: null, file }));
     } catch (err) {
       request.log.error({ err: serializeErr(err) }, "agree: could not show the agreement");
       return page(reply, 503, UNAVAILABLE);

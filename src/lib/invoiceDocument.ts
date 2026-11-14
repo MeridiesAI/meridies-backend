@@ -17,6 +17,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { CORNER_RADIUS, FONTS, type InvoiceStyle } from "./invoiceStyle.js";
 import { formatUsd, type InvoiceState } from "./payments.js";
 
 type Row = Record<string, unknown>;
@@ -52,6 +53,19 @@ export type InvoiceDocument = {
   plan: string | null;
   /** Who sent it and where a reply goes. */
   footnote: string | null;
+  // ---- Invoice composer (all optional: an invoice without them is drawn exactly as before) ----
+  /** The practice's look (invoice_style / the invoice's snapshot). Absent: the original design. */
+  style?: InvoiceStyle | null;
+  /** Other ways to pay with the practice's instructions (card is the button, not listed). */
+  methods?: Array<{ key: string; label: string; instructions: string }>;
+  /** The consultant's note to the family. */
+  note?: string | null;
+  /** The card processing fee passed to the family; shown only by card. Absent/0: none. */
+  feeCents?: number;
+  /** The invoice's own page, for an invoice with no pay button (manual ways to pay only). */
+  viewUrl?: string | null;
+  /** A contract on the pay page: its title, and the path a click on "Review" posts to. */
+  contract?: { title: string; action: string } | null;
 };
 
 /**
@@ -170,8 +184,8 @@ export function readableAccent(hex: string | null | undefined): string {
  * Text and attribute-safe: double quotes too, since names land in alt="".
  * Every attribute here is double-quoted, so an apostrophe ("O'Brien") stays as typed.
  */
-export function esc(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
+export function esc(s: unknown): string {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
 }
 
 /** A logo address an email or the pay page may load: https, or plain http on a loopback host (the local stack). */
@@ -208,6 +222,25 @@ const PILL: Record<InvoiceStatus, { fg: string; bg: string; border: string }> = 
   void: { fg: "#5b635d", bg: "#f1f2ef", border: "#dfe2dc" },
 };
 
+
+// ---- Composer extras: ways to pay, the note, the card fee ---------------------------------
+
+/** What the card button asks for: what is due, plus the card fee when the practice passes it on. */
+export const cardTotalCents = (d: InvoiceDocument) => d.amountDueCents + Math.max(0, d.feeCents ?? 0);
+
+/** The button's words: the style's own label, else "Pay $X by card" as it always read. */
+export function payButtonLabel(d: InvoiceDocument): string {
+  const custom = d.style?.buttonLabel;
+  return custom && custom !== "Pay by card" ? custom : `Pay ${formatUsd(cardTotalCents(d))} by card`;
+}
+
+export const feeSentence = (d: InvoiceDocument): string | null =>
+  (d.feeCents ?? 0) > 0
+    ? `Paying by card adds a ${formatUsd(d.feeCents ?? 0)} processing fee (${formatUsd(cardTotalCents(d))} in all). Other ways to pay have no fee.`
+    : null;
+
+const waysToPay = (d: InvoiceDocument) => (d.status === "due" || d.status === "overdue" ? d.methods ?? [] : []);
+
 /** Whether the document carries a Pay by card button (the pay page passes "": its button posts to itself). */
 export function showsPayButton(d: InvoiceDocument): boolean {
   return d.payUrl !== null && d.amountDueCents > 0 && (d.status === "due" || d.status === "overdue");
@@ -237,25 +270,34 @@ const INK = "#141815";
 const MUTED = "#5b635d";
 const HAIR = "#e4e7e1";
 
+/** The font stacks a document draws with: the style's, else the original design's. */
+function fontsOf(d: InvoiceDocument): { font: string; serif: string } {
+  const f = d.style ? FONTS[d.style.fontKey].stack : null;
+  return { font: f ?? FONT, serif: f ?? SERIF };
+}
+const radiusOf = (d: InvoiceDocument) => (d.style ? CORNER_RADIUS[d.style.corner] : { button: 10, card: 14 });
+const accentOf = (d: InvoiceDocument) => readableAccent(d.style?.accentColor ?? d.practice.accentColor);
+
 function emailBrand(d: InvoiceDocument): string {
-  const logo = safeImageUrl(d.practice.logoUrl);
+  const { serif: SERIF } = fontsOf(d);
+  const logo = d.style?.showLogo === false ? null : safeImageUrl(d.practice.logoUrl);
   if (logo) {
     return `<img src="${esc(logo)}" alt="${esc(d.practice.name)}" height="44" style="display:block;height:44px;max-height:44px;max-width:200px;border:0;outline:none;text-decoration:none;">`;
   }
   return `<span style="font-family:${SERIF};font-size:24px;line-height:1.2;font-weight:500;color:${INK};">${esc(d.practice.name)}</span>`;
 }
 
-function emailPill(s: InvoiceStatus): string {
+function emailPill(s: InvoiceStatus, FONT: string): string {
   const p = PILL[s];
   return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;"><tr><td bgcolor="${p.bg}" style="background:${p.bg};border:1px solid ${p.border};border-radius:999px;padding:4px 12px;font-family:${FONT};font-size:12px;font-weight:700;letter-spacing:0.02em;color:${p.fg};white-space:nowrap;">${STATUS_LABEL[s]}</td></tr></table>`;
 }
 
 /** The agreement block, under the header and above the bill-to: first in the email, before the invoice and its Pay button. */
-function agreementHtml(a: InvoiceEmailAgreement, accent: string, beforePaying: boolean): string {
+function agreementHtml(a: InvoiceEmailAgreement, accent: string, beforePaying: boolean, FONT: string, radius: number): string {
   const button = a.url
     ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;"><tr>
-      <td align="center" bgcolor="${accent}" style="background:${accent};border-radius:10px;">
-        <a href="${esc(a.url)}" style="display:block;padding:13px 20px;font-family:${FONT};font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:10px;">${AGREEMENT_BUTTON}</a>
+      <td align="center" bgcolor="${accent}" style="background:${accent};border-radius:${radius}px;">
+        <a href="${esc(a.url)}" style="display:block;padding:13px 20px;font-family:${FONT};font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:${radius}px;">${AGREEMENT_BUTTON}</a>
       </td>
     </tr></table>`
     : `<div style="margin-top:14px;font-family:${FONT};font-size:13px;color:${MUTED};">${esc(AGREEMENT_LINK_OMITTED)}</div>`;
@@ -275,7 +317,10 @@ function agreementHtml(a: InvoiceEmailAgreement, accent: string, beforePaying: b
 
 /** The invoice email's HTML: tables and inline styles only, light on purpose (dark-mode clients keep the paper white). */
 export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEmailAgreement | null = null): string {
-  const accent = readableAccent(d.practice.accentColor);
+  const accent = accentOf(d);
+  const { font: FONT } = fontsOf(d);
+  const radius = radiusOf(d);
+  const center = d.style?.headerAlign === "center";
   const title = d.number ? `Invoice ${d.number}` : "Invoice";
   const meta = [
     ["Invoice", d.number ?? "Draft"],
@@ -314,18 +359,52 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEma
   const pay = showsPayButton(d)
     ? `<tr><td style="padding:24px 32px 0;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-    <td align="center" bgcolor="${accent}" style="background:${accent};border-radius:10px;">
-      <a href="${esc(d.payUrl ?? "")}" style="display:block;padding:15px 20px;font-family:${FONT};font-size:16px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:10px;">Pay ${esc(formatUsd(d.amountDueCents))} by card</a>
+    <td align="center" bgcolor="${accent}" style="background:${accent};border-radius:${radius.button}px;">
+      <a href="${esc(d.payUrl ?? "")}" style="display:block;padding:15px 20px;font-family:${FONT};font-size:16px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:${radius.button}px;">${esc(payButtonLabel(d))}</a>
     </td>
   </tr></table>
-  <div style="padding-top:10px;text-align:center;font-family:${FONT};font-size:12px;color:${MUTED};">Paid securely through Stripe, straight to ${esc(d.practice.name)}.</div>
+  <div style="padding-top:10px;text-align:center;font-family:${FONT};font-size:12px;color:${MUTED};">${
+    feeSentence(d) ? `${esc(feeSentence(d) ?? "")} ` : ""
+  }Paid securely through Stripe, straight to ${esc(d.practice.name)}.</div>
 </td></tr>`
     : "";
   const plan = d.plan
     ? `<tr><td style="padding:20px 32px 0;font-family:${FONT};font-size:13px;line-height:1.55;color:${MUTED};" dir="auto">${esc(d.plan)}</td></tr>`
     : "";
   const footnote = d.footnote ? `<div style="padding-top:6px;">${esc(d.footnote)}</div>` : "";
-  const agree = agreement ? agreementHtml(agreement, accent, showsPayButton(d)) : "";
+  const footerText = d.style?.footerText ? `<div dir="auto" style="padding-top:6px;">${esc(d.style.footerText)}</div>` : "";
+  const ways = waysToPay(d).filter((m) => m.key !== "card");
+  const waysHtml = ways.length
+    ? `<tr><td style="padding:24px 32px 0;">
+  <div style="font-family:${FONT};font-size:12px;font-weight:600;color:${MUTED};padding-bottom:8px;">Other ways to pay</div>
+  ${ways
+    .map(
+      (m) =>
+        `<div dir="auto" style="font-family:${FONT};font-size:14px;line-height:1.55;color:${INK};padding-bottom:8px;"><strong>${esc(m.label)}</strong>${
+          m.instructions ? `<br><span style="color:${MUTED};">${esc(m.instructions).replace(/\n/g, "<br>")}</span>` : ""
+        }</div>`
+    )
+    .join("")}
+</td></tr>`
+    : "";
+  const viewHtml =
+    d.viewUrl && !showsPayButton(d)
+      ? `<tr><td style="padding:16px 32px 0;font-family:${FONT};font-size:13px;"><a href="${esc(d.viewUrl)}" style="color:${accent};">View this invoice online</a></td></tr>`
+      : "";
+  const noteHtml = d.note
+    ? `<tr><td style="padding:20px 32px 0;"><div dir="auto" style="font-family:${FONT};font-size:14px;line-height:1.6;color:${INK};white-space:pre-line;border-left:3px solid ${accent};padding-left:12px;">${esc(d.note)}</div></td></tr>`
+    : "";
+  const feeHtml =
+    feeSentence(d) && !showsPayButton(d)
+      ? `<tr><td style="padding:12px 32px 0;font-family:${FONT};font-size:12px;color:${MUTED};">${esc(feeSentence(d) ?? "")}</td></tr>`
+      : "";
+  const agree = agreement ? agreementHtml(agreement, accent, showsPayButton(d), FONT, radius.button) : "";
+  const headerRow = center
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" style="padding-bottom:12px;">${emailBrand(d)}</td></tr><tr><td align="center">${emailPill(d.status, FONT)}</td></tr></table>`
+    : `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td valign="middle">${emailBrand(d)}</td>
+      <td valign="middle" align="right">${emailPill(d.status, FONT)}</td>
+    </tr></table>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -339,13 +418,10 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEma
 <body style="margin:0;padding:0;background:#f5f6f3;" bgcolor="#f5f6f3">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f5f6f3" style="background:#f5f6f3;">
 <tr><td align="center" style="padding:28px 12px;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width:600px;background:#ffffff;border:1px solid ${HAIR};border-radius:14px;border-collapse:separate;">
-  <tr><td height="4" bgcolor="${accent}" style="height:4px;line-height:4px;font-size:0;background:${accent};border-radius:14px 14px 0 0;">&nbsp;</td></tr>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" style="max-width:600px;background:#ffffff;border:1px solid ${HAIR};border-radius:${radius.card}px;border-collapse:separate;">
+  <tr><td height="4" bgcolor="${accent}" style="height:4px;line-height:4px;font-size:0;background:${accent};border-radius:${radius.card}px ${radius.card}px 0 0;">&nbsp;</td></tr>
   <tr><td style="padding:28px 32px 0;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-      <td valign="middle">${emailBrand(d)}</td>
-      <td valign="middle" align="right">${emailPill(d.status)}</td>
-    </tr></table>
+    ${headerRow}
   </td></tr>
   ${agree}<tr><td style="padding:28px 32px 0;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
@@ -378,12 +454,16 @@ export function renderInvoiceEmailHtml(d: InvoiceDocument, agreement: InvoiceEma
     </table>
   </td></tr>
   ${pay}
+  ${feeHtml}
+  ${waysHtml}
+  ${viewHtml}
+  ${noteHtml}
   ${plan}
   <tr><td style="padding:28px 32px 28px;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
       <td style="border-top:1px solid ${HAIR};padding-top:16px;font-family:${FONT};font-size:12px;line-height:1.6;color:${MUTED};">
         <div style="font-weight:600;color:${INK};">${esc(d.practice.name)}</div>${replyLine(d) ? `<div style="padding-top:6px;">${esc(replyLine(d) ?? "")}</div>` : ""}
-        ${footnote}
+        ${footnote}${footerText}
       </td>
     </tr></table>
   </td></tr>
@@ -423,13 +503,32 @@ export function renderInvoiceEmailText(d: InvoiceDocument, agreement: InvoiceEma
   ];
   const note = statusNote(d);
   if (note) out.push(note);
-  if (showsPayButton(d)) out.push("", `Pay ${formatUsd(d.amountDueCents)} by card:`, d.payUrl ?? "");
+  if (showsPayButton(d)) out.push("", `${d.style?.buttonLabel && d.style.buttonLabel !== "Pay by card" ? d.style.buttonLabel : `Pay ${formatUsd(cardTotalCents(d))} by card`}:`, d.payUrl ?? "");
+  const fee = feeSentence(d);
+  if (fee) out.push(fee);
+  const ways = waysToPay(d).filter((m) => m.key !== "card");
+  if (ways.length) out.push("", "Other ways to pay:", ...ways.map((m) => `- ${m.label}${m.instructions ? `: ${m.instructions}` : ""}`));
+  if (d.viewUrl && !showsPayButton(d)) out.push("", `View this invoice online: ${d.viewUrl}`);
+  if (d.note) out.push("", d.note);
   if (d.plan) out.push("", d.plan);
   out.push("");
   const reply = replyLine(d);
   if (reply) out.push(reply);
   if (d.footnote) out.push(d.footnote);
+  if (d.style?.footerText) out.push(d.style.footerText);
   return out.join("\n");
+}
+
+/**
+ * The invoice as a text message (the composer's Text tab): one short message with who, what, when and the link.
+ * Plain text, no HTML; the practice's note and ways to pay are on the page the link opens, not in the text.
+ */
+export function renderInvoiceSms(d: InvoiceDocument, recipientFirst: string | null = null): string {
+  const hi = recipientFirst ? `Hi ${recipientFirst}, ` : "";
+  const what = d.number ? `invoice ${d.number}` : "an invoice";
+  const owed = d.amountDueCents > 0 ? `${formatUsd(d.amountDueCents)} due ${longDate(d.dueOn)}` : "nothing due";
+  const link = d.payUrl ? ` View and pay: ${d.payUrl}` : d.viewUrl ? ` View it here: ${d.viewUrl}` : "";
+  return `${hi}${d.practice.name} sent ${what}: ${owed}.${link}`;
 }
 
 /**
@@ -454,7 +553,13 @@ const PAGE_CSS = `
 body{margin:0;background:var(--ground);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
 main{max-width:640px;margin:0 auto;padding:40px 16px 48px}
 .doc{background:var(--paper);border:1px solid var(--hair);border-radius:16px;overflow:hidden;box-shadow:0 12px 28px -14px rgba(20,24,21,.14)}
+.doc{border-radius:var(--r,16px);font-family:var(--font,inherit)}
+.top.center{flex-direction:column;gap:12px}
 .bar{height:4px;background:var(--accent)}
+.ways{margin-top:24px}.ways .k{margin-bottom:8px}.way{font-size:14px;margin-bottom:8px}.way span{display:block;color:var(--muted);white-space:pre-line}
+.pnote{margin-top:20px;padding-left:12px;border-left:3px solid var(--accent);white-space:pre-line;font-size:14px}
+.contract{margin-top:24px;border:1px solid var(--hair);border-radius:12px;padding:16px 18px}.contract form{margin:12px 0 0}
+.contract button{font-size:15px;padding:13px 20px}
 .in{padding:28px 32px}
 .top{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .brand img{display:block;height:44px;max-width:200px;object-fit:contain}
@@ -481,7 +586,7 @@ td.amt{padding-left:16px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .due strong{font-size:26px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
 .note{text-align:right;font-size:13px;color:var(--muted);margin-top:6px}
 form{margin:24px 0 0}
-button{width:100%;border:0;border-radius:10px;background:var(--accent);color:#fff;font-family:inherit;font-weight:700;font-size:16px;line-height:1;padding:16px 20px;cursor:pointer}
+button{width:100%;border:0;border-radius:var(--rb,10px);background:var(--accent);color:#fff;font-family:inherit;font-weight:700;font-size:16px;line-height:1;padding:16px 20px;cursor:pointer}
 button:hover{filter:brightness(1.08)}button:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
 .fine{text-align:center;font-size:12px;color:var(--muted);margin-top:10px}
 .plan{font-size:13px;color:var(--muted);margin-top:20px}
@@ -499,7 +604,7 @@ export const PAGE_STYLE = PAGE_CSS.trim();
 
 /** The pay page's document, with the Pay by card button while something is owed. */
 export function renderInvoicePageBody(d: InvoiceDocument): string {
-  const logo = safeImageUrl(d.practice.logoUrl);
+  const logo = d.style?.showLogo === false ? null : safeImageUrl(d.practice.logoUrl);
   const brand = logo ? `<img src="${esc(logo)}" alt="${esc(d.practice.name)}">` : `<span>${esc(d.practice.name)}</span>`;
   const lines = d.lines
     .map(
@@ -512,12 +617,27 @@ export function renderInvoicePageBody(d: InvoiceDocument): string {
     .join("");
   const note = statusNote(d);
   const pay = showsPayButton(d)
-    ? `<form method="post"><button type="submit">Pay ${esc(formatUsd(d.amountDueCents))} by card</button></form><p class="fine">You'll pay on Stripe's secure page. The payment goes straight to ${esc(d.practice.name)}.</p>`
+    ? `<form method="post"><button type="submit">${esc(payButtonLabel(d))}</button></form><p class="fine">${
+        feeSentence(d) ? `${esc(feeSentence(d) ?? "")} ` : ""
+      }You'll pay on Stripe's secure page. The payment goes straight to ${esc(d.practice.name)}.</p>`
     : "";
-  return `<article class="doc" style="--accent:${readableAccent(d.practice.accentColor)}">
+  const ways = waysToPay(d).filter((m) => m.key !== "card");
+  const waysHtml = ways.length
+    ? `<div class="ways"><div class="k">Other ways to pay</div>${ways
+        .map((m) => `<div class="way" dir="auto"><b>${esc(m.label)}</b>${m.instructions ? `<span>${esc(m.instructions)}</span>` : ""}</div>`)
+        .join("")}</div>`
+    : "";
+  const noteHtml = d.note ? `<div class="pnote" dir="auto">${esc(d.note)}</div>` : "";
+  const contractHtml =
+    d.contract && d.status !== "void"
+      ? `<div class="contract"><div class="k">${esc(AGREEMENT_HEADING)}</div><div class="who" dir="auto">${esc(d.contract.title)}</div><form method="post" action="${esc(d.contract.action)}"><button type="submit">${esc(AGREEMENT_BUTTON)}</button></form></div>`
+      : "";
+  const vars = [`--accent:${accentOf(d)}`];
+  if (d.style) vars.push(`--r:${CORNER_RADIUS[d.style.corner].card + 2}px`, `--rb:${CORNER_RADIUS[d.style.corner].button}px`, `--font:${FONTS[d.style.fontKey].stack}`);
+  return `<article class="doc" style="${vars.join(";")}">
 <div class="bar"></div>
 <div class="in">
-  <div class="top"><div class="brand">${brand}</div><span class="pill p-${d.status}">${STATUS_LABEL[d.status]}</span></div>
+  <div class="top${d.style?.headerAlign === "center" ? " center" : ""}"><div class="brand">${brand}</div><span class="pill p-${d.status}">${STATUS_LABEL[d.status]}</span></div>
   <div class="head">
     <div><div class="k">Bill to</div><div class="who" dir="auto">${esc(d.billTo.name)}</div>${
       d.billTo.contactName ? `<div class="sub" dir="auto">${esc(d.billTo.contactName)}</div>` : ""
@@ -529,8 +649,11 @@ export function renderInvoicePageBody(d: InvoiceDocument): string {
     note ? `<p class="note">${esc(note)}</p>` : ""
   }</div>
   ${pay}
+  ${waysHtml}
+  ${contractHtml}
+  ${noteHtml}
   ${d.plan ? `<p class="plan" dir="auto">${esc(d.plan)}</p>` : ""}
-  <div class="foot"><b>${esc(d.practice.name)}</b> · Questions? Reply to the invoice email.${d.footnote ? `<br>${esc(d.footnote)}` : ""}</div>
+  <div class="foot"><b>${esc(d.practice.name)}</b> · Questions? Reply to the invoice email.${d.footnote ? `<br>${esc(d.footnote)}` : ""}${d.style?.footerText ? `<br>${esc(d.style.footerText)}` : ""}</div>
 </div>
 </article>`;
 }

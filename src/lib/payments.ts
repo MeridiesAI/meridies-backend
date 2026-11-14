@@ -25,8 +25,8 @@ import type { CardDisputeDTO, CardFailureDTO } from "./cardIssues.js";
 
 type Row = Record<string, unknown>;
 
-export type PaymentMethod = "card" | "ach" | "check" | "zelle" | "other";
-export const PAYMENT_METHODS: PaymentMethod[] = ["card", "ach", "check", "zelle", "other"];
+export type PaymentMethod = "card" | "ach" | "check" | "zelle" | "paypal" | "other";
+export const PAYMENT_METHODS: PaymentMethod[] = ["card", "ach", "check", "zelle", "paypal", "other"];
 
 export type InvoiceState = "paid" | "open" | "overdue" | "void";
 export type AccountStatus = "not-invoiced" | "paid-up" | "due" | "overdue";

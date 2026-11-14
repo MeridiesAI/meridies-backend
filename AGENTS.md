@@ -127,7 +127,11 @@ src/
 │   ├── taskSets.ts        # saved task sets: item schema, relative due dates (offset or next month/day), class-year match
 │   ├── caseloadTransfer.ts # caseload transfer: bodies, DTOs without addresses, emails, removal fallback
 │   ├── payments.ts        # Payment Tracker arithmetic; nothing stored
-│   ├── invoiceDocument.ts # the invoice layout: email (HTML + text) and pay page; formats, never computes
+│   ├── invoiceDocument.ts # the invoice layout: email (HTML + text), text message and pay page; formats, never computes
+│   ├── invoiceSend.ts     # the invoice document/email builder and the draft's plan, shared by the routes and the crons
+│   ├── invoiceSettings.ts # the practice's methods and look as an invoice reads them (degrades to defaults)
+│   ├── invoiceSchedule.ts, invoiceComposer.ts, invoiceStyle.ts, paymentMethods.ts, packageTemplates.ts, invoiceCardFee.ts, contracts.ts, invoiceDrafts.ts # the composer's pure parts
+│   ├── invoiceDispatch.ts # the scheduled-invoice and reminder crons
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -673,6 +677,23 @@ forget it.
   is written, and a request without one is byte for byte the invoice email it always was; without the migration 503
   `agreements_unavailable`. Responses add `agreement: { id, title }` only when one went. Tests:
   `test/unit/invoice-agreement.test.ts`, `test/integration/invoice-agreement.test.mjs`.
+- **The invoice composer** (`20261124000003`-`05`; design and every route's shape in
+  `docs/superpowers/specs/2026-11-13-invoice-composer-design.md`). Practice settings: `practice_payment_methods`
+  (built-ins card/ach/zelle/paypal/check seeded on an admin's first read, plus custom ones), `practice_invoice_style`
+  (accent, one of six email-safe fonts, header, corners, button label, footer, logo), `pipeline_package_templates`
+  (a family is set up by COPYING one into `pipeline_packages`; the deposit lives on the template), all written by a
+  firm owner/admin or the solo counselor (`private.crm_can_admin`), read by the practice (`routes/invoiceSettings.ts`).
+  `POST /contacts/:id/invoices` and `/preview` take optional `lines` (must sum to `amountCents`), `methods`, `passCardFee`,
+  `note`, `cc`, `to`, `channel` (email|text), `reminders`; a payload without them is the invoice it always was and writes
+  none of the new `pipeline_invoices` columns. A sent invoice keeps its look (`style_snapshot`). `pipeline_invoice_drafts`
+  holds saved/scheduled invoices (`routes/invoiceDrafts.ts`); `POST /internal/invoice-drafts/dispatch` (every 10-15
+  minutes) and `/internal/invoice-reminders/dispatch` (hourly) send them (`lib/invoiceDispatch.ts`: claimed first, the
+  counselor still approved and able to bill, amounts planned again, 100 a day). Contracts (`routes/contracts.ts`): a
+  private `contracts` bucket, `contract_files`, attached with `agreement: { contractId }`: the database writes the
+  agreement's text from the file, SHA-256 included. The card fee is dark behind `INVOICE_CARD_FEE_ENABLED`. Texting an
+  invoice needs the counselor's own number (409 `texting_unavailable`). Not in `REQUIRED_SCHEMA`; each part degrades
+  without its file. Tests: `test/unit/invoice-*.test.ts`, `contracts.test.ts`, `test/integration/invoice-composer`,
+  `invoice-drafts`, `contracts`.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a

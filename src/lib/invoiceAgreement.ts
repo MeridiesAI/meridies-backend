@@ -37,7 +37,13 @@ import {
   agreementTitle,
   isOpenAgreement,
   mintAgreementLink,
+  mintAgreementLinkAsService,
 } from "./agreements.js";
+import { CONTRACT_ATTACH_MAX_BYTES, CONTRACT_BUCKET, attachmentName, contractsUnavailable, sha256OfBytes, type ContractType } from "./contracts.js";
+import { downloadCapped } from "./storageDownload.js";
+import { serviceClient } from "./supabase.js";
+import { isResultsNotApplied } from "./resultsAvailability.js";
+import type { EmailAttachment } from "./email.js";
 import { AGREEMENT_CONSENT_VERSION } from "./agreementConsent.js";
 import { HttpError, notFound } from "./errors.js";
 
@@ -47,6 +53,8 @@ type Row = Record<string, unknown>;
 export const invoiceAgreementInput = z.union([
   z.object({ agreementId: z.string().uuid() }).strict(),
   z.object({ title: agreementTitle, bodyText: agreementBodyText }).strict(),
+  // A contract from the practice's library (lib/contracts.ts): saved as an agreement bound to the file.
+  z.object({ contractId: z.string().uuid() }).strict(),
 ]);
 export type InvoiceAgreementInput = z.infer<typeof invoiceAgreementInput>;
 
@@ -79,7 +87,18 @@ export async function resolveInvoiceAgreement(
   db: SupabaseClient,
   contactId: string,
   input: InvoiceAgreementInput
-): Promise<{ id: string | null; title: string }> {
+): Promise<ResolvedAgreement> {
+  if ("contractId" in input) {
+    const { data, error } = await db.from("contract_files").select("id, name, storage_path, mime, size_bytes, sha256, archived_at").eq("id", input.contractId).maybeSingle();
+    if (error) throw isResultsNotApplied(error) ? contractsUnavailable() : agreementsError(error);
+    const file = data as unknown as Row | null;
+    if (!file || file.archived_at) throw notFound("That contract isn't in your library");
+    return {
+      id: null,
+      title: String(file.name).slice(0, 160),
+      contract: { id: String(file.id), name: String(file.name), path: String(file.storage_path), mime: String(file.mime) as ContractType, sizeBytes: Number(file.size_bytes), sha256: String(file.sha256) },
+    };
+  }
   if (!("agreementId" in input)) return { id: null, title: input.title };
   const { data, error } = await db
     .from("agreements")
@@ -93,6 +112,10 @@ export async function resolveInvoiceAgreement(
   if (!isOpenAgreement(row.status)) throw new HttpError(409, "This agreement was already accepted or withdrawn", "agreement_closed");
   return { id: String(row.id), title: String(row.title) };
 }
+
+/** The file a contract agreement is bound to. */
+export type ContractRef = { id: string; name: string; path: string; mime: ContractType; sizeBytes: number; sha256: string };
+export type ResolvedAgreement = { id: string | null; title: string; contract?: ContractRef };
 
 /** A new agreement written in the invoice form, saved as a draft (exactly as `POST /agreements` saves one). */
 export async function saveInlineAgreement(
@@ -114,29 +137,75 @@ export async function saveInlineAgreement(
   return String((data as Row).id);
 }
 
+/** A contract from the library, saved as a draft agreement bound to its file (the database writes its text from the file). */
+export async function saveContractAgreement(
+  db: SupabaseClient,
+  p: { contactId: string; counselorId: string; contractId: string; title: string }
+): Promise<string> {
+  const { data, error } = await db
+    .from("agreements")
+    .insert({
+      counselor_id: p.counselorId,
+      contact_id: p.contactId,
+      title: p.title,
+      // Replaced by the guard with the file's own text; the column needs something.
+      body_text: "Contract file",
+      consent_version: AGREEMENT_CONSENT_VERSION,
+      contract_file_id: p.contractId,
+    })
+    .select("id")
+    .single();
+  if (error) throw isResultsNotApplied(error) ? contractsUnavailable() : agreementsError(error);
+  return String((data as Row).id);
+}
+
 /**
  * Save the inline draft if there is one, then mint the link the email carries, the same way
  * `POST /agreements/:id/send` does (and with the same effect: the agreement is `sent`, earlier
- * links stop working). Runs on the caller's client.
+ * links stop working). Runs on the caller's client; `service: true` (the scheduled-invoice cron, no signed-in
+ * user) runs on the service client and mints with `mintAgreementLinkAsService`.
  */
 export async function issueInvoiceAgreement(
   db: SupabaseClient,
-  p: { contactId: string; counselorId: string; input: InvoiceAgreementInput; resolved: { id: string | null; title: string } }
-): Promise<{ id: string; title: string; url: string }> {
+  p: {
+    contactId: string;
+    counselorId: string;
+    input: InvoiceAgreementInput;
+    resolved: ResolvedAgreement;
+    service?: boolean;
+  }
+): Promise<{ id: string; title: string; url: string; contract?: ContractRef }> {
   const publicApiUrl = env.PUBLIC_API_URL;
   if (!publicApiUrl) throw agreementsUnavailable();
   const id =
     p.resolved.id ??
-    (await saveInlineAgreement(db, {
-      contactId: p.contactId,
-      counselorId: p.counselorId,
-      title: p.resolved.title,
-      bodyText: "bodyText" in p.input ? p.input.bodyText : "",
-    }));
+    (p.resolved.contract
+      ? await saveContractAgreement(db, { contactId: p.contactId, counselorId: p.counselorId, contractId: p.resolved.contract.id, title: p.resolved.title })
+      : await saveInlineAgreement(db, {
+          contactId: p.contactId,
+          counselorId: p.counselorId,
+          title: p.resolved.title,
+          bodyText: "bodyText" in p.input ? p.input.bodyText : "",
+        }));
   try {
-    const { url } = await mintAgreementLink(db, id, { publicApiUrl });
-    return { id, title: p.resolved.title, url };
+    const { url } = p.service
+      ? await mintAgreementLinkAsService(db, id, { publicApiUrl, supersede: true, createdBy: p.counselorId })
+      : await mintAgreementLink(db, id, { publicApiUrl });
+    return { id, title: p.resolved.title, url, ...(p.resolved.contract ? { contract: p.resolved.contract } : {}) };
   } catch (err) {
     throw agreementsError(err as { code?: string; message?: string });
   }
+}
+
+/**
+ * The contract's PDF as an email attachment, when it is a PDF of at most 5 MB (read with the service role from
+ * the private bucket, after the caller has shown the contract is the practice's). A Word file, a larger one or a
+ * read that fails sends no attachment: the email's link carries the family to the file.
+ */
+export async function contractAttachment(c: ContractRef | undefined, svc: SupabaseClient | null = serviceClient()): Promise<EmailAttachment[] | undefined> {
+  if (!svc || !c || c.mime !== "application/pdf" || c.sizeBytes > CONTRACT_ATTACH_MAX_BYTES) return undefined;
+  const got = await downloadCapped(svc, CONTRACT_BUCKET, c.path, CONTRACT_ATTACH_MAX_BYTES);
+  // The bytes must be the ones whose hash was recorded (a signed upload URL can outlive the registration).
+  if (got.status !== "ok" || sha256OfBytes(got.bytes) !== c.sha256) return undefined;
+  return [{ filename: attachmentName(c.name, c.mime), content: got.bytes.toString("base64"), contentType: c.mime }];
 }

@@ -18,7 +18,9 @@ export type Job =
   | "pipeline-sequences"
   | "email-blasts"
   | "account-closure-purge"
-  | "push-dispatch";
+  | "push-dispatch"
+  | "invoice-drafts"
+  | "invoice-reminders";
 
 export async function beat(job: Job, ok: boolean, error?: string, log?: { warn: (o: object, m?: string) => void }) {
   const svc = serviceClient();

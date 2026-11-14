@@ -18,6 +18,9 @@
  *     "$API_URL/internal/ingest/college-photos"
  * and (not created yet; OFF unless ACCOUNT_PURGE_ENABLED=true) daily, closed accounts past their grace period:
  *     "$API_URL/internal/account-closures/purge"
+ * and every 10-15 minutes, the scheduled invoices that are due (lib/invoiceDispatch.ts), and hourly, invoice reminders:
+ *     "$API_URL/internal/invoice-drafts/dispatch"
+ *     "$API_URL/internal/invoice-reminders/dispatch"
  * and, per college, cited catalog proposals from the school's own pages (body {"collegeId"} or {"unitid"}):
  *     "$API_URL/internal/catalog/propose"
  */
@@ -33,6 +36,7 @@ import { beat, summarizeHeartbeats, type HeartbeatRow } from "../lib/heartbeat.j
 import { dispatchDueBlasts } from "../lib/blasts.js";
 import { purgeFlag, runClosurePurge } from "../lib/accountClosure.js";
 import { dispatchDueSequences } from "../lib/pipelineSequences.js";
+import { dispatchDueInvoiceDrafts, dispatchInvoiceReminders } from "../lib/invoiceDispatch.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { recoverExtractions } from "../lib/documentExtraction.js";
 import { runImportSweep } from "../lib/imports/jobs.js";
@@ -111,6 +115,51 @@ export default async function internalRoutes(app: FastifyInstance) {
           return reply.code(200).send({ ran: false, reason: "Apply 20261028000004_pipeline_email_sequences.sql" });
         }
         await beat("pipeline-sequences", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
+  /**
+   * Every 10-15 minutes: send the scheduled invoices that are due as real invoices (lib/invoiceDispatch.ts). Each
+   * draft is claimed before anything happens, its counselor must still be approved and able to bill the family,
+   * and the amounts are planned again, so overlapping runs and stale drafts can't double-bill. A yearly draft
+   * writes next year's. `ran: false` until migration 20261124000004 is applied.
+   */
+  app.post(
+    "/invoice-drafts/dispatch",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "Scheduled invoices need the service role key" });
+      try {
+        const tally = await dispatchDueInvoiceDrafts(svc, request.log);
+        if (tally.ran) await beat("invoice-drafts", true, undefined, request.log);
+        return tally.ran ? tally : { ...tally, reason: "Apply 20261124000004_invoice_composer_invoices.sql" };
+      } catch (err) {
+        await beat("invoice-drafts", false, err instanceof Error ? err.message : "failed", request.log);
+        throw err;
+      }
+    }
+  );
+
+  /**
+   * Hourly: send the reminders an invoice asked for (days before / after its due date, 9:00 in the counselor's time
+   * zone) while it is still owed. Each reminder is claimed in the database first (`claim_invoice_reminder`), so
+   * overlapping runs send it once; one that missed its day by more than a day and a half is dropped, not sent late.
+   */
+  app.post(
+    "/invoice-reminders/dispatch",
+    { preHandler: [requireCronSecret], config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const svc = serviceClient();
+      if (!svc) return reply.code(503).send({ ran: false, reason: "Invoice reminders need the service role key" });
+      try {
+        const tally = await dispatchInvoiceReminders(svc, request.log);
+        if (tally.ran) await beat("invoice-reminders", true, undefined, request.log);
+        return tally.ran ? tally : { ...tally, reason: "Apply 20261124000004_invoice_composer_invoices.sql" };
+      } catch (err) {
+        await beat("invoice-reminders", false, err instanceof Error ? err.message : "failed", request.log);
         throw err;
       }
     }

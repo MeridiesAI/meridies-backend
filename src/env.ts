@@ -46,6 +46,9 @@ const envSchema = z.object({
   // 404 agreements_off unless "true". Stays off in production until the consent
   // wording in lib/agreementConsent.ts has been reviewed. Not a certified e-signature.
   AGREEMENTS_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
+  // Invoice composer: pass the card processing fee to the family (lib/invoiceCardFee.ts). Off unless "true"
+  // (surcharge rules vary by state), and then only for an invoice the counselor marked "Pass card fee".
+  INVOICE_CARD_FEE_ENABLED: blankIsUnset(z.enum(["true", "false"]).default("false")),
   // Footer of the monthly Time saved emails: the postal address when there is one,
   // else the contact email. These are relationship emails about the customer's own
   // account (no promotion), so a postal address is optional; add one before any

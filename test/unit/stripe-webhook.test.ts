@@ -116,7 +116,7 @@ class Query {
 const realStripe = new Stripe("sk_test_unit000000000000");
 
 class FakeStripe {
-  charges = new Map<string, { id: string; payment_intent: string; amount_refunded: number }>();
+  charges = new Map<string, { id: string; payment_intent: string; amount_refunded: number; metadata?: Record<string, string> }>();
   accounts = new Map<string, { charges_enabled: boolean; payouts_enabled: boolean; details_submitted: boolean } | "gone">();
   client(): WebhookStripe {
     return {
@@ -257,6 +257,25 @@ test("paid: checkout.session.completed records one card payment and the invoice 
   await app.close();
 });
 
+test("a passed-on card fee is charged but never counted: the payment is the invoice amount", async () => {
+  const app = await build();
+  // The family paid $500 + a $14.82 fee (meridies_fee_cents in the metadata).
+  const r = await post(app, evt("checkout.session.completed", session({ amount_total: 51482, metadata: { ...meta, meridies_fee_cents: "1482" } })));
+  assert.equal(r.json().outcome, "recorded");
+  assert.equal(payments()[0].amount_cents, 50000);
+  assert.equal((await invoice()).state, "paid");
+  await app.close();
+});
+
+test("a nonsense fee in the metadata is ignored, not trusted", async () => {
+  const app = await build();
+  for (const [i, fee] of ["-5", "abc", "999999", "1.5"].entries()) {
+    await post(app, evt("checkout.session.completed", session({ id: `cs_${i}`, payment_intent: `pi_fee_${i}`, metadata: { ...meta, meridies_fee_cents: fee } })));
+    assert.equal(payments()[i]?.amount_cents, 50000, fee);
+  }
+  await app.close();
+});
+
 test("async paid: an unpaid completion waits, async_payment_succeeded records, a late completed adds nothing", async () => {
   const app = await build();
   assert.equal((await post(app, evt("checkout.session.completed", session({ payment_status: "unpaid" })))).json().outcome, "not paid yet");
@@ -366,6 +385,20 @@ test("refunded, partly then fully: refunded_cents is Stripe's running total and 
   assert.equal(payments()[0].refunded_cents, 50000);
   assert.equal(a.collectedCents, 0);
   assert.equal(a.invoices[0].paidCents, 0);
+  await app.close();
+});
+
+test("a refund of only the passed-on card fee leaves the invoice paid; refunding the whole charge refunds the whole payment", async () => {
+  const app = await build();
+  await post(app, evt("checkout.session.completed", session({ amount_total: 51482, metadata: { ...meta, meridies_fee_cents: "1482" } })));
+  stripe.charges.set("ch_test_1", { id: "ch_test_1", payment_intent: "pi_test_1", amount_refunded: 1482, metadata: { ...meta, meridies_fee_cents: "1482" } });
+  await post(app, refundEvent(1482));
+  assert.equal(payments()[0].refunded_cents, 0, "the fee coming back is not the invoice coming back");
+  assert.equal((await invoice()).state, "paid");
+  stripe.charges.get("ch_test_1")!.amount_refunded = 51482;
+  await post(app, refundEvent(51482));
+  assert.equal(payments()[0].refunded_cents, 50000);
+  assert.equal((await invoice()).state, "open");
   await app.close();
 });
 
