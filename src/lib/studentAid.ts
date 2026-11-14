@@ -508,7 +508,8 @@ async function studentAttrs(db: SupabaseClient, studentId: string, prefs: Schola
       [a.name, a.position, a.organization, a.category].filter(Boolean).join(" ").toLowerCase()
     ),
     axes: ((axes.data ?? []) as Row[])
-      .filter((a) => a.hidden !== true && (a.manual_score != null || a.auto_score != null))
+      // An axis with only an AI estimate has neither stored score but a positive `score`.
+      .filter((a) => a.hidden !== true && (a.manual_score != null || a.auto_score != null || Number(a.score) > 0))
       .map((a) => ({ label: String(a.label), score: Number(a.score) })),
     audience: prefs.audience,
   };

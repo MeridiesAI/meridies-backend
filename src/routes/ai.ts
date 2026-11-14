@@ -20,11 +20,13 @@ import {
 } from "../lib/anthropic.js";
 import { buildStudentContext } from "../lib/context/index.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
-import { badRequest, fromPostgrest, notFound } from "../lib/errors.js";
+import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { cleanEstimate, cleanNodeEstimate, POLYGON_ESTIMATE_SYSTEM, polygonEstimatePrompt, polygonEstimateSchema } from "../lib/polygonEstimate.js";
 import { essayShaped } from "../lib/proseGuard.js";
 import { toEssayReview } from "../lib/serialize.js";
+import { loadPolygon } from "../lib/studentPage.js";
 
 const BASE_SYSTEM = [
   "You support independent college counselors at Meridies.",
@@ -96,6 +98,92 @@ export default async function aiRoutes(app: FastifyInstance) {
         .eq("id", studentId);
 
       return { ...result, contextUsed };
+    }
+  );
+
+  // ---- Estimate with AI: the stat polygon ----------------------------------
+
+  /**
+   * A 0-100 read of each visible polygon axis from the student's record, with the reason, stored beside the
+   * formula's score (`ai_score`). A counselor's typed score still wins; clearing it falls back to this, then the
+   * formula. `auto_score` is untouched, so the counselor's polygon read never overwrites an estimate.
+   */
+  app.post(
+    "/polygon-estimate",
+    { preHandler: [app.authenticate, requireRole("counselor"), aiLimit("polygon-estimate")] },
+    async (request) => {
+      const { studentId } = studentBody.parse(request.body);
+      await resolveStudentId(request, studentId, "edit");
+      const { axes } = await loadPolygon(request.db, studentId, { persist: true });
+      if (axes.length === 0) throw badRequest("This student's polygon has no axes to estimate");
+
+      const ctx = await buildStudentContext(request, studentId, "student-ai");
+      const contextUsed = { used: ctx.used, omitted: ctx.omitted };
+      const { axes: estimates, nodes } = await runStructured({
+        request,
+        module: "polygon-estimate",
+        studentId,
+        model: DEEP_MODEL,
+        system: `${BASE_SYSTEM}\n\n${POLYGON_ESTIMATE_SYSTEM}\n\n${UNTRUSTED_DATA_RULE}`,
+        contextUsage: contextUsed,
+        prompt: polygonEstimatePrompt(axes, ctx.text),
+        toolName: "polygon_estimate",
+        maxTokens: 3500,
+        schema: polygonEstimateSchema(axes.map((a) => a.key)),
+        // The detail nodes ride along in the same call; they are a bonus, so a bad `nodes` never fails the axes.
+        validate: (value) => ({ axes: cleanEstimate(value, axes), nodes: cleanNodeEstimate(value) }),
+      });
+
+      const byKey = new Map(axes.map((a) => [a.key, a.id]));
+      const scoredAt = new Date().toISOString();
+      const results = await Promise.all(
+        estimates.map((e) =>
+          request.db
+            .from("student_polygon_axes")
+            .update({ ai_score: e.score, ai_rationale: e.rationale, ai_scored_at: scoredAt })
+            .eq("id", byKey.get(e.key) as string)
+            .eq("student_id", studentId)
+        )
+      );
+      for (const r of results) {
+        // 42703 / PGRST204: the columns aren't there yet (20261125000002 not applied).
+        if (r.error?.code === "42703" || r.error?.code === "PGRST204") {
+          throw unavailable("Estimate with AI isn't switched on yet.");
+        }
+        if (r.error) throw fromPostgrest(r.error);
+      }
+
+      // The 3D solid's detail nodes (20261125000003). The axes above are already saved, so a database
+      // without the table answers "nodes: unavailable" instead of failing the estimate.
+      let nodesSaved: "saved" | "unavailable" | "none" = nodes.length ? "saved" : "none";
+      if (nodes.length) {
+        const { error: nodeError } = await request.db.from("student_stat_nodes").upsert(
+          nodes.map((n) => ({
+            student_id: studentId,
+            key: n.key,
+            ai_score: n.score,
+            ai_rationale: n.rationale,
+            ai_scored_at: scoredAt,
+            updated_by: request.auth.userId,
+          })),
+          { onConflict: "student_id,key" }
+        );
+        if (nodeError) {
+          if (nodeError.code === "42P01" || nodeError.code === "PGRST205" || nodeError.code === "42703" || nodeError.code === "PGRST204") {
+            nodesSaved = "unavailable";
+          } else {
+            throw fromPostgrest(nodeError);
+          }
+        }
+      }
+
+      return {
+        estimated: estimates.filter((e) => e.score !== null).length,
+        notEnoughData: estimates.filter((e) => e.score === null).map((e) => e.key),
+        nodes: nodesSaved,
+        nodesEstimated: nodes.filter((n) => n.score !== null).length,
+        contextUsed,
+      };
     }
   );
 

@@ -321,11 +321,21 @@ export default async function studentPageRoutes(app: FastifyInstance) {
         .eq("source", "custom");
       if (removed.error) throw fromPostgrest(removed.error);
 
-      const restored = await db
+      const base = { manual_score: null, hidden: false, updated_by: request.auth.userId };
+      let restored = await db
         .from("student_polygon_axes")
-        .update({ manual_score: null, hidden: false, updated_by: request.auth.userId })
+        .update({ ...base, ai_score: null, ai_rationale: null, ai_scored_at: null })
         .eq("student_id", student);
+      // Before 20261125000002 the AI columns don't exist; reset still has to work.
+      if (restored.error?.code === "42703" || restored.error?.code === "PGRST204") {
+        restored = await db.from("student_polygon_axes").update(base).eq("student_id", student);
+      }
       if (restored.error) throw fromPostgrest(restored.error);
+
+      // The 3D solid's detail nodes are AI estimates too, so back to derived clears them. A database
+      // without the table (20261125000003) has none to clear.
+      const nodes = await db.from("student_stat_nodes").delete().eq("student_id", student);
+      if (nodes.error && !["42P01", "PGRST205"].includes(nodes.error.code ?? "")) throw fromPostgrest(nodes.error);
 
       return await refreshed(db, student);
     }

@@ -69,6 +69,8 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   "meeting-summary",
   // A family's messages and replies go to the model to be translated (lib/translate.ts).
   "message-translate",
+  // Estimate with AI scores a student's record for the strength profile.
+  "polygon-estimate",
 ]);
 
 /**

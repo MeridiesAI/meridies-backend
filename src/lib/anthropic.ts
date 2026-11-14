@@ -105,7 +105,9 @@ export type AiModule =
   // Cited catalog proposals from a school's own pages (lib/catalogProposals.ts); 20261111000011.
   | "catalog-proposals"
   // Core features and opportunities read off a college's own pages (lib/ingest/collegeFeatures.ts); 20261124000007.
-  | "college-features";
+  | "college-features"
+  // Estimate with AI on the stat polygon (routes/ai.ts, lib/polygonEstimate.ts); 20261125000002.
+  | "polygon-estimate";
 
 /**
  * A file the model reads directly: a PDF as a document block, an image as an

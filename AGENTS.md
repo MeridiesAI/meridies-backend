@@ -113,6 +113,7 @@ src/
 │   ├── studentAvatar.ts   # a student's photo: object path, the `storage:` reference, batch-signed read URLs, cleanup
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
+│   ├── polygonEstimate.ts # Estimate with AI: the scoring prompt (anchored to the admitted-student polygon's scale), the schema, cleanEstimate (pure)
 │   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── activityListImport.ts # an activity list in Files -> proposed Activities rows (a sheet's columns without a model; else AxIS); stores nothing
@@ -1377,6 +1378,33 @@ forget it.
   Colleges tab files research into "Policy & research" by key. Counselors who
   existed at migration time were backfilled; newer ones get them on their
   first Files read (`lib/practiceFolders.ts`).
+- **Estimate with AI scores the polygon, and a counselor's number still wins** (`20261125000002`; `lib/polygonEstimate.ts`,
+  `POST /ai/polygon-estimate { studentId }`, counselor with edit access, 20 a minute, `ai_runs` module `polygon-estimate`,
+  governed by the practice's "AI summaries" switch). It builds the `student-ai` context (which leaves the polygon itself
+  out, so the model never anchors on the scores it replaces), asks DEEP_MODEL for one 0-100 integer and a reason of at
+  most 240 characters per visible axis, and `cleanEstimate` keeps only the student's own axis keys, rounds and clamps the
+  score and bounds the reason (nothing usable is a 503). A `null` score means no evidence at all for that axis: the axis
+  keeps its formula score and the reason says what is missing. **The scale is the admitted-student polygon's**
+  (`college_admitted_profiles`: MIT/Stanford 95-99, NYU/Michigan/Berkeley 85-94), so a counselor can lay the two shapes
+  over each other; it is not "a solid student is 50". Results go in `student_polygon_axes.ai_score` / `ai_rationale` /
+  `ai_scored_at`; `auto_score` is never touched, so the counselor's polygon read does not overwrite an estimate.
+  **Precedence is `manual_score` > `ai_score` > `auto_score`**, in the generated `score` column (dropped and re-added by the
+  migration, so the history trigger records an AI-driven move like any other) and in `toAxisDto`. `POST
+  /:id/polygon/reset` clears AI estimates too (and still works before the migration: it retries without the AI
+  columns). The reason (`aiRationale`) is the counselor's: `polygonResponse` blanks it for a student's read and the legacy
+  `toPolygonAxis` (which reaches students) carries `aiScore` only. **Deploy order:** migration first; before it the route
+  answers 503 "Estimate with AI isn't switched on yet" and everything else is unchanged. Not in `REQUIRED_SCHEMA`.
+  **The same call scores six detail nodes for the 3D stat solid** (Leadership, Awards, Service, Research, Arts, School
+  fit; `EXTRA_NODE_GUIDE` in `lib/polygonEstimate.ts`; `20261125000003`, table `student_stat_nodes`, one row per student and
+  node: `ai_score`, `ai_rationale`, `ai_scored_at`). They are NOT polygon axes, so the 2D chart, the ten-axis cap and
+  `polygon_axis_history` are unaffected (an AI move on a node is not recorded in the history). One model call returns
+  `axes` and `nodes`; `cleanNodeEstimate` is lenient (a missing or malformed `nodes` is "no nodes this time", never a failed
+  estimate). The table is counselor-written and student-read-only, and carries the approval gate. `loadPolygon` returns an
+  optional `nodes: [{ key, score, rationale, scoredAt }]` beside the axes (rationale blanked for a student's read; a hidden
+  strength profile hides it with the axes, in the same routes; absent before the migration). The route answers `nodes:
+  "saved" | "unavailable" | "none"`; without the table the axes still save. `POST /:id/polygon/reset` clears them too.
+  Tests: `test/unit/polygon-estimate.test.ts`. Known limit: activities carry no impact tier, so depth is inferred from
+  text; on a thin record a repeat run moves a score by about 5 points, not more.
 - **A polygon holds at most ten visible axes.** A trigger refuses the
   eleventh (errcode 23514); a default axis the counselor removes is `hidden`,
   not deleted, so its history keeps its parent. `ensure_default_polygon_axes`

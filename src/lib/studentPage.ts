@@ -465,10 +465,14 @@ export type PolygonAxisDto = {
   key: string;
   label: string;
   description: string | null;
-  /** The counselor's score where set, else the derived one; null when neither exists. */
+  /** The counselor's score where set, else the AI's estimate, else the derived one; null when none exists. */
   score: number | null;
   autoScore: number | null;
   manualScore: number | null;
+  /** Estimate with AI: the model's 0-100 read and why (the reason is the counselor's, never the student's). */
+  aiScore: number | null;
+  aiRationale: string | null;
+  aiScoredAt: string | null;
   isManual: boolean;
   custom: boolean;
   hidden: boolean;
@@ -478,14 +482,18 @@ export type PolygonAxisDto = {
 export function toAxisDto(r: Row): PolygonAxisDto {
   const manual = n(r.manual_score);
   const auto = n(r.auto_score);
+  const ai = n(r.ai_score);
   return {
     id: String(r.id),
     key: String(r.key),
     label: String(r.label),
     description: s(r.description),
-    score: manual ?? auto,
+    score: manual ?? ai ?? auto,
     autoScore: auto,
     manualScore: manual,
+    aiScore: ai,
+    aiRationale: s(r.ai_rationale),
+    aiScoredAt: s(r.ai_scored_at),
     isManual: manual !== null,
     custom: r.source === "custom",
     hidden: r.hidden === true,
@@ -582,9 +590,34 @@ export type PolygonResponse = {
   canAdd: boolean;
   /** SV Demo v2: true for the student, who reads their profile and never edits it. */
   readOnly: boolean;
+  /**
+   * The 3D solid's detail nodes (Leadership, Awards, Service, Research, Arts, School fit), as "Estimate with AI"
+   * left them. Absent before 20261125000003 or when they can't be read; empty until the first estimate.
+   */
+  nodes?: StatNodeDto[];
 };
 
-function polygonResponse(axes: PolygonAxisDto[], readOnly: boolean): PolygonResponse {
+export type StatNodeDto = { key: string; score: number | null; rationale: string | null; scoredAt: string | null };
+
+/** The extra nodes for one student; undefined (field left out) when the table isn't there or can't be read. */
+async function loadStatNodes(db: SupabaseClient, studentId: string, readOnly: boolean): Promise<StatNodeDto[] | undefined> {
+  const { data, error } = await db
+    .from("student_stat_nodes")
+    .select("key, ai_score, ai_rationale, ai_scored_at")
+    .eq("student_id", studentId);
+  if (error) return undefined;
+  return ((data ?? []) as Row[]).map((r) => ({
+    key: String(r.key),
+    score: n(r.ai_score),
+    // The model's reasoning is the counselor's working note; the student reads the number only.
+    rationale: readOnly ? null : s(r.ai_rationale),
+    scoredAt: s(r.ai_scored_at),
+  }));
+}
+
+function polygonResponse(all: PolygonAxisDto[], readOnly: boolean, nodes?: StatNodeDto[]): PolygonResponse {
+  // The model's reasoning is the counselor's working note; the student reads the number only.
+  const axes = readOnly ? all.map((a) => ({ ...a, aiRationale: null })) : all;
   const visible = axes.filter((a) => !a.hidden);
   return {
     axes: visible,
@@ -592,6 +625,7 @@ function polygonResponse(axes: PolygonAxisDto[], readOnly: boolean): PolygonResp
     maxAxes: MAX_AXES,
     canAdd: !readOnly && visible.length < MAX_AXES,
     readOnly,
+    ...(nodes ? { nodes } : {}),
   };
 }
 
@@ -614,9 +648,10 @@ export async function loadPolygon(
     if (seeded.error) throw fromPostgrest(seeded.error);
   }
 
-  const [{ data, error }, derived] = await Promise.all([
+  const [{ data, error }, derived, nodes] = await Promise.all([
     db.from("student_polygon_axes").select("*").eq("student_id", studentId).order("sort_order"),
     deriveAxisScores(db, studentId),
+    loadStatNodes(db, studentId, !opts.persist),
   ]);
   if (error) throw fromPostgrest(error);
   const rows = (data ?? []) as Row[];
@@ -637,7 +672,7 @@ export async function loadPolygon(
     row.auto_score = next;
   }
 
-  return polygonResponse(rows.map(toAxisDto), !opts.persist);
+  return polygonResponse(rows.map(toAxisDto), !opts.persist, nodes);
 }
 
 /**

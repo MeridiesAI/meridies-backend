@@ -221,6 +221,8 @@ export const toPolygonAxis = (r: Row) => ({
   maxScore: num(r.max_score) ?? 100,
   autoScore: num(r.auto_score) ?? null,
   manualScore: num(r.manual_score) ?? null,
+  // The AI estimate's number only: its reason is the counselor's, and this shape reaches students too.
+  aiScore: num(r.ai_score) ?? null,
   score: num(r.score) ?? 0,
   isManual: r.manual_score != null,
   note: str(r.note),
