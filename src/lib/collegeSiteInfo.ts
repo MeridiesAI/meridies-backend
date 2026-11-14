@@ -82,7 +82,8 @@ export const THIN_FRESH_DAYS = 1;
 const MAX_SUBPAGES = 3;
 const PAGE_TIMEOUT_MS = 15_000;
 const PAGE_PROMPT_CHARS = 12_000;
-const MIN_QUOTE_CHARS = 12;
+/** The shortest quote that counts as evidence: anything shorter is on almost every page. */
+export const MIN_QUOTE_CHARS = 12;
 const MAX_TEXT_FIELD = 600;
 const MAX_DEADLINES = 12;
 const MAX_PROGRAMS = 15;
@@ -253,8 +254,19 @@ export function planFitsEvidence(plan: DeadlinePlan, evidence: string): boolean 
 }
 
 /** The figures in a sentence: "1870", "40,000", "3.5". */
-function figures(text: string): string[] {
+export function figures(text: string): string[] {
   return (text.match(/\d[\d,.]*\d|\d/g) ?? []).map((f) => f.replace(/[,.]+$/, ""));
+}
+
+/**
+ * Whether `evidence` is a quote of `hay`: a string of at least MIN_QUOTE_CHARS that, folded by
+ * `normalizeForQuote`, is a contiguous piece of `hay` (already folded the same way). The one test
+ * every scraped fact passes, here and in the college features ingest (lib/ingest/collegeFeatures.ts).
+ */
+export function quoteIsOn(evidence: unknown, hay: string): evidence is string {
+  if (typeof evidence !== "string") return false;
+  const q = normalizeForQuote(evidence);
+  return q.length >= MIN_QUOTE_CHARS && hay.includes(q);
 }
 
 /**
@@ -268,8 +280,7 @@ export function groundFacts(raw: unknown, pageTexts: string[]): SiteFacts {
   const out: SiteFacts = { about: null, deadlines: [], testPolicy: null, essaysRecs: null, programs: [] };
   if (!isRecord(raw)) return out;
   const hay = normalizeForQuote(pageTexts.join("\n"));
-  const quoted = (evidence: unknown): evidence is string =>
-    typeof evidence === "string" && normalizeForQuote(evidence).length >= MIN_QUOTE_CHARS && hay.includes(normalizeForQuote(evidence));
+  const quoted = (evidence: unknown): evidence is string => quoteIsOn(evidence, hay);
 
   const statement = (v: unknown): string | null => {
     if (!isRecord(v) || typeof v.text !== "string" || !quoted(v.evidence)) return null;

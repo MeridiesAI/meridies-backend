@@ -1,0 +1,22 @@
+{
+  "core_features": [
+    { "key": "small_classes", "value": 0.8, "quote": "small seminars of no more than 15 students, taught by full-time faculty", "source_url": "https://www.example.edu/academics/honors-college/" },
+    { "key": "undergrad_research", "value": 0.9, "quote": "The Center for Undergraduate Research funds student projects in every college", "source_url": "https://www.example.edu/research/undergraduate-research" },
+    { "key": "study_abroad", "value": 0.85, "quote": "Students can study abroad on all seven continents.", "source_url": "https://www.example.edu/study-abroad" },
+    { "key": "greek_life", "value": 1, "quote": "small seminars of no more than 15 students", "source_url": "https://www.example.edu/study-abroad" },
+    { "key": "campus_vibes", "value": 0.5, "quote": "small seminars of no more than 15 students", "source_url": "https://www.example.edu/academics/honors-college" },
+    { "key": "__proto__", "value": 0.5, "quote": "small seminars of no more than 15 students", "source_url": "https://www.example.edu/academics/honors-college" },
+    { "key": "residential", "value": 1.4, "quote": "live together in Founders Hall during their first year", "source_url": "https://www.example.edu/academics/honors-college" },
+    { "key": "small_classes", "value": 0.3, "quote": "Every honors student completes a senior thesis with a faculty mentor.", "source_url": "https://www.example.edu/academics/honors-college" }
+  ],
+  "opportunities": [
+    { "name": "The Honors College", "category": "academic_program", "description": "Small seminars taught by full-time faculty. Students live together in their first year. Every student writes a senior thesis.", "quote": "The Honors College at Example State offers small seminars", "source_url": "https://www.example.edu/academics/honors-college" },
+    { "name": "Summer Undergraduate Research Fellowship (SURF)", "category": "research", "description": "Ten weeks of full-time work in a faculty lab, with a stipend.", "quote": "students spend ten weeks working full time in a faculty lab with a stipend", "source_url": "https://www.example.edu/research/undergraduate-research" },
+    { "name": "Global Semester", "category": "global", "description": "A semester at a partner university in one of 40 countries.", "quote": "sends students to partner universities in 40 countries", "source_url": "https://www.example.edu/study-abroad" },
+    { "name": "Center for Undergraduate Research", "category": "research", "description": "Funds student projects across 15 departments.", "quote": "funds student projects in every college", "source_url": "https://www.example.edu/research/undergraduate-research" },
+    { "name": "Ivy Leadership Institute", "category": "community", "description": "A leadership program.", "quote": "The Center for Undergraduate Research funds student projects", "source_url": "https://www.example.edu/research/undergraduate-research" },
+    { "name": "Nightlife Collective", "category": "nightlife", "description": "Evenings out.", "quote": "The Honors College at Example State offers small seminars", "source_url": "https://www.example.edu/academics/honors-college" },
+    { "name": "Fake Fellowship", "category": "research", "description": "A fellowship.", "quote": "The Fake Fellowship pays every student a large stipend.", "source_url": "https://www.example.edu/research/undergraduate-research" },
+    { "name": "the honors college", "category": "academic_program", "description": "Again.", "quote": "The Honors College at Example State offers small seminars", "source_url": "https://www.example.edu/academics/honors-college" }
+  ]
+}

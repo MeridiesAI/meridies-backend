@@ -566,17 +566,26 @@ export async function fetchReadablePage(rawUrl: string): Promise<FetchedPage> {
 type FetchedBytes = { finalUrl: URL; contentType: string; bytes: Buffer };
 
 /**
+ * Called with each request's URL (the first and every redirect hop) after it passed validation and
+ * before it is sent. A crawler uses it to keep its per-host rate and robots.txt; throwing stops the fetch.
+ */
+export type BeforeRequest = (url: URL) => Promise<void>;
+
+/**
  * GET with the same per-hop validation, pinning and caps as fetchReadablePage,
  * for a body the caller reads as bytes. `truncate` keeps the first `maxBytes`
  * of a longer page (a `<head>` is at the top); otherwise a longer body is refused.
  */
 async function fetchBytes(
   rawUrl: string,
-  o: { accept: string; types: string[]; maxBytes: number; truncate: boolean }
+  o: { accept: string; types: string[]; maxBytes: number; truncate: boolean; beforeRequest?: BeforeRequest }
 ): Promise<FetchedBytes> {
   let current = await validateUrl(rawUrl);
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    // The caller's say over every request, redirects included: it may wait (a per-host rate) or
+    // refuse by throwing (robots.txt, a hop off the site), before a byte goes out.
+    if (o.beforeRequest) await o.beforeRequest(current.url);
     const signal = AbortSignal.timeout(TIMEOUT_MS);
     let res: PinnedResponse;
     try {
@@ -865,22 +874,89 @@ export function extractLinks(source: string, base: URL): SiteLink[] {
  * as the rest of this file: the text a model may read, the links to follow and
  * the head's title, description and share images, from a single request.
  */
-export async function fetchSitePage(rawUrl: string): Promise<SitePage> {
+export async function fetchSitePage(
+  rawUrl: string,
+  opts: { beforeRequest?: BeforeRequest; mainContent?: boolean } = {}
+): Promise<SitePage> {
   const page = await fetchBytes(rawUrl, {
     accept: "text/html,application/xhtml+xml;q=0.9",
     types: ["text/html", "application/xhtml+xml"],
     maxBytes: MAX_SITE_PAGE_BYTES,
     truncate: true,
+    beforeRequest: opts.beforeRequest,
   });
   const html = page.bytes.toString("utf8");
   const { title, text } = extractText(html);
   return {
     finalUrl: page.finalUrl.toString(),
     title,
-    text: text.slice(0, MAX_TEXT_CHARS),
+    text: (opts.mainContent ? extractMainText(html) : text).slice(0, MAX_TEXT_CHARS),
     meta: parsePageMeta(html, page.finalUrl),
     links: extractLinks(html, page.finalUrl),
   };
+}
+
+/** A `<main` tag (not `<maintenance-banner>`): followed by white space, `>` or `/`. */
+function tagAt(lower: string, name: string, from: number): number {
+  for (let i = lower.indexOf(name, from); i >= 0; i = lower.indexOf(name, i + 1)) {
+    const c = lower.charCodeAt(i + name.length);
+    if (isSpace(c) || c === 62 /* > */ || c === 47 /* / */) return i;
+  }
+  return -1;
+}
+
+/** Below this much text a page's `<main>` is a wrapper around something else; the whole page is read instead. */
+const MIN_MAIN_CHARS = 200;
+
+/**
+ * A page's own words, without the site's menus: the text inside its `<main>` when it has one holding real text
+ * (else the whole page), with `<nav>`, `<footer>` and `<aside>` blocks taken out. The same words on every page of a
+ * site (menus, footers) would otherwise fill a model's prompt and change a page's hash when only the menu changed.
+ * Linear like `extractText`: `indexOf` scans and `replaceBlocks`, no regular expression over the page.
+ */
+export function extractMainText(html: string): string {
+  const lower = asciiLower(html);
+  const chrome = (s: string) => {
+    let body = replaceBlocks(s, "<nav", "</nav>", " ");
+    body = replaceBlocks(body, "<footer", "</footer>", " ");
+    body = replaceBlocks(body, "<aside", "</aside>", " ");
+    return extractText(body).text;
+  };
+  const open = tagAt(lower, "<main", 0);
+  const close = open >= 0 ? lower.lastIndexOf("</main>") : -1;
+  if (open >= 0 && close > open) {
+    const main = chrome(html.slice(open, close));
+    if (main.length >= MIN_MAIN_CHARS) return main;
+  }
+  // No <main>, or one with almost nothing in it: everything but the head, without the menus.
+  const bodyAt = tagAt(lower, "<body", 0);
+  return chrome(bodyAt >= 0 ? html.slice(bodyAt) : html);
+}
+
+/** What a crawler reads besides pages: a site's robots.txt and its sitemaps. */
+export type CrawlFileKind = "robots" | "sitemap";
+
+const CRAWL_FILES: Record<CrawlFileKind, { accept: string; types: string[]; maxBytes: number }> = {
+  // RFC 9309 lets a crawler stop reading robots.txt after 500 KiB. A site that serves it as HTML (a "not found"
+  // page with a 200) parses to no rules, which is what a missing file means.
+  robots: { accept: "text/plain,*/*;q=0.1", types: ["text/plain", "text/html", "application/octet-stream"], maxBytes: 512_000 },
+  // A sitemap may be 50 MB; the first 5 MB of one is plenty of addresses to choose from. Gzipped sitemap files
+  // (application/x-gzip) are not read.
+  sitemap: { accept: "application/xml,text/xml;q=0.9,text/plain;q=0.5", types: ["xml", "text/plain"], maxBytes: 5_000_000 },
+};
+
+/**
+ * A site's robots.txt or a sitemap, as text, through the same validated, pinned, redirect-checked fetch as a
+ * page. A longer file is cut, not refused. Errors are the link errors (`link_not_found` for a 404/410).
+ */
+export async function fetchCrawlFile(
+  rawUrl: string,
+  kind: CrawlFileKind,
+  opts: { beforeRequest?: BeforeRequest } = {}
+): Promise<{ finalUrl: string; text: string }> {
+  const f = CRAWL_FILES[kind];
+  const got = await fetchBytes(rawUrl, { ...f, truncate: true, beforeRequest: opts.beforeRequest });
+  return { finalUrl: got.finalUrl.toString(), text: got.bytes.toString("utf8") };
 }
 
 /**

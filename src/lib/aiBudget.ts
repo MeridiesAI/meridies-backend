@@ -29,9 +29,17 @@ import { serviceClient } from "./supabase.js";
 /** What the gate logs through: a request's logger, or a job's. */
 export type BudgetLog = { warn(obj: unknown, msg?: string): void; error(obj: unknown, msg?: string): void };
 
-export type SystemSubject = "events-discovery" | "catalog-proposals";
-/** catalog-proposals: one Haiku read per college run (lib/catalogProposals.ts), a few hundred schools a month at most. */
-export const SYSTEM_CALLS_PER_MONTH: Record<SystemSubject, number> = { "events-discovery": 2000, "catalog-proposals": 500 };
+export type SystemSubject = "events-discovery" | "catalog-proposals" | "college-features";
+/**
+ * catalog-proposals: one Haiku read per college run (lib/catalogProposals.ts), a few hundred schools a month at most.
+ * college-features: one Haiku read per college whose pages changed (lib/ingest/collegeFeatures.ts); a first fill of the
+ * most-listed schools, then re-runs that skip unchanged sites.
+ */
+export const SYSTEM_CALLS_PER_MONTH: Record<SystemSubject, number> = {
+  "events-discovery": 2000,
+  "catalog-proposals": 500,
+  "college-features": 1500,
+};
 
 /** `role` only selects the daily limits: a student's are lower than a counselor's (AI_STUDENT_DAILY_*). Unset means the counselor's. */
 export type BudgetSubject = { userId: string; role?: "student" | "counselor" } | { system: SystemSubject };

@@ -50,7 +50,7 @@ import { eventKey } from "./ingest/events.js";
 import { beat } from "./heartbeat.js";
 import { checkLink } from "./links.js";
 import { isBlocked, keepCandidates } from "./research/citations.js";
-import { collegesOnLists, listRowsFor, rankColleges, type ListRow } from "./rosterColleges.js";
+import { topRosterColleges } from "./rosterColleges.js";
 import { serviceClient } from "./supabase.js";
 
 type Row = Record<string, unknown>;
@@ -553,33 +553,6 @@ function drain(svc: SupabaseClient, log: Log) {
 }
 
 // ---- The weekly run ----------------------------------------------------------------------
-
-/** The colleges most listed across every roster: students who have a counselor. */
-export async function topRosterColleges(svc: SupabaseClient, max: number): Promise<DiscoveryCollege[]> {
-  const studentIds: string[] = [];
-  for (let from = 0; ; from += 1000) {
-    const { data, error } = await svc
-      .from("profiles")
-      .select("id")
-      .eq("role", "student")
-      .not("counselor_id", "is", null)
-      .order("id")
-      .range(from, from + 999);
-    if (error) throw new Error(`profiles: ${error.message}`);
-    studentIds.push(...((data ?? []) as Row[]).map((r) => String(r.id)));
-    if (!data || data.length < 1000 || studentIds.length >= 20_000) break;
-  }
-  const rows: ListRow[] = await listRowsFor(svc, studentIds);
-  const ids = rankColleges(await collegesOnLists(svc, rows), max);
-  if (!ids.length) return [];
-  const { data, error } = await svc.from("colleges").select("id, name, website").in("id", ids);
-  if (error) throw new Error(`colleges: ${error.message}`);
-  const byId = new Map(((data ?? []) as Row[]).map((r) => [String(r.id), r]));
-  return ids
-    .map((id) => byId.get(id))
-    .filter((r): r is Row => Boolean(r))
-    .map((r) => ({ id: String(r.id), name: String(r.name), website: (r.website as string | null) ?? null }));
-}
 
 export async function blockedDomains(svc: SupabaseClient): Promise<string[]> {
   const { data, error } = await svc.from("research_blocked_domains").select("domain");

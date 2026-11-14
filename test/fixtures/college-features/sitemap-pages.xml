@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url><loc>https://www.example.edu/academics/honors-college</loc></url>
+  <url><loc>https://www.example.edu/research/undergraduate-research</loc><image:image><image:loc>https://www.example.edu/img/lab.jpg</image:loc></image:image></url>
+  <url><loc>https://www.example.edu/study-abroad</loc></url>
+  <url><loc>https://www.example.edu/news/2026/10/research-breakthrough</loc></url>
+  <url><loc>https://www.example.edu/graduate/research</loc></url>
+  <url><loc>https://www.example.edu/private/research-centers</loc></url>
+  <url><loc>https://www.example.edu/files/honors-handbook.pdf</loc></url>
+  <url><loc>https://news.example.edu/research</loc></url>
+  <url><loc>https://www.other.edu/research</loc></url>
+  <url><loc>https://www.example.edu/about/contact</loc></url>
+  <url><loc>https://www.example.edu/academics/majors?ref=a&amp;utm=b</loc></url>
+  <url><loc>https://www.example.edu/career-center/internships</loc></url>
+</urlset>

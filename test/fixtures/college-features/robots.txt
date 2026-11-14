@@ -1,0 +1,12 @@
+# Example State University
+User-agent: *
+Disallow: /search
+Disallow: /private/
+Allow: /private/public-page$
+Crawl-delay: 2
+
+User-agent: BadBot
+Disallow: /
+
+Sitemap: https://www.example.edu/sitemap-index.xml
+Sitemap: https://cdn.other-host.com/sitemap.xml
