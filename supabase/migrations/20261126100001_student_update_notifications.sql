@@ -26,7 +26,8 @@
 -- group is closed and the next change opens a new one. The bell row itself appears and updates at once.
 --
 -- Never in the way of the student's save: insert/delete use statement-level triggers (one notice write per statement,
--- however many rows it touched), and every error is swallowed with a warning.
+-- however many rows it touched), and every error is swallowed with a warning. Names are listed in the order the
+-- statement wrote its rows (a transition table is read back in that order), statement after statement.
 --
 -- Privacy: the names (colleges, activities, file titles) are only in the bell row's title, body and group_detail,
 -- which only the recipient reads (notifications_select_own). A push never carries them: the dispatcher sends a
@@ -308,8 +309,7 @@ begin
                private.student_update_label(to_jsonb(r) ->> 'name'),
                private.student_update_label(to_jsonb(r) ->> 'organization'),
                private.student_update_label(to_jsonb(r) ->> 'position'),
-               case when tg_table_name = 'awards' then 'An award' else 'An activity' end)
-             order by r.created_at, r.id)
+               case when tg_table_name = 'awards' then 'An award' else 'An activity' end))
         into v_names
         from new_rows r
        where r.student_id = v_uid;
@@ -319,8 +319,7 @@ begin
                private.student_update_label(to_jsonb(r) ->> 'name'),
                private.student_update_label(to_jsonb(r) ->> 'organization'),
                private.student_update_label(to_jsonb(r) ->> 'position'),
-               case when tg_table_name = 'awards' then 'An award' else 'An activity' end)
-             order by r.created_at, r.id)
+               case when tg_table_name = 'awards' then 'An award' else 'An activity' end))
         into v_names
         from old_rows r
        where r.student_id = v_uid;
@@ -347,13 +346,13 @@ begin
   if v_uid is null or pg_trigger_depth() > 1 then return null; end if;
   begin
     if tg_op = 'INSERT' then
-      select array_agg(coalesce(private.student_update_label(r.name), 'A college') order by r.created_at, r.id)
+      select array_agg(coalesce(private.student_update_label(r.name), 'A college'))
         into v_names
         from new_rows r
        where r.student_id = v_uid;
       perform private.note_student_update(v_uid, 'colleges', v_names, null);
     elsif tg_op = 'DELETE' then
-      select array_agg(coalesce(private.student_update_label(r.name), 'A college') order by r.sort_order, r.created_at, r.id)
+      select array_agg(coalesce(private.student_update_label(r.name), 'A college'))
         into v_names
         from old_rows r
        where r.student_id = v_uid;
@@ -408,8 +407,7 @@ begin
     select array_agg(coalesce(
              private.student_update_label(r.title),
              private.student_update_label(r.filename),
-             'A file')
-           order by r.created_at, r.id)
+             'A file'))
       into v_names
       from new_rows r
      where r.student_id = v_uid and r.uploaded_by = v_uid;
