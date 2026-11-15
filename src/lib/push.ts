@@ -9,6 +9,10 @@
  *   quote their work, so they are never sent; the payload carries only the label below and an in-app path.
  * - Only approved counselors get push (a pending or revoked counselor gets none), and a device the push service
  *   reports gone (404 / 410) is deleted.
+ * - A row with `push_after` (a grouped student update, migration 20261126100001) waits until then: the database
+ *   moves it 20 minutes past the student's latest change, so a phone buzzes once the student has been quiet that
+ *   long. Its staleness counts from `push_after`, not from when the group opened. A row the person has already read
+ *   in the app is marked handled without a push.
  * - Off (503 push_unavailable, a no-op sweep) until the three VAPID settings exist.
  */
 
@@ -48,8 +52,27 @@ const KIND_BODY: Record<string, string> = {
   scholarship: "There is a scholarship update.",
   aid: "There is a financial aid update.",
   opportunity: "There is a new opportunity.",
+  "student-update": "A student updated their profile.",
   system: "You have a new notification.",
 };
+
+/**
+ * PostgREST `or` filter: rows whose wait is over (no `push_after`, or it has passed). Timestamps are ISO strings,
+ * which hold no comma or parenthesis, so they need no quoting inside the filter.
+ */
+export function dueFilter(nowIso: string): string {
+  return `push_after.is.null,push_after.lte.${nowIso}`;
+}
+
+/** PostgREST `or` filter: rows too old to push. Staleness counts from `push_after` when a row has one, else from `created_at`. */
+export function staleFilter(cutoffIso: string): string {
+  return `push_after.lt.${cutoffIso},and(push_after.is.null,created_at.lt.${cutoffIso})`;
+}
+
+/** A row the person already read in the app is handled without buzzing their phone. */
+export function shouldSend(row: { read_at?: unknown }): boolean {
+  return row.read_at === null || row.read_at === undefined;
+}
 
 /** The in-app address to open. Only an in-app path is ever followed; anything else opens the app's front door. */
 export function safeHref(href: unknown): string {
@@ -100,8 +123,13 @@ export async function sendToSubscription(sub: Sub, payload: PushPayload, log?: L
   }
 }
 
-export async function dispatchPush(svc: SupabaseClient, log: Log): Promise<PushTally> {
+/** What the sweep calls out to; tests pass their own. */
+export type DispatchDeps = { send?: typeof sendToSubscription; now?: () => Date };
+
+export async function dispatchPush(svc: SupabaseClient, log: Log, deps: DispatchDeps = {}): Promise<PushTally> {
   if (!hasPush) return { ran: false, handled: 0, pushed: 0, pruned: 0, reason: "not-configured" };
+  const send = deps.send ?? sendToSubscription;
+  const now = deps.now ?? (() => new Date());
 
   const holder = `${hostname()}:${process.pid}:${randomUUID()}`;
   const { data: acquired, error: leaseErr } = await svc.rpc("acquire_job_lease", {
@@ -116,24 +144,31 @@ export async function dispatchPush(svc: SupabaseClient, log: Log): Promise<PushT
   let pushed = 0;
   let pruned = 0;
   try {
-    const cutoff = new Date(Date.now() - STALE_MINUTES * 60_000).toISOString();
-    await svc.from("notifications").update({ pushed_at: new Date().toISOString() }).is("pushed_at", null).lt("created_at", cutoff);
+    const startedAt = now();
+    const cutoff = new Date(startedAt.getTime() - STALE_MINUTES * 60_000).toISOString();
+    await svc
+      .from("notifications")
+      .update({ pushed_at: startedAt.toISOString() })
+      .is("pushed_at", null)
+      .or(staleFilter(cutoff));
 
     const { data: rows, error } = await svc
       .from("notifications")
-      .select("id, recipient_id, kind, href, created_at")
+      .select("id, recipient_id, kind, href, created_at, read_at")
       .is("pushed_at", null)
+      .or(dueFilter(startedAt.toISOString()))
       .order("created_at", { ascending: true })
       .limit(BATCH);
     if (error) throw new Error(`notifications read failed (${error.code ?? "unknown"})`);
     const list = (rows ?? []) as Row[];
     if (!list.length) return { ran: true, handled, pushed, pruned };
 
-    const userIds = [...new Set(list.map((r) => String(r.recipient_id)))];
-    const { data: subs, error: subErr } = await svc
-      .from("push_subscriptions")
-      .select("id, user_id, endpoint, p256dh, auth, channel")
-      .in("user_id", userIds);
+    // Read in the app already: marked handled below, never pushed.
+    const toSend = list.filter(shouldSend);
+    const userIds = [...new Set(toSend.map((r) => String(r.recipient_id)))];
+    const { data: subs, error: subErr } = userIds.length
+      ? await svc.from("push_subscriptions").select("id, user_id, endpoint, p256dh, auth, channel").in("user_id", userIds)
+      : { data: [] as Row[], error: null };
     if (subErr) throw new Error(`push_subscriptions read failed (${subErr.code ?? "unknown"})`);
 
     const byUser = new Map<string, Sub[]>();
@@ -152,7 +187,7 @@ export async function dispatchPush(svc: SupabaseClient, log: Log): Promise<PushT
     const blocked = new Set(counselors.filter((id) => !approved.has(id)));
 
     const perUser = new Map<string, Row[]>();
-    for (const r of list) perUser.set(String(r.recipient_id), [...(perUser.get(String(r.recipient_id)) ?? []), r]);
+    for (const r of toSend) perUser.set(String(r.recipient_id), [...(perUser.get(String(r.recipient_id)) ?? []), r]);
 
     for (const [userId, items] of perUser) {
       const devices = blocked.has(userId) ? [] : (byUser.get(userId) ?? []);
@@ -160,7 +195,7 @@ export async function dispatchPush(svc: SupabaseClient, log: Log): Promise<PushT
         items.length > MAX_INDIVIDUAL ? [summaryPayload(items.length, items[items.length - 1]?.href)] : items.map((r) => payloadFor(r));
       for (const device of devices) {
         for (const payload of payloads) {
-          const result = await sendToSubscription(device, payload, log);
+          const result = await send(device, payload, log);
           if (result === "sent") pushed += 1;
           if (result === "gone") {
             await svc.from("push_subscriptions").delete().eq("id", device.id);
@@ -168,14 +203,22 @@ export async function dispatchPush(svc: SupabaseClient, log: Log): Promise<PushT
             break;
           }
         }
-        await svc.from("push_subscriptions").update({ last_used_at: new Date().toISOString() }).eq("id", device.id);
+        await svc.from("push_subscriptions").update({ last_used_at: now().toISOString() }).eq("id", device.id);
       }
     }
 
+    // Still due as of now: a student change that landed during this run moved its group's push_after on, so that
+    // group stays open and is pushed again once the student has been quiet for the full wait.
     const ids = list.map((r) => String(r.id));
-    const { error: markErr } = await svc.from("notifications").update({ pushed_at: new Date().toISOString() }).in("id", ids);
+    const markedAt = now().toISOString();
+    const { data: marked, error: markErr } = await svc
+      .from("notifications")
+      .update({ pushed_at: markedAt })
+      .in("id", ids)
+      .or(dueFilter(markedAt))
+      .select("id");
     if (markErr) throw new Error(`notifications mark failed (${markErr.code ?? "unknown"})`);
-    handled = ids.length;
+    handled = (marked ?? []).length;
     return { ran: true, handled, pushed, pruned };
   } finally {
     const { error } = await svc.rpc("release_job_lease", { p_name: LEASE_NAME, p_holder: holder });

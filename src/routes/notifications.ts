@@ -27,7 +27,7 @@ const listQuery = z.object({
   kind: z
     .enum([
       "deadline", "red-flag", "report", "invite", "ai", "policy",
-      "scholarship", "aid", "opportunity", "system",
+      "scholarship", "aid", "opportunity", "system", "student-update",
     ])
     .optional(),
   studentId: z.string().uuid().optional(),

@@ -22,6 +22,8 @@ export const REQUIRED_SCHEMA: Record<string, string[]> = {
   counselor_access_requests: ["token_hash", "superseded_by"],
   // 20261024000001: the context layer's documents loader selects it on every AxIS read.
   documents: ["kind_confirmed"],
+  // 20261126100001: the push dispatch cron filters on it every run (lib/push.ts).
+  notifications: ["push_after"],
 };
 
 /** PostgREST's ways of saying "no such column" and "no such table". */
