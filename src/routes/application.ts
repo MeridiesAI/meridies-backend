@@ -41,7 +41,6 @@ import {
   type SupplementLayout,
 } from "../lib/supplementLayout.js";
 import { noticeEssayEdit } from "../lib/essayNotice.js";
-import { linkedGoogleDoc, readLinkedEssay } from "../lib/essayText.js";
 import {
   catalogDeadline,
   ESSAY_SELECT,
@@ -69,6 +68,7 @@ import {
   splitAnswers,
   type DocPrompt,
 } from "../lib/supplementDocs.js";
+import { linkedGoogleDoc, readLinkedEssay } from "../lib/essayText.js";
 
 type Row = Record<string, unknown>;
 
