@@ -6,6 +6,7 @@
 
 import { toCollegePhoto, type CollegePhotoRow } from "./collegePhotos.js";
 import { currentCycle } from "./supplementDocs.js";
+import { essayTextState } from "./essayText.js";
 
 type Row = Record<string, unknown>;
 
@@ -217,7 +218,9 @@ export function toEssayDoc(r: Row) {
     linkIsMine: false,
     fileKind: fileKindOf(doc, url),
     textStatus,
-    readable: textStatus !== "unreadable",
+    // No count to show: a file Meridies can't read, or a linked Doc whose text hasn't been read in yet (its
+    // word_count is 0 until then, which isn't its length). The app shows "—" for both.
+    readable: textStatus !== "unreadable" && essayTextState(r) !== "pending",
     availableToLlm: doc ? doc.available_to_llm !== false : true,
     /** An upload's Storage object, for a signed preview link (null for suite files). */
     file: doc && !url && doc.storage_path ? { bucket: str(doc.bucket) || "student-documents", path: str(doc.storage_path) } : null,

@@ -66,11 +66,10 @@ import {
   currentCycle,
   docTitle,
   exportDocText,
-  exportDocTextResult,
-  googleDocIdFromUrl,
   splitAnswers,
   type DocPrompt,
 } from "../lib/supplementDocs.js";
+import { linkedGoogleDoc, readLinkedEssay } from "../lib/essayText.js";
 
 type Row = Record<string, unknown>;
 
@@ -1089,7 +1088,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
         .limit(25);
       const { data: essays } = await request.db
         .from("essays")
-        .select("id, body, supplement_doc_id, college_supplement_id, prompt, external_url, link_owner_id, document_id")
+        .select("id, body, supplement_doc_id, college_supplement_id, prompt, external_url, link_owner_id, document_id, text_status, text_synced_at")
         .eq("student_id", studentId)
         .limit(300);
 
@@ -1119,26 +1118,18 @@ export default async function applicationRoutes(app: FastifyInstance) {
           await request.db.from("supplement_docs").update({ text_synced_at: now }).eq("id", d.id);
         });
       }
-      for (const e of (essays ?? []).filter((x) => x.external_url && x.link_owner_id === me && !x.supplement_doc_id && !x.document_id).slice(0, 25)) {
-        const fileId = googleDocIdFromUrl(String(e.external_url));
-        if (!fileId) continue;
+      // A pasted Google Doc link, read only with the grant of whoever linked it (lib/essayText.ts, which a
+      // Narrative Coherence run uses too). A first read is stamped even when the Doc is empty, so the row
+      // stops reading as "not read yet".
+      for (const e of (essays ?? []).filter((x) => "fileId" in linkedGoogleDoc(x, me)).slice(0, 25)) {
         jobs.push(async () => {
-          const r = await exportDocTextResult(me, fileId, request.log).catch((err: unknown) => {
-            request.log.warn({ err: serializeErr(err) }, "linked essay doc export threw");
-            return { ok: false as const, reason: "failed" as const };
-          });
+          const r = await readLinkedEssay(request, e, { now });
           if (!r.ok) {
             if (r.reason === "not-picked") notPicked.push(String(e.id));
             else failed.push(String(e.id));
             return;
           }
-          const text = r.text;
-          if (text === (e.body ?? "")) return;
-          const { error } = await request.db
-            .from("essays")
-            .update({ body: text, text_status: "read", text_synced_at: now })
-            .eq("id", e.id);
-          if (!error) updated++;
+          if (r.row) updated++;
         });
       }
 

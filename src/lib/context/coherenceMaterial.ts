@@ -20,6 +20,87 @@ export function usableEssay(e: Row | undefined): Row | null {
   return Number(e.word_count ?? 0) > 0 && e.text_status !== "unreadable" ? e : null;
 }
 
+/** Why a ticked document couldn't be read for a run (lib/essayText.ts's reasons, plus what the run itself finds). */
+export type UnreadReason =
+  | "not-linked"
+  | "not-google"
+  | "not-mine"
+  | "not-picked"
+  | "no-access"
+  | "failed"
+  | "unreadable"
+  | "empty"
+  | "too-many";
+
+export type UnreadDoc = {
+  part: "statement" | "supplement";
+  title: unknown;
+  school: unknown;
+  reason: UnreadReason;
+  /** no-access only: the connection's own message, written to the caller (lib/oauth.ts). */
+  message?: string;
+};
+
+const docName = (d: UnreadDoc): string => {
+  if (d.part === "statement") return "The personal statement";
+  const title = String(d.title ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || "A supplement";
+  const school = String(d.school ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+  return school ? `${title} (${school})` : title;
+};
+
+/** What went wrong and what to do about it, in the words of whoever ran the report. */
+function unreadLine(reason: UnreadReason, audience: "counselor" | "student", message?: string): { what: string; fix: string } {
+  const notReadYet = "its Google Doc hasn't been read in yet";
+  const askCounselor = "Ask your counselor to open your Essays so it's read in, or upload the file instead.";
+  switch (reason) {
+    case "not-picked":
+      return audience === "student"
+        ? { what: notReadYet, fix: askCounselor }
+        : { what: `${notReadYet}, because Meridies can read only a Doc you picked`, fix: "In Essays, choose “Pick this Doc to keep it in sync”, then generate the report again." };
+    case "not-mine":
+      return audience === "student"
+        ? { what: notReadYet, fix: askCounselor }
+        : { what: `${notReadYet}, and only whoever linked it can read it in`, fix: "Add the Doc from your own Google Drive in Essays, then generate the report again." };
+    case "no-access":
+      return audience === "student"
+        ? { what: notReadYet, fix: askCounselor }
+        : { what: notReadYet, fix: message || "Reconnect Google under App Integrations, then generate the report again." };
+    case "not-google":
+      return { what: "its link isn't a Google Doc, so Meridies can't read it", fix: audience === "student" ? "Upload the file instead." : "Upload the file, or pick it from Drive or OneDrive in Essays, instead." };
+    case "unreadable":
+      return { what: "its file can't be read (it looks like a scan or a picture of the page)", fix: "Upload a version with text." };
+    case "empty":
+      return { what: "its Google Doc is empty", fix: "" };
+    case "too-many":
+      return { what: "too many linked Docs are waiting to be read in at once", fix: "Tick fewer documents, then generate the report again." };
+    case "not-linked":
+      return { what: "its text is still being read", fix: "Try again in a minute." };
+    case "failed":
+    default:
+      return { what: "Google didn't send its text", fix: "Try again in a minute." };
+  }
+}
+
+/**
+ * The 409 a Coherence run answers when a ticked document couldn't be read: each one named with why and what to
+ * do, so the report never quietly leaves out something that was ticked.
+ */
+export function unreadDocsMessage(docs: UnreadDoc[], audience: "counselor" | "student"): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const d of docs.slice(0, 4)) {
+    const { what, fix } = unreadLine(d.reason, audience, d.message);
+    const line = `${docName(d)}: ${what}.${fix ? ` ${fix}` : ""}`;
+    if (seen.has(line)) continue;
+    seen.add(line);
+    lines.push(line);
+  }
+  const extra = docs.length - Math.min(docs.length, 4);
+  const more = extra > 0 ? ` ${extra} more ticked ${extra === 1 ? "document" : "documents"} can't be read yet either.` : "";
+  const untick = docs.length === 1 ? "Or untick it to run the report without it." : "Or untick them to run the report without them.";
+  return `${lines.join(" ")}${more} ${untick}`;
+}
+
 /** A data-block source label from a student-written name: one line, bounded. */
 export const sourceTag = (prefix: string, name: unknown): string =>
   `${prefix}:${String(name ?? "").replace(/\s+/g, " ").trim().slice(0, 80)}`;

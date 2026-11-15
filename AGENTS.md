@@ -1418,6 +1418,18 @@ forget it.
   request, so it would go unnoticed.
 - **Essay word counts are the database's** (`essays_set_word_count`, also on
   `essay_versions`); routes don't accept a client's count.
+- **A pasted Doc link has no count until its text is read** (`lib/essayText.ts`, `lib/coherenceDocs.ts`; no
+  migration). An essay that only carries `external_url` has an empty body and `word_count` 0 until
+  `POST /application/essays/sync` or a Narrative Coherence run reads the Doc in, so 0 there is "not read yet", not
+  "empty": `essayTextState` calls a pasted link with no text and no `text_synced_at` `pending` (a first read stamps
+  `text_synced_at` even for an empty Doc), and tells it from `read`, `unreadable` and `empty`. A linked Doc is read
+  only with the grant of whoever linked it (`link_owner_id`, `linkedGoogleDoc`) through sync's own
+  `exportDocTextResult` (`readLinkedEssay`, which both sync and Coherence call). The essay DTO's `readable` is false
+  while `pending` (the app shows "—", not 0). `GET /application/coherence` counts a pending personal statement as on
+  file (each doc carries `textState`; `pickStatement` still prefers one with text) and `POST /application/coherence`
+  reads ticked pending Docs first (`readTicked`, at most 25, four at a time) and answers 409 `coherence_docs_unread`
+  naming each ticked document it couldn't read and why (`unreadDocsMessage`), never a report that quietly left one
+  out. Tests: `test/unit/essay-text.test.ts`.
 
 ### The student view (SV Demo v2)
 
