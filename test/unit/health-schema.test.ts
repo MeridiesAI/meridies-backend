@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import healthRoutes from "../../src/routes/health.js";
+import { REQUIRED_SCHEMA } from "../../src/lib/schemaCheck.js";
 
 test("health shares schema probes and retries an inconclusive result instead of caching success", async (t) => {
   let now = Date.now();
@@ -32,7 +33,7 @@ test("health shares schema probes and retries an inconclusive result instead of 
       assert.equal(reply.json().schema, expected);
       assert.equal(reply.statusCode, expected ? 200 : 503);
     }
-    assert.equal(schemaReads - before, 3, "concurrent requests share one probe per table");
+    assert.equal(schemaReads - before, Object.keys(REQUIRED_SCHEMA).length, "concurrent requests share one probe per table");
     now += 5001;
     mode = mode === "unknown" ? "missing" : "present";
   }
