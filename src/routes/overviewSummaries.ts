@@ -53,7 +53,7 @@ export default async function overviewSummaryRoutes(app: FastifyInstance) {
             "student_id, gpa_weighted, gpa_unweighted, gpa_scale, sat_superscore, act_composite, rigor_context, rigor_count, class_rank, class_rank_value"
           )
           .in("student_id", ids),
-        db.from("student_polygon_axes").select("*").in("student_id", ids).order("sort_order"),
+        db.from("student_polygon_axes").select("*").in("student_id", ids).eq("hidden", false).order("sort_order"),
         db.from("activities").select("student_id").in("student_id", ids).limit(20_000),
         db.from("awards").select("student_id").in("student_id", ids).limit(20_000),
         db.from("essays").select("student_id, status").in("student_id", ids).limit(20_000),

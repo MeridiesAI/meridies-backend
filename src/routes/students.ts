@@ -134,7 +134,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       db.from("narrative_flags").select("*").eq("student_id", id).order("created_at", { ascending: false }),
       db.from("family_reports").select("*").eq("student_id", id).order("created_at", { ascending: false }).limit(50),
       db.from("school_reframing").select("*").eq("student_id", id).order("created_at", { ascending: false }).limit(50),
-      db.from("student_polygon_axes").select("*").eq("student_id", id).order("sort_order"),
+      db.from("student_polygon_axes").select("*").eq("student_id", id).eq("hidden", false).order("sort_order"),
       db.from("deadlines").select("*").eq("student_id", id).order("due_date", { ascending: true, nullsFirst: false }),
       // RLS keeps this counselor-only, so a student reading their own record
       // gets null here rather than an assessment written about them.

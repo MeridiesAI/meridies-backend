@@ -23,7 +23,7 @@ import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
-import { cleanEstimate, cleanNodeEstimate, POLYGON_ESTIMATE_SYSTEM, polygonEstimatePrompt, polygonEstimateSchema } from "../lib/polygonEstimate.js";
+import { cleanEstimate, EXTRA_NODE_KEYS, POLYGON_ESTIMATE_SYSTEM, polygonEstimatePrompt, polygonEstimateSchema } from "../lib/polygonEstimate.js";
 import { essayShaped } from "../lib/proseGuard.js";
 import { toEssayReview } from "../lib/serialize.js";
 import { loadPolygon } from "../lib/studentPage.js";
@@ -114,27 +114,28 @@ export default async function aiRoutes(app: FastifyInstance) {
     async (request) => {
       const { studentId } = studentBody.parse(request.body);
       await resolveStudentId(request, studentId, "edit");
-      const { axes } = await loadPolygon(request.db, studentId, { persist: true });
+      const { axes, hidden } = await loadPolygon(request.db, studentId, { persist: true });
       if (axes.length === 0) throw badRequest("This student's polygon has no axes to estimate");
+      // The six detail nodes are axes too (20261126000001), hidden until shown, and are scored either way.
+      const detail = hidden.filter((a) => (EXTRA_NODE_KEYS as string[]).includes(a.key));
 
       const ctx = await buildStudentContext(request, studentId, "student-ai");
       const contextUsed = { used: ctx.used, omitted: ctx.omitted };
-      const { axes: estimates, nodes } = await runStructured({
+      const { axes: estimates } = await runStructured({
         request,
         module: "polygon-estimate",
         studentId,
         model: DEEP_MODEL,
         system: `${BASE_SYSTEM}\n\n${POLYGON_ESTIMATE_SYSTEM}\n\n${UNTRUSTED_DATA_RULE}`,
         contextUsage: contextUsed,
-        prompt: polygonEstimatePrompt(axes, ctx.text),
+        prompt: polygonEstimatePrompt([...axes, ...detail], ctx.text),
         toolName: "polygon_estimate",
         maxTokens: 3500,
-        schema: polygonEstimateSchema(axes.map((a) => a.key)),
-        // The detail nodes ride along in the same call; they are a bonus, so a bad `nodes` never fails the axes.
-        validate: (value) => ({ axes: cleanEstimate(value, axes), nodes: cleanNodeEstimate(value) }),
+        schema: polygonEstimateSchema([...axes, ...detail].map((a) => a.key)),
+        validate: (value) => ({ axes: cleanEstimate(value, [...axes, ...detail]) }),
       });
 
-      const byKey = new Map(axes.map((a) => [a.key, a.id]));
+      const byKey = new Map([...axes, ...detail].map((a) => [a.key, a.id]));
       const scoredAt = new Date().toISOString();
       const results = await Promise.all(
         estimates.map((e) =>
@@ -153,35 +154,9 @@ export default async function aiRoutes(app: FastifyInstance) {
         if (r.error) throw fromPostgrest(r.error);
       }
 
-      // The 3D solid's detail nodes (20261125000003). The axes above are already saved, so a database
-      // without the table answers "nodes: unavailable" instead of failing the estimate.
-      let nodesSaved: "saved" | "unavailable" | "none" = nodes.length ? "saved" : "none";
-      if (nodes.length) {
-        const { error: nodeError } = await request.db.from("student_stat_nodes").upsert(
-          nodes.map((n) => ({
-            student_id: studentId,
-            key: n.key,
-            ai_score: n.score,
-            ai_rationale: n.rationale,
-            ai_scored_at: scoredAt,
-            updated_by: request.auth.userId,
-          })),
-          { onConflict: "student_id,key" }
-        );
-        if (nodeError) {
-          if (nodeError.code === "42P01" || nodeError.code === "PGRST205" || nodeError.code === "42703" || nodeError.code === "PGRST204") {
-            nodesSaved = "unavailable";
-          } else {
-            throw fromPostgrest(nodeError);
-          }
-        }
-      }
-
       return {
         estimated: estimates.filter((e) => e.score !== null).length,
         notEnoughData: estimates.filter((e) => e.score === null).map((e) => e.key),
-        nodes: nodesSaved,
-        nodesEstimated: nodes.filter((n) => n.score !== null).length,
         contextUsed,
       };
     }

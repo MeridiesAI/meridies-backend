@@ -26,7 +26,7 @@ import { toRankBand } from "./serialize.js";
 
 type Row = Record<string, unknown>;
 
-export const MAX_AXES = 10;
+export const MAX_AXES = 12;
 
 const s = (v: unknown): string | null => (v == null || v === "" ? null : String(v));
 const n = (v: unknown): number | null => {
@@ -408,7 +408,7 @@ export async function deriveAxisScores(
   db: SupabaseClient,
   studentId: string
 ): Promise<Record<string, number | null>> {
-  const [academics, courses, activities, awards, essays] = await Promise.all([
+  const [academics, courses, activities, awards, essays, recs] = await Promise.all([
     db
       .from("student_academics")
       .select("gpa_weighted, gpa_scale, sat_superscore, act_composite, rigor_count")
@@ -418,8 +418,10 @@ export async function deriveAxisScores(
     db.from("activities").select("id", { count: "exact", head: true }).eq("student_id", studentId),
     db.from("awards").select("id", { count: "exact", head: true }).eq("student_id", studentId),
     db.from("essays").select("status").eq("student_id", studentId),
+    // Recommendation-letter tasks: the card's "Recs" stat counts them.
+    db.from("deliverables").select("status").eq("student_id", studentId).eq("kind", "recommendation"),
   ]);
-  for (const r of [academics, courses, activities, awards, essays]) {
+  for (const r of [academics, courses, activities, awards, essays, recs]) {
     if (r.error) throw fromPostgrest(r.error);
   }
 
@@ -439,6 +441,8 @@ export async function deriveAxisScores(
 
   const essayRows = (essays.data ?? []) as Row[];
 
+  const recRows = (recs.data ?? []) as Row[];
+
   const grades = gpa === null ? null : clampPct((gpa / 4.5) * 100);
   return {
     grades,
@@ -450,6 +454,8 @@ export async function deriveAxisScores(
       activityCount + awardCount === 0
         ? null
         : clampPct(((activityCount / 5) * 0.65 + (awardCount / 4) * 0.35) * 100),
+    recs:
+      recRows.length === 0 ? null : clampPct((recRows.filter((r) => r.status === "complete").length / recRows.length) * 100),
     essays:
       essayRows.length === 0
         ? null
@@ -590,32 +596,9 @@ export type PolygonResponse = {
   canAdd: boolean;
   /** SV Demo v2: true for the student, who reads their profile and never edits it. */
   readOnly: boolean;
-  /**
-   * The 3D solid's detail nodes (Leadership, Awards, Service, Research, Arts, School fit), as "Estimate with AI"
-   * left them. Absent before 20261125000003 or when they can't be read; empty until the first estimate.
-   */
-  nodes?: StatNodeDto[];
 };
 
-export type StatNodeDto = { key: string; score: number | null; rationale: string | null; scoredAt: string | null };
-
-/** The extra nodes for one student; undefined (field left out) when the table isn't there or can't be read. */
-async function loadStatNodes(db: SupabaseClient, studentId: string, readOnly: boolean): Promise<StatNodeDto[] | undefined> {
-  const { data, error } = await db
-    .from("student_stat_nodes")
-    .select("key, ai_score, ai_rationale, ai_scored_at")
-    .eq("student_id", studentId);
-  if (error) return undefined;
-  return ((data ?? []) as Row[]).map((r) => ({
-    key: String(r.key),
-    score: n(r.ai_score),
-    // The model's reasoning is the counselor's working note; the student reads the number only.
-    rationale: readOnly ? null : s(r.ai_rationale),
-    scoredAt: s(r.ai_scored_at),
-  }));
-}
-
-function polygonResponse(all: PolygonAxisDto[], readOnly: boolean, nodes?: StatNodeDto[]): PolygonResponse {
+function polygonResponse(all: PolygonAxisDto[], readOnly: boolean): PolygonResponse {
   // The model's reasoning is the counselor's working note; the student reads the number only.
   const axes = readOnly ? all.map((a) => ({ ...a, aiRationale: null })) : all;
   const visible = axes.filter((a) => !a.hidden);
@@ -625,7 +608,6 @@ function polygonResponse(all: PolygonAxisDto[], readOnly: boolean, nodes?: StatN
     maxAxes: MAX_AXES,
     canAdd: !readOnly && visible.length < MAX_AXES,
     readOnly,
-    ...(nodes ? { nodes } : {}),
   };
 }
 
@@ -648,10 +630,9 @@ export async function loadPolygon(
     if (seeded.error) throw fromPostgrest(seeded.error);
   }
 
-  const [{ data, error }, derived, nodes] = await Promise.all([
+  const [{ data, error }, derived] = await Promise.all([
     db.from("student_polygon_axes").select("*").eq("student_id", studentId).order("sort_order"),
     deriveAxisScores(db, studentId),
-    loadStatNodes(db, studentId, !opts.persist),
   ]);
   if (error) throw fromPostgrest(error);
   const rows = (data ?? []) as Row[];
@@ -672,7 +653,7 @@ export async function loadPolygon(
     row.auto_score = next;
   }
 
-  return polygonResponse(rows.map(toAxisDto), !opts.persist, nodes);
+  return polygonResponse(rows.map(toAxisDto), !opts.persist);
 }
 
 /**

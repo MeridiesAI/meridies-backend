@@ -1394,21 +1394,21 @@ forget it.
   columns). The reason (`aiRationale`) is the counselor's: `polygonResponse` blanks it for a student's read and the legacy
   `toPolygonAxis` (which reaches students) carries `aiScore` only. **Deploy order:** migration first; before it the route
   answers 503 "Estimate with AI isn't switched on yet" and everything else is unchanged. Not in `REQUIRED_SCHEMA`.
-  **The same call scores six detail nodes for the 3D stat solid** (Leadership, Awards, Service, Research, Arts, School
-  fit; `EXTRA_NODE_GUIDE` in `lib/polygonEstimate.ts`; `20261125000003`, table `student_stat_nodes`, one row per student and
-  node: `ai_score`, `ai_rationale`, `ai_scored_at`). They are NOT polygon axes, so the 2D chart, the ten-axis cap and
-  `polygon_axis_history` are unaffected (an AI move on a node is not recorded in the history). One model call returns
-  `axes` and `nodes`; `cleanNodeEstimate` is lenient (a missing or malformed `nodes` is "no nodes this time", never a failed
-  estimate). The table is counselor-written and student-read-only, and carries the approval gate. `loadPolygon` returns an
-  optional `nodes: [{ key, score, rationale, scoredAt }]` beside the axes (rationale blanked for a student's read; a hidden
-  strength profile hides it with the axes, in the same routes; absent before the migration). The route answers `nodes:
-  "saved" | "unavailable" | "none"`; without the table the axes still save. `POST /:id/polygon/reset` clears them too.
-  Tests: `test/unit/polygon-estimate.test.ts`. Known limit: activities carry no impact tier, so depth is inferred from
+  **Recs and the six detail nodes are axes too** (`20261126000001`): Leadership, Awards, Service, Research, Arts and
+  School fit (`EXTRA_NODE_GUIDE` in `lib/polygonEstimate.ts`) are default polygon axes that start **hidden**, and Recs
+  (`recs`, derived: recommendation `deliverables` complete over assigned) is a default axis that starts shown, so the 2D
+  chart and the 3D solid are one set of nodes and a node deleted in either is the same hide/delete. Estimate with AI scores
+  every visible axis plus any of the six that is hidden (`loadPolygon`'s `hidden`); `student_stat_nodes`
+  (`20261125000003`) is no longer read or written (its scores were copied onto the axes by the migration; the table is left
+  in place). `loadPolygon` no longer returns `nodes`. Legacy readers of the axes (`GET /polygon`, `GET /students/:id`,
+  `/overview/student-summaries`) skip hidden axes, so a hidden one is never drawn. `POST /:id/polygon/reset` puts the six
+  back to hidden. **Deploy order:** migration, API, then app (an app first draws the five-axis solid). Tests:
+  `test/unit/polygon-estimate.test.ts`. Known limit: activities carry no impact tier, so depth is inferred from
   text; on a thin record a repeat run moves a score by about 5 points, not more.
-- **A polygon holds at most ten visible axes.** A trigger refuses the
-  eleventh (errcode 23514); a default axis the counselor removes is `hidden`,
+- **A polygon holds at most twelve visible axes.** A trigger refuses the
+  thirteenth (errcode 23514; ten before `20261126000001`); a default axis the counselor removes is `hidden`,
   not deleted, so its history keeps its parent. `ensure_default_polygon_axes`
-  seeds the demo's five only for a student with no axes at all.
+  seeds the five, Recs and the six hidden detail axes only for a student with no axes at all.
 - **`ai_runs_module_check` is extended additively.** The migrations that add
   a module label (`mass-invite`, `college-research`, `email-template`,
   `profile-update`, `submission-review`, `import-mapping`, `import-cleanup`, `message-translate`, `catalog-proposals`, `college-features`) read
