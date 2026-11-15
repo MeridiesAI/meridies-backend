@@ -25,14 +25,12 @@ const AXIS_GUIDE: Record<string, string> = {
     "Activities and awards read together: depth and duration over a long list, leadership, measurable impact, " +
     "and level (school, local, state, national, international). Hours per week and years matter; a title alone does not.",
   essays: "Only what the record shows: status and progress. Without essay text on file, score progress, not prose quality.",
+  recs: "Recommendation letters: how many are assigned and how many are in. No letters assigned is null, not low.",
   narrative: "Whether activities, courses, intended major and goals tell one coherent story, with a visible through-line.",
   intangibles: "Context that sets the student apart or explains their record: first-generation status, obstacles, initiative, demonstrated interest.",
 };
 
-/**
- * The 3D solid's extra nodes, scored in the same call as the axes. They are not polygon axes (the 2D chart and
- * the ten-axis cap don't change): they live in `student_stat_nodes` (20261125000003). The keys are that table's CHECK.
- */
+/** The solid's six detail nodes. They are default polygon axes, hidden until shown (20261126000001), scored with the rest. */
 export const EXTRA_NODE_GUIDE = {
   leadership: "Positions and titles held (founder, captain, president, editor), how many people or how large a program they led, and what changed because of it.",
   awards: "Honors and awards by level: school, city, state or regional, national, international. Higher levels and selective ones count for more; many school-level awards do not add up to a national one.",
@@ -62,13 +60,11 @@ export const POLYGON_ESTIMATE_SYSTEM = [
 
 export function polygonEstimatePrompt(axes: EstimateAxis[], brief: string): string {
   const lines = axes.map((a) => {
-    const guide = AXIS_GUIDE[a.key] ?? a.description ?? "No definition given: judge from the label only, and return null if it can't be read from the record.";
+    const guide = AXIS_GUIDE[a.key] ?? (EXTRA_NODE_GUIDE as Record<string, string>)[a.key] ?? a.description ?? "No definition given: judge from the label only, and return null if it can't be read from the record.";
     return `- ${a.key} (${a.label}): ${guide}`;
   });
-  const nodes = EXTRA_NODE_KEYS.map((k) => `- ${k}: ${EXTRA_NODE_GUIDE[k]}`);
   return (
     `Score each of these axes for this student.\n\nAxes:\n${lines.join("\n")}\n\n` +
-    `Then score these detail nodes the same way (they sit under the axes above and show what a score is made of):\n${nodes.join("\n")}\n\n` +
     `Student record:\n${brief}`
   );
 }
@@ -90,21 +86,8 @@ export function polygonEstimateSchema(keys: string[]) {
           required: ["key", "score", "rationale"],
         },
       },
-      nodes: {
-        type: "array",
-        maxItems: EXTRA_NODE_KEYS.length,
-        items: {
-          type: "object",
-          properties: {
-            key: { type: "string", enum: EXTRA_NODE_KEYS },
-            score: { type: ["integer", "null"], minimum: 0, maximum: 100 },
-            rationale: { type: "string", maxLength: RATIONALE_MAX },
-          },
-          required: ["key", "score", "rationale"],
-        },
-      },
     },
-    required: ["axes", "nodes"],
+    required: ["axes"],
   } as const;
 }
 
@@ -126,15 +109,6 @@ export function cleanEstimate(value: unknown, axes: { key: string }[]): AxisEsti
   const out = cleanItems(raw, new Set(axes.map((a) => a.key)));
   if (out.length === 0) throw unavailable("The AI's answer couldn't be read. Try again.");
   return out;
-}
-
-/**
- * The detail nodes half of the same answer. Lenient on purpose: they are a bonus on top of the axes, so an
- * absent, malformed or empty `nodes` is "no nodes this time", never a failed estimate.
- */
-export function cleanNodeEstimate(value: unknown): AxisEstimate[] {
-  const raw = value && typeof value === "object" ? (value as { nodes?: unknown }).nodes : undefined;
-  return cleanItems(raw, new Set<string>(EXTRA_NODE_KEYS));
 }
 
 function cleanItems(raw: unknown, known: Set<string>): AxisEstimate[] {

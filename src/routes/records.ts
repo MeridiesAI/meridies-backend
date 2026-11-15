@@ -280,6 +280,8 @@ export default async function recordRoutes(app: FastifyInstance) {
       .from("student_polygon_axes")
       .select("*")
       .eq("student_id", student)
+      // A hidden axis (one the counselor removed, or one of the six detail nodes until shown) is not drawn anywhere.
+      .eq("hidden", false)
       .order("sort_order");
 
     if (error) throw fromPostgrest(error);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HttpError } from "../../src/lib/errors.js";
-import { cleanEstimate, cleanNodeEstimate, EXTRA_NODE_KEYS, polygonEstimatePrompt, polygonEstimateSchema, RATIONALE_MAX } from "../../src/lib/polygonEstimate.js";
+import { cleanEstimate, EXTRA_NODE_KEYS, polygonEstimatePrompt, polygonEstimateSchema, RATIONALE_MAX } from "../../src/lib/polygonEstimate.js";
 import { toAxisDto } from "../../src/lib/studentPage.js";
 
 const axes = [{ key: "academics" }, { key: "extracurriculars" }, { key: "narrative" }];
@@ -81,17 +81,18 @@ test("an axis's shown score is the counselor's, else the AI's, else the formula'
   assert.equal(toAxisDto({ ...row, ai_rationale: "because" }).aiRationale, "because");
 });
 
-test("detail nodes: only the six known keys, clamped, a null kept as 'not enough data'", () => {
-  const out = cleanNodeEstimate({
-    axes: [],
-    nodes: [
-      { key: "leadership", score: 71.4, rationale: "Founded a 14-chapter nonprofit." },
-      { key: "service", score: 130, rationale: "" },
-      { key: "arts", score: null, rationale: "Nothing in the record." },
-      { key: "grades", score: 90, rationale: "an axis, not a detail node" },
-      { key: "leadership", score: 5, rationale: "a repeat" },
-    ],
-  });
+test("the detail nodes are scored as ordinary axes: kept, clamped, a null kept as 'not enough data'", () => {
+  const out = cleanEstimate(
+    {
+      axes: [
+        { key: "leadership", score: 71.4, rationale: "Founded a 14-chapter nonprofit." },
+        { key: "service", score: 130, rationale: "" },
+        { key: "arts", score: null, rationale: "Nothing in the record." },
+        { key: "nope", score: 90, rationale: "not an axis the student has" },
+      ],
+    },
+    [{ key: "leadership" }, { key: "service" }, { key: "arts" }]
+  );
   assert.deepEqual(out.map((n) => n.key), ["leadership", "service", "arts"]);
   assert.equal(out[0].score, 71);
   assert.equal(out[1].score, 100);
@@ -99,15 +100,11 @@ test("detail nodes: only the six known keys, clamped, a null kept as 'not enough
   assert.equal(out[2].score, null);
 });
 
-test("a missing or malformed nodes answer is no nodes, never an error, and never touches the axes", () => {
-  for (const v of [null, {}, { nodes: "no" }, { nodes: [null, 3] }]) assert.deepEqual(cleanNodeEstimate(v), []);
-  assert.equal(cleanEstimate({ axes: [{ key: "academics", score: 60, rationale: "ok" }], nodes: "garbage" }, [{ key: "academics" }]).length, 1);
-});
-
-test("the schema and prompt name all six detail nodes", () => {
-  const schema = polygonEstimateSchema(["academics"]);
-  assert.deepEqual(schema.properties.nodes.items.properties.key.enum, EXTRA_NODE_KEYS);
+test("the prompt carries a guide for each detail node and for recs", () => {
   assert.deepEqual([...EXTRA_NODE_KEYS].sort(), ["arts", "awards", "leadership", "research", "school-fit", "service"]);
-  const prompt = polygonEstimatePrompt([{ key: "academics", label: "Grades", description: null }], "BRIEF");
-  for (const k of EXTRA_NODE_KEYS) assert.match(prompt, new RegExp(`- ${k}: `));
+  const axes = [...EXTRA_NODE_KEYS, "recs"].map((key) => ({ key, label: key, description: null }));
+  const prompt = polygonEstimatePrompt(axes, "BRIEF");
+  for (const a of axes) assert.match(prompt, new RegExp(`- ${a.key} \\(`));
+  assert.doesNotMatch(prompt, /No definition given/);
+  assert.equal(polygonEstimateSchema(["a"]).properties.axes.items.properties.key.enum[0], "a");
 });

@@ -28,6 +28,7 @@ import { HttpError, badRequest, fromPostgrest, notFound } from "../lib/errors.js
 import { hiddenByCounselor, setHiddenByCounselor } from "../lib/polygonVisibility.js";
 import { assertCanEditStudent, assertCanViewStudent, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
+import { EXTRA_NODE_KEYS } from "../lib/polygonEstimate.js";
 import {
   applyInfoPatch,
   axisKeyFor,
@@ -332,10 +333,13 @@ export default async function studentPageRoutes(app: FastifyInstance) {
       }
       if (restored.error) throw fromPostgrest(restored.error);
 
-      // The 3D solid's detail nodes are AI estimates too, so back to derived clears them. A database
-      // without the table (20261125000003) has none to clear.
-      const nodes = await db.from("student_stat_nodes").delete().eq("student_id", student);
-      if (nodes.error && !["42P01", "PGRST205"].includes(nodes.error.code ?? "")) throw fromPostgrest(nodes.error);
+      // The six detail nodes start hidden (20261126000001); reset puts them back that way.
+      const hid = await db
+        .from("student_polygon_axes")
+        .update({ hidden: true })
+        .eq("student_id", student)
+        .in("key", [...EXTRA_NODE_KEYS]);
+      if (hid.error) throw fromPostgrest(hid.error);
 
       return await refreshed(db, student);
     }
