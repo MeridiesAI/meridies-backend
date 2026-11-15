@@ -2702,8 +2702,32 @@ Migration `20261114000001_web_push.sql`, `src/lib/push.ts`, `src/routes/push.ts`
 503 `push_unavailable`, the sweep does nothing. **What a lock screen shows is generic by kind, never a title or body**
 (they can name a student or quote their work); making names opt-in is a practice setting that is not built. Only approved
 counselors are pushed; 404/410 devices are deleted; a notification over an hour old is marked handled without a push; more
-than three for one person in a run become one summary. Not done: per-event toggles, the due-tomorrow student reminder and
-meeting-starting-soon pushes (their own sources, not notification rows).
+than three for one person in a run become one summary. A row the person already read in the app is marked handled
+without a push. A row with `push_after` waits until then, and its hour counts from then (below). Not done: per-event
+toggles, the due-tomorrow student reminder and meeting-starting-soon pushes (their own sources, not notification rows).
+
+### Student updates (`20261126100001`, no route code)
+
+A student's OWN change tells their counselor (`profiles.counselor_id`, approved only): adding or removing an activity
+or an award (`group_key` `activities`), adding or removing a college on their list (`colleges`), moving a college between
+Reach / Target / Safety (`college-fit`), and adding a file (`files`: a `documents` row the student uploaded or brought in
+from Drive). Triggers decide it, so every route and direct PostgREST write is covered: "own" is `auth.uid()` = the
+student at trigger depth 1, so a counselor (and AxIS working for one), a parent, the service role (imports, caseload
+transfer, the server's fit tag on a list-builder add) and rows another trigger writes (the onboarding questionnaire's
+activities, a counselor's staged files filed on accept) tell nobody. **One bell row per (counselor, student,
+`group_key`) while it is open** (neither pushed nor read; a unique partial index, `notifications_open_group_idx`): a
+further change updates it in place (`kind` `student-update`, `urgency` low, `group_detail` keeps the counts and up to 10
+names a side; title "Maya added 3 colleges: Duke, NYU, Cornell" or "Maya added 2 activities and removed 1", the body the
+names the title had no room for; `created_at` moves to the latest change so the bell shows it as new). `push_after` is 20
+minutes after the latest change, so the phone buzzes once ("A student updated their profile."), 20 quiet minutes after
+the last change; once pushed or read the group is closed and the next change opens a new row. Insert/delete triggers are
+per statement (one write however many rows) and swallow any error with a warning, so a student's save never fails
+over a notice. **Moving between tiers can't happen today**: `private.student_colleges_counselor_columns` refuses a
+student's `fit` change (fit is the counselor's call), so `college-fit` stays silent until that rule changes. With push
+off (no VAPID keys) nothing is ever pushed, so a group stays open until the counselor reads it. **Deploy order:**
+migration first: `notifications.push_after` is in `REQUIRED_SCHEMA` (the dispatch reads it every run); the previous
+build pushes a group as soon as it sees it, which only makes groups shorter. Tests: `test/unit/push-dispatch.test.ts`,
+`test/integration/student-update-notifications.test.mjs`.
 
 ## Scheduled jobs
 
