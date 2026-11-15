@@ -68,6 +68,17 @@ check("the counselor adds an activity", r.status === 201 || r.status === 200, `s
 rows = await groups("activities");
 check("…and that tells nobody", rows.length === 2 && rows[1].title === "Maya added 1 activity: Robotics", JSON.stringify(rows));
 
+// The Application page's sheets add a blank row first and fill it in after (the app's createSheetActivity(studentId, {})):
+// the add counts, and nothing stands in for the name the student hasn't typed yet.
+r = await call(c.token, "POST", `/notifications/${rows[1].id}/read`);
+check("the counselor reads the second one", r.status === 200 || r.status === 204, `status ${r.status}`);
+r = await call(s.token, "POST", "/application/activities", { studentId: s.id });
+check("the student adds a blank row to the Activities sheet", r.status === 201 || r.status === 200, `status ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+r = await call(s.token, "POST", "/application/honors", { studentId: s.id });
+check("…and to the Honors sheet", r.status === 201 || r.status === 200, `status ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
+rows = await groups("activities");
+check("blank rows are counted, not named", rows.length === 3 && rows[2].title === "Maya added 2 activities" && rows[2].body === null, JSON.stringify(rows));
+
 // ---- files ---------------------------------------------------------------------
 
 const path = `${s.id}/${Date.now()}-transcript.txt`;

@@ -2718,7 +2718,9 @@ activities, a counselor's staged files filed on accept) tell nobody. **One bell 
 `group_key`) while it is open** (neither pushed nor read; a unique partial index, `notifications_open_group_idx`): a
 further change updates it in place (`kind` `student-update`, `urgency` low, `group_detail` keeps the counts and up to 10
 names a side; title "Maya added 3 colleges: Duke, NYU, Cornell" or "Maya added 2 activities and removed 1", the body the
-names the title had no room for; `created_at` moves to the latest change so the bell shows it as new). `push_after` is 20
+names the title had no room for; `created_at` moves to the latest change so the bell shows it as new). A row with nothing
+to name it by yet is counted, never named with a stand-in: the Application page's sheets add a blank activity or honor
+and fill it in afterwards, so that add reads "Maya added 1 activity". `push_after` is 20
 minutes after the latest change, so the phone buzzes once ("A student updated their profile."), 20 quiet minutes after
 the last change; once pushed or read the group is closed and the next change opens a new row. Insert/delete triggers are
 per statement (one write however many rows) and swallow any error with a warning, so a student's save never fails

@@ -27,7 +27,9 @@
 --
 -- Never in the way of the student's save: insert/delete use statement-level triggers (one notice write per statement,
 -- however many rows it touched), and every error is swallowed with a warning. Names are listed in the order the
--- statement wrote its rows (a transition table is read back in that order), statement after statement.
+-- statement wrote its rows (a transition table is read back in that order), statement after statement. A row with
+-- nothing to name it by yet is counted, not named: the Application page's sheets add a blank activity or honor and
+-- fill it in afterwards, so that add reads "Maya added 1 activity", never a stand-in name like "An activity".
 --
 -- Privacy: the names (colleges, activities, file titles) are only in the bell row's title, body and group_detail,
 -- which only the recipient reads (notifications_select_own). A push never carries them: the dispatcher sends a
@@ -201,9 +203,10 @@ declare
   v_rm_list text := private.student_update_list(p_detail -> 'removedNames', v_removed, 10);
 begin
   if v_added > 0 and v_removed > 0 then
-    return left(concat_ws(' ',
+    -- concat_ws skips a side with no names; with neither named there is no body (null, never '').
+    return nullif(left(concat_ws(' ',
       v_verb || ': ' || v_add_list || '.',
-      'Removed: ' || v_rm_list || '.'), 2000);
+      'Removed: ' || v_rm_list || '.'), 2000), '');
   elsif v_added > 3 then
     return left(v_verb || ': ' || v_add_list || '.', 2000);
   elsif v_removed > 3 then
@@ -258,11 +261,12 @@ begin
   if v_counselor is null or not private.is_counselor(v_counselor) then return; end if;
 
   v_first := private.student_update_first_name(v_full_name);
+  -- A null entry is a row with nothing to name it by yet: it counts, it isn't named.
   v_detail := jsonb_build_object(
     'added', cardinality(v_added),
     'removed', cardinality(v_removed),
-    'addedNames', private.student_update_names(to_jsonb(v_added)),
-    'removedNames', private.student_update_names(to_jsonb(v_removed)));
+    'addedNames', private.student_update_names(to_jsonb(array_remove(v_added, null))),
+    'removedNames', private.student_update_names(to_jsonb(array_remove(v_removed, null))));
 
   insert into public.notifications as n
     (recipient_id, student_id, kind, urgency, title, body, href, action_items, created_by,
@@ -304,12 +308,12 @@ declare
 begin
   if v_uid is null or pg_trigger_depth() > 1 then return null; end if;
   begin
+    -- A row with no name, organization or position (the sheet's blank row) is a null entry: counted, not named.
     if tg_op = 'INSERT' then
       select array_agg(coalesce(
                private.student_update_label(to_jsonb(r) ->> 'name'),
                private.student_update_label(to_jsonb(r) ->> 'organization'),
-               private.student_update_label(to_jsonb(r) ->> 'position'),
-               case when tg_table_name = 'awards' then 'An award' else 'An activity' end))
+               private.student_update_label(to_jsonb(r) ->> 'position')))
         into v_names
         from new_rows r
        where r.student_id = v_uid;
@@ -318,8 +322,7 @@ begin
       select array_agg(coalesce(
                private.student_update_label(to_jsonb(r) ->> 'name'),
                private.student_update_label(to_jsonb(r) ->> 'organization'),
-               private.student_update_label(to_jsonb(r) ->> 'position'),
-               case when tg_table_name = 'awards' then 'An award' else 'An activity' end))
+               private.student_update_label(to_jsonb(r) ->> 'position')))
         into v_names
         from old_rows r
        where r.student_id = v_uid;
@@ -346,13 +349,13 @@ begin
   if v_uid is null or pg_trigger_depth() > 1 then return null; end if;
   begin
     if tg_op = 'INSERT' then
-      select array_agg(coalesce(private.student_update_label(r.name), 'A college'))
+      select array_agg(private.student_update_label(r.name))
         into v_names
         from new_rows r
        where r.student_id = v_uid;
       perform private.note_student_update(v_uid, 'colleges', v_names, null);
     elsif tg_op = 'DELETE' then
-      select array_agg(coalesce(private.student_update_label(r.name), 'A college'))
+      select array_agg(private.student_update_label(r.name))
         into v_names
         from old_rows r
        where r.student_id = v_uid;
@@ -406,8 +409,7 @@ begin
   begin
     select array_agg(coalesce(
              private.student_update_label(r.title),
-             private.student_update_label(r.filename),
-             'A file'))
+             private.student_update_label(r.filename)))
       into v_names
       from new_rows r
      where r.student_id = v_uid and r.uploaded_by = v_uid;
