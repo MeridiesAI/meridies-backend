@@ -143,6 +143,25 @@ export function toRecommendation(r: Row, photos: Map<string, CollegePhotoRow> = 
 
 // ---- Essays ------------------------------------------------------------------
 
+/**
+ * A school on the list as the Essays section heads it (GET /application/essays `colleges`): its name and mark,
+ * and for the deadline beside it the round it is applied in, that round's date (`deadline`, the board's "Due")
+ * and where the application stands, so the app can leave a submitted one out of "Next deadline". Never the
+ * counselor's own date, fit or notes.
+ */
+export function toEssayCollege(r: Row) {
+  return {
+    id: str(r.id),
+    collegeId: nstr(r.college_id),
+    name: str(r.name),
+    initials: str(r.initials) || initialsOf(str(r.name)),
+    color: str(r.brand_color) || "#176b45",
+    round: nstr(r.round),
+    deadline: nstr(r.deadline),
+    status: str(r.status) || "not-started",
+  };
+}
+
 export const ESSAY_SELECT =
   "*, document:documents(id, filename, mime_type, source, external_provider, external_web_url, available_to_llm, ai_access, ferpa_waived, parse_status, bucket, storage_path), supplement_doc:supplement_docs(id, web_url, admission_cycle)";
 
