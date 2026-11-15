@@ -24,7 +24,7 @@ const groups = async (group) =>
 
 const added = [];
 for (const name of ["Duke", "NYU", "Cornell"]) {
-  const r = await call(s.token, "POST", "/application/college-list", { name });
+  const r = await call(s.token, "POST", "/application/college-list", { studentId: s.id, name });
   check(`the student adds ${name}`, r.status === 201 || r.status === 200, `status ${r.status} ${JSON.stringify(r.body).slice(0, 200)}`);
   added.push(r.body?.id);
 }
