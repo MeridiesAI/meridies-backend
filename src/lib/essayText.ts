@@ -71,7 +71,7 @@ type Exporter = typeof exportDocTextResult;
  * Read a linked essay's Google Doc in, with the caller's own grant, and store the text the way Essays sync does
  * (the trigger recounts the words). The first read stamps `text_synced_at` even when the text is unchanged (an
  * empty Doc), so the row stops reading as `pending`. `row` is the updated row (`select`), or null when nothing
- * was written. `e` needs id, body, text_synced_at and the columns `linkedGoogleDoc` reads.
+ * was written. `e` needs id, body, text_status, text_synced_at and the columns `linkedGoogleDoc` reads.
  */
 export async function readLinkedEssay(
   request: FastifyRequest,
@@ -93,7 +93,7 @@ export async function readLinkedEssay(
   if (!r.ok) return { ok: false, reason: r.reason };
 
   const changed = r.text !== String(e.body ?? "");
-  if (!changed && e.text_synced_at) return { ok: true, text: r.text, changed: false, row: null };
+  if (!changed && e.text_synced_at && e.text_status !== "pending") return { ok: true, text: r.text, changed: false, row: null };
   const now = opts.now ?? new Date().toISOString();
   const update: Row = changed ? { body: r.text, text_status: "read", text_synced_at: now } : { text_status: "read", text_synced_at: now };
   const { data, error } = await request.db

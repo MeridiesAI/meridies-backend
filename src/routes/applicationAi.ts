@@ -31,10 +31,16 @@ import {
 import { alignActivities } from "../lib/activityAlignment.js";
 import { buildStudentContext, type StudentContext } from "../lib/context/index.js";
 import { columns } from "../lib/context/ai-allowlist.js";
-import { buildCoherenceMaterial, usableEssay } from "../lib/context/coherenceMaterial.js";
+import {
+  buildCoherenceMaterial,
+  unreadDocsMessage,
+  usableEssay,
+  type UnreadDoc,
+} from "../lib/context/coherenceMaterial.js";
 import { UNTRUSTED_DATA_RULE, wrapUntrusted } from "../lib/context/pack.js";
 import { essayBodyReadable } from "../lib/context/sections.js";
-import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
+import { ESSAY_TEXT_COLUMNS, essayTextState, readLinkedEssay, type EssayTextState } from "../lib/essayText.js";
+import { badRequest, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { resolveStudentId } from "../lib/guards.js";
 import { requireStudentAiTools } from "../lib/practiceSettings.js";
 import {
@@ -131,7 +137,12 @@ async function studentBrief(request: FastifyRequest, studentId: string): Promise
 
 // ---- Coherence: what is on file -----------------------------------------------
 
-type CoherenceDoc = { id: string; title: string; words: number; excluded: boolean };
+/**
+ * `textState` (lib/essayText.ts) tells a Doc that is linked but not read in yet (`pending`: counts as on file, and
+ * a run reads it first) from one with text (`read`), one Meridies can't read (`unreadable`) and nothing (`empty`).
+ * `words` is 0 unless the text has been read.
+ */
+type CoherenceDoc = { id: string; title: string; words: number; excluded: boolean; textState: EssayTextState };
 type CoherenceDocs = {
   statement: CoherenceDoc | null;
   groups: { key: string; heading: string; docs: CoherenceDoc[] }[];
@@ -139,11 +150,17 @@ type CoherenceDocs = {
   awards: number;
 };
 
+const COHERENCE_ESSAY_SELECT =
+  `id, title, prompt, school, body, essay_kind, student_college_id, updated_at, ${ESSAY_TEXT_COLUMNS}, document:documents(available_to_llm, kind_confirmed)`;
+
+/** Which personal statement is "the" statement: one with text, else one linked but not read yet, else one that can't be read. */
+const STATEMENT_RANK: Record<EssayTextState, number> = { read: 0, pending: 1, unreadable: 2, empty: 3 };
+
 async function coherenceDocs(request: FastifyRequest, studentId: string): Promise<{ docs: CoherenceDocs; essays: Row[] }> {
   const [essays, list, acts, honors] = await Promise.all([
     request.db
       .from("essays")
-      .select("id, title, prompt, school, body, word_count, essay_kind, student_college_id, text_status, updated_at, document_id, document:documents(available_to_llm, kind_confirmed)")
+      .select(COHERENCE_ESSAY_SELECT)
       .eq("student_id", studentId)
       .order("sort_order")
       .limit(300),
@@ -153,15 +170,28 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
   ]);
   if (essays.error) throw fromPostgrest(essays.error);
   if (list.error) throw fromPostgrest(list.error);
-  const rows = (essays.data ?? []) as Row[];
+  const rows = (essays.data ?? []) as unknown as Row[];
   // Same rule as the context layer: a linked file that is kept out, or didn't come back, is not readable.
   const excluded = (e: Row) => !essayBodyReadable(e.document_id, e.document);
-  const words = (e: Row) => (e.text_status === "unreadable" ? 0 : Number(e.word_count ?? 0));
-  const doc = (e: Row): CoherenceDoc => ({ id: String(e.id), title: String(e.title ?? ""), words: words(e), excluded: excluded(e) });
+  const doc = (e: Row): CoherenceDoc => {
+    const textState = essayTextState(e);
+    return {
+      id: String(e.id),
+      title: String(e.title ?? ""),
+      words: textState === "read" ? Number(e.word_count ?? 0) : 0,
+      excluded: excluded(e),
+      textState,
+    };
+  };
 
+  // A statement linked as a Google Doc is on file before its text is read in (it used to read "Not on file").
   const statements = rows
-    .filter((e) => e.essay_kind === "personal-statement" && words(e) > 0)
-    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+    .filter((e) => e.essay_kind === "personal-statement" && essayTextState(e) !== "empty")
+    .sort(
+      (a, b) =>
+        STATEMENT_RANK[essayTextState(a)] - STATEMENT_RANK[essayTextState(b)] ||
+        String(b.updated_at).localeCompare(String(a.updated_at))
+    );
   const groups = ((list.data ?? []) as Row[])
     .map((l) => ({
       key: String(l.id),
@@ -178,6 +208,49 @@ async function coherenceDocs(request: FastifyRequest, studentId: string): Promis
     },
     essays: rows,
   };
+}
+
+/** Linked Docs one run reads in at most (Essays sync's own cap), four at a time as it does. */
+const RUN_READ_CAP = 25;
+
+/**
+ * Ticked documents linked to a Google Doc that hasn't been read in yet are read now, with the caller's own grant
+ * (lib/essayText.ts, the read Essays sync does), and their rows in `essays` replaced. Returns every ticked document
+ * that still can't be read, with why, in the order ticked: the run refuses rather than quietly leave one out.
+ */
+async function readTicked(request: FastifyRequest, essays: Row[], ticked: Row[]): Promise<UnreadDoc[]> {
+  const problems = new Map<string, UnreadDoc>();
+  const unread = (e: Row, reason: UnreadDoc["reason"], message?: string) =>
+    problems.set(String(e.id), {
+      part: e.essay_kind === "personal-statement" ? "statement" : "supplement",
+      title: e.title,
+      school: e.school,
+      reason,
+      message,
+    });
+  const waiting: Row[] = [];
+  for (const e of ticked) {
+    const state = essayTextState(e);
+    if (state === "unreadable") unread(e, "unreadable");
+    else if (state === "pending") waiting.push(e);
+  }
+  for (const e of waiting.slice(RUN_READ_CAP)) unread(e, "too-many");
+  const toRead = waiting.slice(0, RUN_READ_CAP);
+  for (let i = 0; i < toRead.length; i += 4) {
+    await Promise.all(
+      toRead.slice(i, i + 4).map(async (e) => {
+        const r = await readLinkedEssay(request, e, { select: COHERENCE_ESSAY_SELECT });
+        if (!r.ok) return unread(e, r.reason, r.message);
+        const fresh = r.row ?? e;
+        const at = essays.findIndex((x) => x.id === e.id);
+        if (at >= 0) essays[at] = fresh;
+        const now = essayTextState(fresh);
+        if (now === "unreadable" || now === "empty") unread(fresh, now);
+        else if (now === "pending") unread(fresh, "failed");
+      })
+    );
+  }
+  return ticked.map((e) => problems.get(String(e.id))).filter((p): p is UnreadDoc => p !== undefined);
 }
 
 const coherenceBody = z
@@ -408,6 +481,15 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
       const audience: Audience = isStudent(request) ? "student" : "counselor";
       const studentId = await resolveStudentId(request, b.studentId, "edit");
       const { docs, essays } = await coherenceDocs(request, studentId);
+
+      // A ticked Doc that is linked but not read in yet is read now; one that can't be read stops the run with why.
+      const byId = (id: string) => essays.find((x) => x.id === id);
+      const tickedStatement = b.statement && docs.statement && !docs.statement.excluded ? byId(docs.statement.id) : undefined;
+      const tickedSupplements = [...new Set(b.supplementEssayIds)]
+        .map(byId)
+        .filter((e): e is Row => e !== undefined && e.essay_kind !== "personal-statement" && essayBodyReadable(e.document_id, e.document));
+      const unread = await readTicked(request, essays, [...(tickedStatement ? [tickedStatement] : []), ...tickedSupplements]);
+      if (unread.length > 0) throw new HttpError(409, unreadDocsMessage(unread, audience), "coherence_docs_unread");
 
       // Read only what is ticked AND on file AND not excluded from AI.
       const usable = (id: string) => usableEssay(essays.find((x) => x.id === id));
