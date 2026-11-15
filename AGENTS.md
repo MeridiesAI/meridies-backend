@@ -2008,6 +2008,36 @@ school and no per-year figure, so neither is claimed) and `bySchool` is one row 
 line items added up; a letter with one scholarship line is named by it, otherwise "Scholarships". Grants and zeros are left
 out. The two lists are never added together and `wonCents` is still the tracker's alone. At most 25 of each per student.
 
+### Application rounds and official deadlines (`20261126100002`; `lib/officialDeadlines.ts`)
+
+A school on a student's list is applied in one round, `student_colleges.round` (ED, ED2, EA, REA, SCEA, RD, rolling,
+priority; the board's round badge, student and counselor both pick it), and that round's date is
+`student_colleges.deadline` (the board's "Due", typed by hand when Meridies has no date). `custom_deadline` is the
+counselor's own earlier date and is not the round's.
+
+- **Official per-round dates live in ONE place: `public.college_round_deadlines`**, one row per (college_id,
+  admission_cycle, round): `deadline` (a real date with its year), `source_url` (required: the page it was read on),
+  `evidence` (the sentence that states it, at most 300 characters), `checked_at`. The cycle is `currentCycle()`'s key
+  ("2026-2027", turning over August 1, the same as `college_supplements`). **A scraper or a curated load writes here
+  with the service role, upserting on the primary key** (`on conflict (college_id, admission_cycle, round) do update`);
+  no client writes it. The database refuses a round outside the list, a cycle that isn't two years in a row, and a
+  date outside its cycle (July 1 of its first year to August 31 of its second), so last year's page can't be filed
+  as this year's. Every signed-in user reads it (the auto-fill runs as the caller); the approval gate is attached.
+- **Where a date comes from** (`knownDate`): the official row for this cycle, else the catalog's curated summary
+  (`colleges.deadlines`, "Regular Decision": "Jan 5", `catalogDeadline`), else nothing. `college_site_info.deadlines`
+  ("Look up info & photo", model-read) is never used for it.
+- **Adding a school** (`addToList`: POST /application/college-list, the list builder, accepted recommendations)
+  fills the round's date. **Changing the round** (PATCH /application/college-list/:id, AxIS's `college_list.update`,
+  whose undo puts the old date back) without a date in the same body follows `deadlineAfterRoundChange`: the new
+  round's known date replaces whatever was there, a typed date included; with none known, a date that was filled in
+  for the old round is cleared and a typed one stays; picking the same round again only fills an empty date. A school
+  typed in by hand has no dates on file, so its typed date never moves.
+- **GET /application/essays** `colleges` carry `round`, `deadline` and `status` (`toEssayCollege`), for the Essays
+  section's "ED · Nov 1" and "Next deadline" in the app; never the counselor's date, fit or notes.
+- **Deploy order: either.** Before the migration every read answers "no official dates" (remembered five minutes)
+  and the curated summary fills as before; not in `REQUIRED_SCHEMA`. Tests: `test/unit/round-deadlines.test.ts`,
+  `test/integration/round-deadlines.test.mjs`.
+
 ### Past students (`GET /alumni/analysis`, no migration)
 
 A past student is an `alumni_records` row (Close cycle writes one per senior). `GET /alumni/analysis` (counselor,
