@@ -60,7 +60,7 @@ function unreadLine(reason: UnreadReason, audience: "counselor" | "student", mes
     case "not-mine":
       return audience === "student"
         ? { what: notReadYet, fix: askCounselor }
-        : { what: `${notReadYet}, and only whoever linked it can read it in`, fix: "Paste the link again yourself in Essays, then generate the report again." };
+        : { what: `${notReadYet}, and only whoever linked it can read it in`, fix: "Add the Doc from your own Google Drive in Essays, then generate the report again." };
     case "no-access":
       return audience === "student"
         ? { what: notReadYet, fix: askCounselor }
