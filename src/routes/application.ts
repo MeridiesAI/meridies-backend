@@ -41,8 +41,8 @@ import {
   type SupplementLayout,
 } from "../lib/supplementLayout.js";
 import { noticeEssayEdit } from "../lib/essayNotice.js";
+import { deadlineAfterRoundChange, knownDate, loadOfficialDeadlines } from "../lib/officialDeadlines.js";
 import {
-  catalogDeadline,
   ESSAY_SELECT,
   GRADES,
   initialsOf,
@@ -50,6 +50,7 @@ import {
   RECOGNITION,
   STAGE_STATUS,
   TIMINGS,
+  toEssayCollege,
   toEssayDoc,
   toListCollege,
   toRecommendation,
@@ -200,6 +201,13 @@ export async function addToList(
 
   const round = input.round ?? "RD";
   const maxOrder = (existing.data ?? []).length;
+  // The round's date: the official one for this cycle, else the catalog's curated one (lib/officialDeadlines.ts).
+  let deadline = input.deadline ?? null;
+  if (deadline === null && catalog) {
+    const cycle = currentCycle();
+    const official = await loadOfficialDeadlines(request.db, String(catalog.id), cycle, request.log);
+    deadline = knownDate({ official, curated: catalog.deadlines, cycle }, round);
+  }
   const insert: Row = {
     student_id: studentId,
     college_id: catalog ? catalog.id : null,
@@ -208,7 +216,7 @@ export async function addToList(
     brand_color: catalog?.brand_color ?? null,
     round,
     status: input.status ?? "not-started",
-    deadline: input.deadline ?? (catalog ? catalogDeadline(catalog.deadlines, round) : null),
+    deadline,
     intended_major: input.intendedMajor ?? null,
     added_by: request.auth.userId,
     sort_order: Math.min(maxOrder, 999),
@@ -489,14 +497,20 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const update: Row = {};
       if (b.round !== undefined) {
         update.round = b.round;
-        // A round change moves the deadline with it, unless the counselor had
-        // already typed their own date over the catalog's.
+        // The date belongs to the round (lib/officialDeadlines.ts): the new round's official or curated date
+        // fills in, and a date filled in for the old round goes when the new one has none. A school typed in by
+        // hand has no dates on file, so its typed date stays.
         const college = (current.college ?? null) as Row | null;
         if (b.deadline === undefined && college) {
-          const was = catalogDeadline(college.deadlines, (current.round as string | null) ?? null);
-          if (current.deadline == null || current.deadline === was) {
-            update.deadline = catalogDeadline(college.deadlines, b.round);
-          }
+          const cycle = currentCycle();
+          const official = await loadOfficialDeadlines(request.db, (college.id as string | null) ?? null, cycle, request.log);
+          const next = deadlineAfterRoundChange(
+            (current.deadline as string | null) ?? null,
+            (current.round as string | null) ?? null,
+            b.round,
+            { official, curated: college.deadlines, cycle }
+          );
+          if (next !== undefined) update.deadline = next;
         }
       }
       if (b.fit !== undefined) update.fit = b.fit;
@@ -718,13 +732,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
 
       return {
         cycle,
-        colleges: rows.map((r) => ({
-          id: String(r.id),
-          collegeId: (r.college_id as string | null) ?? null,
-          name: String(r.name),
-          initials: String(r.initials ?? "") || initialsOf(String(r.name)),
-          color: String(r.brand_color ?? "") || "#176b45",
-        })),
+        colleges: rows.map((r) => toEssayCollege(r)),
         essays: (essays.data ?? []).map((r) => essayDto(request, r as Row)),
         prompts: (prompts.data ?? []).map((r) => toSupplementPrompt(r as Row)),
         docs: (docs.data ?? []).map((r) => ({
