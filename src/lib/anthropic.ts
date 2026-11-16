@@ -27,6 +27,14 @@ export const DEEP_MODEL = "claude-sonnet-4-5";
 
 let client: Anthropic | null = null;
 
+/**
+ * How long the client waits for a response to one request (for a stream, for it
+ * to open; an open stream is not cut). The SDK's own default is ten minutes,
+ * which held a counselor's click, its budget reservation and a cron run behind
+ * one stalled call. Web research keeps its longer per-call timeout.
+ */
+const MODEL_TIMEOUT_MS = 120_000;
+
 /** The shared client, for callers that run their own loop (AxIS). They keep the audit and the AI budget gate (lib/aiBudget.ts) themselves. */
 export const anthropicClient = (): Anthropic => anthropic();
 
@@ -34,7 +42,7 @@ function anthropic(): Anthropic {
   if (!hasAnthropic) {
     throw unavailable("AI features aren't configured yet. Set ANTHROPIC_API_KEY.");
   }
-  if (!client) client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  if (!client) client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, timeout: MODEL_TIMEOUT_MS });
   return client;
 }
 
