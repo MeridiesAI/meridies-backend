@@ -584,6 +584,22 @@ export default async function integrationRoutes(app: FastifyInstance) {
       }
       if (isSuite(provider)) {
         ({ revokedAtProvider } = await revokeAndForget(request.auth.userId, provider, request.log));
+        // revokeAndForget doesn't say whether its delete went through. A disconnect must not report
+        // success, and take the card away, while the stored tokens are still there: look, keyed by
+        // the caller's own id, and stop before the visible grant is removed so the click can be repeated.
+        const svc = serviceClient();
+        if (svc) {
+          const { data: left, error: leftError } = await svc
+            .from("integration_tokens")
+            .select("owner_id")
+            .eq("owner_id", request.auth.userId)
+            .eq("provider", provider)
+            .limit(1);
+          if (leftError || (left ?? []).length > 0) {
+            request.log.error({ provider, code: leftError?.code }, "disconnect: the stored tokens were not removed");
+            throw new HttpError(500, "Couldn't disconnect just now. Try again.");
+          }
+        }
       }
 
       const { error } = await request.db
