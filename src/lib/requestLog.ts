@@ -15,16 +15,29 @@ export function loggedUrl(url: string): string {
     // The one-click unsubscribe links (routes/kpiUnsubscribe.ts, routes/pipelineUnsubscribe.ts)
     // carry a long-lived capability token in the path; a log line must not be able to use it.
     .replace(/^\/*(kpi|pipeline)\/unsubscribe\/[^/]*\/?$/, "/$1/unsubscribe/…")
-    // The pay link (routes/pay.ts) carries a capability token that never expires.
-    .replace(/^\/*pay\/[^/]*\/?$/, "/pay/…")
-    // An agreement link (routes/agreements.ts) is the capability to accept it.
-    .replace(/^\/*agree\/[^/]*\/?$/, "/agree/…")
+    // The pay link (routes/pay.ts) carries a capability token that never expires, and
+    // an agreement link (routes/agreements.ts) is the capability to accept it. The token
+    // is dropped whatever follows it (/pay/<token>/contract, /agree/<token>/file).
+    .replace(/^\/*(pay|agree)\/[^/]*(\/.*)?$/, (_m, kind: string, rest: string | undefined) => `/${kind}/…${afterToken(rest)}`)
     // The subscribed calendar feed's URL is its only credential (routes/calendarIcal.ts).
     .replace(/^\/*calendar\/ical\/[^/]+\/?$/, "/calendar/ical/…");
   const keys = query
     ? [...new URLSearchParams(query).keys()].map((k) => `${k}=…`).join("&")
     : "";
   return keys ? `${path}?${keys}` : path;
+}
+
+/**
+ * What may follow a redacted token segment: one short route word ("/contract",
+ * "/file") is kept, trailing slashes are dropped, anything else is hidden.
+ */
+function afterToken(rest: string | undefined): string {
+  if (!rest) return "";
+  let end = rest.length;
+  while (end > 0 && rest[end - 1] === "/") end--;
+  const tail = rest.slice(0, end);
+  if (tail === "") return "";
+  return /^\/[a-z-]{1,24}$/.test(tail) ? tail : "/…";
 }
 
 /**

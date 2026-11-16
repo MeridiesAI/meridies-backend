@@ -79,9 +79,41 @@ if (listMatchEnabled()) {
     .catch(warnLoad);
 }
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, async () => {
-    await app.close();
-    process.exit(0);
-  });
+// Shutdown. app.close() stops accepting connections and waits for every request in flight, so one
+// hung request or an open AxIS stream could hold it until the platform's SIGKILL: past the deadline
+// the process logs and exits on its own. A second signal while closing changes nothing.
+const SHUTDOWN_DEADLINE_MS = 25_000;
+let closing = false;
+
+function shutdown(reason: string, exitCode: number): void {
+  if (closing) return;
+  closing = true;
+  app.log.info({ reason }, "shutting down");
+  setTimeout(() => {
+    app.log.error({ reason }, `shutdown did not finish within ${SHUTDOWN_DEADLINE_MS / 1000} seconds; exiting`);
+    process.exit(exitCode);
+  }, SHUTDOWN_DEADLINE_MS).unref();
+  app.close().then(
+    () => process.exit(exitCode),
+    (err: unknown) => {
+      app.log.error({ err }, "closing the server failed");
+      process.exit(1);
+    }
+  );
 }
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => shutdown(signal, 0));
+}
+
+// A promise nobody awaited that rejects (background work started with `void`) is logged and the
+// process keeps serving: by default Node exits on one, dropping every tenant's requests in flight.
+process.on("unhandledRejection", (reason) => {
+  app.log.error({ err: reason }, "unhandled promise rejection");
+});
+
+// A thrown error nothing caught leaves the process in an unknown state: log it, close as above, exit 1.
+process.on("uncaughtException", (err) => {
+  app.log.fatal({ err }, "uncaught exception; shutting down");
+  shutdown("uncaughtException", 1);
+});

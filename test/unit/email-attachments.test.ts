@@ -84,6 +84,24 @@ test("a 429 is retried once when asked, and not otherwise", async () => {
   }
 });
 
+test("a send carries a deadline, and a timeout is a failed send, never a throw", async () => {
+  const real = globalThis.fetch;
+  let signal: unknown;
+  globalThis.fetch = (async (_url: string, init: { signal?: AbortSignal }) => {
+    signal = init.signal;
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  }) as unknown as typeof fetch;
+  try {
+    const r = await sendEmail(base);
+    assert.ok(signal instanceof AbortSignal, "the request can be cut off");
+    assert.equal(r.sent, false);
+    assert.equal(r.id, null);
+    assert.equal(r.error, "Email provider timed out");
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
 test("Retry-After is kept between one and ten seconds", () => {
   assert.equal(retryAfterMs(null), 1000);
   assert.equal(retryAfterMs("abc"), 1000);

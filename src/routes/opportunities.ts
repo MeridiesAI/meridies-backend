@@ -165,6 +165,7 @@ export default async function opportunityRoutes(app: FastifyInstance) {
 
       const now = new Date().toISOString();
       const sentIds: string[] = [];
+      let failure: { code?: string; message?: string } | null = null;
 
       for (const match of matches) {
         let deadlineId: string | null = null;
@@ -188,7 +189,7 @@ export default async function opportunityRoutes(app: FastifyInstance) {
           deadlineId = deadline?.id ?? null;
         }
 
-        await request.db
+        const { error: sentError } = await request.db
           .from("opportunity_matches")
           .update({
             status: "sent",
@@ -198,11 +199,20 @@ export default async function opportunityRoutes(app: FastifyInstance) {
             deadline_id: deadlineId,
           })
           .eq("id", match.id as string);
+        // Only a match that was really marked sent is counted: the answer must not say "sent" for one that wasn't.
+        if (sentError) {
+          failure = sentError;
+          request.log.warn({ code: sentError.code }, "opportunities: a match could not be marked sent");
+          continue;
+        }
 
         sentIds.push(match.id as string);
       }
 
-      await request.db.from("notifications").insert({
+      // Nothing went through: an error, and the student is told nothing.
+      if (sentIds.length === 0) throw fromPostgrest(failure);
+
+      const { error: noticeError } = await request.db.from("notifications").insert({
         recipient_id: b.studentId,
         student_id: b.studentId,
         kind: "opportunity",
@@ -215,6 +225,8 @@ export default async function opportunityRoutes(app: FastifyInstance) {
         href: "/dashboard/student/updates",
         created_by: request.auth.userId,
       });
+      // The programs are sent either way; a missing bell notice is logged, not an error.
+      if (noticeError) request.log.warn({ code: noticeError.code }, "opportunities: the student's notice was not written");
 
       return { sent: sentIds.length };
     }

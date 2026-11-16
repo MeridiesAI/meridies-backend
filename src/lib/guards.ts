@@ -41,12 +41,17 @@ export function canArchive(role: Role | string | null | undefined, callerId: str
   return role === "counselor" && callerId !== studentId;
 }
 
-/** Throws unless the caller is the student or a counselor who owns them. */
-export async function assertCanViewStudent(
+/**
+ * How the caller is related to this student, or a throw when they aren't: the student
+ * themselves, their primary counselor, or a collaborator with read or write access. One
+ * profiles read, plus one student_collaborators read for a caller who isn't the primary
+ * counselor; the view and edit checks both decide from this, so an edit reads nothing twice.
+ */
+async function studentAccess(
   request: FastifyRequest,
   studentId: string
-): Promise<void> {
-  if (request.auth.userId === studentId) return;
+): Promise<"self" | "primary" | "read" | "write"> {
+  if (request.auth.userId === studentId) return "self";
 
   const { data, error } = await request.db
     .from("profiles")
@@ -60,16 +65,25 @@ export async function assertCanViewStudent(
   }
   // RLS already hid rows the caller may not read, so "no row" means no access.
   if (!data) throw notFound("That student isn't on your roster");
-  if (data.counselor_id === request.auth.userId) return;
+  if (data.counselor_id === request.auth.userId) return "primary";
 
   const { data: shared } = await request.db
     .from("student_collaborators")
-    .select("student_id")
+    .select("student_id, access")
     .eq("student_id", studentId)
     .eq("counselor_id", request.auth.userId)
     .maybeSingle();
 
   if (!shared) throw notFound("That student isn't on your roster");
+  return shared.access === "write" ? "write" : "read";
+}
+
+/** Throws unless the caller is the student or a counselor who owns them. */
+export async function assertCanViewStudent(
+  request: FastifyRequest,
+  studentId: string
+): Promise<void> {
+  await studentAccess(request, studentId);
 }
 
 /** View access plus write rights (primary counselor, or write collaborator). */
@@ -77,24 +91,8 @@ export async function assertCanEditStudent(
   request: FastifyRequest,
   studentId: string
 ): Promise<void> {
-  await assertCanViewStudent(request, studentId);
-  if (request.auth.userId === studentId) return;
-
-  const { data } = await request.db
-    .from("profiles")
-    .select("counselor_id")
-    .eq("id", studentId)
-    .maybeSingle();
-  if (data?.counselor_id === request.auth.userId) return;
-
-  const { data: shared } = await request.db
-    .from("student_collaborators")
-    .select("access")
-    .eq("student_id", studentId)
-    .eq("counselor_id", request.auth.userId)
-    .maybeSingle();
-
-  if (shared?.access !== "write") throw forbidden("You have read-only access to that student");
+  const access = await studentAccess(request, studentId);
+  if (access === "read") throw forbidden("You have read-only access to that student");
 }
 
 /**

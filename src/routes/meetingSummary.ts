@@ -64,7 +64,9 @@ export default async function meetingSummaryRoutes(app: FastifyInstance) {
     "/meeting-summary",
     {
       bodyLimit: BODY_LIMIT,
-      preHandler: [
+      // onRequest, not preHandler: Fastify reads and parses the body between the two, and up to
+      // 3 MB must not be buffered and parsed for a caller who is not a signed-in counselor.
+      onRequest: [
         app.authenticate,
         requireRole("counselor"),
         limit("ai:meeting-summary", 10, 60, "You're running AI tools very fast. Give it a minute."),

@@ -10,11 +10,18 @@
  * Both need the service-role key, because the counter tables are deliberately
  * not writable by `authenticated`. Without that key we fall back to an
  * in-process map and log loudly, rather than silently enforcing nothing.
+ *
+ * The `limit()` preHandler waits for the Postgres counter on writes only. A
+ * read (GET, HEAD) is decided from an in-process mirror of the same counter
+ * and counted in Postgres without waiting (lib/readLimit.ts). Everything that
+ * calls enforceRateLimit, consumeRateLimit, consumeUnits or a quota directly
+ * waits for Postgres, as before.
  */
 
 import { serviceClient } from "./supabase.js";
 import { hasServiceRole } from "../env.js";
 import { tooManyRequests } from "./errors.js";
+import { decideRead, ReadLimiter } from "./readLimit.js";
 
 type Bucket = { windowStart: number; count: number };
 const memory = new Map<string, Bucket>();
@@ -169,12 +176,36 @@ export function startLimit(
   return () => pending;
 }
 
+// Reads are decided in process (lib/readLimit.ts); the windows that have ended are dropped once a minute.
+const readLimiter = new ReadLimiter();
+setInterval(() => readLimiter.sweep(), 60 * 1000).unref();
+
 /**
  * Per-user, per-route limiter for use as a preHandler. The key is scoped to the
  * authenticated user, so one abusive account cannot exhaust everyone's budget.
+ *
+ * A write (anything but GET and HEAD) waits for the Postgres counter, as ever.
+ * A read is decided from this process's own count of the same key, limit and
+ * window, and the Postgres count is sent without being waited for, so a read
+ * doesn't pay a database round trip before its handler; when Postgres answers
+ * "over" (another replica, or a count from before a restart), that key waits
+ * for it again until its window ends. A request with no method is a write.
  */
 export function limit(name: string, max: number, windowSeconds: number, message?: string) {
-  return async (request: { auth: { userId: string } }) => {
-    await enforceRateLimit(`${name}:${request.auth.userId}`, max, windowSeconds, message);
+  return async (request: { auth: { userId: string }; method?: string; log?: { warn: (msg: string) => void } }) => {
+    const key = `${name}:${request.auth.userId}`;
+    if (request.method === "GET" || request.method === "HEAD") {
+      const allowed = await decideRead(
+        readLimiter,
+        key,
+        max,
+        windowSeconds,
+        () => consumeRateLimit(key, max, windowSeconds),
+        () => request.log?.warn("rate limit: a read's durable count could not be recorded")
+      );
+      if (!allowed) throw tooManyRequests(message);
+      return;
+    }
+    await enforceRateLimit(key, max, windowSeconds, message);
   };
 }

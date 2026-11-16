@@ -37,7 +37,9 @@ export default async function intakeFillRoutes(app: FastifyInstance) {
     "/me/intake/fill",
     {
       bodyLimit: BODY_LIMIT,
-      preHandler: [app.authenticate, limit("ai:intake-fill", 15, 60, "That's a lot of requests. Give it a minute.")],
+      // onRequest, not preHandler: Fastify reads and parses the body between the two, and up to
+      // 8 MB must not be buffered and parsed for a caller who is not signed in or is over the limit.
+      onRequest: [app.authenticate, limit("ai:intake-fill", 15, 60, "That's a lot of requests. Give it a minute.")],
     },
     async (request) => {
       const role = request.profile.role;
