@@ -176,6 +176,12 @@ const envSchema = z.object({
   // trusted proxy saw; the X-Forwarded-For entries a client wrote itself are
   // never trusted. 0 trusts no header (direct exposure).
   TRUST_PROXY_HOPS: blankIsUnset(z.coerce.number().int().min(0).max(5).optional()),
+  // How long the caller's profile row, read by `authenticate` on every request, is reused for that user's next
+  // requests, in milliseconds (lib/profileCache.ts). Unset: 5000 in production, 0 elsewhere, so tests and local
+  // development read it on every request. 0 keeps nothing (requests in flight together still share one read).
+  // For up to this long a counselor whose approval was just revoked still passes the API's own gate; the
+  // database (RLS) refuses them at once either way.
+  AUTH_PROFILE_CACHE_MS: blankIsUnset(z.coerce.number().int().min(0).max(30_000).optional()),
   // Where counselor access requests are sent for review (lib/accessReview.ts).
   ACCESS_REVIEW_EMAIL: blankIsUnset(z.string().email().optional()),
 
@@ -251,6 +257,8 @@ export const corsOrigins = env.CORS_ORIGIN.split(",")
   .filter(Boolean);
 
 export const trustProxy = proxyTrust(process.env, env.TRUST_PROXY_HOPS, env.NODE_ENV);
+/** The profile cache's TTL. The default follows the raw NODE_ENV, so only a process started as production caches. */
+export const authProfileCacheMs = env.AUTH_PROFILE_CACHE_MS ?? (process.env.NODE_ENV === "production" ? 5000 : 0);
 export const hasServiceRole = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
 export const hasImportWorker = Boolean(env.IMPORT_DATABASE_URL);
 export const hasAnthropic = Boolean(env.ANTHROPIC_API_KEY);
