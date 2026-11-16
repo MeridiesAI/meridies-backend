@@ -7,6 +7,7 @@ import { corsOrigins, env, hasAnthropic, hasServiceRole, hasTwilio, trustProxy }
 import { proxyMismatch, trustProxyOption } from "./lib/proxyTrust.js";
 import { HttpError } from "./lib/errors.js";
 import { serializeErr, serializeReq } from "./lib/requestLog.js";
+import { bodyTooComplex, cappedValidationDetails } from "./lib/requestGuards.js";
 import rateLimitPlugin from "./plugins/rateLimit.js";
 import supabaseAuth from "./plugins/supabaseAuth.js";
 import { startExtractionRecovery } from "./lib/documentExtraction.js";
@@ -151,6 +152,15 @@ export function buildApp() {
     }
   });
 
+  // Before any schema runs: zod 3 validates every element of an array however
+  // small its `.max()`, so a body with a huge array or a huge number of keys is
+  // refused here (lib/requestGuards.ts). Added before the routes so it covers all of them.
+  app.addHook("preValidation", async (request) => {
+    if (bodyTooComplex(request.body)) {
+      throw new HttpError(413, "That request has too many items. Send it in smaller parts.", "body_too_complex");
+    }
+  });
+
   // Paged lists (GET /colleges/search) carry their total and next cursor in headers.
   // maxAge: the browser keeps a preflight answer for 10 minutes, so the app's
   // direct PATCH/DELETE calls don't pay an OPTIONS round trip each time
@@ -165,17 +175,21 @@ export function buildApp() {
   // Interactive API reference at /docs (spec at /docs/json). Registered before
   // the routes so every route lands in the spec. Most routes validate with zod
   // inside the handler rather than a Fastify schema, so the spec lists paths
-  // and methods without request bodies.
-  app.register(swagger, {
-    openapi: {
-      info: { title: "Meridies API", version: "0.1.0" },
-      components: {
-        securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" } },
+  // and methods without request bodies. Never in production: the spec is the
+  // whole route map, cron and token paths included. NODE_ENV is read raw, like
+  // the test doubles in index.ts (env.NODE_ENV defaults to development when unset).
+  if (process.env.NODE_ENV !== "production") {
+    app.register(swagger, {
+      openapi: {
+        info: { title: "Meridies API", version: "0.1.0" },
+        components: {
+          securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" } },
+        },
+        security: [{ bearerAuth: [] }],
       },
-      security: [{ bearerAuth: [] }],
-    },
-  });
-  app.register(swaggerUi, { routePrefix: "/docs" });
+    });
+    app.register(swaggerUi, { routePrefix: "/docs" });
+  }
   app.register(supabaseAuth);
 
   app.register(healthRoutes);
@@ -313,7 +327,9 @@ export function buildApp() {
 
   app.setErrorHandler((err: FastifyError | ZodError | HttpError, request, reply) => {
     if (err instanceof ZodError) {
-      return reply.code(400).send({ error: "Invalid request", details: err.flatten() });
+      // The first issues only, in flatten()'s shape: a body built to fail in a
+      // hundred thousand places must not come back as megabytes (lib/requestGuards.ts).
+      return reply.code(400).send({ error: "Invalid request", details: cappedValidationDetails(err.issues) });
     }
     if (err instanceof HttpError) {
       if (err.statusCode >= 500) request.log.error(err);
@@ -330,8 +346,9 @@ export function buildApp() {
     const statusCode = (err as FastifyError).statusCode ?? 500;
     if (statusCode >= 500) {
       request.log.error(err);
-      // Never leak internals — no stack traces, no key hints.
-      return reply.code(500).send({ error: "Something went wrong on our end" });
+      // Never leak internals — no stack traces, no key hints. The request id is
+      // the one every log line of this request carries, so a report can be matched to it.
+      return reply.code(500).send({ error: "Something went wrong on our end", requestId: request.id });
     }
     return reply.code(statusCode).send({ error: err.message ?? "Request failed" });
   });
