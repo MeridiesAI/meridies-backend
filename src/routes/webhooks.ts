@@ -101,7 +101,11 @@ async function applyStatus(provider: "resend" | "twilio", messageId: string, sta
       if (status === "delivered") update.delivered_at = now;
       if (note) update.error = note;
     }
-    await svc.from("message_deliveries").update(update).eq("id", r.id);
+    // A failed write must not be answered 2xx: the provider would count the event as taken and a
+    // bounce would never land. Thrown, it is a 500 and the provider sends the event again; the
+    // update only ever moves a status forward, so a repeat is safe.
+    const { error: updateError } = await svc.from("message_deliveries").update(update).eq("id", r.id);
+    if (updateError) throw new Error(`update delivery: ${updateError.code}`);
   }
   return (rows ?? []).length;
 }
