@@ -24,6 +24,22 @@ test("an unsubscribe token never reaches the logs", () => {
   assert.equal(loggedUrl("/pipeline/contacts"), "/pipeline/contacts");
 });
 
+test("a pay or agreement token never reaches the logs, whatever follows it", () => {
+  const token = "Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXU";
+  assert.equal(loggedUrl(`/pay/${token}`), "/pay/…");
+  assert.equal(loggedUrl(`/pay/${token}/`), "/pay/…");
+  assert.equal(loggedUrl(`/pay/${token}/contract`), "/pay/…/contract");
+  assert.equal(loggedUrl(`//pay/${token}/contract/?x=1`), "/pay/…/contract?x=…");
+  assert.equal(loggedUrl(`/agree/${token}/file`), "/agree/…/file");
+  assert.equal(loggedUrl(`/agree/${token}/file/extra/${token}`), "/agree/…/…");
+  for (const url of [`/pay/${token}/contract`, `/agree/${token}/file`, `/pay/${token}/${token}`]) {
+    assert.ok(!loggedUrl(url).includes(token), url);
+  }
+  // Other paths are left alone.
+  assert.equal(loggedUrl("/payments/abc"), "/payments/abc");
+  assert.equal(loggedUrl("/pipeline/payments"), "/pipeline/payments");
+});
+
 test("redactText strips emails, tokens, keys, phones and query values", async () => {
   const { redactText } = await import("../../src/lib/requestLog.js");
   const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
