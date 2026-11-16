@@ -32,6 +32,16 @@ type Logger = {
 };
 
 const RESEND_ENDPOINT = `${resendBase}/emails`;
+/**
+ * How long one send may take. Without it a stalled connection held the request
+ * (or a whole cron run, with every message queued behind it) until a restart.
+ */
+const EMAIL_TIMEOUT_MS = 15_000;
+
+const isTimeout = (err: unknown): boolean => {
+  const name = typeof err === "object" && err !== null && "name" in err ? String((err as { name: unknown }).name) : "";
+  return name === "TimeoutError" || name === "AbortError";
+};
 
 export type OutboundResult = {
   /** Provider message id, when the provider accepted it. */
@@ -174,6 +184,7 @@ async function sendToDevMail(
           ? { Attachments: m.attachments.map((a) => ({ Content: a.content, Filename: a.filename, ContentType: a.contentType })) }
           : {}),
       }),
+      signal: AbortSignal.timeout(EMAIL_TIMEOUT_MS),
     });
     const payload = (await res.json().catch(() => ({}))) as { ID?: string };
     if (res.ok && payload.ID) return { providerId: `dev-mail:${payload.ID}`, sent: true, errorText: null };
@@ -243,6 +254,8 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
             ...(args.idempotencyKey ? { "Idempotency-Key": args.idempotencyKey.slice(0, 256) } : {}),
           },
           body,
+          // A new deadline for each attempt (the 429 retry is a second call).
+          signal: AbortSignal.timeout(EMAIL_TIMEOUT_MS),
         });
       let res = await post();
       if (res.status === 429 && args.retryOn429) {
@@ -259,7 +272,8 @@ export async function sendEmail(args: SendEmailArgs): Promise<OutboundResult> {
         logger?.error({ status: res.status, template, err: errorText }, "email send failed");
       }
     } catch (err) {
-      errorText = err instanceof Error ? err.message : String(err);
+      // A timeout is a failed send like any network error: recorded below, never thrown.
+      errorText = isTimeout(err) ? "Email provider timed out" : err instanceof Error ? err.message : String(err);
       logger?.error({ template, err: errorText }, "email send threw");
     }
   }
