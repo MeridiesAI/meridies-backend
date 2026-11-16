@@ -24,6 +24,20 @@ function hanging() {
   return { base, seen };
 }
 
+/**
+ * AbortSignal.timeout's timer is unref'd, so with nothing else pending the event loop would
+ * drain before the deadline fires and the runner would cancel the test. A server always has
+ * its listening socket; here a ref'd timer holds the loop while the deadline is awaited.
+ */
+async function holdingLoop<T>(run: () => Promise<T>): Promise<T> {
+  const keepAlive = setTimeout(() => {}, 5_000);
+  try {
+    return await run();
+  } finally {
+    clearTimeout(keepAlive);
+  }
+}
+
 test("which requests are Storage object transfers", () => {
   assert.equal(isStorageTransfer(OBJECT), true);
   assert.equal(isStorageTransfer("http://127.0.0.1:54321/storage/v1/object/sign/student-documents/a/b.pdf"), true);
@@ -41,10 +55,12 @@ test("a stalled request is cut off at the deadline", async () => {
   const { base, seen } = hanging();
   const timed = withRequestTimeout(base, 20);
   const started = Date.now();
-  await assert.rejects(timed(REST, { method: "GET", headers: { apikey: "k" } }), (err: unknown) => {
-    assert.equal((err as { name?: string }).name, "TimeoutError");
-    return true;
-  });
+  await holdingLoop(() =>
+    assert.rejects(timed(REST, { method: "GET", headers: { apikey: "k" } }), (err: unknown) => {
+      assert.equal((err as { name?: string }).name, "TimeoutError");
+      return true;
+    })
+  );
   assert.ok(Date.now() - started < 2000);
   // Everything else the caller passed still reaches fetch.
   assert.equal(seen[0]!.method, "GET");
@@ -53,7 +69,7 @@ test("a stalled request is cut off at the deadline", async () => {
 
 test("a request with no init gets the deadline too", async () => {
   const { base, seen } = hanging();
-  await assert.rejects(withRequestTimeout(base, 20)(new URL(REST)));
+  await holdingLoop(() => assert.rejects(withRequestTimeout(base, 20)(new URL(REST))));
   assert.ok(seen[0]!.signal instanceof AbortSignal);
 });
 
