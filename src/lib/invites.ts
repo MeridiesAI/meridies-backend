@@ -13,6 +13,7 @@ import { sendInviteEmail } from "./email.js";
 import { fromPostgrest } from "./errors.js";
 import { assertAddressFreeFor } from "./imports/heldAddresses.js";
 import { moveStagedDocuments } from "./invitationDocuments.js";
+import { carryInvitationInfo } from "./invitationInfo.js";
 
 /** Unguessable capability. base64url of 24 random bytes ≈ 192 bits. */
 export function newInviteToken(): string {
@@ -128,11 +129,11 @@ export async function insertInvitation(
   }
   if (error) throw fromPostgrest(error);
   // Documents the counselor staged on the invitation this one replaces come along.
-  await moveStagedDocuments(
-    request,
-    (superseded ?? []).map((r) => String((r as Row).id)),
-    String((data as unknown as Row).id)
-  );
+  const supersededIds = (superseded ?? []).map((r) => String((r as Row).id));
+  const newId = String((data as unknown as Row).id);
+  await moveStagedDocuments(request, supersededIds, newId);
+  // What the counselor drafted follows a Resend or the same name, never a sibling at the same address.
+  await carryInvitationInfo(request, supersededIds, newId, input.fullName ?? null, input.resendOf);
   return { row: data as unknown as Row, token };
 }
 

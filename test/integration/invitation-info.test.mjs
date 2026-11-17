@@ -343,3 +343,107 @@ check("an empty draft's infoCount is 0, not absent", row6?.infoCount === 0 && Ob
 await patchInfo(c, d6, { act: 30 });
 const building2 = await call(c.token, "GET", "/invites/building");
 check("infoCount follows a PATCH", building2.body?.find?.((r) => r.id === d6)?.infoCount === 1, `${building2.body?.find?.((r) => r.id === d6)?.infoCount}`);
+
+// ---- a new invitation that replaces a pending one: whose info follows ------------------------------------------
+// The rule: the card's Resend always carries it; a POST /invites carries it only to the same non-blank name.
+// Parents often share one address, so a sibling's invitation must never receive another child's details.
+let nCarry = 0;
+/** A pending draft at `email` (null name = nameless) with `info` seeded on the service side. */
+async function draftAt(email, fullName, info) {
+  const token = `invinfo-carry-${Date.now()}-${++nCarry}-aaaaaaaa`;
+  const name = fullName === null ? "null" : `'${fullName}'`;
+  return one(
+    `insert into public.invitations (counselor_id, email, token, source, full_name, info)
+     values ('${c.id}', '${email}', '${token}', 'intake', ${name}, $j$${JSON.stringify(info)}$j$::jsonb) returning id`
+  );
+}
+/** The row as the database holds it. */
+const invRow = async (id) =>
+  JSON.parse(await one(`select json_build_object('info', info, 'status', status, 'name', full_name)::text from public.invitations where id = '${id}'`));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const carryTag = Date.now();
+const MIA = { phone: "555-0101", birthday: "2012-03-04", parentEmail: "parent@example.com", privateNote: "Mia's private details" };
+
+const rNamed = await draftAt(`carry-named-${carryTag}@test.local`, "Mia Chen", MIA);
+const resentNamed = await call(c.token, "POST", `/invites/${rNamed}/resend`);
+const rNamedNew = resentNamed.body?.id;
+const [oldNamed, newNamed] = [await invRow(rNamed), rNamedNew ? await invRow(rNamedNew) : null];
+check(
+  "Resend keeps the info",
+  [200, 201].includes(resentNamed.status) && rNamedNew !== rNamed && same(newNamed?.info, MIA) && newNamed?.status === "pending",
+  `${resentNamed.status} new ${JSON.stringify(newNamed)}`
+);
+check("...and the revoked invitation keeps its own copy", oldNamed.status === "revoked" && same(oldNamed.info, MIA), JSON.stringify(oldNamed));
+
+const rNameless = await draftAt(`carry-nameless-${carryTag}@test.local`, null, MIA);
+const resentNameless = await call(c.token, "POST", `/invites/${rNameless}/resend`);
+const newNameless = resentNameless.body?.id ? await invRow(resentNameless.body.id) : null;
+check(
+  "Resend keeps the info of a draft with no name",
+  [200, 201].includes(resentNameless.status) && newNameless?.name === null && same(newNameless?.info, MIA),
+  `${resentNameless.status} ${JSON.stringify(newNameless)}`
+);
+
+const sameAddr = `carry-same-${carryTag}@test.local`;
+const dSame = await draftAt(sameAddr, "Ana Lopez", MIA);
+const reSame = await call(c.token, "POST", "/invites", { email: sameAddr, fullName: "  ana   LOPEZ ", source: "intake" });
+const newSame = reSame.body?.id ? await invRow(reSame.body.id) : null;
+check(
+  "a same-name re-invite via POST /invites keeps it",
+  reSame.status === 201 && reSame.body?.id !== dSame && same(newSame?.info, MIA) && (await invRow(dSame)).status === "revoked",
+  `${reSame.status} ${JSON.stringify(newSame)}`
+);
+
+const diffAddr = `carry-diff-${carryTag}@test.local`;
+const dDiff = await draftAt(diffAddr, "Mia Chen", MIA);
+const reDiff = await call(c.token, "POST", "/invites", { email: diffAddr, fullName: "Leo Chen", source: "intake" });
+const newDiff = reDiff.body?.id ? await invRow(reDiff.body.id) : null;
+const oldDiff = await invRow(dDiff);
+check("a different name at the same address does not receive it", reDiff.status === 201 && same(newDiff?.info, {}), `${reDiff.status} ${JSON.stringify(newDiff)}`);
+check("...and the info stays on the revoked row", oldDiff.status === "revoked" && same(oldDiff.info, MIA), JSON.stringify(oldDiff));
+
+const blankAddr = `carry-blank-${carryTag}@test.local`;
+const dBlank = await draftAt(blankAddr, "Mia Chen", MIA);
+const reBlank = await call(c.token, "POST", "/invites", { email: blankAddr });
+const newBlank = reBlank.body?.id ? await invRow(reBlank.body.id) : null;
+check(
+  "a blank-name re-invite does not receive it",
+  reBlank.status === 201 && same(newBlank?.info, {}) && same((await invRow(dBlank)).info, MIA),
+  `${reBlank.status} ${JSON.stringify(newBlank)}`
+);
+
+const nlAddr = `carry-nl-${carryTag}@test.local`;
+const dNl = await draftAt(nlAddr, null, MIA);
+const reNl = await call(c.token, "POST", "/invites", { email: nlAddr });
+const newNl = reNl.body?.id ? await invRow(reNl.body.id) : null;
+check(
+  "two nameless invitations are not the same student",
+  reNl.status === 201 && same(newNl?.info, {}) && same((await invRow(dNl)).info, MIA),
+  `${reNl.status} ${JSON.stringify(newNl)}`
+);
+
+// The sibling case: Mia's draft (filled in through the API, as the counselor would) sits at the parents' address;
+// the counselor then invites Leo there.
+const parentAddr = `parent-${carryTag}@test.local`;
+const miaId = await draftAt(parentAddr, "Mia Chen", {});
+const miaFill = await patchInfo(c, miaId, { birthday: "2012-03-04", parentName: "Pat Chen", parentEmail: parentAddr, privateNote: "Mia is anxious about tests" });
+const leo = await call(c.token, "POST", "/invites", { email: parentAddr, fullName: "Leo Chen", source: "intake" });
+const leoRow = leo.body?.id ? await invRow(leo.body.id) : null;
+const miaRow = await invRow(miaId);
+check(
+  "a sibling invited at the same address gets none of Mia's info",
+  miaFill.status === 200 && leo.status === 201 && leoRow?.name === "Leo Chen" && same(leoRow?.info, {}) && leoRow?.status === "pending",
+  `${miaFill.status} ${leo.status} ${JSON.stringify(leoRow)}`
+);
+check(
+  "...and the revoked Mia row still has hers",
+  miaRow.status === "revoked" && miaRow.info?.privateNote === "Mia is anxious about tests" && miaRow.info?.birthday === "2012-03-04" && miaRow.info?.parentName === "Pat Chen",
+  JSON.stringify(miaRow)
+);
+// Resending Leo's invitation carries Leo's own (empty) info, never Mia's from the revoked row.
+const leoResend = await call(c.token, "POST", `/invites/${leo.body?.id}/resend`);
+check(
+  "a Resend of the sibling's invitation carries only the sibling's own info",
+  [200, 201].includes(leoResend.status) && same((await invRow(leoResend.body?.id)).info, {}),
+  `${leoResend.status}`
+);

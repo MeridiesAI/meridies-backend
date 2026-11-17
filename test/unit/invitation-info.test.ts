@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { draftInfoPatchSchema, draftInfoView, splitDraftPatch } from "../../src/lib/invitationInfo.js";
+import { carryInvitationInfo, draftInfoPatchSchema, draftInfoView, pickInfoToCarry, splitDraftPatch } from "../../src/lib/invitationInfo.js";
 import { infoCountsByInvitation } from "../../src/lib/invites.js";
 
 const INV = "9acde249-47c8-4553-b194-37cbab069252";
@@ -165,4 +165,86 @@ test("infoCountsByInvitation: a missing column is null without a warning; any ot
 
 test("infoCountsByInvitation: no ids is an empty map, not null", async () => {
   assert.equal((await infoCountsByInvitation(countsRequest({ error: { code: "42703" } }), []))?.size, 0);
+});
+
+// ---- carrying info to the invitation that replaces a pending one ---------------------------------------------
+const row = (id: string, full_name: string | null, info: unknown) => ({ id, full_name, info });
+const MIA = { phone: "555-0101", birthday: "2012-03-04" };
+
+test("pickInfoToCarry: the Resend's own row carries, whatever the names say", () => {
+  assert.deepEqual(pickInfoToCarry([row("old", "Mia Chen", MIA)], { newFullName: "Leo Chen", resendOf: "old" }), MIA);
+  assert.deepEqual(pickInfoToCarry([row("old", null, MIA)], { newFullName: null, resendOf: "old" }), MIA, "a nameless draft's Resend");
+});
+
+test("pickInfoToCarry: the same non-blank name carries, ignoring case and spacing", () => {
+  assert.deepEqual(pickInfoToCarry([row("old", "Mia Chen", MIA)], { newFullName: "  mia   CHEN " }), MIA);
+});
+
+test("pickInfoToCarry: a different name, a blank name or a missing name never receives it", () => {
+  assert.equal(pickInfoToCarry([row("old", "Mia Chen", MIA)], { newFullName: "Leo Chen" }), null);
+  assert.equal(pickInfoToCarry([row("old", "Mia Chen", MIA)], { newFullName: "" }), null);
+  assert.equal(pickInfoToCarry([row("old", "Mia Chen", MIA)], { newFullName: null }), null);
+  assert.equal(pickInfoToCarry([row("old", null, MIA)], { newFullName: null }), null, "two blanks are not the same student");
+  assert.equal(pickInfoToCarry([row("old", "   ", MIA)], { newFullName: "  " }), null);
+  assert.equal(pickInfoToCarry([row("old", null, MIA)], { newFullName: "Mia Chen", resendOf: "someone-else" }), null);
+});
+
+test("pickInfoToCarry: only a non-empty object counts as info", () => {
+  for (const info of [{}, null, undefined, [], "x", 5]) {
+    assert.equal(pickInfoToCarry([row("old", "Mia Chen", info)], { newFullName: "Mia Chen", resendOf: "old" }), null, JSON.stringify(info) ?? "undefined");
+  }
+});
+
+test("pickInfoToCarry: a Resend match beats a name match; a row without info is skipped", () => {
+  const rows = [row("a", "Mia Chen", { phone: "name" }), row("b", "Leo Chen", { phone: "resend" })];
+  assert.deepEqual(pickInfoToCarry(rows, { newFullName: "Mia Chen", resendOf: "b" }), { phone: "resend" });
+  assert.deepEqual(pickInfoToCarry([row("a", "Mia Chen", {}), ...rows.slice(0, 1)], { newFullName: "Mia Chen" }), { phone: "name" });
+  assert.equal(pickInfoToCarry([], { newFullName: "Mia Chen", resendOf: "a" }), null);
+});
+
+/** A request whose invitations read answers `read` and whose update answers `write`; `calls` records both. */
+const carryRequest = (read: { data?: unknown; error?: { code: string } | null }, write: { error?: { code: string } | null } | "throws" = {}, warned: unknown[] = [], calls: unknown[] = []) =>
+  ({
+    auth: { userId: "c" },
+    log: { warn: (o: unknown) => warned.push(o) },
+    db: {
+      from: () => ({
+        select: () => ({ eq: () => ({ in: async () => ({ data: null, error: null, ...read }) }) }),
+        update: (v: unknown) => ({
+          eq: () => ({
+            eq: async (...a: unknown[]) => {
+              calls.push([v, a]);
+              if (write === "throws") throw new Error("boom with a phone 555-0101");
+              return { error: null, ...write };
+            },
+          }),
+        }),
+      }),
+    },
+  }) as never;
+
+test("carryInvitationInfo: writes the picked info to the new row, scoped to the counselor", async () => {
+  const calls: unknown[] = [];
+  await carryInvitationInfo(carryRequest({ data: [row("old", "Mia Chen", MIA)] }, {}, [], calls), ["old"], "new", "Mia Chen");
+  assert.deepEqual(calls, [[{ info: MIA }, ["counselor_id", "c"]]]);
+});
+
+test("carryInvitationInfo: nothing to carry writes nothing", async () => {
+  const calls: unknown[] = [];
+  await carryInvitationInfo(carryRequest({ data: [row("old", "Mia Chen", MIA)] }, {}, [], calls), ["old"], "new", "Leo Chen");
+  await carryInvitationInfo(carryRequest({ data: [] }, {}, [], calls), [], "new", "Mia Chen");
+  assert.deepEqual(calls, []);
+});
+
+test("carryInvitationInfo: never throws, warns with the code only, and a missing column is quiet", async () => {
+  const warned: unknown[] = [];
+  await carryInvitationInfo(carryRequest({ error: { code: "42703" } }, {}, warned), ["old"], "new", "Mia Chen");
+  await carryInvitationInfo(carryRequest({ error: { code: "PGRST204" } }, {}, warned), ["old"], "new", "Mia Chen");
+  assert.deepEqual(warned, []);
+  await carryInvitationInfo(carryRequest({ error: { code: "57014" } }, {}, warned), ["old"], "new", "Mia Chen");
+  await carryInvitationInfo(carryRequest({ data: [row("old", "Mia Chen", MIA)] }, { error: { code: "23514" } }, warned), ["old"], "new", "Mia Chen");
+  await carryInvitationInfo(carryRequest({ data: [row("old", "Mia Chen", MIA)] }, "throws", warned), ["old"], "new", "Mia Chen");
+  assert.equal(warned.length, 3);
+  assert.deepEqual(warned.slice(0, 2).map((w) => (w as { code?: string }).code), ["57014", "23514"]);
+  assert.ok(!JSON.stringify(warned).includes("555-0101") && !JSON.stringify(warned).includes("2012-03-04"), "no info content in a log line");
 });

@@ -1627,6 +1627,34 @@ the database (`20261010*`):
   `documentCount` reads 0. **Not done:** staged files of a revoked or dismissed invitation stay in Storage; nothing
   creates essay or activity rows from them. Tests: `test/unit/invitation-documents.test.ts`,
   `test/integration/invitation-documents.test.mjs`.
+- **A counselor can fill in a student's info before the student joins** (`20261127000001`; `lib/invitationInfo.ts`,
+  `routes/invites.ts`). `invitations.info` (jsonb, `{}` by default, a check keeps it an object under 40000 bytes) holds
+  what the info card would, keyed by `infoPatchSchema`'s camelCase keys minus `gradYear` (that is `invitations.grad_year`)
+  plus `highSchoolId` and `privateNote` (4000). It is written only through the API (`grant update (info)` to
+  `authenticated`, nothing for `anon`; a student can't read it): `GET /invites/:id/info` answers the card's shape
+  (`draftInfoView`: what a draft can't know is empty) and `PATCH /invites/:id/info` (body `draftInfoPatchSchema`, strict;
+  a null or "" clears a key; `highSchool` is matched to the catalog on every patch that carries it) merges through
+  `merge_invitation_info`, one atomic RPC, so two quick edits to different fields lose neither. 404 for another
+  counselor's invitation, 409 `invitation_accepted` ("They've joined, so their details live on their own page now.";
+  GET still answers) or `invitation_closed` (revoked, or any status but pending), and 503 `invitation_info_unavailable` before the
+  migration; `GET /invites/building` adds `infoCount` (the key count, 0 for `{}`), **absent before the migration**, which
+  is how the app knows to keep linking the card to the old page. **On accept** the trigger `invitation_info_on_accepted`
+  copies it into the student's record **filling blanks only**, a value the student already has is never overwritten,
+  in five destinations (profile phone and school, `student_personal_details`, `student_academics`, the primary parent,
+  the private note), each in its own sub-block that warns with the destination, the invitation id and the sqlstate
+  only (never a value: a minor's birthday) and never blocks accepting; `high_school_id` only when the student's school is
+  also blank; the parent is inserted when the student has none and the draft has an email or phone (a parent name alone
+  is NOT copied, `guardians` needs one of them), as counselor-added with alerts on, which the guardians guard would
+  otherwise undo (it sees the accepting student as the adder), so the trigger sets `meridies.axis_restore`
+  transaction-locally around that insert. **A resend or a second send** carries it
+  (`carryInvitationInfo`, called by `insertInvitation` after `moveStagedDocuments`; `pickInfoToCarry` is the rule) only
+  from the Resend (`POST /invites/:id/resend` passes `resendOf`) or from a superseded row whose name and the new one's are
+  both non-blank and equal under `sameStudentName`; otherwise it stays on the revoked row and is NOT copied, because parents
+  often share one address and a sibling invited there later (a different name, or none) must never receive another
+  child's details. The old row keeps its copy; best effort, never throws, logs the error code only. **Deploy order:**
+  migration first; not in `REQUIRED_SCHEMA`, and without the file the routes answer 503, `infoCount` is absent and
+  nothing else about invitations changes (the carry reads nothing and returns quietly). Tests:
+  `test/unit/invitation-info.test.ts`, `test/integration/invitation-info.test.mjs`.
 - **Setup steps clear themselves** (`lib/studentSetup.ts`). For a confirmed
   student, `GET /work-items?includeDerived=true` adds `origin: "setup"` rows
   (GPA & scores, strength profile, recommend colleges, activities, guardian,

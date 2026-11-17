@@ -6,7 +6,9 @@
  * routes and the carry-over to a re-invite use these pure parts.
  */
 
+import type { FastifyRequest } from "fastify";
 import { z } from "zod";
+import { sameStudentName } from "./imports/heldAddresses.js";
 import { infoPatchSchema, type StudentInfo } from "./studentPage.js";
 
 /** The info card's edit plus the private note; strict, so an unknown key (a guardian id, a school link) is refused. */
@@ -90,4 +92,57 @@ export function draftInfoView(inv: {
     applications: 0,
     fromQuestionnaire: [],
   };
+}
+
+/** PostgREST's "no such column" answers (invites.ts has the same set; importing it here would be circular). */
+const NO_INFO_COLUMN = new Set(["42703", "PGRST204"]);
+
+/**
+ * Whose info follows a new invitation: the superseded row's, only for the card's Resend (`resendOf`) or the same
+ * non-blank name. Parents often share one address, so a sibling invited there later must never get another child's
+ * details. A Resend match wins over a name match; a row with no info is skipped. Null = nothing to carry.
+ */
+export function pickInfoToCarry(
+  rows: { id: string; full_name: string | null; info: unknown }[],
+  { newFullName, resendOf }: { newFullName: string | null; resendOf?: string }
+): Record<string, unknown> | null {
+  const filled = rows.filter((r) => r.info && typeof r.info === "object" && !Array.isArray(r.info) && Object.keys(r.info).length > 0);
+  const row = filled.find((r) => r.id === resendOf) ?? filled.find((r) => sameStudentName(r.full_name, newFullName));
+  return row ? (row.info as Record<string, unknown>) : null;
+}
+
+/**
+ * Copy the replaced invitation's `info` onto the new one when `pickInfoToCarry` says it belongs there. The old
+ * row keeps its own copy. Best effort and never throws: the invitation is already made, so a failure costs the
+ * counselor a re-type, not the invite. Logs the error code only (info holds a minor's birthday and a family's contacts).
+ */
+export async function carryInvitationInfo(
+  request: FastifyRequest,
+  supersededIds: string[],
+  toId: string,
+  newFullName: string | null,
+  resendOf?: string
+): Promise<void> {
+  if (supersededIds.length === 0) return;
+  try {
+    const { data, error } = await request.db
+      .from("invitations")
+      .select("id, full_name, info")
+      .eq("counselor_id", request.auth.userId)
+      .in("id", supersededIds);
+    if (error) {
+      if (!NO_INFO_COLUMN.has(error.code ?? "")) request.log.warn({ code: error.code }, "invitation info not carried: read failed");
+      return;
+    }
+    const info = pickInfoToCarry((data ?? []) as unknown as Parameters<typeof pickInfoToCarry>[0], { newFullName, resendOf });
+    if (!info) return;
+    const { error: writeError } = await request.db
+      .from("invitations")
+      .update({ info })
+      .eq("id", toId)
+      .eq("counselor_id", request.auth.userId);
+    if (writeError) request.log.warn({ code: writeError.code }, "invitation info not carried: write failed");
+  } catch (e) {
+    request.log.warn({ code: (e as { code?: string })?.code }, "invitation info not carried");
+  }
 }
