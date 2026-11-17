@@ -121,29 +121,42 @@ check("a student's own token cannot read invitations.info", !(Array.isArray(peek
 
 // ---- a bad value's warning never quotes it (a minor's birthday stays out of the server log) ----------------
 const { spawnSync } = await import("node:child_process");
-const f = await user("invinfo-f", "student");
-const invF = await invite(f, {});
-// Built in SQL so the literal never appears in any statement text either.
-await sql(`update public.invitations set info = jsonb_build_object('birthday', '2008-02-' || '30') where id = '${invF.id}'`);
-// A wide window: Docker Desktop's clock can trail the host's; the invitation id keeps the match to this accept.
-const since = new Date(Date.now() - 60000).toISOString();
-const accF = await accept(f, invF.token);
-await new Promise((r) => setTimeout(r, 1000));
-let log = null;
-try {
-  // Postgres logs to the container's stderr; spawnSync keeps both streams.
-  const r = spawnSync("docker", ["logs", "supabase_db_draftinfo", "--since", since], { encoding: "utf8" });
-  log = r.status === 0 ? r.stdout + r.stderr : null;
-} catch {
-  log = null; // no docker here (CI): the log can't be read, so this check is skipped
+const LOG_CHECK = "a bad birthday is warned about by destination and code, not by value";
+/** The database's container: the supabase_db_* one publishing DB_URL's port (the harness's own default). */
+function dbContainer() {
+  const dbUrl = process.env.DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+  const port = new URL(dbUrl).port || "5432";
+  const r = spawnSync("docker", ["ps", "--filter", `publish=${port}`, "--format", "{{.Names}}"], { encoding: "utf8" });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout.split("\n").map((s) => s.trim()).find((s) => s.startsWith("supabase_db_")) ?? null;
 }
-if (log !== null) {
+/** Postgres logs to the container's stderr; keep both streams. */
+const dbLog = (name) => {
+  const r = spawnSync("docker", ["logs", "--since", "120s", name], { encoding: "utf8" });
+  return r.status === 0 ? r.stdout + r.stderr : "";
+};
+
+const container = dbContainer();
+if (!container) {
+  console.log(`SKIP  ${LOG_CHECK}  (no docker/db container found)`);
+} else {
+  const f = await user("invinfo-f", "student");
+  const invF = await invite(f, {});
+  // Built in SQL so the literal never appears in any statement text either.
+  await sql(`update public.invitations set info = jsonb_build_object('birthday', '2008-02-' || '30') where id = '${invF.id}'`);
+  const accF = await accept(f, invF.token);
+  // Poll until this invitation's warning is flushed to the log (up to 10 s).
+  let log = "";
+  for (let t = 0; t < 20 && !log.includes(invF.id); t++) {
+    await new Promise((r) => setTimeout(r, 500));
+    log = dbLog(container);
+  }
   const ours = log.split("\n").filter((l) => l.includes(invF.id));
   check(
-    "a bad birthday is warned about by destination and code, not by value",
+    LOG_CHECK,
     accF.status === 200 &&
       ours.some((l) => l.includes("student_personal_details not filled") && l.includes("sqlstate 22008")) &&
       !log.includes("2008-02-30"),
-    `${accF.status} ${ours.join(" / ").slice(0, 240)}`
+    `${accF.status} ${container}: ${ours.join(" / ").slice(0, 240)}`
   );
 }
