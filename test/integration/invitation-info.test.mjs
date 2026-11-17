@@ -1,6 +1,6 @@
 // What a counselor drafts for a student who hasn't joined yet (20261127000001): invitations.info, merged by
 // merge_invitation_info, copied into the student's blank fields the moment they accept, never blocking the accept.
-import { call, check, rest, sql, user } from "./harness.mjs";
+import { API, call, check, rest, sql, user } from "./harness.mjs";
 
 // psql prints the command tag ("INSERT 0 1") after a RETURNING row; keep the first line.
 const one = async (q) => (await sql(q)).split("\n")[0];
@@ -160,3 +160,184 @@ if (!container) {
     `${accF.status} ${container}: ${ours.join(" / ").slice(0, 240)}`
   );
 }
+
+// ---- GET / PATCH /invites/:id/info ---------------------------------------------------------------------
+let nDraft = 0;
+/** A pending invitation of the counselor's for an address nobody has joined with; `info` is seeded on the service side. */
+async function pending(info = {}) {
+  const token = `invinfo-api-${Date.now()}-${++nDraft}-aaaaaaaa`;
+  return one(
+    `insert into public.invitations (counselor_id, email, token, source, full_name, info)
+     values ('${c.id}', 'draft-${Date.now()}-${nDraft}@test.local', '${token}', 'intake', 'Draft Student', $j$${JSON.stringify(info)}$j$::jsonb) returning id`
+  );
+}
+const getInfo = (who, id) => call(who.token, "GET", `/invites/${id}/info`);
+const patchInfo = (who, id, body) => call(who.token, "PATCH", `/invites/${id}/info`, body);
+
+const d1 = await pending();
+const fresh = await getInfo(c, d1);
+check(
+  "GET /info on an empty draft answers the card's shape with nothing filled",
+  fresh.status === 200 &&
+    fresh.body?.info?.phone === null &&
+    fresh.body?.info?.fullName === "Draft Student" &&
+    Array.isArray(fresh.body?.info?.intendedMajors) &&
+    fresh.body?.privateNote === "" &&
+    fresh.body?.invitation?.id === d1 &&
+    fresh.body?.invitation?.status === "pending" &&
+    fresh.body?.invitation?.studentId === null,
+  `${fresh.status} ${JSON.stringify(fresh.body).slice(0, 200)}`
+);
+
+const p1 = await patchInfo(c, d1, {
+  phone: "555-0303",
+  gpaUnweighted: 3.8,
+  parentName: "Dana Draft",
+  parentEmail: "dana@example.com",
+  parentPhone: "555-0404",
+  privateNote: "Prefers evening calls.",
+});
+check(
+  "PATCH /info answers the same shape, with the new values",
+  p1.status === 200 &&
+    p1.body?.info?.phone === "555-0303" &&
+    p1.body?.info?.gpaUnweighted === 3.8 &&
+    p1.body?.info?.parentName === "Dana Draft" &&
+    p1.body?.privateNote === "Prefers evening calls." &&
+    p1.body?.invitation?.status === "pending",
+  `${p1.status} ${JSON.stringify(p1.body).slice(0, 240)}`
+);
+const g1 = await getInfo(c, d1);
+check(
+  "GET /info reads back what PATCH stored (phone, GPA, parent, private note)",
+  g1.status === 200 &&
+    g1.body?.info?.phone === "555-0303" &&
+    g1.body?.info?.gpaUnweighted === 3.8 &&
+    g1.body?.info?.parentName === "Dana Draft" &&
+    g1.body?.info?.parentEmail === "dana@example.com" &&
+    g1.body?.info?.parentPhone === "555-0404" &&
+    g1.body?.privateNote === "Prefers evening calls." &&
+    g1.body?.invitation?.email.startsWith("draft-") &&
+    g1.body?.invitation?.fullName === "Draft Student",
+  `${g1.status} ${JSON.stringify(g1.body).slice(0, 300)}`
+);
+const stored = JSON.parse(await one(`select info from public.invitations where id = '${d1}'`));
+check("the private note is stored inside info, not as its own column", stored.privateNote === "Prefers evening calls." && stored.phone === "555-0303", JSON.stringify(stored));
+
+const pc = await patchInfo(c, d1, { phone: "", privateNote: null });
+check(
+  "an empty string or null clears a key",
+  pc.status === 200 && pc.body?.info?.phone === null && pc.body?.privateNote === "" && pc.body?.info?.gpaUnweighted === 3.8,
+  `${pc.status} ${JSON.stringify(pc.body).slice(0, 200)}`
+);
+
+const pg = await patchInfo(c, d1, { gradYear: "2027" });
+const gradDb = await one(`select grad_year from public.invitations where id = '${d1}'`);
+check(
+  "gradYear lands on the invitation's own column and shows on the card",
+  pg.status === 200 && gradDb === "2027" && pg.body?.info?.gradYear === "2027" && pg.body?.info?.phone === null && pg.body?.info?.gpaUnweighted === 3.8,
+  `${pg.status} db ${gradDb} ${JSON.stringify(pg.body?.info?.gradYear)}`
+);
+const pgc = await patchInfo(c, d1, { gradYear: null });
+check("gradYear null clears the invitation's class year", pgc.status === 200 && (await one(`select grad_year is null from public.invitations where id = '${d1}'`)) === "t", `${pgc.status}`);
+
+const bad = [
+  ["a bad email", { email: "nope" }],
+  ["an SAT below 400", { sat: 399 }],
+  ["an unknown key", { guardianId: "x" }],
+  ["a private note over 4000 characters", { privateNote: "x".repeat(4001) }],
+];
+for (const [label, body] of bad) {
+  const r = await patchInfo(c, d1, body);
+  check(`PATCH /info refuses ${label} with 400`, r.status === 400, `${r.status} ${JSON.stringify(r.body).slice(0, 120)}`);
+}
+const empty = await patchInfo(c, d1, {});
+check("an empty patch is 400 Nothing to change", empty.status === 400 && empty.body?.error === "Nothing to change", `${empty.status} ${JSON.stringify(empty.body)}`);
+const storedAfterBad = JSON.parse(await one(`select info from public.invitations where id = '${d1}'`));
+check("a refused patch stores nothing", storedAfterBad.sat === undefined && storedAfterBad.email === undefined, JSON.stringify(storedAfterBad));
+
+// Two edits to different fields, fired together, both survive (one atomic merge).
+const d2 = await pending();
+const [r1, r2] = await Promise.all([patchInfo(c, d2, { phone: "555-0505" }), patchInfo(c, d2, { sat: 1500 })]);
+const both = await getInfo(c, d2);
+check(
+  "two quick PATCHes to different fields both survive",
+  r1.status === 200 && r2.status === 200 && both.body?.info?.phone === "555-0505" && both.body?.info?.sat === 1500,
+  `${r1.status} ${r2.status} ${JSON.stringify(both.body?.info?.phone)} ${JSON.stringify(both.body?.info?.sat)}`
+);
+
+// High school: matched to the catalog on every patch that carries a name.
+const hsName = `Draftinfo Test High ${Date.now()}`;
+const hsId = await one(`with h as (insert into public.high_schools (name) values ('${hsName}') returning id) select id from h`);
+const d3 = await pending();
+const h1 = await patchInfo(c, d3, { highSchool: hsName.toLowerCase() });
+check("a high school typed as a catalog name is linked", h1.status === 200 && h1.body?.info?.highSchoolId === hsId && h1.body?.info?.highSchool === hsName.toLowerCase(), `${h1.status} ${JSON.stringify(h1.body?.info?.highSchoolId)}`);
+const h2 = await patchInfo(c, d3, { highSchool: hsName.toLowerCase() });
+check("sending the same name again keeps the link", h2.status === 200 && h2.body?.info?.highSchoolId === hsId, `${h2.status} ${JSON.stringify(h2.body?.info?.highSchoolId)}`);
+const h3 = await patchInfo(c, d3, { highSchool: "No Such School Anywhere" });
+check("a name with no catalog match drops the link but keeps the typed name", h3.status === 200 && h3.body?.info?.highSchoolId === null && h3.body?.info?.highSchool === "No Such School Anywhere", `${h3.status} ${JSON.stringify(h3.body?.info?.highSchoolId)}`);
+const h4 = await patchInfo(c, d3, { highSchool: hsName });
+const h5 = await patchInfo(c, d3, { highSchool: "" });
+check(
+  "clearing the name clears the link too",
+  h4.body?.info?.highSchoolId === hsId && h5.status === 200 && h5.body?.info?.highSchool === null && h5.body?.info?.highSchoolId === null,
+  `${JSON.stringify(h4.body?.info?.highSchoolId)} -> ${h5.status} ${JSON.stringify(h5.body?.info)}`.slice(0, 200)
+);
+const h6 = await patchInfo(c, d3, { phone: "555-0606" });
+const h7 = await patchInfo(c, d3, { highSchool: hsName });
+const h8 = await patchInfo(c, d3, { phone: "555-0707" });
+check("a patch for another field leaves the school link alone", h7.body?.info?.highSchoolId === hsId && h8.body?.info?.highSchoolId === hsId && h6.status === 200, `${h8.status} ${JSON.stringify(h8.body?.info?.highSchoolId)}`);
+
+// Who may call it.
+const x1 = await getInfo(other, d1);
+const x2 = await patchInfo(other, d1, { phone: "555-9999" });
+check("another counselor's GET is 404", x1.status === 404, `${x1.status} ${JSON.stringify(x1.body).slice(0, 100)}`);
+check("another counselor's PATCH is 404 and changes nothing", x2.status === 404 && (await one(`select info ? 'phone' from public.invitations where id = '${d1}'`)) === "f", `${x2.status}`);
+const gone = await getInfo(c, "00000000-0000-4000-8000-000000000000");
+check("an unknown invitation is 404", gone.status === 404, `${gone.status}`);
+const stu = await getInfo(a, d1);
+const stuP = await patchInfo(a, d1, { phone: "1" });
+check("a student token is 403 on both", stu.status === 403 && stuP.status === 403, `${stu.status} ${stuP.status}`);
+const noTok = await fetch(`${API}/invites/${d1}/info`);
+const noTokP = await fetch(`${API}/invites/${d1}/info`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{}" });
+check("no token is 401 on both", noTok.status === 401 && noTokP.status === 401, `${noTok.status} ${noTokP.status}`);
+const notUuid = await getInfo(c, "not-a-uuid");
+check("a malformed id is 400", notUuid.status === 400, `${notUuid.status}`);
+
+// After the student joins: GET still answers, PATCH is 409.
+const afterJoin = await getInfo(c, invA.id);
+const patchJoined = await patchInfo(c, invA.id, { phone: "555-1212" });
+check(
+  "after accept GET answers with status accepted and the student's id",
+  afterJoin.status === 200 && afterJoin.body?.invitation?.status === "accepted" && afterJoin.body?.invitation?.studentId === a.id,
+  `${afterJoin.status} ${JSON.stringify(afterJoin.body?.invitation)}`
+);
+check(
+  "after accept PATCH is 409 invitation_accepted",
+  patchJoined.status === 409 && patchJoined.body?.code === "invitation_accepted",
+  `${patchJoined.status} ${JSON.stringify(patchJoined.body)}`
+);
+// A student who is on another counselor's roster is not exposed by id.
+await sql(`update public.profiles set counselor_id = '${other.id}' where id = '${b.id}'`);
+const moved = await getInfo(c, invB.id);
+check("a joined student who is no longer on this roster is not named", moved.status === 200 && moved.body?.invitation?.status === "accepted" && moved.body?.invitation?.studentId === null, JSON.stringify(moved.body?.invitation));
+
+// Revoked.
+const d4 = await pending({ phone: "555-1313" });
+await sql(`update public.invitations set status = 'revoked' where id = '${d4}'`);
+const gRev = await getInfo(c, d4);
+const pRev = await patchInfo(c, d4, { phone: "555-1414" });
+check("a revoked invitation still answers GET", gRev.status === 200 && gRev.body?.invitation?.status === "revoked" && gRev.body?.invitation?.studentId === null && gRev.body?.info?.phone === "555-1313", `${gRev.status} ${JSON.stringify(gRev.body?.invitation)}`);
+check("a revoked invitation's PATCH is 409 invitation_closed and changes nothing", pRev.status === 409 && pRev.body?.code === "invitation_closed" && (await one(`select info->>'phone' from public.invitations where id = '${d4}'`)) === "555-1313", `${pRev.status} ${JSON.stringify(pRev.body)}`);
+
+// The building card's feature flag: infoCount is the stored key count (0 for {}).
+const d5 = await pending({ phone: "555-1515", sat: 1400, privateNote: "n" });
+const d6 = await pending({});
+const building = await call(c.token, "GET", "/invites/building");
+const row5 = building.body?.find?.((r) => r.id === d5);
+const row6 = building.body?.find?.((r) => r.id === d6);
+check("a building card carries infoCount equal to the stored key count", building.status === 200 && row5?.infoCount === 3, `${building.status} ${JSON.stringify(row5?.infoCount)}`);
+check("an empty draft's infoCount is 0, not absent", row6?.infoCount === 0 && Object.hasOwn(row6, "infoCount"), JSON.stringify(row6?.infoCount));
+await patchInfo(c, d6, { act: 30 });
+const building2 = await call(c.token, "GET", "/invites/building");
+check("infoCount follows a PATCH", building2.body?.find?.((r) => r.id === d6)?.infoCount === 1, `${building2.body?.find?.((r) => r.id === d6)?.infoCount}`);

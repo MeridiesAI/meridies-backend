@@ -54,7 +54,7 @@ export type CreateInvitationInput = {
 };
 
 /** PostgREST's "no such column" answers. */
-const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
+export const MISSING_COLUMN = new Set(["42703", "PGRST204"]);
 
 export const INVITATION_COLUMNS =
   "id, email, status, created_at, expires_at, accepted_at, accepted_by, full_name, grade_level, " +
@@ -264,6 +264,34 @@ export async function importDataByInvitation(
     const clean: Record<string, string> = {};
     for (const [k, v] of Object.entries(d as Record<string, unknown>)) if (typeof v === "string") clean[k] = v;
     if (Object.keys(clean).length > 0) out.set(r.id, clean);
+  }
+  return out;
+}
+
+/**
+ * How many things each draft holds (`invitations.info`, 20261127000001): its key count, 0 for `{}`. Read apart
+ * from INVITATION_COLUMNS so a database without the column still lists its cards. `null` means the column is
+ * not there (or the read failed): the caller leaves `infoCount` off, which is how the app knows the API
+ * cannot take draft details.
+ */
+export async function infoCountsByInvitation(
+  request: FastifyRequest,
+  ids: string[]
+): Promise<Map<string, number> | null> {
+  const out = new Map<string, number>();
+  if (ids.length === 0) return out;
+  const { data, error } = await request.db
+    .from("invitations")
+    .select("id, info")
+    .eq("counselor_id", request.auth.userId)
+    .in("id", ids);
+  if (error) {
+    if (!MISSING_COLUMN.has(error.code ?? "")) request.log.warn({ code: error.code }, "invitation info counts unreadable");
+    return null;
+  }
+  for (const r of (data ?? []) as unknown as { id: string; info: unknown }[]) {
+    const info = r.info;
+    out.set(r.id, info && typeof info === "object" && !Array.isArray(info) ? Object.keys(info).length : 0);
   }
   return out;
 }

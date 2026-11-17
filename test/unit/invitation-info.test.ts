@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { draftInfoPatchSchema, draftInfoView, splitDraftPatch } from "../../src/lib/invitationInfo.js";
+import { infoCountsByInvitation } from "../../src/lib/invites.js";
 
 const INV = "9acde249-47c8-4553-b194-37cbab069252";
 const HS = "6b898b7d-0abf-447d-bc9d-2b47bd9c5731";
@@ -138,4 +139,30 @@ test("the largest info a counselor can store stays within 60% of the column's 40
   const { set } = splitDraftPatch(patch, HS);
   const bytes = Buffer.byteLength(JSON.stringify(set));
   assert.ok(bytes <= 24000, `the largest info is ${bytes} bytes of JSON; keep it at 24000 or less (the column allows 40000 as jsonb)`);
+});
+
+/** A request whose invitations read answers `result`; `warned` collects what was logged. */
+const countsRequest = (result: { data?: unknown; error?: { code: string } | null }, warned: unknown[] = []) =>
+  ({
+    auth: { userId: "c" },
+    log: { warn: (o: unknown) => warned.push(o) },
+    db: { from: () => ({ select: () => ({ eq: () => ({ in: async () => ({ data: null, error: null, ...result }) }) }) }) },
+  }) as never;
+
+test("infoCountsByInvitation: the key count of each draft, 0 for {}", async () => {
+  const out = await infoCountsByInvitation(countsRequest({ data: [{ id: "a", info: { phone: "1", sat: 1400 } }, { id: "b", info: {} }] }), ["a", "b"]);
+  assert.deepEqual([...(out ?? [])], [["a", 2], ["b", 0]]);
+});
+
+test("infoCountsByInvitation: a missing column is null without a warning; any other failure is null with one", async () => {
+  const warned: unknown[] = [];
+  assert.equal(await infoCountsByInvitation(countsRequest({ error: { code: "42703" } }, warned), ["a"]), null);
+  assert.equal(await infoCountsByInvitation(countsRequest({ error: { code: "PGRST204" } }, warned), ["a"]), null);
+  assert.deepEqual(warned, []);
+  assert.equal(await infoCountsByInvitation(countsRequest({ error: { code: "57014" } }, warned), ["a"]), null);
+  assert.deepEqual(warned, [{ code: "57014" }]);
+});
+
+test("infoCountsByInvitation: no ids is an empty map, not null", async () => {
+  assert.equal((await infoCountsByInvitation(countsRequest({ error: { code: "42703" } }), []))?.size, 0);
 });
