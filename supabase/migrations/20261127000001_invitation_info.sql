@@ -7,8 +7,9 @@
 -- trigger copies them into the student's own tables, filling blanks only: a value the student already has
 -- is never overwritten, and a bad value is skipped with a warning, never an error that blocks the accept.
 --
--- Additive and idempotent. Deploy order: either order with the code. Safe for the previous build: nothing
--- reads the column and its default is '{}'. NOT in REQUIRED_SCHEMA: without it the draft-info routes
+-- Additive and idempotent. Deploy order: migration first is the recommended order, either order is safe.
+-- Safe for the previous build: it reads no info (its data export reads invitations with *, so a counselor's
+-- export now carries their own drafts) and the default is '{}'. NOT in REQUIRED_SCHEMA: without it the draft-info routes
 -- answer 503 and the app keeps linking the card to the invitations page.
 
 alter table public.invitations
@@ -21,8 +22,9 @@ alter table public.invitations drop constraint if exists invitations_info_shape;
 alter table public.invitations
   add constraint invitations_info_shape check (jsonb_typeof(info) = 'object' and pg_column_size(info) <= 40000);
 
--- Written only through the API on the counselor's own client; RLS and private.invitations_guard_client
--- apply as for every other client-writable column. Nothing for anon.
+-- The app writes it only through the API's routes, but a counselor's own client could write the column too:
+-- RLS and private.invitations_guard_client apply as for every other client-writable column, the check above
+-- bounds it, and the accept trigger tolerates garbage (a bad value is skipped). Nothing for anon.
 grant update (info) on table public.invitations to authenticated;
 
 -- ---------------------------------------------------------------------------
@@ -139,9 +141,14 @@ begin
         (i->>'act')::integer,
         nullif(btrim(i->>'rigor'), ''))
       on conflict (student_id) do update set
-        gpa_weighted   = coalesce(t.gpa_weighted, excluded.gpa_weighted),
-        gpa_unweighted = coalesce(t.gpa_unweighted, excluded.gpa_unweighted),
-        gpa_scale      = case when nullif(btrim(t.gpa_scale), '') is null then coalesce(excluded.gpa_scale, t.gpa_scale) else t.gpa_scale end,
+        -- The GPA group moves together (the questionnaire sync's rule): all three only when all three are blank,
+        -- so a GPA is never read on a scale that wasn't its own. The other columns fill one by one.
+        gpa_weighted   = case when t.gpa_weighted is null and t.gpa_unweighted is null and nullif(btrim(t.gpa_scale), '') is null
+                              then excluded.gpa_weighted else t.gpa_weighted end,
+        gpa_unweighted = case when t.gpa_weighted is null and t.gpa_unweighted is null and nullif(btrim(t.gpa_scale), '') is null
+                              then excluded.gpa_unweighted else t.gpa_unweighted end,
+        gpa_scale      = case when t.gpa_weighted is null and t.gpa_unweighted is null and nullif(btrim(t.gpa_scale), '') is null
+                              then excluded.gpa_scale else t.gpa_scale end,
         class_rank     = case when nullif(btrim(t.class_rank), '') is null then coalesce(excluded.class_rank, t.class_rank) else t.class_rank end,
         sat_superscore = coalesce(t.sat_superscore, excluded.sat_superscore),
         act_composite  = coalesce(t.act_composite, excluded.act_composite),

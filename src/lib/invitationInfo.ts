@@ -8,6 +8,7 @@
 
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
+import { gpaOverScale } from "./gpa.js";
 import { sameStudentName } from "./imports/heldAddresses.js";
 import { infoPatchSchema, type StudentInfo } from "./studentPage.js";
 
@@ -38,6 +39,37 @@ export function splitDraftPatch(
   // The link follows the typed name: a name with no catalog match, or a cleared one, drops it.
   if (fields.highSchool !== undefined) put("highSchoolId", fields.highSchool && highSchoolId ? highSchoolId : null);
   return gradYear === undefined ? { set, remove } : { set, remove, gradYear: gradYear ? Number(gradYear) : null };
+}
+
+/**
+ * Why the draft, with this patch on top of what is stored, holds a GPA or birthday the student's own tables would
+ * refuse at accept (which would skip that whole destination), or null. Checked only when the patch touches those
+ * fields, so a draft stored earlier never blocks an edit elsewhere. The rules are the tables': `student_academics_gpa_range`
+ * (0-10, or 0-110 on a scale starting "100"), `student_academics_gpa_within_scale` (`gpaOverScale`) and
+ * `student_personal_details.birthday` (1980-01-01 to 2030-12-31).
+ */
+export function draftValueProblem(stored: Record<string, unknown>, patch: DraftInfoPatch): string | null {
+  const merged = (key: keyof DraftInfoPatch): unknown => {
+    const v = patch[key] !== undefined ? patch[key] : stored[key];
+    return v === undefined || v === "" ? null : v;
+  };
+  if (patch.gpaWeighted !== undefined || patch.gpaUnweighted !== undefined || patch.gpaScale !== undefined) {
+    const rawScale = merged("gpaScale");
+    const scale = typeof rawScale === "string" ? rawScale : null;
+    const cap = /^\s*100/.test(scale ?? "") ? 110 : 10;
+    for (const kind of ["weighted", "unweighted"] as const) {
+      const raw = merged(kind === "weighted" ? "gpaWeighted" : "gpaUnweighted");
+      const value = raw === null ? NaN : Number(raw);
+      if (!Number.isFinite(value)) continue;
+      if (value > cap) return `${kind === "unweighted" ? "An" : "A"} ${kind} GPA can be at most ${cap}${cap === 10 ? " unless the scale is 100" : " on a 100 scale"}`;
+      const why = gpaOverScale(value, scale, kind);
+      if (why) return why;
+    }
+  }
+  if (patch.birthday) {
+    if (patch.birthday < "1980-01-01" || patch.birthday > "2030-12-31") return "Birthday must be between 1980 and 2030.";
+  }
+  return null;
 }
 
 /** A stored value read as the info card's own field rule would accept it, else null. */

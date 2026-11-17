@@ -361,7 +361,7 @@ Two things the database enforces that the API must not be trusted to:
 - **Only `accept_invitation()` marks an invitation accepted**
   (`20261024000023`). The client UPDATE grant on `invitations` covers what
   the app edits (status, the New student card's fields, intake requests,
-  `dismissed_at`, `confirmed_at`, `submitted_at`), and
+  `dismissed_at`, `confirmed_at`, `submitted_at`, and `info`, bounded by a 40000-byte check), and
   `private.invitations_guard_client` lets a client move status only
   pending -> revoked, set `confirmed_at` only once accepted and
   `submitted_at` only back to null, and insert only a pending row. The API
@@ -1002,8 +1002,8 @@ forget it.
   (a family isn't a student). The counselor's data export carries
   `contactActivities` and `contactFollowups` beside `contacts`. Not done: the
   contact's info and parents are not copied onto the student at conversion
-  (an invitation carries only name, grade, class year and note, so a copy would
-  have to write into the student's tables through the import machinery), and
+  (an invitation also carries the counselor's draft `info`, which accept copies into the student's blank fields, but
+  conversion does not fill it from the card), and
   follow-ups aren't in the Calendar feed (its kinds are a fixed set with
   seeded types) or on a cron-driven notification. An invitation always goes to
   the student's own address: a parent-only lead is not invitable. Tests:
@@ -1628,12 +1628,17 @@ the database (`20261010*`):
   creates essay or activity rows from them. Tests: `test/unit/invitation-documents.test.ts`,
   `test/integration/invitation-documents.test.mjs`.
 - **A counselor can fill in a student's info before the student joins** (`20261127000001`; `lib/invitationInfo.ts`,
-  `routes/invites.ts`). `invitations.info` (jsonb, `{}` by default, a check keeps it an object under 40000 bytes) holds
+  `routes/invites.ts`). `invitations.info` (jsonb, `{}` by default, a check keeps it an object with `pg_column_size(info) <= 40000`) holds
   what the info card would, keyed by `infoPatchSchema`'s camelCase keys minus `gradYear` (that is `invitations.grad_year`)
-  plus `highSchoolId` and `privateNote` (4000). It is written only through the API (`grant update (info)` to
-  `authenticated`, nothing for `anon`; a student can't read it): `GET /invites/:id/info` answers the card's shape
+  plus `highSchoolId` and `privateNote` (4000). The app writes it only through the API's routes, but a counselor's own client could technically write the column
+  (`grant update (info)` to `authenticated`, nothing for `anon`; a student can't read it); it is bounded by the
+  40000-byte check and the accept trigger tolerates garbage. The counselor's data export (`/account/export`) reads
+  invitations with `*`, so it now includes `info` (the counselor's own data). `GET /invites/:id/info` answers the card's shape
   (`draftInfoView`: what a draft can't know is empty) and `PATCH /invites/:id/info` (body `draftInfoPatchSchema`, strict;
-  a null or "" clears a key; `highSchool` is matched to the catalog on every patch that carries it) merges through
+  a null or "" clears a key; `highSchool` is matched to the catalog on every patch that carries it; a patch that
+  touches a GPA, the scale or the birthday is checked against the stored draft with the patch on top and refused 400
+  when the student's tables would refuse it: `draftValueProblem`, the GPA range, `gpaOverScale` in the card's words, and
+  "Birthday must be between 1980 and 2030.") merges through
   `merge_invitation_info`, one atomic RPC, so two quick edits to different fields lose neither. 404 for another
   counselor's invitation, 409 `invitation_accepted` ("They've joined, so their details live on their own page now.";
   GET still answers) or `invitation_closed` (revoked, or any status but pending), and 503 `invitation_info_unavailable` before the
@@ -1641,7 +1646,8 @@ the database (`20261010*`):
   is how the app knows to keep linking the card to the old page. **On accept** the trigger `invitation_info_on_accepted`
   copies it into the student's record **filling blanks only**, a value the student already has is never overwritten,
   in five destinations (profile phone and school, `student_personal_details`, `student_academics`, the primary parent,
-  the private note), each in its own sub-block that warns with the destination, the invitation id and the sqlstate
+  the private note; the three GPA columns fill together and only when all three are blank, a scale alone counting as
+  a GPA on file, while SAT, ACT, rank and rigor fill one by one), each in its own sub-block that warns with the destination, the invitation id and the sqlstate
   only (never a value: a minor's birthday) and never blocks accepting; `high_school_id` only when the student's school is
   also blank; the parent is inserted when the student has none and the draft has an email or phone (a parent name alone
   is NOT copied, `guardians` needs one of them), as counselor-added with alerts on, which the guardians guard would
@@ -1652,8 +1658,8 @@ the database (`20261010*`):
   both non-blank and equal under `sameStudentName`; otherwise it stays on the revoked row and is NOT copied, because parents
   often share one address and a sibling invited there later (a different name, or none) must never receive another
   child's details. The old row keeps its copy; best effort, never throws, logs the error code only. **Deploy order:**
-  migration first; not in `REQUIRED_SCHEMA`, and without the file the routes answer 503, `infoCount` is absent and
-  nothing else about invitations changes (the carry reads nothing and returns quietly). Tests:
+  migration first is the recommended order, either order is safe; not in `REQUIRED_SCHEMA`, and without the file the routes answer 503, `infoCount` is absent and
+  nothing else about invitations changes (the carry issues its select, which fails with 42703 before the migration, and then returns quietly). Tests:
   `test/unit/invitation-info.test.ts`, `test/integration/invitation-info.test.mjs`.
 - **Setup steps clear themselves** (`lib/studentSetup.ts`). For a confirmed
   student, `GET /work-items?includeDerived=true` adds `origin: "setup"` rows

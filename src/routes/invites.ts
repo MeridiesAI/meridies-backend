@@ -24,7 +24,7 @@ import {
   toInvitationDetail,
   type ReferredBy,
 } from "../lib/invites.js";
-import { draftInfoPatchSchema, draftInfoView, splitDraftPatch } from "../lib/invitationInfo.js";
+import { draftInfoPatchSchema, draftInfoView, draftValueProblem, splitDraftPatch } from "../lib/invitationInfo.js";
 import { matchHighSchool } from "../lib/studentPage.js";
 import { invitationDeliveries } from "../lib/inviteDelivery.js";
 import {
@@ -637,8 +637,12 @@ export default async function inviteRoutes(app: FastifyInstance) {
       const patch = draftInfoPatchSchema.parse(request.body);
       if (Object.keys(patch).length === 0) throw badRequest("Nothing to change");
       const closedAnswer = (status: unknown) => closedBecause(status, JOINED_DETAILS);
-      const closed = closedAnswer((await readDraft(request, id)).status);
+      const draft = await readDraft(request, id);
+      const closed = closedAnswer(draft.status);
       if (closed) throw closed;
+      // A GPA or birthday the student's tables would refuse would drop a whole block at accept: refuse it now.
+      const problem = draftValueProblem(draft.info ?? {}, patch);
+      if (problem) throw badRequest(problem);
       // A write that lost a race with the student accepting (or a revoke) answers the same 409 as one that came late.
       const lostRace = async () => closedAnswer((await readDraft(request, id)).status) ?? notFound("No invitation of yours matches that");
 

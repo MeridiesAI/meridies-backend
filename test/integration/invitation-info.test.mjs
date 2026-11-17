@@ -117,7 +117,7 @@ check("merge on a non-pending invitation returns null", mClosed.status === 200 &
 
 // ---- the student can't read it --------------------------------------------------------------------------
 const peek = await rest(a.token, "GET", `/rest/v1/invitations?id=eq.${invA.id}&select=info`);
-check("a student's own token cannot read invitations.info", !(Array.isArray(peek.body) && peek.body.length > 0), `${peek.status} ${JSON.stringify(peek.body).slice(0, 120)}`);
+check("a student's own token cannot read invitations.info", peek.status === 200 && Array.isArray(peek.body) && peek.body.length === 0, `${peek.status} ${JSON.stringify(peek.body).slice(0, 120)}`);
 
 // ---- a bad value's warning never quotes it (a minor's birthday stays out of the server log) ----------------
 const { spawnSync } = await import("node:child_process");
@@ -447,3 +447,95 @@ check(
   [200, 201].includes(leoResend.status) && same((await invRow(leoResend.body?.id)).info, {}),
   `${leoResend.status}`
 );
+
+// ---- the draft refuses a GPA or birthday the student's tables would refuse (final review, Important 1) ---------
+// Each refusal is checked against the stored info: nothing is saved.
+const infoOf = async (id) => JSON.parse(await one(`select info from public.invitations where id = '${id}'`));
+const v1 = await pending();
+const r92 = await patchInfo(c, v1, { gpaWeighted: 92 });
+check("a GPA of 92 with no scale is 400 and stores nothing", r92.status === 400 && (await infoOf(v1)).gpaWeighted === undefined, `${r92.status} ${JSON.stringify(r92.body)}`);
+const r53 = await patchInfo(c, v1, { gpaWeighted: 5.3, gpaScale: "4.0" });
+check(
+  "weighted 5.3 on a 4.0 scale is 400 in the card's words and stores nothing",
+  r53.status === 400 && r53.body?.error === "A weighted GPA can be at most 5 on a 4.0 scale" && same(await infoOf(v1), {}),
+  `${r53.status} ${JSON.stringify(r53.body)} ${JSON.stringify(await infoOf(v1))}`
+);
+const r38 = await patchInfo(c, v1, { gpaUnweighted: 3.8 });
+check("unweighted 3.8 alone is saved", r38.status === 200 && (await infoOf(v1)).gpaUnweighted === 3.8, `${r38.status} ${JSON.stringify(r38.body).slice(0, 160)}`);
+const v2 = await pending();
+const r100 = await patchInfo(c, v2, { gpaWeighted: 92, gpaScale: "100" });
+check("weighted 92 on a 100 scale is saved", r100.status === 200 && (await infoOf(v2)).gpaWeighted === 92, `${r100.status} ${JSON.stringify(r100.body).slice(0, 160)}`);
+const rScale = await patchInfo(c, v2, { gpaScale: "4.0" });
+const v2After = await infoOf(v2);
+check(
+  "a stored weighted 92 then scale 4.0 is 400 and the scale stays 100",
+  rScale.status === 400 && v2After.gpaScale === "100" && v2After.gpaWeighted === 92,
+  `${rScale.status} ${JSON.stringify(rScale.body)} ${JSON.stringify(v2After)}`
+);
+const rOther = await patchInfo(c, v2, { phone: "555-1616" });
+check("a patch that doesn't touch the GPA still saves next to a valid stored one", rOther.status === 200 && (await infoOf(v2)).phone === "555-1616", `${rOther.status}`);
+const v3 = await pending();
+const rOld = await patchInfo(c, v3, { birthday: "1975-05-05" });
+check(
+  "a birthday before 1980 is 400 in plain words and stores nothing",
+  rOld.status === 400 && rOld.body?.error === "Birthday must be between 1980 and 2030." && (await infoOf(v3)).birthday === undefined,
+  `${rOld.status} ${JSON.stringify(rOld.body)}`
+);
+const rLeap = await patchInfo(c, v3, { birthday: "2008-02-29" });
+check("a valid birthday is saved", rLeap.status === 200 && (await infoOf(v3)).birthday === "2008-02-29", `${rLeap.status} ${JSON.stringify(rLeap.body).slice(0, 160)}`);
+
+// End to end: a draft filled through the API lands whole.
+const g = await user("invinfo-g", "student");
+const gEmail = await one(`select email from public.profiles where id = '${g.id}'`);
+const gToken = `invinfo-e2e-${Date.now()}-aaaaaaaa`;
+const gInv = await one(
+  `insert into public.invitations (counselor_id, email, token, source, full_name) values ('${c.id}', '${gEmail}', '${gToken}', 'intake', 'Gia Draft') returning id`
+);
+const gFill = await patchInfo(c, gInv, { gpaUnweighted: 3.8, gpaScale: "4.0", sat: 1400, birthday: "2008-06-15", phone: "555-1717" });
+const gAcc = await accept(g, gToken);
+const gAcad = await one(`select concat_ws('|', gpa_unweighted, gpa_scale, sat_superscore) from public.student_academics where student_id = '${g.id}'`);
+const gBday = await one(`select birthday from public.student_personal_details where student_id = '${g.id}'`);
+const gPhone = await one(`select phone from public.profiles where id = '${g.id}'`);
+check(
+  "a draft the API accepted lands whole at accept (GPA, scale, SAT, birthday, phone)",
+  gFill.status === 200 && gAcc.status === 200 && gAcad === "3.800|4.0|1400" && gBday === "2008-06-15" && gPhone === "555-1717",
+  `${gFill.status} ${gAcc.status} academics ${gAcad} birthday ${gBday} phone ${gPhone}`
+);
+
+// ---- the GPA group fills only when all three GPA columns are blank (final review, Important 2) -------------------
+const h = await user("invinfo-h", "student");
+await sql(`insert into public.student_academics (student_id, gpa_unweighted) values ('${h.id}', 3.8)`);
+const invH = await invite(h, { gpaScale: "100", gpaWeighted: 95, sat: 1350 });
+const accH = await accept(h, invH.token);
+const acadH = await one(`select concat_ws('|', coalesce(gpa_weighted::text, '-'), gpa_unweighted, coalesce(gpa_scale, '-'), sat_superscore) from public.student_academics where student_id = '${h.id}'`);
+check("a student's own GPA keeps its three columns, and the draft's SAT still fills", accH.status === 200 && acadH === "-|3.800|-|1350", `${accH.status} ${acadH}`);
+
+const k = await user("invinfo-k", "student");
+await sql(`insert into public.student_academics (student_id, act_composite) values ('${k.id}', 30)`);
+const invK = await invite(k, { gpaScale: "4.0", gpaWeighted: 4.3, gpaUnweighted: 3.9 });
+const accK = await accept(k, invK.token);
+const acadK = await one(`select concat_ws('|', gpa_weighted, gpa_unweighted, gpa_scale, act_composite) from public.student_academics where student_id = '${k.id}'`);
+check("a student with all three GPA columns blank gets all three", accK.status === 200 && acadK === "4.300|3.900|4.0|30", `${accK.status} ${acadK}`);
+
+const l = await user("invinfo-l", "student");
+await sql(`insert into public.student_academics (student_id, gpa_scale) values ('${l.id}', '100')`);
+const invL = await invite(l, { gpaWeighted: 4.3, gpaUnweighted: 3.9, gpaScale: "4.0" });
+const accL = await accept(l, invL.token);
+const acadL = await one(`select concat_ws('|', coalesce(gpa_weighted::text, '-'), coalesce(gpa_unweighted::text, '-'), gpa_scale) from public.student_academics where student_id = '${l.id}'`);
+check("a scale on its own counts as a GPA on file: none of the three is filled", accL.status === 200 && acadL === "-|-|100", `${accL.status} ${acadL}`);
+
+// ---- the high school and its catalog link (final review, minor 3) ----------------------------------------------
+const hsCarryName = `Draftinfo Carry High ${Date.now()}`;
+const hsCarryId = await one(`with h as (insert into public.high_schools (name) values ('${hsCarryName}') returning id) select id from h`);
+const m = await user("invinfo-m", "student");
+await sql(`update public.profiles set high_school = null, high_school_id = null where id = '${m.id}'`);
+const invM = await invite(m, { highSchool: hsCarryName, highSchoolId: hsCarryId });
+const accM = await accept(m, invM.token);
+const schoolM = await one(`select concat_ws('|', high_school, high_school_id) from public.profiles where id = '${m.id}'`);
+check("a blank school takes the draft's name and catalog link", accM.status === 200 && schoolM === `${hsCarryName}|${hsCarryId}`, `${accM.status} ${schoolM}`);
+const n = await user("invinfo-n", "student");
+await sql(`update public.profiles set high_school = 'Own School', high_school_id = null where id = '${n.id}'`);
+const invN = await invite(n, { highSchool: hsCarryName, highSchoolId: hsCarryId });
+const accN = await accept(n, invN.token);
+const schoolN = await one(`select concat_ws('|', high_school, coalesce(high_school_id::text, '-')) from public.profiles where id = '${n.id}'`);
+check("a student who has a school keeps it and gets no link", accN.status === 200 && schoolN === "Own School|-", `${accN.status} ${schoolN}`);
