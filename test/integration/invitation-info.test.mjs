@@ -118,3 +118,32 @@ check("merge on a non-pending invitation returns null", mClosed.status === 200 &
 // ---- the student can't read it --------------------------------------------------------------------------
 const peek = await rest(a.token, "GET", `/rest/v1/invitations?id=eq.${invA.id}&select=info`);
 check("a student's own token cannot read invitations.info", !(Array.isArray(peek.body) && peek.body.length > 0), `${peek.status} ${JSON.stringify(peek.body).slice(0, 120)}`);
+
+// ---- a bad value's warning never quotes it (a minor's birthday stays out of the server log) ----------------
+const { spawnSync } = await import("node:child_process");
+const f = await user("invinfo-f", "student");
+const invF = await invite(f, {});
+// Built in SQL so the literal never appears in any statement text either.
+await sql(`update public.invitations set info = jsonb_build_object('birthday', '2008-02-' || '30') where id = '${invF.id}'`);
+// A wide window: Docker Desktop's clock can trail the host's; the invitation id keeps the match to this accept.
+const since = new Date(Date.now() - 60000).toISOString();
+const accF = await accept(f, invF.token);
+await new Promise((r) => setTimeout(r, 1000));
+let log = null;
+try {
+  // Postgres logs to the container's stderr; spawnSync keeps both streams.
+  const r = spawnSync("docker", ["logs", "supabase_db_draftinfo", "--since", since], { encoding: "utf8" });
+  log = r.status === 0 ? r.stdout + r.stderr : null;
+} catch {
+  log = null; // no docker here (CI): the log can't be read, so this check is skipped
+}
+if (log !== null) {
+  const ours = log.split("\n").filter((l) => l.includes(invF.id));
+  check(
+    "a bad birthday is warned about by destination and code, not by value",
+    accF.status === 200 &&
+      ours.some((l) => l.includes("student_personal_details not filled") && l.includes("sqlstate 22008")) &&
+      !log.includes("2008-02-30"),
+    `${accF.status} ${ours.join(" / ").slice(0, 240)}`
+  );
+}

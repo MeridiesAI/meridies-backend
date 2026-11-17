@@ -43,6 +43,8 @@ grant execute on function public.merge_invitation_info(uuid, jsonb, text[]) to a
 -- Accepting the invitation fills the student's blank fields from info.
 -- Each destination is its own sub-block: a bad value there is a WARNING and
 -- that destination is skipped; the acceptance always goes through.
+-- The warning names the destination and SQLSTATE only, never SQLERRM: the
+-- message can quote the value (a minor's birthday, a parent's email).
 -- ---------------------------------------------------------------------------
 
 create or replace function private.invitation_info_on_accepted()
@@ -74,7 +76,7 @@ begin
                                    then (nullif(btrim(i->>'highSchoolId'), ''))::uuid else p.high_school_id end
        where p.id = v_student;
     exception when others then
-      raise warning 'invitation info: profiles not filled for invitation %: %', new.id, sqlerrm;
+      raise warning 'invitation info: profiles not filled for invitation % (sqlstate %)', new.id, sqlstate;
     end;
   end if;
 
@@ -112,7 +114,7 @@ begin
         colleges_planned   = coalesce(t.colleges_planned, excluded.colleges_planned),
         intended_majors    = case when cardinality(t.intended_majors) = 0 then excluded.intended_majors else t.intended_majors end;
     exception when others then
-      raise warning 'invitation info: student_personal_details not filled for invitation %: %', new.id, sqlerrm;
+      raise warning 'invitation info: student_personal_details not filled for invitation % (sqlstate %)', new.id, sqlstate;
     end;
   end if;
 
@@ -139,7 +141,7 @@ begin
         act_composite  = coalesce(t.act_composite, excluded.act_composite),
         rigor_context  = case when nullif(btrim(t.rigor_context), '') is null then coalesce(excluded.rigor_context, t.rigor_context) else t.rigor_context end;
     exception when others then
-      raise warning 'invitation info: student_academics not filled for invitation %: %', new.id, sqlerrm;
+      raise warning 'invitation info: student_academics not filled for invitation % (sqlstate %)', new.id, sqlstate;
     end;
   end if;
 
@@ -160,7 +162,7 @@ begin
               new.counselor_id);
       perform set_config('meridies.axis_restore', coalesce(v_restore, ''), true);
     exception when others then
-      raise warning 'invitation info: guardians not filled for invitation %: %', new.id, sqlerrm;
+      raise warning 'invitation info: guardians not filled for invitation % (sqlstate %)', new.id, sqlstate;
     end;
   end if;
 
@@ -172,7 +174,7 @@ begin
       on conflict (student_id) do update set body = excluded.body, updated_by = excluded.updated_by
         where nullif(btrim(t.body), '') is null;
     exception when others then
-      raise warning 'invitation info: student_private_notes not filled for invitation %: %', new.id, sqlerrm;
+      raise warning 'invitation info: student_private_notes not filled for invitation % (sqlstate %)', new.id, sqlstate;
     end;
   end if;
 
