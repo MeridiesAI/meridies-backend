@@ -12,8 +12,14 @@
 -- answer 503 and the app keeps linking the card to the invitations page.
 
 alter table public.invitations
-  add column if not exists info jsonb not null default '{}'::jsonb
-    constraint invitations_info_shape check (jsonb_typeof(info) = 'object' and pg_column_size(info) <= 20000);
+  add column if not exists info jsonb not null default '{}'::jsonb;
+
+-- A sanity limit, not the real bound: the API's schema caps every key (the largest possible draft is about
+-- 19 KB), and this is twice that. Dropped and re-added so a re-apply moves the limit on a database that has
+-- an older one. A violation's DETAIL quotes the whole row into the log, so the limit must never be reachable.
+alter table public.invitations drop constraint if exists invitations_info_shape;
+alter table public.invitations
+  add constraint invitations_info_shape check (jsonb_typeof(info) = 'object' and pg_column_size(info) <= 40000);
 
 -- Written only through the API on the counselor's own client; RLS and private.invitations_guard_client
 -- apply as for every other client-writable column. Nothing for anon.

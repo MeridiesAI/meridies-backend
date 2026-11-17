@@ -118,10 +118,11 @@ test("draftInfoView: a wrong-typed stored value reads as empty and never throws"
   assert.deepEqual(view.intendedMajors, []);
 });
 
-// The column check is `pg_column_size(info) <= 20000`. The worst case is every field at its bound in a letter that
-// takes 3 bytes (the schema counts UTF-16 units, the database bytes): measured 19187 bytes of JSON, 19292 as jsonb on
-// the local stack (7172 with ASCII only). That is under the check, not far under: a longer bound needs a larger check.
-test("the largest info a counselor can store fits the column's 20000-byte check (19187 bytes of JSON, 19292 as jsonb)", () => {
+// The column check is `pg_column_size(info) <= 40000` (a sanity limit; a violation's DETAIL would quote the row into
+// the log, so it must stay out of reach). The worst case is every field at its bound in a letter that takes 3 bytes
+// (the schema counts UTF-16 units, the database bytes): measured 19187 bytes of JSON, 19292 as jsonb on the local
+// stack (7172 with ASCII only). The test keeps it at 60% of the bound, so a schema bound that raises it fails here.
+test("the largest info a counselor can store stays within 60% of the column's 40000-byte check (19187 bytes of JSON)", () => {
   const big = (max: number) => "中".repeat(max);
   const patch = draftInfoPatchSchema.parse({
     email: `${"a".repeat(64)}@${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(63)}.com`,
@@ -136,6 +137,5 @@ test("the largest info a counselor can store fits the column's 20000-byte check 
   assert.deepEqual(Object.keys(patch).sort(), Object.keys(draftInfoPatchSchema.shape).sort());
   const { set } = splitDraftPatch(patch, HS);
   const bytes = Buffer.byteLength(JSON.stringify(set));
-  const JSONB_OVERHEAD = 200; // measured 105 more than the JSON text; rounded up
-  assert.ok(bytes + JSONB_OVERHEAD < 20000, `the largest info is ${bytes} bytes of JSON; the column allows 20000 as jsonb`);
+  assert.ok(bytes <= 24000, `the largest info is ${bytes} bytes of JSON; keep it at 24000 or less (the column allows 40000 as jsonb)`);
 });
