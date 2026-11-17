@@ -314,7 +314,9 @@ check(
 );
 check(
   "after accept PATCH is 409 invitation_accepted",
-  patchJoined.status === 409 && patchJoined.body?.code === "invitation_accepted",
+  patchJoined.status === 409 &&
+    patchJoined.body?.code === "invitation_accepted" &&
+    patchJoined.body?.error === "They've joined, so their details live on their own page now.",
   `${patchJoined.status} ${JSON.stringify(patchJoined.body)}`
 );
 // A student who is on another counselor's roster is not exposed by id.
@@ -328,7 +330,7 @@ await sql(`update public.invitations set status = 'revoked' where id = '${d4}'`)
 const gRev = await getInfo(c, d4);
 const pRev = await patchInfo(c, d4, { phone: "555-1414" });
 check("a revoked invitation still answers GET", gRev.status === 200 && gRev.body?.invitation?.status === "revoked" && gRev.body?.invitation?.studentId === null && gRev.body?.info?.phone === "555-1313", `${gRev.status} ${JSON.stringify(gRev.body?.invitation)}`);
-check("a revoked invitation's PATCH is 409 invitation_closed and changes nothing", pRev.status === 409 && pRev.body?.code === "invitation_closed" && (await one(`select info->>'phone' from public.invitations where id = '${d4}'`)) === "555-1313", `${pRev.status} ${JSON.stringify(pRev.body)}`);
+check("a revoked invitation's PATCH is 409 invitation_closed and changes nothing", pRev.status === 409 && pRev.body?.code === "invitation_closed" && pRev.body?.error === "That invitation is no longer open." && (await one(`select info->>'phone' from public.invitations where id = '${d4}'`)) === "555-1313", `${pRev.status} ${JSON.stringify(pRev.body)}`);
 
 // The building card's feature flag: infoCount is the stored key count (0 for {}).
 const d5 = await pending({ phone: "555-1515", sat: 1400, privateNote: "n" });

@@ -425,9 +425,9 @@ export default async function inviteRoutes(app: FastifyInstance) {
   );
 
   /** Why a draft or document write is refused, or null while the invitation is still pending. */
-  const closedBecause = (status: unknown): HttpError | null =>
+  const closedBecause = (status: unknown, joined = "They've joined. Add the file to their folder instead."): HttpError | null =>
     status === "accepted"
-      ? new HttpError(409, "They've joined. Add the file to their folder instead.", "invitation_accepted")
+      ? new HttpError(409, joined, "invitation_accepted")
       : status !== "pending"
         ? new HttpError(409, "That invitation is no longer open.", "invitation_closed")
         : null;
@@ -618,6 +618,8 @@ export default async function inviteRoutes(app: FastifyInstance) {
     },
   });
 
+  const JOINED_DETAILS = "They've joined, so their details live on their own page now.";
+
   app.get(
     "/:id/info",
     { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:info", 240, 60)] },
@@ -634,10 +636,11 @@ export default async function inviteRoutes(app: FastifyInstance) {
       const { id } = idParam.parse(request.params);
       const patch = draftInfoPatchSchema.parse(request.body);
       if (Object.keys(patch).length === 0) throw badRequest("Nothing to change");
-      const closed = closedBecause((await readDraft(request, id)).status);
+      const closedAnswer = (status: unknown) => closedBecause(status, JOINED_DETAILS);
+      const closed = closedAnswer((await readDraft(request, id)).status);
       if (closed) throw closed;
       // A write that lost a race with the student accepting (or a revoke) answers the same 409 as one that came late.
-      const lostRace = async () => closedBecause((await readDraft(request, id)).status) ?? notFound("No invitation of yours matches that");
+      const lostRace = async () => closedAnswer((await readDraft(request, id)).status) ?? notFound("No invitation of yours matches that");
 
       // Matched on every patch that names a school: splitDraftPatch drops the stored link when it gets no id.
       const { set, remove, gradYear } = splitDraftPatch(patch, patch.highSchool ? await matchHighSchool(request.db, patch.highSchool) : null);
