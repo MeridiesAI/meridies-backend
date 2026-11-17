@@ -16,12 +16,16 @@ import { requireRole } from "../lib/guards.js";
 import { acceptedStudentOnRoster, canConfirm, intakeItemsByInvitation, itemStatus, markWaived, sendItemBack } from "../lib/newStudentIntake.js";
 import {
   INVITATION_COLUMNS,
+  MISSING_COLUMN,
   addressStatuses,
   createInvitation,
   importDataByInvitation,
+  infoCountsByInvitation,
   toInvitationDetail,
   type ReferredBy,
 } from "../lib/invites.js";
+import { draftInfoPatchSchema, draftInfoView, draftValueProblem, splitDraftPatch } from "../lib/invitationInfo.js";
+import { matchHighSchool } from "../lib/studentPage.js";
 import { invitationDeliveries } from "../lib/inviteDelivery.js";
 import {
   INVITATION_DOCUMENT_COLUMNS,
@@ -364,12 +368,13 @@ export default async function inviteRoutes(app: FastifyInstance) {
         .limit(100);
       if (error) throw fromPostgrest(error);
       const rows = (data ?? []) as unknown as Record<string, unknown>[];
-      const [items, deliveries] = await Promise.all([
+      const [items, deliveries, infoCounts] = await Promise.all([
         intakeItemsByInvitation(
           request,
           rows.filter((r) => r.status === "accepted").map((r) => String(r.id))
         ),
         invitationDeliveries(request, rows.map((r) => String(r.id))),
+        infoCountsByInvitation(request, rows.map((r) => String(r.id))),
       ]);
 
       const profileById = await profileInfo(
@@ -396,6 +401,9 @@ export default async function inviteRoutes(app: FastifyInstance) {
           studentId: r.accepted_by ? String(r.accepted_by) : null,
           // Files staged for a student who hasn't joined yet; 0 once they have (they are in the student's folder).
           documentCount: documentCounts.get(detail.id) ?? 0,
+          // What the counselor has filled in for them so far. Absent (not 0) while the column is missing:
+          // the app reads its presence as "this API takes draft details".
+          ...(infoCounts ? { infoCount: infoCounts.get(detail.id) ?? 0 } : {}),
           profileStatus: profile?.status ?? null,
           delivery: deliveries.get(detail.id) ?? null,
           intakeItems: detail.intakeRequests.map((q) => {
@@ -416,6 +424,14 @@ export default async function inviteRoutes(app: FastifyInstance) {
     }
   );
 
+  /** Why a draft or document write is refused, or null while the invitation is still pending. */
+  const closedBecause = (status: unknown, joined = "They've joined. Add the file to their folder instead."): HttpError | null =>
+    status === "accepted"
+      ? new HttpError(409, joined, "invitation_accepted")
+      : status !== "pending"
+        ? new HttpError(409, "That invitation is no longer open.", "invitation_closed")
+        : null;
+
   /**
    * Documents for a student who hasn't joined yet. The file goes straight from the browser to the documents
    * bucket at `<counselor id>/<invitation id>/<ts>-<name>`; these routes list, register and remove the row that
@@ -432,10 +448,8 @@ export default async function inviteRoutes(app: FastifyInstance) {
       .maybeSingle();
     if (error) throw fromPostgrest(error);
     if (!data) throw notFound("No invitation of yours matches that");
-    if (data.status === "accepted") {
-      throw new HttpError(409, "They've joined. Add the file to their folder instead.", "invitation_accepted");
-    }
-    if (data.status !== "pending") throw new HttpError(409, "That invitation is no longer open.", "invitation_closed");
+    const closed = closedBecause(data.status);
+    if (closed) throw closed;
   };
 
   app.get(
@@ -553,6 +567,106 @@ export default async function inviteRoutes(app: FastifyInstance) {
       if (error) throw fromPostgrest(error);
       if (!data) throw notFound("No invitation of yours matches that");
       return toInvitationDetail(data as unknown as Record<string, unknown>);
+    }
+  );
+
+  /**
+   * What the counselor fills in for a student who hasn't joined yet (`invitations.info`, 20261127000001), shown
+   * and edited as the info card. The column is read apart from INVITATION_COLUMNS, so a database without it
+   * keeps listing invitations and these routes answer 503. On the caller's client, so RLS says whose it is.
+   */
+  type DraftRow = {
+    id: string;
+    email: string;
+    status: "pending" | "accepted" | "revoked";
+    full_name: string | null;
+    grad_year: number | null;
+    accepted_by: string | null;
+    info: Record<string, unknown> | null;
+  };
+
+  const readDraft = async (request: FastifyRequest, id: string): Promise<DraftRow> => {
+    const { data, error } = await request.db
+      .from("invitations")
+      .select("id, email, status, full_name, grad_year, accepted_by, info")
+      .eq("counselor_id", request.auth.userId)
+      .eq("id", id)
+      .maybeSingle();
+    if (error) {
+      throw MISSING_COLUMN.has(error.code ?? "")
+        ? new HttpError(503, "Draft details aren't switched on yet.", "invitation_info_unavailable")
+        : fromPostgrest(error);
+    }
+    if (!data) throw notFound("No invitation of yours matches that");
+    return data as unknown as DraftRow;
+  };
+
+  const draftAnswer = async (request: FastifyRequest, row: DraftRow) => ({
+    info: draftInfoView(row),
+    privateNote: typeof row.info?.privateNote === "string" ? row.info.privateNote : "",
+    invitation: {
+      id: row.id,
+      email: row.email,
+      fullName: row.full_name ?? "",
+      status: row.status,
+      // Named only while the roster bears the acceptance out (as the New student steps do), so a student who
+      // joined another counselor's roster is not exposed.
+      studentId:
+        row.status === "accepted" && row.accepted_by && (await acceptedStudentOnRoster(request, row.accepted_by))
+          ? row.accepted_by
+          : null,
+    },
+  });
+
+  const JOINED_DETAILS = "They've joined, so their details live on their own page now.";
+
+  app.get(
+    "/:id/info",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:info", 240, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      return draftAnswer(request, await readDraft(request, id));
+    }
+  );
+
+  app.patch(
+    "/:id/info",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("invites:patch", 120, 60)] },
+    async (request) => {
+      const { id } = idParam.parse(request.params);
+      const patch = draftInfoPatchSchema.parse(request.body);
+      if (Object.keys(patch).length === 0) throw badRequest("Nothing to change");
+      const closedAnswer = (status: unknown) => closedBecause(status, JOINED_DETAILS);
+      const draft = await readDraft(request, id);
+      const closed = closedAnswer(draft.status);
+      if (closed) throw closed;
+      // A GPA or birthday the student's tables would refuse would drop a whole block at accept: refuse it now.
+      const problem = draftValueProblem(draft.info ?? {}, patch);
+      if (problem) throw badRequest(problem);
+      // A write that lost a race with the student accepting (or a revoke) answers the same 409 as one that came late.
+      const lostRace = async () => closedAnswer((await readDraft(request, id)).status) ?? notFound("No invitation of yours matches that");
+
+      // Matched on every patch that names a school: splitDraftPatch drops the stored link when it gets no id.
+      const { set, remove, gradYear } = splitDraftPatch(patch, patch.highSchool ? await matchHighSchool(request.db, patch.highSchool) : null);
+      if (Object.keys(set).length > 0 || remove.length > 0) {
+        // One atomic merge, so two quick edits to different fields never lose one.
+        const { data, error } = await request.db.rpc("merge_invitation_info", { p_id: id, p_set: set, p_remove: remove });
+        if (error) throw error.code === "23514" ? badRequest("That's more than a draft can hold.") : fromPostgrest(error);
+        if (data === null) throw await lostRace();
+      }
+      if (gradYear !== undefined) {
+        const { data, error } = await request.db
+          .from("invitations")
+          .update({ grad_year: gradYear })
+          .eq("id", id)
+          .eq("counselor_id", request.auth.userId)
+          .eq("status", "pending")
+          .select("id")
+          .maybeSingle();
+        if (error) throw fromPostgrest(error);
+        if (!data) throw await lostRace();
+      }
+      return draftAnswer(request, await readDraft(request, id));
     }
   );
 
