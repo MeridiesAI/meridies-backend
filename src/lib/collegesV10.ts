@@ -8,6 +8,7 @@
  */
 
 import { z } from "zod";
+import { meetsLearningSupport, type SupportLevel } from "./collegeAccessibility.js";
 import { consideration, testPolicyFrom } from "./ingest/ipeds.js";
 import { finalizeMatch, rankWithinBands, type MatchInput, type MatchScore } from "./listMatch.js";
 import { RACE_KEYS, type RaceKey } from "./ingest/scorecard.js";
@@ -230,6 +231,8 @@ export type ListCriteria = {
   origin: { lat: number; lng: number; label: string } | null;
   aid: (typeof AID_OPTIONS)[number];
   diversity: (typeof DIVERSITY_OPTIONS)[number];
+  /** Accessibility & Support: enhanced (enhanced or comprehensive) or comprehensive. Absent or "any" leaves it out. */
+  learningSupport?: "any" | "enhanced" | "comprehensive";
 };
 
 export type ListSchool = {
@@ -255,6 +258,8 @@ export type ListSchool = {
   largestGroupPct: number | null;
   fields: string[];
   regularDeadline: string | null;
+  /** The school's support level, merged with the practice's own edit; filled in by the route for the learning-support filter. */
+  supportLevel?: SupportLevel | null;
 };
 
 type Field =
@@ -300,10 +305,10 @@ const DIVERSE_MAX = 45;
 export const AID_FLOOR: Record<string, number> = { Lenient: 5, Limited: 8 };
 
 export type Constraint =
-  | "Diversity" | "Financial aid" | "Location type" | "School size" | "Test optional" | "Majors";
+  | "Diversity" | "Financial aid" | "Location type" | "School size" | "Test optional" | "Learning support" | "Majors";
 
 /** Loosened in this order when nothing matches: preferences first, the major last. */
-const RELAX_ORDER: Constraint[] = ["Diversity", "Financial aid", "Location type", "School size", "Test optional", "Majors"];
+const RELAX_ORDER: Constraint[] = ["Diversity", "Financial aid", "Location type", "School size", "Test optional", "Learning support", "Majors"];
 
 function tests(c: ListCriteria): Record<Constraint, { on: boolean; test: (s: ListSchool) => boolean }> {
   const fields = c.majors.map(fieldFor).filter((f): f is Field => f !== null);
@@ -311,6 +316,11 @@ function tests(c: ListCriteria): Record<Constraint, { on: boolean; test: (s: Lis
     Majors: { on: fields.length > 0, test: (s) => fields.some((f) => s.fields.includes(f)) },
     "School size": { on: c.sizes.length > 0, test: (s) => c.sizes.includes(sizeLabel(s.undergrads) ?? "") },
     "Location type": { on: c.settings.length > 0, test: (s) => s.setting !== null && c.settings.includes(s.setting) },
+    // A school with no record never matches enhanced or comprehensive.
+    "Learning support": {
+      on: c.learningSupport === "enhanced" || c.learningSupport === "comprehensive",
+      test: (s) => meetsLearningSupport(s.supportLevel, c.learningSupport),
+    },
     "Test optional": {
       on: c.testOptional === "Yes",
       test: (s) => s.testPolicy === "optional" || s.testPolicy === "blind",

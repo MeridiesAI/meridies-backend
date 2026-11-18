@@ -114,6 +114,8 @@ export type AiModule =
   | "catalog-proposals"
   // Core features and opportunities read off a college's own pages (lib/ingest/collegeFeatures.ts); 20261124000007.
   | "college-features"
+  // A college's disability services and learning support, read off its own pages (lib/collegeAccessibility.ts); 20261127000003.
+  | "college-accessibility"
   // Estimate with AI on the stat polygon (routes/ai.ts, lib/polygonEstimate.ts); 20261125000002.
   | "polygon-estimate";
 

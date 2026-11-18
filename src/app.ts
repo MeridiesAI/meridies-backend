@@ -79,6 +79,8 @@ import communicationRoutes from "./routes/communication.js";
 import messagingRoutes from "./routes/messaging.js";
 // v10 sync imports: colleges-events
 import collegeV10Routes from "./routes/collegesV10.js";
+import collegeAccessibilityRoutes from "./routes/collegeAccessibility.js";
+import learningSupportRoutes from "./routes/learningSupport.js";
 import collegeAiRoutes from "./routes/collegeAi.js";
 import eventRoutes from "./routes/events.js";
 // v10 sync imports: management-pipeline
@@ -201,6 +203,7 @@ export function buildApp() {
   app.register(studentRoutes, { prefix: "/students" });
   app.register(aiContextRoutes, { prefix: "/students" });
   app.register(studentAvatarRoutes, { prefix: "/students" });
+  app.register(learningSupportRoutes, { prefix: "/students" });
   app.register(counselorAvatarRoutes, { prefix: "/profile/avatar" });
   // Absolute paths (/students/:id/research/:feature, /recommendations/:id/...): no prefix.
   app.register(researchRoutes);
@@ -249,6 +252,7 @@ export function buildApp() {
   app.register(messagingRoutes, { prefix: "/messaging" });
   // v10 sync routes: colleges-events
   app.register(collegeV10Routes, { prefix: "/colleges" });
+  app.register(collegeAccessibilityRoutes, { prefix: "/colleges" });
   app.register(collegeIntelRoutes, { prefix: "/colleges" });
   app.register(collegeAiRoutes, { prefix: "/ai" });
   app.register(meetingSummaryRoutes, { prefix: "/ai" });

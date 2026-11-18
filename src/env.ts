@@ -69,6 +69,9 @@ const envSchema = z.object({
   // inbound one starting "[xx] " is read as language xx with the rest as its English. Same rules as RESEARCH_FAKE:
   // only with NODE_ENV development or test, the server refuses to start otherwise (lib/translate.ts).
   TRANSLATE_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
+  // Test double for the college accessibility research job (no network, no model; lib/collegeAccessibility.ts).
+  // Same rules as TRANSLATE_FAKE: only with NODE_ENV development or test; the server refuses to start otherwise.
+  ACCESSIBILITY_FAKE: blankIsUnset(z.enum(["fixture"]).optional()),
   // Eval-only: AxIS's clock can be moved forward through POST /axis/eval/clock (the real-model evals' draft expiry
   // cases). The server refuses to start with it unless NODE_ENV isn't production and SUPABASE_URL is a local stack
   // (lib/axis/clock.ts).

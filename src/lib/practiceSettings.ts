@@ -71,6 +71,8 @@ const SUMMARY_MODULES: ReadonlySet<AiModule> = new Set<AiModule>([
   "message-translate",
   // Estimate with AI scores a student's record for the strength profile.
   "polygon-estimate",
+  // A college's disability services page summarized for the Consultant (lib/collegeAccessibility.ts).
+  "college-accessibility",
 ]);
 
 /**

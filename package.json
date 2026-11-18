@@ -20,7 +20,8 @@
     "test:caseload-load": "node test/integration/caseload-transfer-load.mjs",
     "test:perf": "node test/integration/perf-roster.mjs",
     "seed:e2e": "node scripts/seed/e2e-stack.mjs",
-    "ingest:features": "tsx scripts/ingest/college-features.ts"
+    "ingest:features": "tsx scripts/ingest/college-features.ts",
+    "ingest:accessibility": "tsx --env-file-if-exists=.env scripts/ingest/ipeds-accessibility.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
