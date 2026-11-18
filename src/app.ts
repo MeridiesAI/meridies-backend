@@ -105,6 +105,8 @@ import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
 import familyConsentRoutes from "./routes/familyConsent.js";
 import platformTermsRoutes from "./routes/platformTerms.js";
+import billingRoutes from "./routes/billing.js";
+import billingWebhookRoutes from "./routes/billingWebhook.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
@@ -297,6 +299,8 @@ export function buildApp() {
   app.register(accountRoutes, { prefix: "/account" });
   app.register(webhookRoutes, { prefix: "/webhooks" });
   app.register(stripeWebhookRoutes, { prefix: "/webhooks" });
+  app.register(billingWebhookRoutes, { prefix: "/webhooks" });
+  app.register(billingRoutes, { prefix: "/billing" });
   app.register(internalRoutes, { prefix: "/internal" });
   // A student messaging their counselor, and their own calendar events (QA round 10).
   app.register(studentOwnRoutes, { prefix: "/me" });

@@ -240,7 +240,7 @@ const REVIEWED = [
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "lib/invoiceTexting.ts", "lib/invoiceAgreement.ts", "routes/contracts.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/resume.ts", "routes/familyConsent.ts", "routes/platformTerms.ts", "routes/collegeAccessibility.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "lib/invoiceTexting.ts", "lib/invoiceAgreement.ts", "routes/contracts.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/resume.ts", "routes/familyConsent.ts", "routes/billingWebhook.ts", "lib/billing.ts", "routes/platformTerms.ts", "routes/collegeAccessibility.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {
