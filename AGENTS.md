@@ -114,7 +114,8 @@ src/
 │   ├── pipelineExtras.ts  # pipeline history/follow-ups: is the migration in, serializers, follow-up summaries
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── polygonEstimate.ts # Estimate with AI: the scoring prompt (anchored to the admitted-student polygon's scale), the schema, cleanEstimate (pure)
-│   ├── resume.ts          # resume builder: content schema, bullet drafting prompt, the checks on its answer
+│   ├── resume.ts          # resume builder: the older bullet drafting prompt and the checks on its answer
+│   ├── resumeDoc.ts       # resume builder v2: the 8-format document schema (strict, 60000 bytes) and Polish (prompt, schema, the number guard)
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── activityListImport.ts # an activity list in Files -> proposed Activities rows (a sheet's columns without a model; else AxIS); stores nothing
 │   ├── pipelineSequences.ts # pipeline email sequences: is the migration in, send times, the dispatcher
@@ -206,7 +207,7 @@ src/
 │   ├── parentInvites.ts   # /parent-invites  counselor Invite / Resend; public preview and accept (token in the body)
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
-│   ├── resume.ts          # /resume       the student's resume: save, read, draft bullets
+│   ├── resume.ts          # /resume       the resume the student and their Consultant share: save, read, Polish, draft bullets
 │   ├── pipelineSequences.ts # /pipeline   email sequences and enrollments
 │   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out
 │   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)

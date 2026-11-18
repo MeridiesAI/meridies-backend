@@ -55,29 +55,45 @@ check("both on, it shows", (await overview()).strengthProfile.visible === true &
 // ---------------------------------------------------------------------------
 // Resume builder
 // ---------------------------------------------------------------------------
+const entry = (over = {}) => ({ id: "e1", org: "Robotics Team", descriptor: "", location: "", role: "Captain", dates: "2023 – Present", hours: "6 hrs/wk", bullets: ["Led a team of 12 to the regional finals"], ...over });
 const content = {
-  header: { name: "Sam Student", contact: "sam@example.com", location: "Ithaca, NY" },
-  education: [{ school: "Ithaca High School", detail: "GPA 3.9", dates: "2023-2027" }],
-  activities: [{ sourceId: null, title: "Robotics Team", role: "Captain", dates: "2023-now", bullets: ["Led a team of 12 to the regional finals"] }],
-  honors: [{ text: "State Science Olympiad, 2nd place" }],
-  skills: ["Python", "CAD"],
+  version: 2,
+  header: { name: "Sam Student", email: "sam@example.com", phone: "", place: "Ithaca, NY", link: "" },
+  education: [{ id: "ed1", school: "Ithaca High School", location: "Ithaca, NY", date: "May 2027", address: "", contact: "", lines: [{ id: "l1", label: "GPA", text: "3.9" }] }],
+  sections: { leadership: [entry()], honors: [entry({ id: "e2", org: "State Science Olympiad", role: "2nd place", bullets: [] })] },
+  snapshot: [],
+  highlightUrl: "",
+  skills: [{ id: "s1", label: "Skills", items: "Python, CAD" }],
+  order: null,
 };
+const Peer = await user("sv-peer", "student");
 const empty = await call(Stu.token, "GET", "/resume");
 check("no resume yet reads as null", empty.status === 200 && empty.body.resume === null, `${empty.status} ${JSON.stringify(empty.body)}`);
-const saved = await call(Stu.token, "PUT", "/resume", { template: "classic", content });
-check("a student saves their resume", saved.status === 200 && saved.body.resume.content.skills.length === 2, `${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
+const saved = await call(Stu.token, "PUT", "/resume", { templateKey: "general", content });
+check("a student saves their resume", saved.status === 200 && saved.body.resume.templateKey === "general" && saved.body.resume.content.skills.length === 1, `${saved.status} ${JSON.stringify(saved.body).slice(0, 200)}`);
+check("and updatedBy is the student, set by the database", saved.body.resume?.updatedBy?.id === Stu.id, JSON.stringify(saved.body.resume?.updatedBy));
 const back = await call(Stu.token, "GET", "/resume");
-check("and reads it back", back.body.resume?.template === "classic" && back.body.resume.content.header.name === "Sam Student");
+check("and reads it back", back.body.resume?.templateKey === "general" && back.body.resume.content.header.name === "Sam Student");
 const cRead = await call(S.token, "GET", `/resume?studentId=${Stu.id}`);
-check("their counselor reads it", cRead.status === 200 && cRead.body.resume?.content.header.name === "Sam Student", `${cRead.status}`);
-check("another practice can't", [403, 404].includes((await call(X.token, "GET", `/resume?studentId=${Stu.id}`)).status));
-check("a counselor can't save a student's resume", (await call(S.token, "PUT", "/resume", { template: "classic", content })).status === 403);
-const tooLong = await call(Stu.token, "PUT", "/resume", { template: "classic", content: { ...content, skills: ["x".repeat(80)] } });
+check("their Consultant reads it", cRead.status === 200 && cRead.body.resume?.content.header.name === "Sam Student", `${cRead.status}`);
+check("another practice can't read it", [403, 404].includes((await call(X.token, "GET", `/resume?studentId=${Stu.id}`)).status));
+const cSave = await call(S.token, "PUT", `/resume?studentId=${Stu.id}`, { templateKey: "stem", content: { ...content, header: { ...content.header, name: "Sam T. Student" } } });
+check("their Consultant saves it", cSave.status === 200 && cSave.body.resume.templateKey === "stem", `${cSave.status} ${JSON.stringify(cSave.body).slice(0, 200)}`);
+check("and updatedBy is now the Consultant", cSave.body.resume?.updatedBy?.id === S.id, JSON.stringify(cSave.body.resume?.updatedBy));
+const forgedBy = await rest(Stu.token, "PATCH", `/rest/v1/student_resumes?student_id=eq.${Stu.id}`, { updated_by: X.id });
+check("a client can't write updated_by", forgedBy.status >= 400, `${forgedBy.status}`);
+check("another practice's Consultant can't save it", [403, 404].includes((await call(X.token, "PUT", `/resume?studentId=${Stu.id}`, { templateKey: "stem", content })).status));
+check("a student can't save another student's resume", (await call(Peer.token, "PUT", `/resume?studentId=${Stu.id}`, { templateKey: "general", content })).status === 403);
+check("or read it", [403, 404].includes((await call(Peer.token, "GET", `/resume?studentId=${Stu.id}`)).status));
+const tooLong = await call(Stu.token, "PUT", "/resume", { templateKey: "general", content: { ...content, skills: [{ id: "s1", label: "x".repeat(80), items: "" }] } });
 check("an over-long line is refused", tooLong.status === 400, `${tooLong.status}`);
-check("an unknown template is refused", (await call(Stu.token, "PUT", "/resume", { template: "fancy", content })).status === 400);
-check("an unknown field is refused", (await call(Stu.token, "PUT", "/resume", { template: "classic", content: { ...content, secret: 1 } })).status === 400);
+check("an unknown format is refused", (await call(Stu.token, "PUT", "/resume", { templateKey: "fancy", content })).status === 400);
+check("an unknown section is refused", (await call(Stu.token, "PUT", "/resume", { templateKey: "general", content: { ...content, sections: { bogus: [entry()] } } })).status === 400);
 const forged = await rest(Stu.token, "PATCH", `/rest/v1/student_resumes?student_id=eq.${Stu.id}`, { student_id: X.id });
 check("a resume can't be handed to someone else", forged.status >= 400, `${forged.status}`);
+const polish = await call(Stu.token, "POST", "/resume/polish", { section: "Leadership", entry: { org: "Robotics", descriptor: "", role: "Captain", dates: "2023 – Present", hours: "", bullets: ["Led 12 members"] } });
+check("polish answers 503 without a model key or 403 with the student AI tools off, never a 500", [200, 403, 503].includes(polish.status), `${polish.status} ${JSON.stringify(polish.body)}`);
+check("polish needs a bullet", [400, 403, 503].includes((await call(S.token, "POST", `/resume/polish?studentId=${Stu.id}`, { section: "x", entry: { org: "", descriptor: "", role: "", dates: "", hours: "", bullets: [] } })).status));
 const draft = await call(Stu.token, "POST", "/resume/draft", { activityIds: ["00000000-0000-0000-0000-000000000000"] });
 check("drafting answers 503 without a model key, 400 for an unknown entry, never a 500", [400, 503].includes(draft.status), `${draft.status} ${JSON.stringify(draft.body)}`);
 check("a counselor can't draft a student's resume", (await call(S.token, "POST", "/resume/draft", { activityIds: ["00000000-0000-0000-0000-000000000000"] })).status === 403);

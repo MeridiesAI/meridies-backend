@@ -35,6 +35,7 @@ export const ORDER_KEYS: Record<string, readonly string[]> = {
   student_alert_prefs: ["student_id"],
   student_personal_details: ["student_id"],
   student_private_notes: ["student_id"],
+  student_resumes: ["student_id"],
   student_status_overrides: ["student_id"],
 };
 
