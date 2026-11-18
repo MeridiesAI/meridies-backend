@@ -1,14 +1,15 @@
 /**
  * Resume builder (migration 20261028000006), under /resume.
  *
- *   GET  /resume               the student's saved resume (a counselor reads one with ?studentId=)
- *   PUT  /resume               save it (student only)
+ *   GET  /resume               the saved resume (a Consultant reads a student's with ?studentId=)
+ *   PUT  /resume               save it: the student's own, or a Consultant who can edit the student (migration 20261127000002)
+ *   POST /resume/polish        one entry's bullets rewritten, never adding a fact (lib/resumeDoc.ts)
  *   POST /resume/draft         bullets drafted from named activity entries (student only)
  *   POST /resume/adjust        suggested edits to the student's own resume file (lib/resumeAdjust.ts)
  *
- * The student builds and keeps their own resume; the counselor who can see
- * the student reads it. Drafting stores nothing: the student chooses what to
- * keep. See lib/resume.ts for what the model sees and what is checked.
+ * The student and their Consultant build one resume together (last write wins: the app saves whole documents).
+ * Drafting and Polish store nothing: the person chooses what to keep. See lib/resume.ts and lib/resumeDoc.ts for what
+ * the model sees and what is checked.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -18,15 +19,10 @@ import { FAST_MODEL, runStructured } from "../lib/anthropic.js";
 import { HttpError, badRequest, fromPostgrest, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
-import { assertAiAllowed } from "../lib/practiceSettings.js";
-import {
-  RESUME_DRAFT_SCHEMA,
-  RESUME_DRAFT_SYSTEM,
-  activityForPrompt,
-  cleanDraft,
-  draftBody,
-  resumeBody,
-} from "../lib/resume.js";
+import { assertAiAllowed, assertStudentAiTools } from "../lib/practiceSettings.js";
+import { RESUME_DRAFT_SCHEMA, RESUME_DRAFT_SYSTEM, activityForPrompt, cleanDraft, draftBody } from "../lib/resume.js";
+import { POLISH_SCHEMA, POLISH_SYSTEM, cleanPolish, polishBody, polishPrompt, resumeSaveBody } from "../lib/resumeDoc.js";
+import { serviceClient } from "../lib/supabase.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
 import { canReadStoredText, readStoredText } from "../lib/applicationText.js";
 import { documentReadableForTask, toAiDoc } from "../lib/context/documentAi.js";
@@ -49,6 +45,29 @@ export default async function resumeRoutes(app: FastifyInstance) {
   const student = [app.authenticate, requireRole("student")];
   const aiLimit = limit("ai:resume", 20, 60, "You're drafting very fast. Give it a minute.");
 
+  /** The saved row as the app reads it. `updatedBy` is the editor's name (read after access was checked), else null. */
+  async function savedResume(row: Row) {
+    const updatedById = typeof row.updated_by === "string" ? row.updated_by : null;
+    let updatedBy: { id: string; name: string } | null = null;
+    if (updatedById) {
+      const db = serviceClient();
+      if (db) {
+        const { data } = await db.from("profiles").select("full_name").eq("id", updatedById).maybeSingle();
+        const name = typeof (data as Row | null)?.full_name === "string" ? String((data as Row).full_name).trim() : "";
+        if (name) updatedBy = { id: updatedById, name };
+      }
+    }
+    return {
+      // A row saved before v2 has no format key: it opens as the general format, its old content left untouched.
+      templateKey: typeof row.template_key === "string" ? row.template_key : "general",
+      content: row.content,
+      updatedAt: String(row.updated_at),
+      updatedBy,
+    };
+  }
+
+  const SAVED_COLUMNS = "template_key, content, updated_at, updated_by";
+
   app.get(
     "/",
     { preHandler: [app.authenticate, limit("resume:read", 120, 60)] },
@@ -57,7 +76,7 @@ export default async function resumeRoutes(app: FastifyInstance) {
       const studentId = await resolveStudentId(request, q.studentId, "view");
       const { data, error } = await request.db
         .from("student_resumes")
-        .select("template, content, updated_at")
+        .select(SAVED_COLUMNS)
         .eq("student_id", studentId)
         .maybeSingle();
       if (error) {
@@ -65,24 +84,54 @@ export default async function resumeRoutes(app: FastifyInstance) {
         throw fromPostgrest(error);
       }
       if (!data) return { resume: null };
-      const row = data as Row;
-      return { resume: { template: String(row.template), content: row.content, updatedAt: String(row.updated_at) } };
+      return { resume: await savedResume(data as Row) };
     }
   );
 
-  app.put("/", { preHandler: [...student, limit("resume:write", 120, 60)] }, async (request) => {
-    const b = resumeBody.parse(request.body);
+  // The student saves their own; a Consultant who can edit the student saves theirs. RLS decides it again.
+  app.put("/", { preHandler: [app.authenticate, limit("resume:write", 120, 60)] }, async (request) => {
+    const q = z.object({ studentId: z.string().uuid().optional() }).strict().parse(request.query);
+    const parsed = resumeSaveBody.safeParse(request.body);
+    if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "That resume can't be saved");
+    const studentId = await resolveStudentId(request, q.studentId, "edit");
     const { data, error } = await request.db
       .from("student_resumes")
-      .upsert({ student_id: request.auth.userId, template: b.template, content: b.content }, { onConflict: "student_id" })
-      .select("template, content, updated_at")
+      .upsert({ student_id: studentId, template_key: parsed.data.templateKey, content: parsed.data.content }, { onConflict: "student_id" })
+      .select(SAVED_COLUMNS)
       .single();
     if (error) {
       if (isResultsNotApplied(error)) throw unavailableResume();
       throw fromPostgrest(error);
     }
-    const row = data as Row;
-    return { resume: { template: String(row.template), content: row.content, updatedAt: String(row.updated_at) } };
+    return { resume: await savedResume(data as Row) };
+  });
+
+  /**
+   * Polish: one entry's bullets rewritten as action verb plus result. A student needs the practice's "Let students
+   * use AI tools" switch (and the AI summaries one); a Consultant who can edit the student needs AI summaries.
+   * Nothing private is sent: only the entry the caller typed, wrapped as untrusted data. Stores nothing.
+   */
+  app.post("/polish", { preHandler: [app.authenticate, limit("ai:resume-polish", 30, 60, "You're polishing very fast. Give it a minute.")] }, async (request) => {
+    const q = z.object({ studentId: z.string().uuid().optional() }).strict().parse(request.query);
+    const b = polishBody.parse(request.body);
+    if (!hasAnthropic) throw unavailable("AI features aren't configured yet. Set ANTHROPIC_API_KEY.");
+    const studentId = await resolveStudentId(request, q.studentId, "edit");
+    await assertStudentAiTools(request);
+    if (b.entry.bullets.every((x) => !x.trim())) throw badRequest("Add at least one bullet to polish first");
+
+    const bullets = await runStructured({
+      request,
+      module: "resume",
+      studentId,
+      model: FAST_MODEL,
+      system: POLISH_SYSTEM,
+      prompt: polishPrompt(b.section, b.entry),
+      toolName: "resume_polish",
+      schema: POLISH_SCHEMA as unknown as Record<string, unknown>,
+      maxTokens: 700,
+      validate: (v) => cleanPolish(v, b.entry),
+    });
+    return { bullets };
   });
 
   app.post("/draft", { preHandler: [...student, aiLimit] }, async (request) => {
