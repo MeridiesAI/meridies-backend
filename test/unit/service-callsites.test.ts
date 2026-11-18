@@ -99,6 +99,9 @@ const REVIEWED = [
   // that practice's practice_stripe_accounts row, which clients have no write grant on. routes/pay.ts: public,
   // the hashed pay token decides; reads only that invoice, its family's billing rows and the practice's Stripe
   // account, asks approvedCounselorIds for the contact's counselor before opening a Checkout, writes nothing.
+  // routes/resume.ts: inside the caller's own request, after resolveStudentId proved they may view or edit that
+  // student; reads one thing, the full name of whoever last saved that student's resume (the student or their
+  // Consultant, who already know each other), and writes nothing.
   // routes/stripeWebhook.ts: acts for no counselor; Stripe's signature decides, and it writes only a card
   // payment against the invoice named in a session taken on that invoice's own practice account, refunded
   // amounts on such payments, the matching practice_stripe_accounts flags, and stripe_webhook_events.
@@ -233,7 +236,7 @@ const REVIEWED = [
   "lib/replyRouting.ts", "lib/research/accept.ts", "lib/research/run.ts", "lib/submissionReview.ts", "lib/supabase.ts",
   "lib/sweepSchedule.ts", "routes/accessReview.ts", "routes/account.ts", "routes/auth.ts",
   "routes/collegeIntel.ts", "routes/collegesV10.ts", "routes/communication.ts", "routes/events.ts", "routes/health.ts", "routes/integrations.ts",
-  "routes/internal.ts", "lib/invoiceTexting.ts", "lib/invoiceAgreement.ts", "routes/contracts.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
+  "routes/internal.ts", "lib/invoiceTexting.ts", "lib/invoiceAgreement.ts", "routes/contracts.ts", "routes/kpi.ts", "routes/messaging.ts", "routes/kpiUnsubscribe.ts", "routes/pay.ts", "routes/resume.ts", "routes/pipelineStripe.ts", "routes/preferences.ts", "routes/pipelineUnsubscribe.ts", "routes/stripeWebhook.ts", "routes/webhooks.ts",
 ];
 
 function tsFiles(dir: string): string[] {
