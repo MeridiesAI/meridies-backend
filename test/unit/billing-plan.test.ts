@@ -98,3 +98,12 @@ test("an event of the other mode, or an unrelated event, is ignored", () => {
   assert.equal(planBillingEvent(ev("invoice.paid", { customer: "cus_1" }, { livemode: true }), { livemode: false }).kind, "ignore");
   assert.equal(planBillingEvent(ev("payment_intent.succeeded", {}), { livemode: null }).kind, "ignore");
 });
+
+test("a plan set up ahead of its start has no access until then, whatever its status", () => {
+  const future = new Date(now.getTime() + 30 * 86_400_000).toISOString();
+  const before = accessFor(row({ kind: "founding", status: "active", access_starts_at: future }), now);
+  assert.deepEqual([before.state, before.canEdit, before.canAddStudents, before.locked], ["not_started", false, false, true]);
+  // once the moment has passed it is an ordinary active plan
+  const after = accessFor(row({ kind: "founding", status: "active", access_starts_at: new Date(now.getTime() - 1000).toISOString() }), now);
+  assert.equal(after.state, "active");
+});

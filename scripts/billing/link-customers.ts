@@ -26,6 +26,8 @@ const entry = z
     email: z.string().trim().email(),
     stripeCustomerId: z.string().regex(/^cus_[A-Za-z0-9]+$/, "must look like cus_...").optional(),
     kind: z.enum(["founding", "custom", "internal"]),
+    /** ISO moment before which the account has no access at all (a client who starts later). */
+    accessStartsAt: z.string().datetime().optional(),
   })
   .refine((e) => (e.kind === "internal" ? e.stripeCustomerId === undefined : e.stripeCustomerId !== undefined), {
     message: "founding and custom need a stripeCustomerId; internal must not have one",
@@ -51,7 +53,7 @@ const ids = parsed.data.map((e) => e.stripeCustomerId).filter(Boolean);
 if (new Set(ids).size !== ids.length) fail("The same Stripe customer id appears twice in the file.");
 
 if (validateOnly) {
-  for (const e of parsed.data) console.log(`${e.email}  ${e.kind}  ${e.stripeCustomerId ?? "(no Stripe customer: free access)"}`);
+  for (const e of parsed.data) console.log(`${e.email}  ${e.kind}  ${e.stripeCustomerId ?? "(no Stripe customer: free access)"}${e.accessStartsAt ? `  access starts ${e.accessStartsAt}` : ""}`);
   console.log(`File is valid: ${parsed.data.length} accounts. Nothing was read or written.`);
   process.exit(0);
 }
@@ -98,6 +100,7 @@ for (const e of parsed.data) {
           ...(e.stripeCustomerId ? { stripe_customer_id: e.stripeCustomerId } : {}),
           status: "active",
           started_at: new Date().toISOString(),
+          ...(e.accessStartsAt ? { access_starts_at: e.accessStartsAt } : {}),
         },
         { onConflict: "counselor_id" }
       );

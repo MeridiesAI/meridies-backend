@@ -48,6 +48,7 @@ export default async function billingRoutes(app: FastifyInstance) {
       canEdit: access.canEdit,
       locked: access.locked,
       daysPastDue: daysPastDue(plan, now),
+      accessStartsAt: plan?.access_starts_at ?? null,
       currentPeriodEnd: plan?.current_period_end ?? null,
       cancelAtPeriodEnd: plan?.cancel_at_period_end ?? false,
       hasBillingPortal: Boolean(plan?.stripe_customer_id),

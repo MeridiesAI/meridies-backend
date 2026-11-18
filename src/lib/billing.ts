@@ -18,7 +18,7 @@ export const billingEnabled = (): boolean => env.BILLING_ENABLED === "true";
 export const billingUnavailable = () => new HttpError(503, "Billing isn't switched on yet", "billing_unavailable");
 
 const PLAN_COLUMNS =
-  "counselor_id, kind, status, billing_interval, billed_students, current_period_end, cancel_at_period_end, past_due_since, money_back_used_at, stripe_customer_id, stripe_subscription_id";
+  "counselor_id, kind, status, billing_interval, billed_students, current_period_end, cancel_at_period_end, past_due_since, money_back_used_at, access_starts_at, stripe_customer_id, stripe_subscription_id";
 
 export type StoredPlan = PlanRow & {
   counselor_id: string;

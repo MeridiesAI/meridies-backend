@@ -15,6 +15,8 @@ create table if not exists public.plan_subscriptions (
   stripe_subscription_id text unique check (stripe_subscription_id is null or stripe_subscription_id ~ '^sub_[A-Za-z0-9]+$'),
   billing_interval       text check (billing_interval is null or billing_interval in ('month', 'year')),
   status                 text not null default 'none' check (status in ('none', 'active', 'past_due', 'canceled')),
+  -- A plan can be set up ahead of time: until this moment the account has no access (a founding client who starts later).
+  access_starts_at       timestamptz,
   billed_students        integer check (billed_students is null or billed_students between 0 and 100000),
   started_at             timestamptz,
   current_period_end     timestamptz,

@@ -10,6 +10,7 @@
  *     day 0 to 7    full access, with a banner (Stripe is retrying the card)
  *     day 7 to 30   read-only: look and export, change nothing, add no students
  *     day 30 to 60  locked: billing and export only
+ *     before access_starts_at   not_started: locked, whatever the plan's status
  *     day 60 on     closure_due: the account is queued for the 30-day export window and deletion (lib/accountClosure.ts),
  *                   which a person starts; nothing here deletes anything
  */
@@ -22,11 +23,13 @@ export type PlanRow = {
   status: PlanStatus;
   past_due_since: string | null;
   money_back_used_at: string | null;
+  /** Until this moment the account has no access at all (a plan set up ahead of its start). */
+  access_starts_at?: string | null;
   stripe_customer_id?: string | null;
   stripe_subscription_id?: string | null;
 };
 
-export type PlanState = "needs_plan" | "active" | "grace" | "read_only" | "locked" | "closure_due" | "canceled";
+export type PlanState = "not_started" | "needs_plan" | "active" | "grace" | "read_only" | "locked" | "closure_due" | "canceled";
 
 export type Access = {
   state: PlanState;
@@ -49,6 +52,10 @@ export const canSeePricing = (row: Pick<PlanRow, "kind"> | null): boolean => (ro
 export function accessFor(row: PlanRow | null, now: Date): Access {
   const plan = row ?? NO_PLAN;
   const open: Access = { state: "active", canAddStudents: true, canEdit: true, locked: false };
+  // Set up ahead of time: nothing is open until the start moment, whatever Stripe says.
+  if (plan.access_starts_at && now.getTime() < new Date(plan.access_starts_at).getTime()) {
+    return { state: "not_started", canAddStudents: false, canEdit: false, locked: true };
+  }
   if (plan.status === "active") return open;
   if (plan.status === "none") return { state: "needs_plan", canAddStudents: false, canEdit: true, locked: false };
   if (plan.status === "canceled") return { state: "canceled", canAddStudents: false, canEdit: false, locked: false };
