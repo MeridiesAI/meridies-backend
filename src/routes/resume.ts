@@ -146,8 +146,9 @@ export default async function resumeRoutes(app: FastifyInstance) {
     const q = z.object({ studentId: z.string().uuid().optional() }).strict().parse(request.query);
     const parsed = importBody.safeParse(request.body);
     if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "That resume can't be imported");
-    if (!hasAnthropic) throw new HttpError(503, "Importing a resume isn't switched on yet", "resume_import_unavailable");
+    // Who may touch this student is decided before anything about the server's own setup is said.
     const studentId = await resolveStudentId(request, q.studentId, "edit");
+    if (!hasAnthropic) throw new HttpError(503, "Importing a resume isn't switched on yet", "resume_import_unavailable");
     await assertAiAllowed(request, "resume-adjust");
     const { lines } = parsed.data;
     const sorted = await runStructured({
