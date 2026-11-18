@@ -34,6 +34,7 @@
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { loadMergedRecords } from "../lib/collegeAccessibility.js";
 import { FAST_MODEL, enforceNoProse, runStructured } from "../lib/anthropic.js";
 import { HttpError, badRequest, fromPostgrest, notFound, unavailable } from "../lib/errors.js";
 import { PHOTO_COLUMNS, isMissingPhotoSchema, loadCollegePhotos, toCollegePhoto, type CollegePhotoRow } from "../lib/collegePhotos.js";
@@ -136,6 +137,7 @@ export const listCriteriaSchema = z
       .nullable(),
     aid: z.enum(AID_OPTIONS),
     diversity: z.enum(DIVERSITY_OPTIONS),
+    learningSupport: z.enum(["any", "enhanced", "comprehensive"]).optional(),
   })
   .strict();
 
@@ -661,6 +663,11 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     const ls = by(lists.data);
     const st = by(stats.data);
     const rows = new Map(((colleges.data ?? []) as Row[]).map((c) => [String(c.id), c]));
+    // Accessibility & Support, the practice's edits on top; absent (not null) before the migration, so an older API shape holds.
+    const access = await loadMergedRecords(request, list).catch((err) => {
+      request.log.warn({ err: err instanceof Error ? err.message : "failed" }, "compare: accessibility not read");
+      return null;
+    });
 
     // In the order asked, so the columns stay where the counselor put them.
     return list
@@ -681,6 +688,7 @@ export default async function collegeV10Routes(app: FastifyInstance) {
           // Federal figures (College Scorecard), with their own freshness; kept
           // apart from the curated facts and aid profile above.
           official: st.get(id)?.[0] ? toOfficialStats(st.get(id)![0]) : null,
+          ...(access ? { accessibility: access.get(id) ?? null } : {}),
         };
       });
   });
@@ -1197,6 +1205,11 @@ export default async function collegeV10Routes(app: FastifyInstance) {
     ];
     const excluded = new Set(b.exclude ?? []);
     const candidates = schools.filter((s) => !excluded.has(s.collegeId));
+    // The Learning support filter reads each school's support level (shared record + this practice's edit).
+    if (b.criteria.learningSupport === "enhanced" || b.criteria.learningSupport === "comprehensive") {
+      const levels = await loadMergedRecords(request, candidates.map((s) => s.collegeId));
+      for (const s of candidates) s.supportLevel = levels?.get(s.collegeId)?.supportLevel ?? null;
+    }
     // List matching (LIST_MATCH_ENABLED): match data per school orders each band; null (off, or nothing could be
     // read) leaves the list exactly as before. It never throws.
     const match = listMatchEnabled()

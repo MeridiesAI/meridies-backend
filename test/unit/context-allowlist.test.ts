@@ -16,7 +16,7 @@ test("columns() returns only allowlisted names", () => {
 
 test("never-included data is not on the allowlist", () => {
   const all = JSON.stringify(AI_ALLOWLIST);
-  for (const banned of ["student_private_notes", "student_status_overrides", "red_flags", "guardians",
+  for (const banned of ["student_learning_support", "learning_support", "need_level", "student_private_notes", "student_status_overrides", "red_flags", "guardians",
     "address", "birthday", "gender", "contact_email", "phone", "email", '"profile"']) {
     assert.ok(!all.includes(banned), `${banned} must not be on the allowlist`);
   }
@@ -107,4 +107,21 @@ test("restricted documents are the ones a student may not see", () => {
   assert.equal(isRestrictedDocument({ kind: "iep-504" }), true);
   assert.equal(isRestrictedDocument({ kind: "counselor-only" }), true);
   assert.equal(isRestrictedDocument({ kind: "transcript" }), false);
+});
+
+/** The learning-support note is read and written only by its own route: no AI context, serializer or export touches it. */
+test("student_learning_support is referenced only by its own route, never by a context builder or an export", async () => {
+  const { readdirSync, readFileSync, statSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (full.endsWith(".ts")) files.push(full);
+    }
+  };
+  walk(join(process.cwd(), "src"));
+  const hits = files.filter((f) => /student_learning_support|need_level/.test(readFileSync(f, "utf8"))).map((f) => f.slice(process.cwd().length + 1));
+  assert.deepEqual(hits.sort(), ["src/routes/learningSupport.ts"]);
 });

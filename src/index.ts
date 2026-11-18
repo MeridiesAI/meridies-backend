@@ -5,6 +5,7 @@ import { verifyImportWorkerAtBoot } from "./lib/imports/db.js";
 import { researchFakeRefusal } from "./lib/research/bootGuard.js";
 import { meetingSummaryFakeRefusal } from "./lib/meetingSummary.js";
 import { translateFakeRefusal } from "./lib/translate.js";
+import { accessibilityFakeRefusal } from "./lib/collegeAccessibility.js";
 import { evalClockRefusal } from "./lib/axis/clock.js";
 import { driveFakeRefusal } from "./lib/driveExport.js";
 import { listMatchEnabled } from "./lib/listMatchLoad.js";
@@ -27,6 +28,14 @@ if (translateRefusal) {
   process.exit(1);
 }
 if (env.TRANSLATE_FAKE) app.log.warn("TRANSLATE_FAKE is on: translations are canned, not a model's");
+
+// And for the accessibility research double: it would store college facts no page said.
+const accessibilityRefusal = accessibilityFakeRefusal({ ACCESSIBILITY_FAKE: env.ACCESSIBILITY_FAKE, NODE_ENV: process.env.NODE_ENV });
+if (accessibilityRefusal) {
+  app.log.error(accessibilityRefusal);
+  process.exit(1);
+}
+if (env.ACCESSIBILITY_FAKE) app.log.warn("ACCESSIBILITY_FAKE is on: accessibility research returns canned fixtures");
 
 // The evals' clock: only on a local stack and never in production, read raw like the doubles above.
 const clockRefusal = evalClockRefusal({ AXIS_EVAL_CLOCK: env.AXIS_EVAL_CLOCK, NODE_ENV: process.env.NODE_ENV, SUPABASE_URL: env.SUPABASE_URL });

@@ -115,6 +115,8 @@ src/
 │   ├── polygonVisibility.ts # who hid the student's strength profile (the student, their counselor)
 │   ├── polygonEstimate.ts # Estimate with AI: the scoring prompt (anchored to the admitted-student polygon's scale), the schema, cleanEstimate (pure)
 │   ├── resume.ts          # resume builder: the older bullet drafting prompt and the checks on its answer
+│   ├── collegeAccessibility.ts # Accessibility & Support: the shared record, a practice's override on top, the 180-day stale rule, the research job (every field quote-checked, sourced; never the IPEDS percent)
+│   ├── ingest/ipedsAccessibility.ts # the IPEDS percent registered with disability services: CSV, row reading, the insert/update plan (the variable name is an argument, never guessed)
 │   ├── resumeDoc.ts       # resume builder v2: the 8-format document schema (strict, 60000 bytes) and Polish (prompt, schema, the number guard)
 │   ├── activityAlignment.ts # Coherence: research / service / competitions and the declared major, no model
 │   ├── activityListImport.ts # an activity list in Files -> proposed Activities rows (a sheet's columns without a model; else AxIS); stores nothing
@@ -207,6 +209,8 @@ src/
 │   ├── parentInvites.ts   # /parent-invites  counselor Invite / Resend; public preview and accept (token in the body)
 │   ├── pipeline.ts        # /pipeline     Contact Pipeline + Payment Tracker
 │   ├── pipelineActivity.ts # /pipeline    contact timeline + follow-ups
+│   ├── collegeAccessibility.ts # /colleges/:id/accessibility (+ /research, /override)   disability services and learning support for a college
+│   ├── learningSupport.ts # /students/:id/learning-support   a student's PRIVATE learning-support note: the student's own Consultant only
 │   ├── resume.ts          # /resume       the resume the student and their Consultant share: save, read, Polish, draft bullets
 │   ├── pipelineSequences.ts # /pipeline   email sequences and enrollments
 │   ├── pipelineUnsubscribe.ts # /pipeline/unsubscribe/:token   public one-click opt-out

@@ -150,6 +150,7 @@ jobs:
           RESEARCH_FAKE: fixture
           # Translation test double (no model call): "[es] text" out, "[xx] text" read as language xx in; refuses to boot in production.
           TRANSLATE_FAKE: fixture
+          ACCESSIBILITY_FAKE: fixture
           # Meeting-summary test double (no model call): transcripts summarize to their first lines; refuses to boot in production.
           MEETING_SUMMARY_FAKE: fixture
           # Google Sheets export double (no call to Google; account-export.test.mjs); refuses to boot in production.
@@ -206,6 +207,7 @@ jobs:
           NODE_ENV: development
           # Translation double: the API and the two suites (which check a family's reply in English) both read it.
           TRANSLATE_FAKE: fixture
+          ACCESSIBILITY_FAKE: fixture
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
           RESEND_WEBHOOK_SECRET: whsec_dGVzdC1yZXNlbmQtc2VjcmV0LWZvci1sb2NhbC10ZXN0cw==
           PUBLIC_API_URL: http://127.0.0.1:4101
