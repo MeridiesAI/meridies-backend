@@ -94,6 +94,9 @@ check("a resume can't be handed to someone else", forged.status >= 400, `${forge
 const polish = await call(Stu.token, "POST", "/resume/polish", { section: "Leadership", entry: { org: "Robotics", descriptor: "", role: "Captain", dates: "2023 – Present", hours: "", bullets: ["Led 12 members"] } });
 check("polish answers 503 without a model key or 403 with the student AI tools off, never a 500", [200, 403, 503].includes(polish.status), `${polish.status} ${JSON.stringify(polish.body)}`);
 check("polish needs a bullet", [400, 403, 503].includes((await call(S.token, "POST", `/resume/polish?studentId=${Stu.id}`, { section: "x", entry: { org: "", descriptor: "", role: "", dates: "", hours: "", bullets: [] } })).status));
+check("import answers 503 without a model key, 403 with the AI switches off, never a 500", [200, 403, 503].includes((await call(Stu.token, "POST", "/resume/import", { lines: ["Sam Student", "Robotics Team, Captain"] })).status));
+check("import refuses an empty or oversized resume", (await call(Stu.token, "POST", "/resume/import", { lines: [] })).status === 400 && (await call(Stu.token, "POST", "/resume/import", { lines: Array.from({ length: 501 }, () => "x") })).status === 400);
+check("another practice's Consultant can't import for this student", [403, 404].includes((await call(X.token, "POST", `/resume/import?studentId=${Stu.id}`, { lines: ["x"] })).status));
 const draft = await call(Stu.token, "POST", "/resume/draft", { activityIds: ["00000000-0000-0000-0000-000000000000"] });
 check("drafting answers 503 without a model key, 400 for an unknown entry, never a 500", [400, 503].includes(draft.status), `${draft.status} ${JSON.stringify(draft.body)}`);
 check("a counselor can't draft a student's resume", (await call(S.token, "POST", "/resume/draft", { activityIds: ["00000000-0000-0000-0000-000000000000"] })).status === 403);
