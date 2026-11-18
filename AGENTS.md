@@ -52,9 +52,9 @@ src/
 │   ├── email.ts           # Resend email + Twilio SMS, message_deliveries audit
 │   ├── links.ts           # the ONLY user-supplied-URL fetch — see below
 │   ├── linkText.ts        # a read link's page text for AxIS: stored with the digest, served under the AI switches
-│   ├── oauth.ts           # Google/Microsoft OAuth (code + PKCE), token refresh/revoke
+│   ├── oauth.ts           # Google/Microsoft/Zoom OAuth (code + PKCE), token refresh/revoke
 │   ├── tokenCrypto.ts     # AES-256-GCM for tokens at rest (INTEGRATION_TOKEN_KEY)
-│   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams
+│   ├── suiteApi.ts        # Drive/OneDrive files, Calendar events with Meet/Teams, Zoom meetings
 │   ├── liveDocuments.ts   # live edit times of linked files, for the task tracker
 │   ├── documentGuess.ts   # the type guess (imports and every upload): printed phrases, text shape, filename, Google type; no model
 │   ├── documentSort.ts    # Files auto-sort: the guess for bytes (POST /files/documents/guess) or a stored object (an upload with no kind)
@@ -3334,7 +3334,7 @@ without its calendar pointer. **A restore sends nothing, except a meeting's invi
 cancellation, so after the restore the undo route asks `axis_trash_restored_meetings(action)` (the deleter only; the
 meetings the restore brought back, from the trash rows, each with the calendar it was on) which also raises each
 one's `ics_sequence` above the cancellation's (the `meetings_ics_sequence` trigger wouldn't let a client). A meeting
-still ahead that was on the caller's own Google or Microsoft calendar is put back there the way a new meeting is
+still ahead that was on the caller's own Google or Microsoft calendar (or was a Zoom meeting) is put back there the way a new meeting is
 (`createConferenceEvent`, a new link; a failure is logged and the invitation still goes, without the old link, which
 died with the deleted event; an event the row couldn't be pointed at is deleted again; a collaborator's restore
 keeps the link, since their delete never touched the owner's calendar), then it gets a new meeting's round (`prepareInviteRound` with no "before": invites
@@ -3780,6 +3780,32 @@ the grant the route answers 409 with that reason and the app files the prompts a
 These calls go to fixed provider hosts
 with provider-issued ids, so they are not the `lib/links.ts` SSRF surface.
 Every route answers 503 with the missing setting when a provider is unset.
+
+**Zoom is meetings only** (`20261128000001`; `lib/oauth.ts`, `lib/suiteApi.ts`, `routes/integrations.ts`). A counselor connects
+their Zoom account like Google (`GET /integrations/zoom/authorize`, `POST /integrations/zoom/complete`, `DELETE
+/integrations/zoom`, code + PKCE through the same state table), and a meeting with `mode: "zoom"` and `createConference:
+true` (`POST`/`PATCH /meetings`) creates a scheduled Zoom meeting on that account and stores its join link
+(`joinUrl`, `calendarProvider: "zoom"`; the pointer's `calendar_event_id` is the Zoom meeting id). A pasted `joinUrl` with
+mode zoom and no `createConference` is stored like the other modes. Moving, renaming, cancelling or deleting the meeting
+does the same in Zoom (`PATCH /v2/meetings/{id}` with the start and the length together: `syncCalendar` completes a one-sided
+change from the row, an end alone keeping the stored start and a start alone the stored length; `DELETE` with `schedule_for_reminder=false`, 404 is success). It is **not a suite**: `SuiteProvider` stays Google and
+Microsoft (most code reads `provider === "google" ? Google : Microsoft`, so a third value would fall into Graph), and
+`ConnectProvider = SuiteProvider | "zoom"` (`CONNECT_PROVIDERS`) is used only by connect/refresh/revoke, account closure,
+the meeting-event calls and the pointer readers (`meetingCalendar`, `axisRestoreMeetings`, `bookingCalendar`'s move and
+delete). Files, picker, busy time and plain events stay `SuiteProvider`, so Zoom can't reach them. Zoom takes the app's id and
+secret as HTTP Basic at the token, refresh and revoke calls (never in the form), asks for no scope in the consent URL (the
+Marketplace app carries them: `meeting:write:meeting`, `meeting:update:meeting`, `meeting:delete:meeting`, `user:read:user`),
+reads the account from `GET /v2/users/me`, rotates the refresh token (the compare-and-swap above covers it), and a reconnect
+as another Zoom account is 409 `zoom_other_account`. A missing or lapsed grant is 409 `zoom_disconnected` / `zoom_reconnect`
+(also a grant without a meeting scope). `GET /integrations/providers` lists `zoom` in the same shape (`driveGranted` and
+`pickerReady` false, `maxFiles` 0) with `calendarEnabled` true when the create scope was granted: Zoom has no calendar to
+turn on, and the app reads the field as "can create a Zoom link". The subscribed `.ics` leaves the link out as before; the
+`/calendar/feed` meeting items carry `joinUrl` and `mode` (counselors and students only: parent accounts are refused on that
+route). A student's move or cancel of such a meeting (`/me/booking`) follows the Zoom meeting with the counselor's token;
+a Zoom meeting is not on their Google/Outlook calendar, so the emailed invite round still sends the counselor their own copy.
+Booking types, public bookings and `book_meeting_slot` stay Meet / Teams / in person / phone. `ZOOM_CLIENT_ID` /
+`ZOOM_CLIENT_SECRET` unset: Zoom answers unavailable. Until Zoom publishes the Marketplace app only users of the account that
+owns it can authorize it. Tests: `test/unit/zoom-connector.test.ts`.
 
 ### Emailed calendar invites (no Google or Microsoft needed)
 
@@ -5145,6 +5171,7 @@ npm run dev               # http://localhost:4000
 | `GOOGLE_PICKER_MAX_FILES` | Optional; files per pick, 1-50, default 10 |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Optional; Microsoft connect (tenant defaults to `common`). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/microsoft` |
 | `MICROSOFT_PICKER_MAX_FILES` | Optional; files per OneDrive pick, 1-50, default 10 (for the picker in PR B) |
+| `ZOOM_CLIENT_ID` / `ZOOM_CLIENT_SECRET` | Optional; Zoom connect (a Marketplace General, user-managed OAuth app). Redirect URI to register: `<APP_URL>/dashboard/counselor/data-hub/callback/zoom` |
 | `APP_URL` | The app's origin: invite links, and the OAuth redirect URIs above — must match what is registered exactly |
 | `INTEGRATION_TOKEN_KEY` | 32 bytes base64; encrypts OAuth tokens. Changing it forces every reconnect |
 | `ACCESS_REVIEW_EMAIL` | Optional; inbox for counselor access requests. Defaults to `team@meridiesai.com`. The review link is built from `PUBLIC_API_URL` |

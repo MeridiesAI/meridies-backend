@@ -8,7 +8,7 @@
  * values (`common-app`, `scoir`, `csv`, ...) stay for the imports that really
  * are separate things.
  *
- * `google` and `microsoft` connect through a real OAuth handshake
+ * `google`, `microsoft` and `zoom` connect through a real OAuth handshake
  * (lib/oauth.ts): `GET /:provider/authorize` returns the consent URL, the
  * provider redirects the browser to an app page, that page POSTs the code and
  * state to the authenticated `POST /:provider/complete`, and the tokens
@@ -34,6 +34,7 @@ import {
   accessTokenFor,
   beginAuthorization,
   completeAuthorization,
+  CONNECT_PROVIDERS,
   connectedAccountEmail,
   GOOGLE_SCOPE,
   microsoftConsentUrl,
@@ -45,7 +46,8 @@ import {
   revokeAndForget,
   SUITE_PROVIDERS,
   unavailableReason,
-  type SuiteProvider,
+  ZOOM_SCOPE,
+  type ConnectProvider,
 } from "../lib/oauth.js";
 import { toDocument, toIntegration } from "../lib/serialize.js";
 import { isActiveContentFile } from "../lib/storagePath.js";
@@ -64,16 +66,18 @@ import { assertOwnFolder, assertSameStudentTree, studentFolderId } from "./files
 type Row = Record<string, unknown>;
 
 const PROVIDERS = [
-  "google", "microsoft",
+  "google", "microsoft", "zoom",
   "google-drive", "google-calendar", "onedrive",
   "common-app", "scoir", "maialearning", "csv", "gmail", "outlook", "twilio",
 ] as const;
 
-const isSuite = (p: string): p is SuiteProvider =>
-  (SUITE_PROVIDERS as readonly string[]).includes(p);
+/** Zoom included: the providers with a real handshake and stored tokens. The Files routes stay on `suiteParam` (Google, Microsoft). */
+const isConnect = (p: string): p is ConnectProvider =>
+  (CONNECT_PROVIDERS as readonly string[]).includes(p);
 
 const providerParam = z.object({ provider: z.enum(PROVIDERS) });
 const suiteParam = z.object({ provider: z.enum(SUITE_PROVIDERS) });
+const connectParam = z.object({ provider: z.enum(CONNECT_PROVIDERS) });
 
 const connectBody = z
   .object({
@@ -175,9 +179,10 @@ export default async function integrationRoutes(app: FastifyInstance) {
         });
       }
     }
-    return SUITE_PROVIDERS.map((provider) => {
+    return CONNECT_PROVIDERS.map((provider) => {
       const reason = unavailableReason(provider);
       const account = accounts.get(provider) ?? null;
+      const zoom = provider === "zoom";
       return {
         provider,
         available: reason === null,
@@ -185,15 +190,20 @@ export default async function integrationRoutes(app: FastifyInstance) {
         tokensHeld: Boolean(account),
         accountEmail: account?.email ?? null,
         connectedAt: account?.connectedAt ?? null,
-        calendarEnabled: account ? account.scopes.some((s) => /calendar\.events$|calendars\.readwrite$/i.test(s)) : false,
-        driveGranted: account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
+        // Zoom has no calendar to turn on: the app reuses this field as "can create a link here", so for
+        // Zoom it is true when the meeting-create scope was granted.
+        calendarEnabled: account
+          ? account.scopes.some((s) => (zoom ? s === ZOOM_SCOPE.create : /calendar\.events$|calendars\.readwrite$/i.test(s)))
+          : false,
+        driveGranted: !zoom && account ? account.scopes.some((s) => /drive\.file$|files\.read/i.test(s)) : false,
         // Until the Railway variables are set the app hides the Drive button (Elvin, 10/15).
-        // Microsoft's picker needs nothing beyond the sign-in client.
+        // Microsoft's picker needs nothing beyond the sign-in client; Zoom has no picker.
         pickerReady:
+          !zoom &&
           reason === null &&
           (provider === "microsoft" ||
             pickerConfigProblem({ clientId: env.GOOGLE_CLIENT_ID, apiKey: env.GOOGLE_PICKER_API_KEY, projectNumber: env.GOOGLE_PROJECT_NUMBER }) === null),
-        maxFiles: provider === "google" ? env.GOOGLE_PICKER_MAX_FILES : env.MICROSOFT_PICKER_MAX_FILES,
+        maxFiles: zoom ? 0 : provider === "google" ? env.GOOGLE_PICKER_MAX_FILES : env.MICROSOFT_PICKER_MAX_FILES,
       };
     });
   });
@@ -211,7 +221,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
       ],
     },
     async (request) => {
-      const { provider } = suiteParam.parse(request.params);
+      const { provider } = connectParam.parse(request.params);
       // onedrive: a personal Microsoft account's consent to the picker's scope (lib/oauth.ts ONEDRIVE_CONSUMER_SCOPE).
       const { add } = z.object({ add: z.enum(["calendar", "onedrive"]).optional() }).strict().parse(request.query ?? {});
       return { url: await beginAuthorization(request.auth.userId, provider, { add: add ?? null }) };
@@ -235,7 +245,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
       ],
     },
     async (request) => {
-      const { provider } = suiteParam.parse(request.params);
+      const { provider } = connectParam.parse(request.params);
       const body = completeBody.parse(request.body);
       const { scopes } = await completeAuthorization(
         request.auth.userId,
@@ -504,7 +514,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
     { preHandler: [app.authenticate, limit("integrations:connect", 30, 60)] },
     async (request) => {
       const { provider } = providerParam.parse(request.params);
-      if (isSuite(provider)) {
+      if (isConnect(provider)) {
         throw badRequest(`${providerLabel(provider)} connects through its own sign-in. Use Connect.`);
       }
       const body = connectBody.parse(request.body ?? {});
@@ -582,7 +592,7 @@ export default async function integrationRoutes(app: FastifyInstance) {
           config.microsoftAccount === "personal" ? MSA_TENANT_ID : typeof config.tenantId === "string" ? config.tenantId : null
         );
       }
-      if (isSuite(provider)) {
+      if (isConnect(provider)) {
         ({ revokedAtProvider } = await revokeAndForget(request.auth.userId, provider, request.log));
         // revokeAndForget doesn't say whether its delete went through. A disconnect must not report
         // success, and take the card away, while the stored tokens are still there: look, keyed by

@@ -230,6 +230,9 @@ const envSchema = z.object({
   MICROSOFT_TENANT: blankIsUnset(
     z.string().regex(/^[A-Za-z0-9.-]{1,100}$/, "MICROSOFT_TENANT must be a tenant id or alias").default("common")
   ),
+  // Zoom Marketplace "General" (user-managed OAuth) app: counselors' Zoom meetings are created through it.
+  ZOOM_CLIENT_ID: blankIsUnset(z.string().min(10).optional()),
+  ZOOM_CLIENT_SECRET: blankIsUnset(z.string().min(10).optional()),
   // 32 random bytes, base64 (`openssl rand -base64 32`). Encrypts OAuth tokens
   // at rest with AES-256-GCM. Rotating it strands stored tokens: every
   // counselor has to reconnect.

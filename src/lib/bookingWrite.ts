@@ -38,7 +38,7 @@ import { slotsFor, type BookingSettingsDto, type IgnoreMeeting, type MeetingType
 import { bookingConferenceProvider } from "./bookingCalendar.js";
 import { HttpError } from "./errors.js";
 import { whenShort, type InviteRoundSummary } from "./meetingInvites.js";
-import type { SuiteProvider } from "./oauth.js";
+import type { ConnectProvider, SuiteProvider } from "./oauth.js";
 import type { CalendarEventInput } from "./suiteApi.js";
 
 type Row = Record<string, unknown>;
@@ -97,7 +97,7 @@ export type NoticeInput = {
   /** The student booked the meeting (true), or the counselor did and the student changed it. */
   byStudent: boolean;
   /** A cancel whose calendar delete failed: the event is still on this calendar. */
-  calendarLeft?: SuiteProvider | null;
+  calendarLeft?: ConnectProvider | null;
   /** A Meet / Teams booking made with no calendar connected: it has no link yet. */
   noLink?: "google-meet" | "teams" | null;
 };
@@ -116,7 +116,11 @@ export function noticeText(n: NoticeInput): { title: string; body: string } {
         : `${n.first} cancelled the meeting on ${at}`;
   const who = n.byStudent ? `${n.first} booked this in Meridies.` : `You set this meeting up; ${n.first} changed it in Meridies.`;
   const moved = n.action === "rescheduled" && n.previous ? `Moved from ${when(n.previous, n.timeZone)}. ${who}` : who;
-  const left = n.calendarLeft ? ` It is still on your ${n.calendarLeft === "google" ? "Google" : "Outlook"} calendar; delete it there.` : "";
+  const left = n.calendarLeft
+    ? n.calendarLeft === "zoom"
+      ? " It is still in your Zoom account; delete it there."
+      : ` It is still on your ${n.calendarLeft === "google" ? "Google" : "Outlook"} calendar; delete it there.`
+    : "";
   const noLink = n.noLink
     ? ` It has no ${n.noLink === "teams" ? "Teams" : "Google Meet"} link yet: add one to the meeting in Meridies (${n.first} gets it in an updated invite), or connect your ${n.noLink === "teams" ? "Outlook" : "Google"} Calendar so bookings get one.`
     : "";
@@ -318,7 +322,8 @@ export async function rescheduleBooking(
   const minutes = oldEnd ? Math.round((Date.parse(oldEnd) - Date.parse(oldStart)) / MINUTE) : 60;
   if (!(minutes >= 15 && minutes <= 180)) throw new HttpError(409, "Ask your counselor to change this meeting", "ask_your_counselor");
 
-  const ignore: IgnoreMeeting = { id: str(m.id), startsAt: oldStart, endsAt: oldEnd, onCalendar: pointerOf(m) };
+  // A Zoom meeting isn't on the counselor's Google/Outlook calendar, so there is no own event to ignore in its busy time.
+  const ignore: IgnoreMeeting = { id: str(m.id), startsAt: oldStart, endsAt: oldEnd, onCalendar: pointerOf(m) && m.calendar_provider !== "zoom" };
   if (!(await io.slotOpen({ id: "reschedule", durationMinutes: minutes }, i.startsAt, ignore))) throw slotUnavailable();
 
   const startsAt = new Date(i.startsAt).toISOString();
@@ -353,13 +358,13 @@ export async function cancelBooking(io: BookingIo, i: Change): Promise<{ meeting
 
   // Nothing left on the counselor's calendar is "removed"; a failed delete is reported, never blocking.
   let calendarRemoved = true;
-  let calendarLeft: SuiteProvider | null = null;
+  let calendarLeft: ConnectProvider | null = null;
   if (pointerOf(m)) {
     try {
       await io.calendar.remove(m);
     } catch {
       calendarRemoved = false;
-      calendarLeft = m.calendar_provider === "microsoft" ? "microsoft" : "google";
+      calendarLeft = m.calendar_provider === "microsoft" || m.calendar_provider === "zoom" ? m.calendar_provider : "google";
     }
   }
 

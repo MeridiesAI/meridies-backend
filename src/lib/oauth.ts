@@ -1,5 +1,6 @@
 /**
- * OAuth 2.0 for the Google and Microsoft suites — authorization code + PKCE.
+ * OAuth 2.0 for the Google and Microsoft suites — authorization code + PKCE — and Zoom, which
+ * connects through the same handshake but is not a suite (no files, no Calendar).
  *
  * Google asks in two steps (Connect: identity plus drive.file; Calendar only when the
  * counselor turns it on); Microsoft asks once. The handshake:
@@ -41,6 +42,24 @@ import { decryptToken, encryptToken, hasTokenKey } from "./tokenCrypto.js";
 
 export const SUITE_PROVIDERS = ["google", "microsoft"] as const;
 export type SuiteProvider = (typeof SUITE_PROVIDERS)[number];
+
+/**
+ * Everything that connects through this handshake. `SuiteProvider` stays Google/Microsoft: most code
+ * branches `provider === "google" ? Google : Microsoft`, so a third value there would fall into the
+ * Graph path. Only the connect/refresh/revoke code and the meeting-event calls take the wider type.
+ */
+export const CONNECT_PROVIDERS = [...SUITE_PROVIDERS, "zoom"] as const;
+export type ConnectProvider = (typeof CONNECT_PROVIDERS)[number];
+
+/**
+ * Zoom's granular scopes (the Marketplace app is configured with these; the authorize URL asks for none).
+ * Create is what `/integrations/providers` reports as `calendarEnabled` for Zoom.
+ */
+export const ZOOM_SCOPE = {
+  create: "meeting:write:meeting",
+  update: "meeting:update:meeting",
+  delete: "meeting:delete:meeting",
+} as const;
 
 const STATE_TTL_MS = 10 * 60 * 1000;
 const REFRESH_MARGIN_MS = 60 * 1000;
@@ -169,7 +188,20 @@ type ProviderConfig = {
   extraAuthorizeParams: Record<string, string>;
 };
 
-function providerConfig(provider: SuiteProvider): ProviderConfig | null {
+function providerConfig(provider: ConnectProvider): ProviderConfig | null {
+  if (provider === "zoom") {
+    if (!env.ZOOM_CLIENT_ID || !env.ZOOM_CLIENT_SECRET) return null;
+    return {
+      label: "Zoom",
+      authorizeUrl: "https://zoom.us/oauth/authorize",
+      tokenUrl: "https://zoom.us/oauth/token",
+      clientId: env.ZOOM_CLIENT_ID,
+      clientSecret: env.ZOOM_CLIENT_SECRET,
+      // Zoom takes the scopes configured on the Marketplace app; none is sent.
+      scopes: [],
+      extraAuthorizeParams: {},
+    };
+  }
   if (provider === "google") {
     if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) return null;
     return {
@@ -197,15 +229,14 @@ function providerConfig(provider: SuiteProvider): ProviderConfig | null {
   };
 }
 
-export const providerLabel = (p: SuiteProvider) => (p === "google" ? "Google" : "Microsoft");
+export const providerLabel = (p: ConnectProvider) => (p === "google" ? "Google" : p === "zoom" ? "Zoom" : "Microsoft");
 
 /** Why this provider can't be used right now, or null when it can. */
-export function unavailableReason(provider: SuiteProvider): string | null {
+export function unavailableReason(provider: ConnectProvider): string | null {
   const label = providerLabel(provider);
   if (!providerConfig(provider)) {
-    return `${label} isn't set up on this server yet (missing ${
-      provider === "google" ? "GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET" : "MICROSOFT_CLIENT_ID / MICROSOFT_CLIENT_SECRET"
-    }).`;
+    const vars = { google: "GOOGLE", microsoft: "MICROSOFT", zoom: "ZOOM" }[provider];
+    return `${label} isn't set up on this server yet (missing ${vars}_CLIENT_ID / ${vars}_CLIENT_SECRET).`;
   }
   if (!hasTokenKey()) return `${label} sign-in needs INTEGRATION_TOKEN_KEY to store tokens safely.`;
   if (!serviceClient()) return `${label} sign-in needs SUPABASE_SERVICE_ROLE_KEY to store tokens.`;
@@ -220,7 +251,7 @@ export function pickerConfigProblem(e: { clientId?: string; apiKey?: string; pro
   return null;
 }
 
-function configured(provider: SuiteProvider) {
+function configured(provider: ConnectProvider) {
   const reason = unavailableReason(provider);
   if (reason) throw unavailable(reason);
   // unavailableReason has proven all four are present.
@@ -235,23 +266,36 @@ function configured(provider: SuiteProvider) {
  * with Google / Microsoft; it must be byte-identical in the authorize request
  * and the token exchange, so both build it here.
  */
-export function redirectUri(provider: SuiteProvider): string {
+export function redirectUri(provider: ConnectProvider): string {
   return `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/data-hub/callback/${provider}`;
 }
 
 const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
 const sha256B64Url = (v: string) => createHash("sha256").update(v).digest("base64url");
 
-async function postForm(url: string, form: Record<string, string>): Promise<Response> {
+async function postForm(url: string, form: Record<string, string>, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
+      ...headers,
     },
     body: new URLSearchParams(form).toString(),
     signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
+}
+
+/**
+ * How the app proves itself at a token call: Google and Microsoft take the id and secret in the form,
+ * Zoom takes them as HTTP Basic (and nothing in the form).
+ */
+function clientAuth(provider: ConnectProvider, config: ProviderConfig): { form: Record<string, string>; headers: Record<string, string> } {
+  if (provider === "zoom") {
+    const basic = Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64");
+    return { form: {}, headers: { Authorization: `Basic ${basic}` } };
+  }
+  return { form: { client_id: config.clientId, client_secret: config.clientSecret }, headers: {} };
 }
 
 type TokenResponse = {
@@ -297,10 +341,11 @@ const CONSUMERS_TOKEN = "https://login.microsoftonline.com/consumers/oauth2/v2.0
 
 export async function beginAuthorization(
   userId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   opts: { add?: MicrosoftAddOn | null } = {}
 ): Promise<string> {
   if (provider === "google" && opts.add === "onedrive") throw badRequest("OneDrive is a Microsoft permission.");
+  if (provider === "zoom" && opts.add) throw badRequest("Zoom has nothing to add after Connect.");
   const { config, db } = configured(provider);
   let authorizeUrl = config.authorizeUrl;
   if (provider === "microsoft" && opts.add === "onedrive") {
@@ -333,7 +378,9 @@ export async function beginAuthorization(
     code_challenge_method: "S256",
   };
   const params =
-    provider === "google"
+    provider === "zoom"
+      ? new URLSearchParams(base)
+      : provider === "google"
       ? new URLSearchParams({
           ...base,
           ...googleAuthorizeParams({ add: opts.add === "calendar" ? "calendar" : null, loginHint: await connectedAccountEmail(userId, "google") }),
@@ -349,7 +396,7 @@ export async function beginAuthorization(
 }
 
 /** The connected account's email, for login_hint and messages. Null when not connected. */
-export async function connectedAccountEmail(ownerId: string, provider: SuiteProvider): Promise<string | null> {
+export async function connectedAccountEmail(ownerId: string, provider: ConnectProvider): Promise<string | null> {
   const db = serviceClient();
   if (!db) return null;
   const { data } = await db
@@ -390,6 +437,21 @@ async function microsoftIdentity(accessToken: string): Promise<{ id: string | nu
   }
 }
 
+/** Zoom's own id and email for the signed-in account (`/users/me`); Zoom sends no id_token. */
+async function zoomIdentity(accessToken: string): Promise<{ id: string | null; email: string | null }> {
+  try {
+    const res = await fetch("https://api.zoom.us/v2/users/me", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+    if (!res.ok) return { id: null, email: null };
+    const me = (await res.json()) as { id?: string; email?: string };
+    return { id: me.id ?? null, email: me.email ?? null };
+  } catch {
+    return { id: null, email: null };
+  }
+}
+
 /**
  * Consume the caller's own state, exchange the code, store the tokens, record
  * the grant. Every failure is an HttpError with a counselor-readable message;
@@ -397,7 +459,7 @@ async function microsoftIdentity(accessToken: string): Promise<{ id: string | nu
  */
 export async function completeAuthorization(
   userId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   code: string,
   state: string,
   log: { warn: (obj: object, msg: string) => void }
@@ -428,16 +490,16 @@ export async function completeAuthorization(
   // A grant already known to be personal (its add-ons, OneDrive's included) completes at the
   // consumers endpoint, where its OneDrive consent was asked.
   const tokenUrl = provider === "microsoft" && (await microsoftAccountKind(ownerId)) === "personal" ? CONSUMERS_TOKEN : config.tokenUrl;
+  const auth = clientAuth(provider, config);
   const res = await postForm(tokenUrl, {
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectUri(provider),
-    client_id: config.clientId,
-    client_secret: config.clientSecret,
+    ...auth.form,
     code_verifier: decryptToken(String(pending.code_verifier_enc)),
     // The code carries what was consented; the scope here only names the resource (Graph).
     ...(provider === "microsoft" ? { scope: config.scopes.join(" ") } : {}),
-  });
+  }, auth.headers);
   const token = await readTokenResponse(res);
   if (!res.ok || !token.access_token) {
     log.warn({ provider, status: res.status, error: token.error ?? null }, "oauth code exchange failed");
@@ -477,6 +539,32 @@ export async function completeAuthorization(
         409,
         `You signed in as ${accountEmail ?? "another account"}. Use ${connected}, or disconnect Microsoft and connect the other account.`,
         "microsoft_other_account"
+      );
+    }
+  }
+
+  if (provider === "zoom") {
+    // Same rule as Microsoft: an unreadable identity is refused, and a reconnect as another account is
+    // refused (the stored meetings belong to the first one).
+    const me = await zoomIdentity(token.access_token);
+    accountId = me.id;
+    accountEmail = me.email;
+    if (!accountId) {
+      log.warn({ provider }, "zoom identity unreadable after code exchange");
+      throw new HttpError(502, "Zoom didn't say which account signed in. Try connecting again.");
+    }
+    const { data: existing } = await db
+      .from("integration_tokens")
+      .select("account_id, account_email")
+      .eq("owner_id", ownerId)
+      .eq("provider", "zoom")
+      .maybeSingle();
+    if (accountMismatch((existing?.account_id as string | null) ?? null, accountId)) {
+      const connected = (existing?.account_email as string | null) ?? "the connected account";
+      throw new HttpError(
+        409,
+        `You signed in as ${accountEmail ?? "another account"}. Use ${connected}, or disconnect Zoom and connect the other account.`,
+        "zoom_other_account"
       );
     }
   }
@@ -552,7 +640,7 @@ export type LiveToken = {
   scopes: string[];
 };
 
-async function markGrantBroken(ownerId: string, provider: SuiteProvider, message: string) {
+async function markGrantBroken(ownerId: string, provider: ConnectProvider, message: string) {
   const db = serviceClient();
   if (!db) return;
   await db
@@ -567,7 +655,7 @@ type TokenRow = Record<string, unknown>;
 async function readTokenRow(
   db: NonNullable<ReturnType<typeof serviceClient>>,
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   label: string
 ): Promise<TokenRow> {
   const { data: row, error } = await db
@@ -626,7 +714,7 @@ const refreshing = new Map<string, Promise<LiveToken>>();
  */
 export async function accessTokenFor(
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   opts: { force?: boolean } = {}
 ): Promise<LiveToken> {
   const { config, db } = configured(provider);
@@ -662,7 +750,7 @@ async function refreshGrant(
   db: NonNullable<ReturnType<typeof serviceClient>>,
   config: ProviderConfig,
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   row: TokenRow
 ): Promise<LiveToken> {
   const label = config.label;
@@ -673,16 +761,16 @@ async function refreshGrant(
     throw new HttpError(409, message, `${provider}_reconnect`);
   }
 
+  const auth = clientAuth(provider, config);
   const res = await postForm(config.tokenUrl, {
     grant_type: "refresh_token",
     refresh_token: decryptToken(String(row.refresh_token_enc)),
-    client_id: config.clientId,
-    client_secret: config.clientSecret,
-    // Keep Calendar on a grant that has it; never widen one that doesn't.
+    ...auth.form,
+    // Keep Calendar on a grant that has it; never widen one that doesn't. (Zoom takes no scope on a refresh.)
     ...(provider === "microsoft"
       ? { scope: microsoftScopesFor({ calendar: rowHasScope(row, MICROSOFT_SCOPE.calendar) }).join(" ") }
       : {}),
-  });
+  }, auth.headers);
   const token = await readTokenResponse(res);
   if (!res.ok || !token.access_token) {
     // Before calling the grant broken, look again: a refresh on another
@@ -710,7 +798,7 @@ async function refreshGrant(
     access_token_enc: encryptToken(token.access_token),
     expires_at: new Date(Date.now() + (token.expires_in ?? 3600) * 1000).toISOString(),
   };
-  // Microsoft rotates refresh tokens; Google usually doesn't send a new one.
+  // Microsoft and Zoom rotate refresh tokens; Google usually doesn't send a new one.
   if (token.refresh_token) update.refresh_token_enc = encryptToken(token.refresh_token);
   if (token.scope) update.scopes = token.scope.split(/\s+/).filter(Boolean);
   // Compare-and-swap on the refresh token this refresh spent: if another
@@ -920,13 +1008,15 @@ export function hasScope(token: LiveToken, scope: string): boolean {
   });
 }
 
-export function requireScope(token: LiveToken, provider: SuiteProvider, scope: string, what: string, code?: string) {
+export function requireScope(token: LiveToken, provider: ConnectProvider, scope: string, what: string, code?: string) {
   if (!hasScope(token, scope)) {
     throw new HttpError(
       409,
       code === "calendar_not_enabled"
         ? "Turn on Google Calendar to add Meet links."
-        : `Your ${providerLabel(provider)} connection doesn't allow ${what}. Reconnect and leave that permission ticked.`,
+        : provider === "zoom"
+          ? `Your Zoom connection can't ${what}. Reconnect Zoom and approve all of its permissions.`
+          : `Your ${providerLabel(provider)} connection doesn't allow ${what}. Reconnect and leave that permission ticked.`,
       code
     );
   }
@@ -935,14 +1025,14 @@ export function requireScope(token: LiveToken, provider: SuiteProvider, scope: s
 // ---- Disconnect ---------------------------------------------------------------
 
 /**
- * Revoke at the provider where that exists, then delete the tokens. Google has
- * a revocation endpoint. The Microsoft identity platform does not offer one for
+ * Revoke at the provider where that exists, then delete the tokens. Google and
+ * Zoom have a revocation endpoint. The Microsoft identity platform does not offer one for
  * a single app's refresh token, so for Microsoft the tokens are destroyed here
  * and the counselor is told to remove the app's consent in their account.
  */
 export async function revokeAndForget(
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   log: { warn: (obj: object, msg: string) => void }
 ): Promise<{ revokedAtProvider: boolean }> {
   const db = serviceClient();
@@ -962,6 +1052,18 @@ export async function revokeAndForget(
       const res = await postForm("https://oauth2.googleapis.com/revoke", { token: decryptToken(sealed) });
       // 400 invalid_token means it was already dead — revoked either way.
       revokedAtProvider = res.ok || res.status === 400;
+    } catch (err) {
+      log.warn({ provider, err: serializeErr(err) }, "token revoke failed");
+    }
+  }
+
+  const zoom = provider === "zoom" ? providerConfig("zoom") : null;
+  if (row && zoom && hasTokenKey()) {
+    try {
+      // Zoom's revoke takes the access token, with the app's Basic credentials.
+      const auth = clientAuth("zoom", zoom);
+      const res = await postForm("https://zoom.us/oauth/revoke", { token: decryptToken(String(row.access_token_enc)) }, auth.headers);
+      revokedAtProvider = res.ok;
     } catch (err) {
       log.warn({ provider, err: serializeErr(err) }, "token revoke failed");
     }

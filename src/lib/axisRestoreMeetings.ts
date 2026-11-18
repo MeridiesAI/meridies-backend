@@ -8,7 +8,7 @@
  *   1. `axis_trash_restored_meetings` lists the meetings that restore brought back (from the trash rows, so a
  *      cascade would count too), each with the calendar it was on, and raises its invite sequence above the
  *      cancellation the delete sent (the meetings_ics_sequence trigger won't let a client do that).
- *   2. A meeting still ahead that was on its owner's Google or Microsoft calendar goes back there the way a new
+ *   2. A meeting still ahead that was on its owner's Google or Microsoft calendar (or a Zoom meeting) goes back there the way a new
  *      meeting does (`createConferenceEvent`, owner only, with the caller's own token), with its new link. If that
  *      fails, the old link (which died with the deleted event) is cleared, so the invitation carries none.
  *   3. It gets the round a new meeting gets (`prepareInviteRound` with no "before"): invites on, scheduled, not
@@ -21,16 +21,16 @@
 import type { FastifyRequest } from "fastify";
 import { isSchemaMissing } from "./axis/failsafe.js";
 import { invitesReady, loadAttendeeIds, meetingState, prepareInviteRound, startInviteDelivery } from "./meetingInvites.js";
-import type { SuiteProvider } from "./oauth.js";
+import type { ConnectProvider } from "./oauth.js";
 import { createConferenceEvent, deleteCalendarEvent } from "./suiteApi.js";
 
 type Row = Record<string, unknown>;
 
 /** A meeting a restore brought back, and the calendar it was on before the delete (null: none). */
-export type RestoredMeeting = { id: string; calendarProvider: SuiteProvider | null };
+export type RestoredMeeting = { id: string; calendarProvider: ConnectProvider | null };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const PROVIDERS = new Set<SuiteProvider>(["google", "microsoft"]);
+const PROVIDERS = new Set<ConnectProvider>(["google", "microsoft", "zoom"]);
 
 /** The function's answer, re-validated: a list of `{ id, calendarProvider }`, anything else dropped. */
 export function restoredMeetingsFrom(raw: unknown): RestoredMeeting[] {
@@ -39,7 +39,7 @@ export function restoredMeetingsFrom(raw: unknown): RestoredMeeting[] {
     const r = (item ?? {}) as Row;
     if (typeof r.id !== "string" || !UUID.test(r.id)) return [];
     const p = r.calendarProvider;
-    return [{ id: r.id, calendarProvider: typeof p === "string" && PROVIDERS.has(p as SuiteProvider) ? (p as SuiteProvider) : null }];
+    return [{ id: r.id, calendarProvider: typeof p === "string" && PROVIDERS.has(p as ConnectProvider) ? (p as ConnectProvider) : null }];
   });
 }
 
@@ -50,10 +50,10 @@ export function restoredMeetingsFrom(raw: unknown): RestoredMeeting[] {
  */
 export function calendarPlan(
   meeting: Row,
-  wasOn: SuiteProvider | null,
+  wasOn: ConnectProvider | null,
   callerId: string,
   now: Date
-): { put: true; provider: SuiteProvider } | { put: false; reason: string } {
+): { put: true; provider: ConnectProvider } | { put: false; reason: string } {
   if (!wasOn) return { put: false, reason: "it wasn't on a connected calendar" };
   if (typeof meeting.counselor_id !== "string" || meeting.counselor_id !== callerId || !callerId) {
     return { put: false, reason: "the meeting's event is on its owner's calendar, not the caller's" };

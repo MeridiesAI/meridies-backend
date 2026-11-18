@@ -41,12 +41,14 @@ test("restoredMeetingsFrom keeps well-formed rows only", () => {
       { id: OTHER, calendarProvider: null },
       { id: "not-a-uuid", calendarProvider: "google" },
       { id: STUDENT, calendarProvider: "zoom" },
+      { id: ME, calendarProvider: "skype" },
       null,
     ]),
     [
       { id: MEETING, calendarProvider: "google" },
       { id: OTHER, calendarProvider: null },
-      { id: STUDENT, calendarProvider: null },
+      { id: STUDENT, calendarProvider: "zoom" },
+      { id: ME, calendarProvider: null },
     ]
   );
   assert.deepEqual(restoredMeetingsFrom({ id: MEETING }), []);
@@ -55,6 +57,8 @@ test("restoredMeetingsFrom keeps well-formed rows only", () => {
 test("calendarPlan: the caller's own future meeting goes back on the calendar it was on", () => {
   assert.deepEqual(calendarPlan(meeting(), "google", ME, NOW), { put: true, provider: "google" });
   assert.deepEqual(calendarPlan(meeting({ mode: "teams" }), "microsoft", ME, NOW), { put: true, provider: "microsoft" });
+  // A deleted Zoom meeting comes back as a new Zoom meeting, not as a dead link.
+  assert.deepEqual(calendarPlan(meeting({ mode: "zoom" }), "zoom", ME, NOW), { put: true, provider: "zoom" });
 });
 
 test("calendarPlan: nothing goes on a calendar it wasn't on, someone else's, or for a meeting that's over", () => {

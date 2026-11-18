@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { DeletionFailed, deleteAccount, deletionBlocker, type DeletionSubject } from "./accountDeletion.js";
 import { brandedEmail, brandedText } from "./email.js";
-import { revokeAndForget, SUITE_PROVIDERS, type SuiteProvider } from "./oauth.js";
+import { CONNECT_PROVIDERS, revokeAndForget, type ConnectProvider } from "./oauth.js";
 
 export const CLOSURE_GRACE_DAYS = 30;
 /** Accounts deleted per purge run, oldest due first. */
@@ -154,21 +154,21 @@ export function pickDue(rows: DueRow[], now: Date): DueRow[] {
 
 export type ConnectionsResult = {
   /** Providers the account had a stored token for; every stored token is forgotten (deleted) either way. */
-  forgotten: SuiteProvider[];
-  /** Providers that confirmed the revoke (Google only: Microsoft has no per-app revoke call). */
-  revokedAtProvider: SuiteProvider[];
+  forgotten: ConnectProvider[];
+  /** Providers that confirmed the revoke (Google and Zoom: Microsoft has no per-app revoke call). */
+  revokedAtProvider: ConnectProvider[];
 };
 
 /**
- * The account's Google/Microsoft tokens: revoked at the provider where it has a call (Google) and forgotten, with the
+ * The account's Google/Microsoft/Zoom tokens: revoked at the provider where it has a call (Google, Zoom) and forgotten, with the
  * visible `integrations` rows. Best effort per provider: a provider that fails is logged (never a token) and the
  * purge goes on, since the deletion removes the stored tokens either way.
  */
 export async function revokeConnections(svc: SupabaseClient, id: string, log: Log): Promise<ConnectionsResult> {
   const { data } = await svc.from("integration_tokens").select("provider").eq("owner_id", id);
-  const forgotten = ((data ?? []) as Array<{ provider: string }>).map((r) => r.provider).filter((p): p is SuiteProvider => (SUITE_PROVIDERS as readonly string[]).includes(p));
-  const revokedAtProvider: SuiteProvider[] = [];
-  for (const provider of SUITE_PROVIDERS) {
+  const forgotten = ((data ?? []) as Array<{ provider: string }>).map((r) => r.provider).filter((p): p is ConnectProvider => (CONNECT_PROVIDERS as readonly string[]).includes(p));
+  const revokedAtProvider: ConnectProvider[] = [];
+  for (const provider of CONNECT_PROVIDERS) {
     try {
       const r = await revokeAndForget(id, provider, log);
       if (r.revokedAtProvider) revokedAtProvider.push(provider);

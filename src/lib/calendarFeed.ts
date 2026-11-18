@@ -68,6 +68,13 @@ export type CalendarFeedItem = {
   done: boolean;
   /** Meetings only: scheduled / held / cancelled / no-show. */
   meetingStatus: string | null;
+  /**
+   * `meetings` rows only: the link the Join button opens, and how the meeting is held
+   * (google-meet / teams / zoom / in-person / phone). Counselors and students read the feed, both already
+   * read a meeting's link through /meetings. The subscribed .ics never carries it: feedIcsEvents names the fields it writes.
+   */
+  joinUrl?: string | null;
+  mode?: string | null;
   /** Tasks only: the task (deliverable) a stage belongs to. */
   taskId: string | null;
   /** Deadlines only: the school it is for. */
@@ -517,7 +524,7 @@ export async function buildCalendarFeed(
   }
   let meetings = db
     .from("meetings")
-    .select("id, student_id, counselor_id, title, starts_at, ends_at, status, agenda, location, mode")
+    .select("id, student_id, counselor_id, title, starts_at, ends_at, status, agenda, location, mode, join_url")
     .gte("starts_at", fromInstant)
     .lt("starts_at", toInstant);
   if (!isStudent) meetings = meetings.eq("counselor_id", me);
@@ -753,6 +760,8 @@ export async function buildCalendarFeed(
       detail: ns(r.agenda),
       done: s(r.status) === "held",
       meetingStatus: s(r.status),
+      joinUrl: ns(r.join_url),
+      mode: ns(r.mode),
     });
   }
 

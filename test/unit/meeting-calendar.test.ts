@@ -29,7 +29,13 @@ test("no pointer, a half pointer or an unknown provider is no event", () => {
   assert.deepEqual(calendarAccess({ counselor_id: OWNER, calendar_provider: null, calendar_event_id: null }, OWNER), { kind: "none" });
   assert.deepEqual(calendarAccess({ counselor_id: OWNER, calendar_provider: "google", calendar_event_id: null }, OWNER), { kind: "none" });
   assert.deepEqual(calendarAccess({ counselor_id: OWNER, calendar_provider: "google", calendar_event_id: "" }, OWNER), { kind: "none" });
-  assert.deepEqual(calendarAccess({ counselor_id: OWNER, calendar_provider: "zoom", calendar_event_id: "x" }, OWNER), { kind: "none" });
+  assert.deepEqual(calendarAccess({ counselor_id: OWNER, calendar_provider: "skype", calendar_event_id: "x" }, OWNER), { kind: "none" });
+});
+
+test("a Zoom meeting's pointer is honoured: its owner moves and deletes it, nobody else does", () => {
+  const zoom = { counselor_id: OWNER, calendar_provider: "zoom", calendar_event_id: "81234567890" };
+  assert.deepEqual(calendarAccess(zoom, OWNER), { kind: "owner", ownerId: OWNER, provider: "zoom", eventId: "81234567890" });
+  assert.deepEqual(calendarAccess(zoom, OTHER), { kind: "not-owner", provider: "zoom" });
 });
 
 test("ownership needs a stored owner and a caller that match exactly", () => {

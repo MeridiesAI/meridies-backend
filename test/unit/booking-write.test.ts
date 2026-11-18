@@ -368,6 +368,39 @@ test("a cancel whose calendar delete failed tells the counselor the event is sti
   assert.match(outlook.body, /It is still on your Outlook calendar; delete it there\.$/);
 });
 
+test("a student's move or cancel of a meeting their counselor made with a Zoom link follows the Zoom meeting", async () => {
+  const seen: string[] = [];
+  const deps = {
+    create: async () => ({ eventId: "e", joinUrl: "https://x" }),
+    createPlain: async () => ({ eventId: "p" }),
+    update: async (owner: string, provider: string, id: string) => void seen.push(`update:${owner}:${provider}:${id}`),
+    remove: async (owner: string, provider: string, id: string) => void seen.push(`remove:${owner}:${provider}:${id}`),
+  };
+  const zoom = { ...existing, mode: "zoom", calendar_provider: "zoom", calendar_event_id: "81234567890" };
+  await moveBookingProviderEvent(zoom, { counselorId: COUNSELOR, studentId: STUDENT }, { startsAt: day6(15), endsAt: day6(15, 30) }, log, deps);
+  await removeBookingProviderEvent(zoom, { counselorId: COUNSELOR, studentId: STUDENT }, log, deps);
+  assert.deepEqual(seen, [`update:${COUNSELOR}:zoom:81234567890`, `remove:${COUNSELOR}:zoom:81234567890`], "the counselor's own token, the Zoom meeting");
+  // Still refused for a pointer that names no provider we know.
+  await assert.rejects(moveBookingProviderEvent({ ...existing, calendar_provider: "skype" }, { counselorId: COUNSELOR, studentId: STUDENT }, { startsAt: day6(15) }, log, deps));
+
+  // A Zoom meeting is not on their Google/Outlook calendar, so no own calendar event is ignored when checking the new time.
+  let ignored: { onCalendar?: boolean } | null = null;
+  await rescheduleBooking(
+    io([], { slotOpen: async (_t, _s, ignore) => ((ignored = ignore), true) }),
+    { ...changeInput, meeting: { ...changeInput.meeting, calendar_provider: "zoom", calendar_event_id: "81234567890" }, startsAt: day6(15) }
+  );
+  assert.equal(ignored!.onCalendar, false);
+
+  const notices: { body: string }[] = [];
+  const calls: Calls = [];
+  const base = io(calls);
+  await cancelBooking(
+    io(calls, { calendar: { ...base.calendar, remove: async () => { throw new Error("down"); } }, notify: async (n) => void notices.push(n) }),
+    { ...changeInput, meeting: { ...changeInput.meeting, calendar_provider: "zoom", calendar_event_id: "81234567890" } }
+  );
+  assert.match(notices[0].body, /It is still in your Zoom account; delete it there\.$/);
+});
+
 test("a failed delete of the counselor's event is logged with ids only", async () => {
   const lines: unknown[] = [];
   const capture = { warn: (o: unknown) => void lines.push(o), info: () => undefined, error: () => undefined } as unknown as FastifyRequest["log"];
