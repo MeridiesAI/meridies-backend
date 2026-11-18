@@ -3,6 +3,8 @@
  *
  *   GET  /resume               the saved resume (a Consultant reads a student's with ?studentId=)
  *   PUT  /resume               save it: the student's own, or a Consultant who can edit the student (migration 20261127000002)
+
+ *   POST /resume/import        an existing resume's lines sorted into the builder's document, nothing invented (lib/resumeImport.ts)
  *   POST /resume/polish        one entry's bullets rewritten, never adding a fact (lib/resumeDoc.ts)
  *   POST /resume/draft         bullets drafted from named activity entries (student only)
  *   POST /resume/adjust        suggested edits to the student's own resume file (lib/resumeAdjust.ts)
@@ -21,6 +23,7 @@ import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { assertAiAllowed, assertStudentAiTools } from "../lib/practiceSettings.js";
 import { RESUME_DRAFT_SCHEMA, RESUME_DRAFT_SYSTEM, activityForPrompt, cleanDraft, draftBody } from "../lib/resume.js";
+import { IMPORT_SCHEMA, IMPORT_SYSTEM, cleanImport, importBody, importPrompt } from "../lib/resumeImport.js";
 import { POLISH_SCHEMA, POLISH_SYSTEM, cleanPolish, polishBody, polishPrompt, resumeSaveBody } from "../lib/resumeDoc.js";
 import { serviceClient } from "../lib/supabase.js";
 import { isResultsNotApplied } from "../lib/resultsAvailability.js";
@@ -132,6 +135,34 @@ export default async function resumeRoutes(app: FastifyInstance) {
       validate: (v) => cleanPolish(v, b.entry),
     });
     return { bullets };
+  });
+
+  /**
+   * Import: the lines of the person's existing resume (with the edits they accepted in the Resume adjuster) sorted into
+   * the builder's document. The model only sorts; every value it returns must be a piece of the resume's own text, and
+   * a line it left out comes back in `unplaced` and in the document. Stores nothing: the app saves with PUT /resume.
+   */
+  app.post("/import", { preHandler: [app.authenticate, limit("ai:resume-import", 10, 3600, "Give it a minute before importing again.")] }, async (request) => {
+    const q = z.object({ studentId: z.string().uuid().optional() }).strict().parse(request.query);
+    const parsed = importBody.safeParse(request.body);
+    if (!parsed.success) throw badRequest(parsed.error.issues[0]?.message ?? "That resume can't be imported");
+    if (!hasAnthropic) throw new HttpError(503, "Importing a resume isn't switched on yet", "resume_import_unavailable");
+    const studentId = await resolveStudentId(request, q.studentId, "edit");
+    await assertAiAllowed(request, "resume-adjust");
+    const { lines } = parsed.data;
+    const sorted = await runStructured({
+      request,
+      module: "resume-adjust",
+      studentId,
+      model: FAST_MODEL,
+      system: IMPORT_SYSTEM,
+      prompt: importPrompt(lines),
+      toolName: "resume_import",
+      schema: IMPORT_SCHEMA as unknown as Record<string, unknown>,
+      maxTokens: 6000,
+      validate: (v) => cleanImport(v, lines),
+    });
+    return { templateKey: "general", content: sorted.content, unplaced: sorted.unplaced, dropped: sorted.dropped };
   });
 
   app.post("/draft", { preHandler: [...student, aiLimit] }, async (request) => {
