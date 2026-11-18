@@ -103,6 +103,8 @@ import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
+import familyConsentRoutes from "./routes/familyConsent.js";
+import platformTermsRoutes from "./routes/platformTerms.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
@@ -261,6 +263,8 @@ export function buildApp() {
   app.register(pipelineRoutes, { prefix: "/pipeline" });
   app.register(pipelineActivityRoutes, { prefix: "/pipeline" });
   app.register(resumeRoutes, { prefix: "/resume" });
+  app.register(familyConsentRoutes);
+  app.register(platformTermsRoutes, { prefix: "/terms" });
   app.register(pipelineSequenceRoutes, { prefix: "/pipeline" });
   app.register(pipelineUnsubscribeRoutes);
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });

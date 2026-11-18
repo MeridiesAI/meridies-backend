@@ -8,6 +8,7 @@
  * has to be *received*, not discovered.
  */
 
+import { UNDER_AGE_MESSAGE } from "../lib/age.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { hasAnswers } from "../lib/studentSetup.js";
 import { z } from "zod";
@@ -276,7 +277,8 @@ function requestNote(requests: { label: string; provided: boolean }[]): string |
   return open.length ? `Please send: ${open.join(", ")}.` : null;
 }
 const revokeSchema = z.object({ id: z.string().uuid() }).strict();
-const acceptSchema = z.object({ token: z.string().trim().min(10).max(200) }).strict();
+// `ageConfirmed` is the sign-up checkbox "I am 13 or older". Absent from an older app build (accepted); false is refused.
+const acceptSchema = z.object({ token: z.string().trim().min(10).max(200), ageConfirmed: z.boolean().optional() }).strict();
 const previewSchema = z.object({ token: z.string().trim().min(10).max(200) });
 
 export default async function inviteRoutes(app: FastifyInstance) {
@@ -913,7 +915,8 @@ export default async function inviteRoutes(app: FastifyInstance) {
       ],
     },
     async (request) => {
-      const { token } = acceptSchema.parse(request.body);
+      const { token, ageConfirmed } = acceptSchema.parse(request.body);
+      if (ageConfirmed === false) throw badRequest(UNDER_AGE_MESSAGE);
 
       const { error } = await request.db.rpc("accept_invitation", { p_token: token });
       if (error) {
