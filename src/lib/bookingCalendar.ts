@@ -33,7 +33,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { HttpError } from "./errors.js";
-import { GOOGLE_SCOPE, MICROSOFT_SCOPE, type SuiteProvider } from "./oauth.js";
+import { GOOGLE_SCOPE, MICROSOFT_SCOPE, type ConnectProvider, type SuiteProvider } from "./oauth.js";
 import {
   createConferenceEvent,
   createPlainCalendarEvent,
@@ -51,8 +51,9 @@ export type BookingProviderDeps = {
   create: (ownerId: string, provider: SuiteProvider, input: CalendarEventInput, log: Log) => Promise<{ eventId: string; joinUrl: string }>;
   /** A plain event, for a mode with no conference (in person, phone). */
   createPlain: (ownerId: string, provider: SuiteProvider, input: CalendarEventInput, log: Log) => Promise<{ eventId: string }>;
-  update: (ownerId: string, provider: SuiteProvider, eventId: string, change: Partial<CalendarEventInput>, log: Log) => Promise<void>;
-  remove: (ownerId: string, provider: SuiteProvider, eventId: string, log: Log) => Promise<void>;
+  // Zoom too: a student may move or cancel a meeting their counselor made with a Zoom link (booking itself never makes one).
+  update: (ownerId: string, provider: ConnectProvider, eventId: string, change: Partial<CalendarEventInput>, log: Log) => Promise<void>;
+  remove: (ownerId: string, provider: ConnectProvider, eventId: string, log: Log) => Promise<void>;
 };
 
 const realDeps: BookingProviderDeps = {
@@ -78,10 +79,10 @@ function assertParties(meeting: Row, expected: BookingParties): void {
   if (!ok) throw new Error("booking calendar: the meeting isn't this counselor's meeting with this student");
 }
 
-function pointer(meeting: Row): { provider: SuiteProvider; eventId: string } {
+function pointer(meeting: Row): { provider: ConnectProvider; eventId: string } {
   const provider = meeting.calendar_provider;
   const eventId = meeting.calendar_event_id;
-  if ((provider !== "google" && provider !== "microsoft") || typeof eventId !== "string" || eventId.length === 0) {
+  if ((provider !== "google" && provider !== "microsoft" && provider !== "zoom") || typeof eventId !== "string" || eventId.length === 0) {
     throw new Error("booking calendar: the meeting has no calendar event");
   }
   return { provider, eventId };

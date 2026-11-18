@@ -3,11 +3,12 @@
  *
  * `meeting_notes` records what was said; this records that a session was going
  * to happen at all, which is what the calendar and the "next meetings" card
- * read. Modes are Google Meet, Microsoft Teams, in person and phone — Zoom was
- * dropped in the v5 brief and its absence is deliberate.
+ * read. Modes are Google Meet, Microsoft Teams, Zoom, in person and phone (Zoom was
+ * dropped in the v5 brief and brought back on purpose, 11/18).
  *
  * `createConference: true` books the session on the counselor's own Google or
- * Outlook calendar with a real Meet / Teams link (lib/suiteApi.ts), and the
+ * Outlook calendar with a real Meet / Teams link, or creates a Zoom meeting on their
+ * connected Zoom account (lib/suiteApi.ts), and the
  * meeting remembers the event so moving or cancelling it here does the same
  * there. The calendar call runs first: a meeting is never saved claiming a
  * link that the provider refused to create. That provider event carries no
@@ -53,7 +54,7 @@ import {
   NOT_OWNER_SKIP,
   ownsMeeting,
 } from "../lib/meetingCalendar.js";
-import { connectedAccountEmail, type SuiteProvider } from "../lib/oauth.js";
+import { connectedAccountEmail, type ConnectProvider } from "../lib/oauth.js";
 import { meetingHtmlLink, needsGoogleAddress } from "../lib/calendarLink.js";
 import { toMeeting } from "../lib/serialize.js";
 import {
@@ -79,7 +80,7 @@ const meetingBody = z
   .object({
     studentId: z.string().uuid(),
     title: z.string().trim().min(1).max(300),
-    mode: z.enum(["google-meet", "teams", "in-person", "phone"]).optional(),
+    mode: z.enum(["google-meet", "teams", "zoom", "in-person", "phone"]).optional(),
     location: z.string().trim().max(300).nullable().optional(),
     // The Join link a student opens: http(s) only, as the AxIS catalog already requires.
     joinUrl: z.string().url().max(2000).refine((u) => /^https?:\/\//i.test(u), "Use an http(s) link").nullable().optional(),
@@ -88,7 +89,7 @@ const meetingBody = z
     agenda: z.string().trim().max(4000).nullable().optional(),
     guardiansInvited: z.boolean().optional(),
     deadlineId: z.string().uuid().nullable().optional(),
-    /** Create the event, with a Meet/Teams link, on the connected calendar. */
+    /** Create the event with a Meet/Teams link on the connected calendar, or the Zoom meeting on the connected Zoom account. */
     createConference: z.boolean().optional(),
     /**
      * Every student invited (Demo booker's multi-select). The primary
@@ -100,11 +101,12 @@ const meetingBody = z
   })
   .strict();
 
-/** Which connected suite hosts a conference mode. */
-function conferenceProvider(mode: string): SuiteProvider {
+/** Which connected account hosts a conference mode. */
+function conferenceProvider(mode: string): ConnectProvider {
   if (mode === "google-meet") return "google";
   if (mode === "teams") return "microsoft";
-  throw badRequest("Only Google Meet and Teams meetings get a calendar event with a link");
+  if (mode === "zoom") return "zoom";
+  throw badRequest("Only Google Meet, Teams and Zoom meetings get a link made for them");
 }
 
 const meetingPatch = meetingBody
@@ -182,7 +184,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
       const endError = inviteEndError(ready, body.sendInvites === true, body.endsAt);
       if (endError) throw badRequest(endError);
 
-      let calendar: { provider: SuiteProvider; eventId: string; joinUrl: string } | null = null;
+      let calendar: { provider: ConnectProvider; eventId: string; joinUrl: string } | null = null;
       if (body.createConference) {
         const provider = conferenceProvider(mode);
         if (!body.endsAt) throw badRequest("A calendar event needs an end time");
@@ -628,6 +630,14 @@ async function syncCalendar(
     if (patch.startsAt !== undefined) change.startsAt = patch.startsAt;
     if (patch.endsAt) change.endsAt = patch.endsAt;
     if (patch.agenda !== undefined) change.description = patch.agenda;
+    if (access.provider === "zoom" && (change.startsAt || change.endsAt)) {
+      // Zoom takes a start and a length, never one alone: an end alone keeps the stored start, a start alone keeps the
+      // stored length (not the stored end, which would be before the new start).
+      const oldStart = existing.starts_at as string;
+      const oldEnd = (existing.ends_at as string | null) ?? null;
+      change.startsAt ??= oldStart;
+      change.endsAt ??= oldEnd ? new Date(Date.parse(change.startsAt) + (Date.parse(oldEnd) - Date.parse(oldStart))).toISOString() : undefined;
+    }
     if (Object.keys(change).length > 0) {
       await updateCalendarEvent(access.ownerId, access.provider, access.eventId, change, request.log);
     }

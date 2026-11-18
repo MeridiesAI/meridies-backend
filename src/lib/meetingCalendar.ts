@@ -3,7 +3,7 @@
  *
  * A meeting booked with a Meet / Teams link remembers the event it created
  * (`calendar_provider`, `calendar_event_id`) on its owner's Google or Outlook
- * calendar (`counselor_id`). The routes act on that event with stored OAuth
+ * calendar (`counselor_id`); a Zoom one remembers the meeting on their Zoom account. The routes act on that event with stored OAuth
  * tokens, so the one rule is: a provider is only ever called with the
  * caller's own token, and only for a meeting the caller owns. A write
  * collaborator editing someone else's meeting changes it in Meridies only,
@@ -21,7 +21,7 @@
  * with that student, the counselor taken from the student's profile.
  */
 
-import type { SuiteProvider } from "./oauth.js";
+import type { ConnectProvider } from "./oauth.js";
 
 type Row = Record<string, unknown>;
 
@@ -29,18 +29,18 @@ export type CalendarAccess =
   /** No event behind this meeting. */
   | { kind: "none" }
   /** The caller owns the meeting: act on the event with the caller's token. */
-  | { kind: "owner"; ownerId: string; provider: SuiteProvider; eventId: string }
+  | { kind: "owner"; ownerId: string; provider: ConnectProvider; eventId: string }
   /** Someone else's event: never call it. */
-  | { kind: "not-owner"; provider: SuiteProvider };
+  | { kind: "not-owner"; provider: ConnectProvider };
 
-const PROVIDERS: ReadonlySet<string> = new Set(["google", "microsoft"]);
+const PROVIDERS: ReadonlySet<string> = new Set(["google", "microsoft", "zoom"]);
 
-function pointer(meeting: Row): { provider: SuiteProvider; eventId: string } | null {
+function pointer(meeting: Row): { provider: ConnectProvider; eventId: string } | null {
   const provider = meeting.calendar_provider;
   const eventId = meeting.calendar_event_id;
   if (typeof provider !== "string" || !PROVIDERS.has(provider)) return null;
   if (typeof eventId !== "string" || eventId.length === 0) return null;
-  return { provider: provider as SuiteProvider, eventId };
+  return { provider: provider as ConnectProvider, eventId };
 }
 
 /** Whether the caller owns the meeting (`counselor_id`), compared as stored. */

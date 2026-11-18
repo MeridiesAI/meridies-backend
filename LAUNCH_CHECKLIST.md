@@ -187,6 +187,15 @@ the 24 v10 migrations are applied, and P0 is done apart from merging the signup 
 - [ ] **Leaked-password protection**: Supabase Auth > Attack Protection. Needs the Supabase Pro plan;
   the project is on Free, which also has no daily backups. The upgrade is pending a team decision.
 
+- [ ] **Zoom** (off in production, no `ZOOM_*` vars, until the steps below):
+  - apply `20261128000001_zoom_provider.sql` (additive; either order with the code).
+  - create a Zoom Marketplace **General (user-managed OAuth) app** with redirect URI
+    `https://app.meridiesai.com/dashboard/counselor/data-hub/callback/zoom` (plus the localhost one) and the granular scopes
+    `meeting:write:meeting`, `meeting:update:meeting`, `meeting:delete:meeting`, `user:read:user`.
+  - set `ZOOM_CLIENT_ID` and `ZOOM_CLIENT_SECRET` on Railway.
+  - **until Zoom approves and publishes the app, only users in the Zoom account that owns it can authorize it**; other
+    consultants' accounts connect only after the Marketplace review passes.
+
 - [ ] **Import pipeline step 2 (the Import page)**: apply `20261023020001`-`20261023020003`
   (`DATABASE_MIGRATION_INSTRUCTIONS.md`); confirm `IMPORT_DATABASE_URL` (logs in as `import_worker`
   through the session pooler) and the `/internal/imports/sweep` cron (every 5 to 15 minutes, which now

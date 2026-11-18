@@ -20,7 +20,7 @@ import { z } from "zod";
 
 export type IcsMethod = "REQUEST" | "CANCEL" | "PUBLISH";
 export type IcsPerson = { name: string | null; email: string };
-export type IcsMode = "google-meet" | "teams" | "in-person" | "phone";
+export type IcsMode = "google-meet" | "teams" | "zoom" | "in-person" | "phone";
 
 export type IcsEventInput = {
   meetingId: string;
@@ -133,19 +133,20 @@ export function foldLine(line: string): string {
 const MODE_LABEL: Record<IcsMode, string> = {
   "google-meet": "Google Meet",
   teams: "Microsoft Teams",
+  zoom: "Zoom",
   "in-person": "In person",
   phone: "Phone call",
 };
 
 /**
- * Where the meeting is, as the invite's LOCATION: for a Meet or Teams
+ * Where the meeting is, as the invite's LOCATION: for a Meet, Teams or Zoom
  * meeting its link, else what the counselor typed, else the mode's name, so
  * an invite never says nothing about where to be.
  */
 export function meetingWhere(e: Pick<IcsEventInput, "mode" | "location" | "joinUrl">): string {
   const link = safeUrl(e.joinUrl);
   const typed = e.location?.trim() || null;
-  if (e.mode === "google-meet" || e.mode === "teams") return link ?? typed ?? MODE_LABEL[e.mode];
+  if (e.mode === "google-meet" || e.mode === "teams" || e.mode === "zoom") return link ?? typed ?? MODE_LABEL[e.mode];
   return typed ?? MODE_LABEL[e.mode];
 }
 

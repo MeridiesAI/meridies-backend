@@ -193,6 +193,17 @@ test("the place: a Meet or Teams link, the typed place, or the mode's name", () 
   assert.ok(logical(linked).includes("DESCRIPTION:Plan\\n\\nJoin: https://meet.google.com/abc-defg-hij"));
 });
 
+test("a Zoom meeting reads as Zoom: its link is the place, else the typed place, else the word Zoom", () => {
+  const link = "https://us05web.zoom.us/j/81234567890?pwd=abc";
+  assert.equal(meetingWhere({ mode: "zoom", location: null, joinUrl: link }), link);
+  assert.equal(meetingWhere({ mode: "zoom", location: null, joinUrl: null }), "Zoom");
+  const ics = buildMeetingIcs(event({ mode: "zoom", location: null, joinUrl: link, agenda: "Plan" }));
+  assert.ok(logical(ics).includes(`LOCATION:${link}`));
+  assert.ok(logical(ics).includes(`URL:${link}`));
+  assert.ok(logical(ics).includes(`DESCRIPTION:Plan\\n\\nJoin: ${link}`));
+  assert.ok(logical(buildMeetingIcs(event({ mode: "zoom", location: null, joinUrl: null }))).includes("LOCATION:Zoom"));
+});
+
 test("only http(s) links are kept", () => {
   assert.equal(safeUrl("javascript:alert(1)"), null);
   assert.equal(safeUrl("https://x.test/a\r\nB:1"), "https://x.test/aB:1");

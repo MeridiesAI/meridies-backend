@@ -104,7 +104,7 @@ const utcOrNull = (v: unknown): string | null => {
 
 // ---- meetings ---------------------------------------------------------------------
 
-const MODES = ["google-meet", "teams", "in-person", "phone"] as const;
+const MODES = ["google-meet", "teams", "zoom", "in-person", "phone"] as const;
 const STATUSES = ["scheduled", "held", "cancelled", "no-show"] as const;
 
 const meetingFields = {
@@ -261,8 +261,8 @@ export const meetings: OpGroup = {
       // Asks when it emails invites, writes to the connected calendar, or other students (other families) will see it.
       risk: (i) =>
         i.send_invites || i.create_conference || (i.attendee_ids ?? []).some((id) => id !== i.student_id) ? "confirm" : "auto",
-      title: "Book a meeting with a student (send_invites emails each invitee a calendar invite; create_conference adds a Meet/Teams event).",
-      doc: "{ student_id, title ≤300, starts_at ISO datetime with offset, ends_at?, mode?: google-meet|teams|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? (other students) ≤30, create_conference?, send_invites? (both need ends_at) }",
+      title: "Book a meeting with a student (send_invites emails each invitee a calendar invite; create_conference adds a Meet/Teams/Zoom link).",
+      doc: "{ student_id, title ≤300, starts_at ISO datetime with offset, ends_at?, mode?: google-meet|teams|zoom|in-person|phone, location?, join_url?, agenda? ≤4000, guardians_invited?, deadline_id?, attendee_ids? (other students) ≤30, create_conference?, send_invites? (both need ends_at) }",
       input: z
         .object({
           student_id: uuid,
@@ -290,7 +290,7 @@ export const meetings: OpGroup = {
         const { title: _title, starts_at: _starts, student_id: _student, ...rest } = i;
         return meetingDetails(rest, h);
       },
-      warning: "Every student invited sees the meeting, its title and agenda on their calendar; with calendar invites on, each of them (and their parents, if invited) is emailed it; with a Meet or Teams link, the event also goes on your connected Google or Outlook calendar.",
+      warning: "Every student invited sees the meeting, its title and agenda on their calendar; with calendar invites on, each of them (and their parents, if invited) is emailed it; with a Meet or Teams link, the event also goes on your connected Google or Outlook calendar; with a Zoom link, a Zoom meeting is created on your connected Zoom account.",
       undo: (_i, body) => {
         const id = idOf(body);
         return id ? { op: "meetings.delete", input: { meeting_id: id } } : null;
@@ -329,7 +329,7 @@ export const meetings: OpGroup = {
         return `Update ${meetingLabel(m)}${who}`;
       },
       details: (i, h) => meetingDetails(i, h),
-      warning: "On a meeting booked on your Google or Outlook calendar, cancelling or changing the mode removes that event. Students added to the meeting see it, its title and agenda. Emailed invites go to every invitee.",
+      warning: "On a meeting booked on your Google or Outlook calendar (or as a Zoom meeting), cancelling or changing the mode removes that event. Students added to the meeting see it, its title and agenda. Emailed invites go to every invitee.",
       snapshot: (i, h) => findMeeting(h, i.meeting_id),
       undo: (i, _body, before) => {
         const b = asRecord(before) as Row & Meeting;

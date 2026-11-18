@@ -775,7 +775,7 @@ export const toMeeting = (r: Row) => ({
   studentId: str(r.student_id),
   counselorId: str(r.counselor_id),
   title: str(r.title),
-  mode: str(r.mode) as "google-meet" | "teams" | "in-person" | "phone",
+  mode: str(r.mode) as "google-meet" | "teams" | "zoom" | "in-person" | "phone",
   location: nstr(r.location),
   joinUrl: nstr(r.join_url),
   startsAt: nstr(r.starts_at),
@@ -785,8 +785,8 @@ export const toMeeting = (r: Row) => ({
   guardiansInvited: Boolean(r.guardians_invited),
   meetingNoteId: nstr(r.meeting_note_id),
   deadlineId: nstr(r.deadline_id),
-  /** Set when the API booked it on a connected Google / Outlook calendar. */
-  calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | null,
+  /** Set when the API booked it on a connected Google / Outlook calendar, or created it as a Zoom meeting. */
+  calendarProvider: nstr(r.calendar_provider) as "google" | "microsoft" | "zoom" | null,
   /** Emailed calendar invites on (lib/meetingInvites.ts). False before 20261023090001. */
   sendInvites: r.send_invites === true,
   /** "Notes sent" mark (Time saved). Absent before 20261027000001, so the app hides the switch. */

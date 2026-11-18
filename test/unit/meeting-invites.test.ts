@@ -9,6 +9,7 @@ import {
   inviteColumns,
   inviteEmail,
   inviteEndError,
+  meetingState,
   invitesReady,
   latestInvitePerAddress,
   planInviteRound,
@@ -83,6 +84,19 @@ test("create with guardians invited adds a guardians message per student", () =>
 test("the counselor's copy only when the meeting isn't on their connected calendar", () => {
   const p = plan({ after: m({ onProviderCalendar: true }) });
   assert.deepEqual(short(p?.messages), ["student:a:REQUEST:invite"]);
+});
+
+test("a Zoom meeting is not on the counselor's connected calendar, so they still get their own copy, and the email says Zoom", () => {
+  const row = { id: "e0000000-0000-4000-8000-000000000001", counselor_id: C, student_id: A, status: "scheduled", mode: "zoom", starts_at: "2026-10-20T19:00:00Z", join_url: "https://us05web.zoom.us/j/81234567890" };
+  const zoom = meetingState({ ...row, calendar_provider: "zoom", calendar_event_id: "81234567890" });
+  assert.equal(zoom.mode, "zoom", "an unknown mode would fall back to google-meet");
+  assert.equal(zoom.onProviderCalendar, false);
+  assert.equal(meetingState({ ...row, mode: "google-meet", calendar_provider: "google", calendar_event_id: "abc" }).onProviderCalendar, true);
+  const p = plan({ after: m({ ...zoom, sendInvites: true }) });
+  assert.deepEqual(short(p?.messages), ["counselor:-:PUBLISH:invite", "student:a:REQUEST:invite"]);
+  const e = inviteEmail({ kind: "student", template: "meeting-invite", studentName: "Avery" }, m({ mode: "zoom", joinUrl: "https://us05web.zoom.us/j/81234567890" }), "UTC", "Dana");
+  assert.match(e.text, /Where: https:\/\/us05web\.zoom\.us\/j\/81234567890/);
+  assert.equal(e.text.includes("Google Meet"), false);
 });
 
 test("a move sends an update to everyone kept; an unchanged save sends nothing", () => {

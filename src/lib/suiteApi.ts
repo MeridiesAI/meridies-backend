@@ -23,6 +23,8 @@ import {
   providerLabel,
   requireScope,
   WORK_ONEDRIVE_ORIGIN,
+  ZOOM_SCOPE,
+  type ConnectProvider,
   type LiveToken,
   type PickerTarget,
   type SuiteProvider,
@@ -40,6 +42,11 @@ const GOOGLE_CALENDAR = { name: GOOGLE_CALENDAR_SCOPE, what: "writing to Calenda
 const MS_FILES_SCOPE = MICROSOFT_SCOPE.files;
 const MS_CALENDAR_SCOPE = MICROSOFT_SCOPE.calendar;
 const MS_FILES = { name: MS_FILES_SCOPE, what: "reading OneDrive", code: "files_not_granted" };
+// Zoom: a missing scope is a reconnect (the app's `calendarEnabled` for Zoom is the create scope).
+const ZOOM_API = "https://api.zoom.us/v2";
+const ZOOM_CREATE = { name: ZOOM_SCOPE.create, what: "create meetings", code: "zoom_reconnect" };
+const ZOOM_UPDATE = { name: ZOOM_SCOPE.update, what: "change meetings", code: "zoom_reconnect" };
+const ZOOM_DELETE = { name: ZOOM_SCOPE.delete, what: "delete meetings", code: "zoom_reconnect" };
 
 const GOOGLE_ID = /^[A-Za-z0-9_-]{5,300}$/;
 // Not "." or "..": encodeURIComponent keeps dots, and URL parsing would resolve them as path segments.
@@ -82,7 +89,7 @@ export const __sleep = { fn: sleep };
  * A fetch that fails (DNS, reset, timeout) never carries its URL into an error
  * or a log line: a Graph search URL holds the counselor's search words.
  */
-async function quietFetch(provider: SuiteProvider, url: string, init: RequestInit): Promise<Response> {
+async function quietFetch(provider: ConnectProvider, url: string, init: RequestInit): Promise<Response> {
   try {
     return await fetch(url, init);
   } catch {
@@ -97,7 +104,7 @@ async function quietFetch(provider: SuiteProvider, url: string, init: RequestIni
  */
 async function call(
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   url: string,
   init: RequestInit,
   scope: { name: string; what: string; code?: string }
@@ -138,7 +145,7 @@ export function googleFileFailureCode(status: number): string | null {
 const FILE_READS = new Set(["file", "file download"]);
 
 /** Map a provider failure to something safe to show. Bodies are never echoed. */
-export function providerFailure(provider: SuiteProvider, res: Response, log: Log, what: string): HttpError {
+export function providerFailure(provider: ConnectProvider, res: Response, log: Log, what: string): HttpError {
   log.warn({ provider, status: res.status, what }, "provider request failed");
   const label = providerLabel(provider);
   const unpicked = provider === "google" && res.status === 403 && FILE_READS.has(what);
@@ -556,6 +563,10 @@ const graphDateTime = (iso: string) => ({
 const httpsOrNull = (u: unknown) =>
   typeof u === "string" && u.startsWith("https://") && u.length <= 2000 ? u : null;
 
+// Zoom: UTC to the second, and a length in minutes (1-1440) rather than an end.
+const zoomTime = (iso: string) => new Date(iso).toISOString().replace(/\.\d{3}Z$/, "Z");
+const zoomMinutes = (from: string, to: string) => Math.min(1440, Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 60_000)));
+
 type GoogleEvent = {
   id?: string;
   hangoutLink?: string;
@@ -572,15 +583,46 @@ function googleJoinUrl(ev: GoogleEvent): string | null {
 /**
  * Put the meeting on the counselor's own calendar with a real conference:
  * Google Meet via conferenceData, Teams via an online meeting on the Outlook
- * event. No attendees are added and no invitation is sent by this API — the
+ * event, Zoom via a scheduled meeting on their Zoom account (no calendar event: Zoom
+ * keeps its own list). No attendees are added and no invitation is sent by this API — the
  * counselor shares the link, which keeps outbound mail on the audited path.
  */
 export async function createConferenceEvent(
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   input: CalendarEventInput,
   log: Log
 ): Promise<{ eventId: string; joinUrl: string }> {
+  if (provider === "zoom") {
+    const { res } = await call(
+      ownerId,
+      provider,
+      `${ZOOM_API}/users/me/meetings`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: input.title.slice(0, 200),
+          type: 2,
+          start_time: zoomTime(input.startsAt),
+          duration: zoomMinutes(input.startsAt, input.endsAt),
+          timezone: "UTC",
+          agenda: input.description?.slice(0, 2000) || undefined,
+        }),
+      },
+      ZOOM_CREATE
+    );
+    if (!res.ok) throw providerFailure(provider, res, log, "meeting");
+    const m = (await res.json()) as { id?: number | string; join_url?: string };
+    if (m.id === undefined || m.id === null) throw unavailable("Zoom didn't return the new meeting");
+    const eventId = String(m.id);
+    const joinUrl = httpsOrNull(m.join_url);
+    if (!joinUrl) {
+      await deleteCalendarEvent(ownerId, provider, eventId, log).catch(() => undefined);
+      throw unavailable("Zoom created the meeting but no join link. Nothing was saved — try again.");
+    }
+    return { eventId, joinUrl };
+  }
   if (provider === "google") {
     const base = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
     const { res } = await call(
@@ -725,13 +767,23 @@ export async function createPlainCalendarEvent(
 
 export async function updateCalendarEvent(
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   eventId: string,
   patch: Partial<CalendarEventInput>,
   log: Log
 ): Promise<void> {
   const body: Record<string, unknown> = {};
-  if (provider === "google") {
+  if (provider === "zoom") {
+    if (patch.title !== undefined) body.topic = patch.title.slice(0, 200);
+    if (patch.description !== undefined) body.agenda = (patch.description ?? "").slice(0, 2000);
+    // Zoom wants a start and a length, never an end alone: a time change carries both (the caller fills in the unchanged one).
+    if (patch.endsAt && !patch.startsAt) throw new Error("zoom meeting: an end-time change must carry the start time");
+    if (patch.startsAt) {
+      body.start_time = zoomTime(patch.startsAt);
+      body.timezone = "UTC";
+      if (patch.endsAt) body.duration = zoomMinutes(patch.startsAt, patch.endsAt);
+    }
+  } else if (provider === "google") {
     if (patch.title !== undefined) body.summary = patch.title;
     if (patch.description !== undefined) body.description = patch.description ?? "";
     if (patch.startsAt) body.start = { dateTime: new Date(patch.startsAt).toISOString() };
@@ -745,43 +797,51 @@ export async function updateCalendarEvent(
   if (Object.keys(body).length === 0) return;
 
   const url =
-    provider === "google"
-      ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
-      : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}`;
+    provider === "zoom"
+      ? `${ZOOM_API}/meetings/${encodeURIComponent(eventId)}`
+      : provider === "google"
+        ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
+        : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}`;
   const { res } = await call(
     ownerId,
     provider,
     url,
     { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-    provider === "google"
-      ? GOOGLE_CALENDAR
-      : { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
+    provider === "zoom"
+      ? ZOOM_UPDATE
+      : provider === "google"
+        ? GOOGLE_CALENDAR
+        : { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
   );
-  if (!res.ok) throw providerFailure(provider, res, log, "calendar event");
+  if (!res.ok) throw providerFailure(provider, res, log, provider === "zoom" ? "meeting" : "calendar event");
 }
 
 export async function deleteCalendarEvent(
   ownerId: string,
-  provider: SuiteProvider,
+  provider: ConnectProvider,
   eventId: string,
   log: Log
 ): Promise<void> {
   const url =
-    provider === "google"
-      ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
-      : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}`;
+    provider === "zoom"
+      ? `${ZOOM_API}/meetings/${encodeURIComponent(eventId)}?schedule_for_reminder=false` // no cancellation email to the host
+      : provider === "google"
+        ? `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(eventId)}?sendUpdates=none`
+        : `https://graph.microsoft.com/v1.0/me/events/${encodeURIComponent(eventId)}`;
   const { res } = await call(
     ownerId,
     provider,
     url,
     { method: "DELETE" },
-    provider === "google"
-      ? GOOGLE_CALENDAR
-      : { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
+    provider === "zoom"
+      ? ZOOM_DELETE
+      : provider === "google"
+        ? GOOGLE_CALENDAR
+        : { name: MS_CALENDAR_SCOPE, what: "writing to your Outlook calendar" }
   );
   // Already gone (404/410) is the outcome we wanted.
   if (!res.ok && res.status !== 404 && res.status !== 410) {
-    throw providerFailure(provider, res, log, "calendar event");
+    throw providerFailure(provider, res, log, provider === "zoom" ? "meeting" : "calendar event");
   }
 }
 

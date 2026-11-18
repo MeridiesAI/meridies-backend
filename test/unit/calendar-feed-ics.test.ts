@@ -122,10 +122,13 @@ test("privacy: meetings show first name and last initial, never title, agenda, l
     studentId: "s1",
     attendeeIds: ["s1", "s2"],
     meetingStatus: "scheduled",
+    // The feed items carry the Join link and mode for the app's board; the subscribed .ics must not.
+    joinUrl: "https://us05web.zoom.us/j/81234567890?pwd=secret",
+    mode: "zoom",
   });
   const ics = unfold(buildFeedIcs(feedIcsEvents([meeting], names), { now: NOW }));
   assert.ok(ics.includes("SUMMARY:Meeting with Ana P.\\, Ben O.\r\n"), ics);
-  for (const banned of ["Pérez", "Okafor", "FAFSA", "1520", "meet.google", "Agenda", "DESCRIPTION", "LOCATION", "URL:", "ATTENDEE", "ORGANIZER"]) {
+  for (const banned of ["Pérez", "Okafor", "FAFSA", "1520", "meet.google", "Agenda", "DESCRIPTION", "LOCATION", "URL:", "ATTENDEE", "ORGANIZER", "zoom", "Zoom", "secret"]) {
     assert.ok(!ics.includes(banned), banned);
   }
 });

@@ -70,12 +70,12 @@ export type MeetingState = {
   mode: IcsMode;
   agenda: string | null;
   sequence: number;
-  /** On the owner's connected Google / Outlook calendar already. */
+  /** On the owner's connected Google / Outlook calendar already (a Zoom meeting is not: it makes no calendar event). */
   onProviderCalendar: boolean;
 };
 
 const s = (v: unknown): string | null => (v == null || v === "" ? null : String(v));
-const MODES = new Set<IcsMode>(["google-meet", "teams", "in-person", "phone"]);
+const MODES = new Set<IcsMode>(["google-meet", "teams", "zoom", "in-person", "phone"]);
 const STATUSES = new Set<MeetingStatus>(["scheduled", "held", "cancelled", "no-show"]);
 
 export function meetingState(r: Row): MeetingState {
@@ -97,7 +97,7 @@ export function meetingState(r: Row): MeetingState {
     mode: MODES.has(mode) ? mode : "google-meet",
     agenda: s(r.agenda),
     sequence: Number.isInteger(seq) && seq >= 0 ? seq : 0,
-    onProviderCalendar: Boolean(r.calendar_event_id),
+    onProviderCalendar: Boolean(r.calendar_event_id) && r.calendar_provider !== "zoom",
   };
 }
 
