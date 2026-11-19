@@ -175,10 +175,57 @@ test("notify off, or nothing affected, sends nothing and charges nothing", async
   assert.deepEqual(keys, []);
 });
 
+test("update: nothing a family sees changed sends nothing and charges nothing; only changed rows are listed", async () => {
+  const { keys, consume } = counting();
+  const same = await prepareSeriesInviteRound(req(), { kind: "update", before: twelve(), after: twelve(), attendeeIds: [A, B], notify: true }, { consume, now: NOW });
+  assert.deepEqual(same.summary, { status: "none" });
+  assert.deepEqual(keys, []);
+
+  const after = twelve().map((x, i) => (i === 1 ? { ...x, title: "Moved" } : x));
+  const one = await prepareSeriesInviteRound(req(), { kind: "update", before: twelve(), after, attendeeIds: [A], notify: true }, { consume, now: NOW });
+  assert.deepEqual(keys, [`meeting-invites:${C}`]);
+  const { sent } = await deliver(one.round);
+  assert.equal(sent.length, 1);
+  assert.ok(String(sent[0]!.text).includes("October 27, 2026"));
+  assert.equal(String(sent[0]!.text).includes("October 20, 2026"), false);
+});
+
+test("update: a row that ends up cancelled is never reported (deletes use kind cancel)", async () => {
+  const { keys, consume } = counting();
+  const only = await prepareSeriesInviteRound(req(), { kind: "update", before: [m(0)], after: [m(0, { status: "cancelled", title: "Moved" })], attendeeIds: [A], notify: true }, { consume, now: NOW });
+  assert.deepEqual(only.summary, { status: "none" });
+  assert.deepEqual(keys, []);
+
+  const before = [m(0), m(1)];
+  const after = [m(0, { status: "cancelled", title: "Moved" }), m(1, { title: "Moved" })];
+  const mixed = await prepareSeriesInviteRound(req(), { kind: "update", before, after, attendeeIds: [A], notify: true }, { consume, now: NOW });
+  const { sent } = await deliver(mixed.round);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.template, "meeting-update");
+  assert.equal(String(sent[0]!.text).includes("October 20, 2026"), false);
+  assert.ok(String(sent[0]!.text).includes("October 27, 2026"));
+  assert.equal(/cancel/i.test(String(sent[0]!.text)), false);
+});
+
+test("one date reads in the singular for create, update and cancel", async () => {
+  const { consume } = counting();
+  const inputs = [
+    { kind: "create" as const, before: [], after: [m(0)] },
+    { kind: "update" as const, before: [m(0)], after: [m(0, { title: "Moved" })] },
+    { kind: "cancel" as const, before: [m(0)], after: [] },
+  ];
+  for (const i of inputs) {
+    const p = await prepareSeriesInviteRound(req(), { ...i, attendeeIds: [A], notify: true }, { consume, now: NOW });
+    const { sent } = await deliver(p.round);
+    const all = `${sent[0]!.subject}\n${sent[0]!.text}`;
+    assert.equal(/1 dates|these dates|These 1|\bdates\b/.test(all), false, `${i.kind}: ${all}`);
+  }
+});
+
 test("the hour used up: create and update are skipped with the single round's reason", async () => {
   for (const kind of ["create", "update"] as const) {
     const { keys, consume } = counting(false);
-    const p = await prepareSeriesInviteRound(req(), { kind, before: twelve(), after: twelve(), attendeeIds: [A, B], notify: true }, { consume, now: NOW });
+    const p = await prepareSeriesInviteRound(req(), { kind, before: twelve(), after: twelve({ title: "Moved" }), attendeeIds: [A, B], notify: true }, { consume, now: NOW });
     assert.equal(keys.length, 1);
     assert.deepEqual(p.summary, { status: "skipped", reason: "Too many calendar invites this hour, so invites and updates weren't emailed" });
     assert.equal(p.round, null);

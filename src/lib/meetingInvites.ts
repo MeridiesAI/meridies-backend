@@ -192,7 +192,7 @@ export function live(m: MeetingState, now: Date): boolean {
   return m.sendInvites && m.status === "scheduled" && !ended(m, now);
 }
 
-function material(a: MeetingState, b: MeetingState): boolean {
+export function material(a: MeetingState, b: MeetingState): boolean {
   const t = (v: string | null) => (v ? Date.parse(v) : null);
   return (
     a.title !== b.title ||
@@ -611,11 +611,13 @@ export function seriesEmail(
   const who = plainLine(counselorName ?? "", 120) || "Your counselor";
   const cancel = r.template === "meeting-cancel";
   const n = rows.length;
+  const dates = n === 1 ? "1 date" : `${n} dates`;
+  const these = n === 1 ? "this date" : "these dates";
   const lead =
     r.template === "meeting-invite"
       ? r.kind === "counselor"
-        ? `A copy of this repeating meeting (${n} dates) for your own calendar.`
-        : `${who} invited you to a repeating meeting (${n} dates).`
+        ? `A copy of this repeating meeting (${dates}) for your own calendar.`
+        : `${who} invited you to a repeating meeting (${dates}).`
       : r.template === "meeting-update"
         ? `${n === 1 ? "This date" : `These ${n} dates`} of a repeating meeting changed.`
         : `${n === 1 ? "This date" : `These ${n} dates`} of a repeating meeting ${n === 1 ? "is" : "are"} cancelled.`;
@@ -633,13 +635,13 @@ export function seriesEmail(
     ...(r.kind === "student" && !cancel ? { cta: { label: "Open your calendar", url: `${env.APP_URL.replace(/\/+$/, "")}/dashboard/student/calendar` } } : {}),
     footnote:
       r.template === "meeting-invite"
-        ? "The calendar file is attached. Open it to add every date to your calendar."
+        ? `The calendar file is attached. Open it to add ${n === 1 ? "this date" : "every date"} to your calendar.`
         : cancel
-          ? "If you added these dates to your calendar, delete them there."
-          : "If you added these dates to your calendar, change them there: your calendar keeps the old times until you do.",
+          ? `If you added ${these} to your calendar, delete ${n === 1 ? "it" : "them"} there.`
+          : `If you added ${these} to your calendar, change ${n === 1 ? "it" : "them"} there: your calendar keeps the old ${n === 1 ? "time" : "times"} until you do.`,
   };
   return {
-    subject: plainLine(`${PREFIX[r.template]}: ${title} · ${n} dates from ${whenShort(m.startsAt, timeZone)}`, 250),
+    subject: plainLine(`${PREFIX[r.template]}: ${title} · ${n === 1 ? "" : `${dates} from `}${whenShort(m.startsAt, timeZone)}`, 250),
     html: brandedEmail(body),
     text: brandedText(body),
   };

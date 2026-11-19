@@ -13,6 +13,10 @@
  * `cancel` send the text list of changed or cancelled dates and attach nothing. Limit: calendar apps keep the
  * events a create added at their old times (or at all, after a cancel) until the person changes or deletes
  * them; upgrade to REQUEST/CANCEL files after the invite spike.
+ *
+ * An `update` tells only about rows whose family-visible fields changed (`material`, as the single round) and
+ * that are still scheduled; it never says anything is cancelled. Scoped deletes and cancellations MUST use
+ * kind "cancel".
  */
 
 import type { FastifyRequest } from "fastify";
@@ -22,14 +26,15 @@ import {
   defaultDeps,
   INVITE_ROUNDS_PER_HOUR,
   live,
+  material,
   NO_ADDRESS,
   resolveRound,
   sendRound,
   seriesEmail,
   THROTTLED,
   type Deps,
+  type InviteRoundSummary,
   type MeetingState,
-  type Prepared,
   type ResolvedRound,
 } from "./meetingInvites.js";
 import { consumeRateLimit } from "./limits.js";
@@ -53,13 +58,17 @@ export async function prepareSeriesInviteRound(
   request: Pick<FastifyRequest, "db" | "log">,
   input: { kind: SeriesRoundKind; before: MeetingState[]; after: MeetingState[]; attendeeIds: string[]; notify: boolean },
   deps: { consume: typeof consumeRateLimit; now: Date } = { consume: consumeRateLimit, now: new Date() }
-): Promise<Prepared> {
+): Promise<{ summary: InviteRoundSummary; round: SeriesRound | null }> {
   try {
     const { kind } = input;
     if (!input.notify) return { summary: { status: "none" }, round: null };
     // The occurrences invitees hold (or held, for a cancel): invites on, scheduled, not over.
+    const was = new Map(input.before.map((b) => [b.id, b]));
     const rows = (kind === "cancel" ? input.before : input.after)
       .filter((r) => live(r, deps.now))
+      // An update emails only rows a family would see changed. Scoped series patches can't set status, so a row
+      // that isn't scheduled any more is dropped by `live` here and never reported: deletes MUST use kind "cancel".
+      .filter((r) => kind !== "update" || (was.has(r.id) && material(was.get(r.id)!, r)))
       .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt));
     if (rows.length === 0) return { summary: { status: "none" }, round: null };
 
@@ -140,8 +149,8 @@ export async function deliverSeriesRound(round: SeriesRound, log: Log, deps: Dep
   });
 }
 
-/** Send a prepared series round in the background; the response doesn't wait. Anything but a series round is ignored. */
-export function startSeriesDelivery(round: unknown, log: Log): void {
-  if (!round || typeof round !== "object" || !("rows" in round) || !("kind" in round)) return;
-  void deliverSeriesRound(round as SeriesRound, log).catch((err) => log.error({ err: serializeErr(err) }, "series invite round failed"));
+/** Send a prepared series round in the background; the response doesn't wait. */
+export function startSeriesDelivery(round: SeriesRound | null, log: Log): void {
+  if (!round) return;
+  void deliverSeriesRound(round, log).catch((err) => log.error({ err: serializeErr(err) }, "series invite round failed"));
 }
