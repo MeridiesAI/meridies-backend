@@ -14,7 +14,7 @@
  * pointed at by the invoice's `message_delivery_id`) names the agreement with
  * its link left out. No column, no migration.
  *
- * One exception, a drafted contract (`{ draftId }`, migration 20261129000001): it is rendered for the family and
+ * One exception, a drafted contract (`{ draftId }`, migration 20261129000002): it is rendered for the family and
  * signed with the SENDER's saved signature at send time, and an `agreement_signatures` row keeps that signature as
  * it was. Never from the cron (409 `draft_contract_send_now`).
  *

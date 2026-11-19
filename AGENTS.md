@@ -707,7 +707,7 @@ forget it.
   invoice needs the counselor's own number (409 `texting_unavailable`). Not in `REQUIRED_SCHEMA`; each part degrades
   without its file. Tests: `test/unit/invoice-*.test.ts`, `contracts.test.ts`, `test/integration/invoice-composer`,
   `invoice-drafts`, `contracts`.
-- **Drafted contracts** (`20261129000001`; design in `docs/superpowers/specs/2026-11-18-contract-drafting-design.md`,
+- **Drafted contracts** (`20261129000002`; design in `docs/superpowers/specs/2026-11-18-contract-drafting-design.md`,
   plan in `docs/superpowers/plans/2026-11-18-contract-drafting.md`). A consultant drafts a contract from a fixed outline
   (text, list, text, then clauses; <= 40 sections, <= 50,000 characters), saves **one** personal signature (typed, or a
   drawn PNG <= 60 KB and <= 1200 x 400), and attaches the draft to an invoice. At send it is rendered to plain text,
@@ -741,7 +741,7 @@ forget it.
   `Signature image SHA-256: <hash>`), else 503 and a log line with the agreement id only, never the bytes; a typed
   signature or an agreement with no snapshot is 404. **Preview writes nothing** (no invoice number, no agreement, no
   snapshot). **Switch:** behind `AGREEMENTS_ENABLED` (off is 404 `agreements_off` before anything is written). **Deploy
-  order:** migration `20261129000001` after `20261128000001`, applied with the Apply migrations workflow; without it the
+  order:** migration `20261129000002` after `20261129000001`, applied with the Apply migrations workflow; without it the
   draft and signature routes answer 503 `contract_drafts_unavailable` and the sign page renders without an image; not in
   `REQUIRED_SCHEMA`, so the app and demo may deploy before it. Tests: `test/unit/contract-draft.test.ts`,
   `contract-draft-api.test.ts`, `invoice-agreement.test.ts`, `agreements.test.ts`; `test/integration/contract-drafts.test.mjs`,

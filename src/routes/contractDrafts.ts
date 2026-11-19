@@ -1,5 +1,5 @@
 /**
- * Contracts drafted in Meridies, and the consultant's saved signature (migration 20261129000001,
+ * Contracts drafted in Meridies, and the consultant's saved signature (migration 20261129000002,
  * lib/contractDraftApi.ts, the model in lib/contractDraft.ts).
  *
  *   GET    /pipeline/contract-drafts            ?includeArchived=true -> { drafts, canEdit }

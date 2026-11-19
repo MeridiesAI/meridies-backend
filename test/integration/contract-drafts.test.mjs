@@ -1,5 +1,5 @@
 // Contracts drafted in Meridies and the consultant's saved signature (routes/contractDrafts.ts,
-// lib/contractDraftApi.ts, migration 20261129000001), against a running API (see harness.mjs).
+// lib/contractDraftApi.ts, migration 20261129000002), against a running API (see harness.mjs).
 //
 //   S   a solo counselor (their own practice, so an admin)
 //   A   owner of a firm, B a consultant in it who is not an admin

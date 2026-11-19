@@ -21,7 +21,7 @@
 --     not: no covered delete reaches it, like `contract_files`. `agreements` and its guard are unchanged:
 --     the rendered text carries the signature block, so its body hash covers it.
 --
--- Deploy order: after 20261128000001. Either order with the code: without this file the draft routes
+-- Deploy order: after 20261129000001. Either order with the code: without this file the draft routes
 -- answer 503 `contract_drafts_unavailable` and invoices, agreements and uploaded contracts work as before.
 -- Additive only. Not in REQUIRED_SCHEMA. Re-runnable.
 

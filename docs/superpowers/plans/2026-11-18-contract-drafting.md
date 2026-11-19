@@ -90,13 +90,13 @@ export function copyTitle(title: string): string;            // `${title} (copy)
 ### Task 2: Migration
 
 **Files:**
-- Create: `supabase/migrations/20261129000001_contract_drafts.sql` (confirm it sorts after the newest on `origin/main`, currently `20261128000001`; bump if not)
+- Create: `supabase/migrations/20261129000002_contract_drafts.sql` (confirm it sorts after the newest on `origin/main`, currently `20261129000001`; bump if not)
 - Modify: none (not in `REQUIRED_SCHEMA`)
 - Test: `test/integration/approval-db.test.mjs` (existing; must still pass), `test/integration/contract-drafts.test.mjs` (Task 3 adds the behavior checks)
 
 **Interfaces — Produces** (tables the routes use): `public.contract_drafts(id, firm_id, counselor_id, practice_id, title, sections jsonb, archived_at, created_by, created_at, updated_at)`, `public.counselor_signatures(counselor_id pk, signer_name, kind, image_png bytea, image_sha256, updated_at)`, `public.agreement_signatures(agreement_id pk, signer_name, kind, image_png, image_sha256, signed_at)`.
 
-- [ ] **Step 1: Write the migration**, modelled on `20261124000005_contracts.sql` (header comment in the same style: what, deploy order "after 20261128000001; code degrades to 503 without it", additive, re-runnable):
+- [ ] **Step 1: Write the migration**, modelled on `20261124000005_contracts.sql` (header comment in the same style: what, deploy order "after 20261129000001; code degrades to 503 without it", additive, re-runnable):
   - `contract_drafts`: same scope check and RLS shape as `contract_files` (select `crm_can_access`; insert/update `crm_can_admin` + `crm_is_own_workspace` + `created_by = auth.uid()`); `title` 1–160; `sections` `jsonb_typeof = 'array'`; no delete; `grant update (title, sections, archived_at, updated_at)`; a before-update trigger sets `updated_at = now()`.
   - `counselor_signatures`: owner-only select/insert/update (`counselor_id = auth.uid()`); `signer_name` 1–120; `kind in ('typed','drawn')`; check `(kind = 'drawn') = (image_png is not null)`; `length(image_png) <= 61440`; `image_sha256 ~ '^[0-9a-f]{64}$'` when drawn.
   - `agreement_signatures`: `agreement_id` pk `references agreements(id) on delete cascade`; same column checks; select via `crm_can_bill` of the agreement's contact; insert policy only where the agreement's `counselor_id = auth.uid()` and `status = 'draft'`; no update/delete grants; a before-update trigger always raises, a before-delete trigger raises unless `pg_trigger_depth() > 1` (the parent's cascade), and a before-truncate trigger raises (pattern of `agreement_acceptances` in `20261111000010`).

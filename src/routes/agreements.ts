@@ -341,7 +341,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
   }
 
   /**
-   * The signature frozen on an agreement when it was sent, if any (migration 20261129000001). Tolerant of a database
+   * The signature frozen on an agreement when it was sent, if any (migration 20261129000002). Tolerant of a database
    * without it (null); any other read error throws, so the page is "unavailable" rather than shown without its image.
    * `image_png` (service role only, "\\x<hex>" from PostgREST) is read only when `withImage`.
    */
