@@ -187,6 +187,11 @@ test("until: before the start, too far out, or too few dates", () => {
     name: "RangeError",
     message: "That end date makes 367 meetings; a series can have at most 52.",
   });
+  // The cap in the message is the caller's `max`, not the default.
+  assert.throws(() => expandSeriesDates("2026-11-24", { preset: "daily", end: { until: "2026-12-24" } }, 12), {
+    name: "RangeError",
+    message: "That end date makes 31 meetings; a series can have at most 12.",
+  });
 });
 
 test("the span limit is 366 days, inclusive, for until and for count", () => {
@@ -197,13 +202,16 @@ test("the span limit is 366 days, inclusive, for until and for count", () => {
     () => expandSeriesDates("2026-11-24", { preset: "weekly", end: { until: "2027-11-26" } }, 100),
     { name: "RangeError", message: "A series can run for at most 366 days." },
   );
-  // A count that reaches past a year is refused too: 52 biweekly meetings would run two years.
+  // A count that reaches past a year is refused too, in words that name the cause: 52 biweekly meetings run two years.
   assert.throws(() => expandSeriesDates("2026-11-24", { preset: "biweekly", end: { count: 52 } }), {
     name: "RangeError",
-    message: "A series can run for at most 366 days.",
+    message: "52 meetings that often would run past 366 days; choose fewer.",
   });
   // 14 monthly meetings from the 31st end 13 months later.
-  assert.throws(() => expandSeriesDates("2026-01-31", { preset: "monthly", end: { count: 14 } }), RangeError);
+  assert.throws(() => expandSeriesDates("2026-01-31", { preset: "monthly", end: { count: 14 } }), {
+    name: "RangeError",
+    message: "14 meetings that often would run past 366 days; choose fewer.",
+  });
   assert.equal(expandSeriesDates("2026-01-31", { preset: "monthly", end: { count: 13 } }).length, 13);
 });
 
@@ -244,6 +252,18 @@ test("zonedInstant: other zones, including east of UTC, without DST and UTC itse
   assert.equal(zonedInstant("2026-11-01", 540, "UTC"), "2026-11-01T09:00:00.000Z");
   assert.equal(zonedInstant("2026-03-29", 90, "Europe/London"), "2026-03-29T01:30:00.000Z"); // 01:30 never happens: 02:30 BST
   assert.equal(zonedInstant("2026-07-01", 540, "Pacific/Auckland"), "2026-06-30T21:00:00.000Z");
+});
+
+test("zonedInstant: gaps that are not an hour long or not at 2 AM still move forward", () => {
+  // Sao Paulo's 2018 change was at midnight: 00:00 BRT (-03:00) became 01:00 BRST (-02:00) on 2018-11-04,
+  // so 00:30 never happened. Read with -03:00 it is 03:30Z, which is 01:30 BRST.
+  assert.equal(zonedInstant("2018-11-04", 30, "America/Sao_Paulo"), "2018-11-04T03:30:00.000Z");
+  // Lord Howe's gap is 30 minutes: 02:00 LHST (+10:30) became 02:30 LHDT (+11:00) on 2018-10-07, i.e. at
+  // 15:30Z the evening before. 02:15 never happened; read with +10:30 it is 15:45Z, which is 02:45 +11:00.
+  assert.equal(zonedInstant("2018-10-07", 135, "Australia/Lord_Howe"), "2018-10-06T15:45:00.000Z");
+  // The wall times either side of that gap are real and read with their own offsets.
+  assert.equal(zonedInstant("2018-10-07", 105, "Australia/Lord_Howe"), "2018-10-06T15:15:00.000Z"); // 01:45 +10:30
+  assert.equal(zonedInstant("2018-10-07", 150, "Australia/Lord_Howe"), "2018-10-06T15:30:00.000Z"); // 02:30 +11:00
 });
 
 test("zonedInstant: minutes past a day roll into the next day, negative into the one before", () => {
@@ -351,23 +371,14 @@ test("repeatLabel names the cadence, the start's weekday and the end", () => {
     repeatLabel({ preset: "biweekly", end: { until: "2026-12-22" } }, "2026-11-24"),
     "Every 2 weeks on Tuesday until Dec 22",
   );
-  assert.equal(repeatLabel({ preset: "daily", end: { count: 5 } }, "2026-11-24"), "Daily, 5 times");
+  assert.equal(repeatLabel({ preset: "daily", end: { count: 5 } }, "2026-11-24"), "Every day, 5 times");
   assert.equal(repeatLabel({ preset: "weekdays", end: { until: "2026-12-04" } }, "2026-11-24"), "Every weekday until Dec 4");
 });
 
-test("repeatLabel: monthly uses the start's day with an ordinal", () => {
-  assert.equal(repeatLabel({ preset: "monthly", end: { count: 4 } }, "2026-01-31"), "Monthly on the 31st, 4 times");
-  const day = (d: number) => repeatLabel({ preset: "monthly", end: { count: 2 } }, `2026-03-${String(d).padStart(2, "0")}`);
-  assert.equal(day(1), "Monthly on the 1st, 2 times");
-  assert.equal(day(2), "Monthly on the 2nd, 2 times");
-  assert.equal(day(3), "Monthly on the 3rd, 2 times");
-  assert.equal(day(4), "Monthly on the 4th, 2 times");
-  assert.equal(day(11), "Monthly on the 11th, 2 times");
-  assert.equal(day(12), "Monthly on the 12th, 2 times");
-  assert.equal(day(13), "Monthly on the 13th, 2 times");
-  assert.equal(day(21), "Monthly on the 21st, 2 times");
-  assert.equal(day(22), "Monthly on the 22nd, 2 times");
-  assert.equal(day(23), "Monthly on the 23rd, 2 times");
+test("repeatLabel: monthly names the start's day of the month, without an ordinal", () => {
+  assert.equal(repeatLabel({ preset: "monthly", end: { count: 4 } }, "2026-01-31"), "Monthly on day 31, 4 times");
+  assert.equal(repeatLabel({ preset: "monthly", end: { count: 2 } }, "2026-03-01"), "Monthly on day 1, 2 times");
+  assert.equal(repeatLabel({ preset: "monthly", end: { until: "2026-06-15" } }, "2026-03-22"), "Monthly on day 22 until Jun 15");
 });
 
 test("repeatLabel: the year of an until date shows only when it differs from the start's", () => {

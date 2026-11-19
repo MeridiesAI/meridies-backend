@@ -65,7 +65,6 @@ function* candidates(startMs: number, preset: RepeatPreset): Generator<number> {
 export function expandSeriesDates(start: string, spec: RepeatSpec, max = MAX_SERIES): string[] {
   const startMs = parseDate(start, "start");
   const end = spec.end;
-  const spanError = () => new RangeError(`A series can run for at most ${MAX_SPAN_DAYS} days.`);
 
   let count = Infinity;
   let untilMs = Infinity;
@@ -77,7 +76,9 @@ export function expandSeriesDates(start: string, spec: RepeatSpec, max = MAX_SER
   } else {
     untilMs = parseDate(end.until, "end");
     if (untilMs < startMs) throw new RangeError("The end date can't be before the start date.");
-    if ((untilMs - startMs) / DAY_MS > MAX_SPAN_DAYS) throw spanError();
+    if ((untilMs - startMs) / DAY_MS > MAX_SPAN_DAYS) {
+      throw new RangeError(`A series can run for at most ${MAX_SPAN_DAYS} days.`);
+    }
   }
 
   const dates: number[] = [];
@@ -92,7 +93,7 @@ export function expandSeriesDates(start: string, spec: RepeatSpec, max = MAX_SER
       throw new RangeError(`That end date makes ${dates.length} meetings; a series can have at most ${max}.`);
     }
   } else if ((dates[dates.length - 1]! - startMs) / DAY_MS > MAX_SPAN_DAYS) {
-    throw spanError();
+    throw new RangeError(`${count} meetings that often would run past ${MAX_SPAN_DAYS} days; choose fewer.`);
   }
   return dates.map(isoDate);
 }
@@ -162,21 +163,16 @@ export function wallDelta(fromIso: string, toIso: string, timeZone: string): { d
 const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-function ordinal(n: number): string {
-  const suffix = n % 100 >= 11 && n % 100 <= 13 ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
-  return `${n}${suffix}`;
-}
-
 /** "Weekly on Tuesday, 10 times", "Every 2 weeks on Tuesday until Jan 26": the same words for the same input. */
 export function repeatLabel(spec: RepeatSpec, start: string): string {
   const s = new Date(parseDate(start, "start"));
   const weekday = WEEKDAY_NAMES[s.getUTCDay()]!;
   const what = {
-    daily: "Daily",
+    daily: "Every day",
     weekdays: "Every weekday",
     weekly: `Weekly on ${weekday}`,
     biweekly: `Every 2 weeks on ${weekday}`,
-    monthly: `Monthly on the ${ordinal(s.getUTCDate())}`,
+    monthly: `Monthly on day ${s.getUTCDate()}`,
   }[spec.preset];
   if ("count" in spec.end) return `${what}, ${spec.end.count} times`;
   const u = new Date(parseDate(spec.end.until, "end"));
