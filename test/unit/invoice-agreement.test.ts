@@ -10,7 +10,7 @@ import {
   renderInvoicePageBody,
   type InvoiceDocument,
 } from "../../src/lib/invoiceDocument.js";
-import { checkInvoiceAgreement, invoiceAgreementInput, withAgreementSubject } from "../../src/lib/invoiceAgreement.js";
+import { checkInvoiceAgreement, contractFieldsMessage, invoiceAgreementInput, issueInvoiceAgreement, resolveInvoiceAgreement, withAgreementSubject } from "../../src/lib/invoiceAgreement.js";
 import { HttpError } from "../../src/lib/errors.js";
 
 const PAY = "https://api.example.com/pay/paytok";
@@ -176,4 +176,215 @@ test("the attachment is one of the contact's agreements, or a new title and text
   ]) {
     assert.equal(invoiceAgreementInput.safeParse(bad).success, false, JSON.stringify(bad));
   }
+});
+
+// ---- A drafted contract ({ draftId }) -----------------------------------------------------------------
+
+const DRAFT_ID = "22222222-2222-4222-8222-222222222222";
+const SENDER = { counselorId: "c-1", counselorName: "Casey Counselor", practiceName: "Northfield Admissions" };
+const SECTIONS = [
+  { id: "s", kind: "text", heading: "Services", body: "{{counselor_name}} guides {{student_name}} and {{family_name}} from {{date}}." },
+  { id: "p", kind: "list", heading: "Prerequisites", items: ["Intake form"] },
+  { id: "f", kind: "text", heading: "Fees", body: "See the invoice." },
+];
+type Row = Record<string, unknown>;
+type PgErr = { code: string; message: string } | null;
+
+/** A Supabase client stand-in: canned rows per table, failures on demand, and a log of every write. */
+function stubDb(o: { rows?: Record<string, Row | null>; insertError?: Record<string, PgErr>; rpcError?: PgErr; updateError?: PgErr }) {
+  const writes: string[] = [];
+  const rows: Record<string, Row | null> = {
+    contract_drafts: { id: DRAFT_ID, title: "Agreement for {{student_name}}", sections: SECTIONS, archived_at: null },
+    pipeline_contacts: { parent_name: "Pat Parent", parent_email: "pat@families.test", student_name: "Sam Student" },
+    counselor_signatures: { signer_name: "Casey Signer", kind: "typed", image_png: null, image_sha256: null },
+    ...o.rows,
+  };
+  const from = (table: string) => {
+    let op = "select";
+    const result = () => {
+      if (op === "insert") return { data: table === "agreements" ? { id: "ag-1" } : null, error: o.insertError?.[table] ?? null };
+      if (op === "update") return { data: null, error: o.updateError ?? null };
+      return { data: rows[table] ?? null, error: null };
+    };
+    const q = {
+      select: () => q,
+      eq: () => q,
+      in: () => q,
+      insert: (r: Row) => ((op = "insert"), writes.push(`insert ${table} ${JSON.stringify(r)}`), q),
+      update: (r: Row) => ((op = "update"), writes.push(`update ${table} ${JSON.stringify(r)}`), q),
+      maybeSingle: async () => result(),
+      single: async () => result(),
+      then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => Promise.resolve(result()).then(res, rej),
+    };
+    return q;
+  };
+  const rpc = async (name: string) => (writes.push(`rpc ${name}`), { data: null, error: o.rpcError ?? null });
+  return { db: { from, rpc } as unknown as Parameters<typeof resolveInvoiceAgreement>[0], writes };
+}
+
+const withApiUrl = async (fn: () => Promise<void>) => {
+  const prev = env.PUBLIC_API_URL;
+  (env as { PUBLIC_API_URL?: string }).PUBLIC_API_URL = "https://api.example.com";
+  try {
+    await fn();
+  } finally {
+    (env as { PUBLIC_API_URL?: string }).PUBLIC_API_URL = prev;
+  }
+};
+const rejects = async (p: Promise<unknown>) => {
+  try {
+    await p;
+    return null;
+  } catch (e) {
+    assert.ok(e instanceof HttpError, String(e));
+    return `${e.statusCode} ${e.code}`;
+  }
+};
+
+test("a draft id is a fourth strict variant", async () => {
+  assert.ok(invoiceAgreementInput.safeParse({ draftId: DRAFT_ID }).success);
+  assert.equal(invoiceAgreementInput.safeParse({ draftId: DRAFT_ID, title: "T", bodyText: "B" }).success, false);
+  assert.equal(invoiceAgreementInput.safeParse({ draftId: "nope" }).success, false);
+  await withSwitch(false, () => {
+    assert.equal(code(() => checkInvoiceAgreement({ draftId: DRAFT_ID }, { to: "a@b.test", send: true })), "404 agreements_off");
+  });
+});
+
+test("resolving a draft renders it for the family and the sender, writing nothing", async () => {
+  const { db, writes } = stubDb({ rows: { pipeline_contacts: { parent_name: "Pat\n\n2. Fake", parent_email: "p@x.test", student_name: "  Sam   Student " } } });
+  const r = await resolveInvoiceAgreement(db, "contact-1", { draftId: DRAFT_ID }, SENDER);
+  assert.equal(r.id, null);
+  assert.equal(r.title, "Agreement for Sam Student");
+  assert.ok(r.draft?.bodyText.includes("Casey Counselor guides Sam Student and Pat 2. Fake from "), r.draft?.bodyText);
+  assert.ok(!r.draft?.bodyText.includes("\n\n2. Fake"), "a name can't forge a heading");
+  assert.match(r.draft!.bodyText, /Signed for Northfield Admissions by Casey Signer, [A-Z][a-z]+ \d{1,2}, \d{4}\.$/);
+  assert.deepEqual(writes, []);
+});
+
+test("no parent address: the family is the student", async () => {
+  const { db } = stubDb({ rows: { pipeline_contacts: { parent_name: "Pat", parent_email: "", student_name: "Sam" } } });
+  const r = await resolveInvoiceAgreement(db, "contact-1", { draftId: DRAFT_ID }, SENDER);
+  assert.ok(r.draft?.bodyText.includes("guides Sam and Sam from"));
+});
+
+test("a draft's refusals: archived 404, no signature 409, no sender (the cron) 409", async () => {
+  assert.equal(await rejects(resolveInvoiceAgreement(stubDb({ rows: { contract_drafts: { id: DRAFT_ID, title: "T", sections: SECTIONS, archived_at: "2026-11-01" } } }).db, "c", { draftId: DRAFT_ID }, SENDER)), "404 undefined");
+  assert.equal(await rejects(resolveInvoiceAgreement(stubDb({ rows: { contract_drafts: null } }).db, "c", { draftId: DRAFT_ID }, SENDER)), "404 undefined");
+  assert.equal(await rejects(resolveInvoiceAgreement(stubDb({ rows: { counselor_signatures: null } }).db, "c", { draftId: DRAFT_ID }, SENDER)), "409 signature_needed");
+  assert.equal(await rejects(resolveInvoiceAgreement(stubDb({}).db, "c", { draftId: DRAFT_ID })), "409 draft_contract_send_now");
+});
+
+test("missing and unknown fields are named in words", () => {
+  assert.equal(contractFieldsMessage(["family_name"]), "Fill in the parent's or student's name on the family's card first");
+  assert.equal(contractFieldsMessage(["student_name", "family_name"]), "Fill in the student's name and the parent's or student's name on the family's card first");
+  assert.equal(contractFieldsMessage(["counselor_name"]), "Fill in your name in Settings first");
+  assert.equal(contractFieldsMessage(["fee"]), "The contract uses a field Meridies doesn't know: {{fee}}");
+  assert.equal(contractFieldsMessage([""]), "The contract uses a field Meridies doesn't know: an empty {{ }}");
+  // inherited property names are unknown fields, not card fields
+  assert.equal(contractFieldsMessage(["constructor", "__proto__"]), "The contract uses a field Meridies doesn't know: {{constructor}}, {{__proto__}}");
+  assert.equal(contractFieldsMessage(["Student_Name"]), "The contract uses a field Meridies doesn't know: {{Student_Name}}");
+});
+
+test("render failures map to 400s before anything is written", async () => {
+  const empty = stubDb({ rows: { pipeline_contacts: { parent_name: " ", parent_email: "p@x.test", student_name: "Sam" } } });
+  assert.equal(await rejects(resolveInvoiceAgreement(empty.db, "c", { draftId: DRAFT_ID }, SENDER)), "400 contract_fields_missing");
+  const long = stubDb({ rows: { contract_drafts: { id: DRAFT_ID, title: "T", sections: [{ ...SECTIONS[0], body: "{{student_name}}".repeat(3000) }, SECTIONS[1], SECTIONS[2]], archived_at: null }, pipeline_contacts: { parent_name: "P", parent_email: "p@x.test", student_name: "S".repeat(40) } } });
+  assert.equal(await rejects(resolveInvoiceAgreement(long.db, "c", { draftId: DRAFT_ID }, SENDER)), "400 contract_too_long");
+  assert.deepEqual([...empty.writes, ...long.writes], []);
+});
+
+test("a hand-written draft row is held to the save rules again: 400 contract_draft_invalid, nothing written", async () => {
+  // contract_drafts is writable through PostgREST by an admin, so the row may be any jsonb.
+  const bad: Row[] = [
+    { id: DRAFT_ID, title: "T", sections: [{ kind: "list" }], archived_at: null },
+    { id: DRAFT_ID, title: "T", sections: [SECTIONS[0], SECTIONS[1], SECTIONS[2], ...Array.from({ length: 38 }, (_, i) => ({ id: `c${i}`, kind: "clause", heading: "H", body: "x" }))], archived_at: null },
+    { id: DRAFT_ID, title: "T", sections: [{ ...SECTIONS[0], body: "x".repeat(50_001) }, SECTIONS[1], SECTIONS[2]], archived_at: null },
+    { id: DRAFT_ID, title: "T", sections: "nope", archived_at: null },
+    { id: DRAFT_ID, title: 7, sections: SECTIONS, archived_at: null },
+  ];
+  for (const row of bad) {
+    const { db, writes } = stubDb({ rows: { contract_drafts: row } });
+    let err: unknown;
+    await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER).catch((e) => (err = e));
+    assert.ok(err instanceof HttpError && err.statusCode === 400 && err.code === "contract_draft_invalid", JSON.stringify(row).slice(0, 80));
+    assert.equal(err.message, "This drafted contract needs fixing in your library before it can be sent.");
+    assert.deepEqual(writes, []);
+  }
+});
+
+test("issuing a draft: save, snapshot copied from the saved row, then the link", async () => {
+  await withApiUrl(async () => {
+    const { db, writes } = stubDb({});
+    const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
+    const out = await issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved });
+    assert.equal(out.id, "ag-1");
+    assert.equal(writes.length, 3);
+    assert.match(writes[0], /^insert agreements /);
+    assert.ok(writes[0].includes(JSON.stringify(resolved.draft!.bodyText)), "the rendered text is what is saved");
+    assert.equal(writes[1], `insert agreement_signatures ${JSON.stringify({ agreement_id: "ag-1", signer_name: "Casey Signer", kind: "typed", image_png: null, image_sha256: null })}`);
+    assert.equal(writes[2], "rpc issue_agreement_link");
+  });
+});
+
+test("a failed snapshot or link voids the new agreement and the error goes on", async () => {
+  await withApiUrl(async () => {
+    for (const fail of [{ insertError: { agreement_signatures: { code: "23514", message: "check" } } }, { rpcError: { code: "XX000", message: "boom" } }]) {
+      const { db, writes } = stubDb(fail);
+      const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
+      await assert.rejects(issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved }));
+      assert.equal(writes.at(-1), `update agreements ${JSON.stringify({ status: "void" })}`, writes.join(" | "));
+    }
+  });
+});
+
+test("a snapshot refused because the signature changed: voided, 409, never stamped with the new one", async () => {
+  await withApiUrl(async () => {
+    const { db, writes } = stubDb({ insertError: { agreement_signatures: { code: "42501", message: "rls" } } });
+    const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
+    // The saved row now differs from the one the text names.
+    resolved.draft = { ...resolved.draft!, signature: { ...resolved.draft!.signature, signer_name: "Someone Earlier" } };
+    const thrown = await issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved }).catch((e: unknown) => e);
+    assert.ok(thrown instanceof HttpError && thrown.statusCode === 409 && thrown.code === "signature_changed", String(thrown));
+    // What it leaves is said as it is: nothing went to the family, and the new agreement is void (no "send it again" with it).
+    assert.match(thrown.message, /signature changed while the contract was being signed, so nothing was sent to the family\. Attach the contract again and send the invoice again\.$/);
+    assert.equal(writes.filter((w) => w.startsWith("insert agreement_signatures")).length, 1);
+    assert.equal(writes.at(-1), `update agreements ${JSON.stringify({ status: "void" })}`);
+  });
+});
+
+test("a void that itself fails is logged with the agreement id and the original error, and the original error goes on", async () => {
+  await withApiUrl(async () => {
+    const logger = { error: (o: unknown, m?: string) => void calls.push([o as Record<string, unknown>, m]) };
+    const calls: Array<[Record<string, unknown>, string | undefined]> = [];
+    const failures = { insertError: { agreement_signatures: { code: "23514", message: "check boom" } } };
+    const run = async (updateError: PgErr) => {
+      calls.length = 0;
+      const { db } = stubDb({ ...failures, updateError });
+      const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
+      return issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved, logger }).catch((e: unknown) => e);
+    };
+    // The void works: nothing to report, the original error goes on.
+    const quiet = await run(null);
+    assert.ok(quiet instanceof HttpError, String(quiet));
+    assert.equal(calls.length, 0);
+    // The void fails too: one line naming the agreement, both errors; the thrown error is still the original.
+    const loud = await run({ code: "XX000", message: "void boom" });
+    assert.ok(loud instanceof HttpError && loud.message === (quiet as HttpError).message && loud.statusCode === (quiet as HttpError).statusCode, String(loud));
+    assert.equal(calls.length, 1);
+    const [obj, msg] = calls[0]!;
+    assert.equal(obj.agreement, "ag-1");
+    assert.ok((obj.err as { message: string }).message.includes((quiet as HttpError).message), "the original error");
+    assert.match((obj.voidErr as { message: string }).message, /void boom/);
+    assert.match(msg ?? "", /could not void/);
+  });
+});
+
+test("the service client (the cron) never signs a draft", async () => {
+  await withApiUrl(async () => {
+    const { db, writes } = stubDb({});
+    const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
+    assert.equal(await rejects(issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved, service: true })), "409 draft_contract_send_now");
+    assert.equal(await rejects(issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved: { id: null, title: "T" } })), "409 draft_contract_send_now");
+    assert.deepEqual(writes, []);
+  });
 });

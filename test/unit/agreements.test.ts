@@ -22,6 +22,8 @@ import {
   hashAgreementToken,
   mintAgreementLink,
   parseAcceptForm,
+  signatureImageLine,
+  signatureVerdict,
   truncateUserAgent,
 } from "../../src/lib/agreements.js";
 import { loggedUrl } from "../../src/lib/requestLog.js";
@@ -200,6 +202,47 @@ test("the public page renders the body inert and prints the consent sentence by 
   assert.match(html, /<pre[^>]*>/);
 });
 
+test("a drawn signature's image sits under the text, above the form or the accepted lines; its values are escaped", () => {
+  const signature = { href: "/agree/t/signature", name: "Jane <b>" };
+  const open = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, signature });
+  assert.ok(open.includes('<img src="/agree/t/signature" alt="Signature of Jane &lt;b&gt;"'), open);
+  assert.ok(!open.includes("<b>"), "the name is escaped");
+  assert.match(open, /max-width:320px;height:auto;display:block/);
+  assert.ok(open.indexOf("</pre>") < open.indexOf("<img") && open.indexOf("<img") < open.indexOf("<form"), "under the text, above the form");
+  const done = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, signature, accepted: { signerName: "Pat", acceptedAt: "2026-11-07T00:00:00.000Z", bodySha256: sha("Body") } });
+  assert.ok(done.indexOf("</pre>") < done.indexOf("<img") && done.indexOf("<img") < done.indexOf("Accepted by"), "and above the accepted lines");
+  assert.ok(!/<form/.test(done));
+  const quoted = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, signature: { href: '/a"x', name: 'J" onerror="x' } });
+  assert.ok(quoted.includes('src="/a&quot;x"') && quoted.includes('alt="Signature of J&quot; onerror=&quot;x"'), "a quote can't end an attribute");
+});
+
+test("without a signature the page is exactly what it was: no image, the form right after the text", () => {
+  const plain = agreementPageBody({ title: "Plan", bodyText: "Body", error: null });
+  assert.equal(agreementPageBody({ title: "Plan", bodyText: "Body", error: null, signature: null }), plain);
+  assert.ok(!plain.includes("<img"));
+  assert.match(plain, /<\/pre>\n<form method="post">/);
+  const done = agreementPageBody({ title: "Plan", bodyText: "Body", error: null, accepted: { signerName: "Pat", acceptedAt: "2026-11-07T00:00:00.000Z", bodySha256: sha("Body") } });
+  assert.match(done, /<\/pre>\n<p><strong>Accepted by Pat<\/strong>/);
+});
+
+test("the signature image is served only when it is drawn, its bytes hash to the recorded SHA-256, and the text names that hash", () => {
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+  const hash = createHash("sha256").update(png).digest("hex");
+  const text = `Terms\n\nSigned for P by Casey, November 18, 2026.\n${signatureImageLine(hash)}`;
+  const drawn = { signer_name: "Casey", kind: "drawn", image_sha256: hash, bytes: png };
+  assert.equal(signatureImageLine(hash), `Signature image SHA-256: ${hash}`);
+  assert.equal(signatureVerdict(drawn, text), "ok");
+  assert.equal(signatureVerdict(null, text), "none", "no snapshot (an older agreement)");
+  assert.equal(signatureVerdict({ signer_name: "Casey", kind: "typed", image_sha256: null, bytes: null }, text), "none", "a typed signature has no image");
+  // The stored bytes are not the ones the row names: refused.
+  assert.equal(signatureVerdict({ ...drawn, bytes: Buffer.concat([png, Buffer.from([0])]) }, text), "mismatch");
+  assert.equal(signatureVerdict({ ...drawn, bytes: null }, text), "mismatch");
+  // The row and its bytes agree, but the text the family accepts names another image (or none, or the hash only inside a longer line).
+  assert.equal(signatureVerdict(drawn, `Terms\n${signatureImageLine("0".repeat(64))}`), "mismatch");
+  assert.equal(signatureVerdict(drawn, "Terms"), "mismatch");
+  assert.equal(signatureVerdict(drawn, `Terms\nsee ${signatureImageLine(hash)}`), "mismatch");
+});
+
 test("a signer name with HTML is escaped on the page and in both emails, and the certificate goes in each", () => {
   const evil = `<img src=x onerror=alert(1)>`;
   const certificate = buildCertificate({
@@ -263,6 +306,11 @@ test("switched off (the default): every route answers 404 agreements_off before 
     assert.equal(r.headers["cache-control"], "no-store");
     assert.equal(r.headers["x-robots-tag"], "noindex");
   }
+  for (const path of ["file", "signature"]) {
+    const r = await app.inject({ method: "GET", url: `/agree/${"A".repeat(43)}/${path}` });
+    assert.equal(r.statusCode, 404, `/agree/<token>/${path}`);
+    assert.match(r.body, /not available/i);
+  }
   await app.close();
 });
 
@@ -280,6 +328,7 @@ test("switched on, the public page sends strict headers (no script allowed) even
     assert.match(csp, /default-src 'none'/);
     assert.ok(!/script-src/.test(csp), "no script source at all");
     assert.match(csp, /form-action 'self'/);
+    assert.match(csp, /(^|; )img-src 'self'(;|$)/, "the page may show its own signature image, from nowhere else");
     assert.equal(r.headers["cache-control"], "no-store");
     assert.equal(r.headers["x-robots-tag"], "noindex");
     assert.equal(r.headers["referrer-policy"], "no-referrer");
