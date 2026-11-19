@@ -11,6 +11,9 @@
  *   POST   /calendar/events                a practice event ("Planning milestone")
  *   PATCH  /calendar/events/:id
  *   DELETE /calendar/events/:id
+ *   POST   /calendar/events/series         a repeating practice event (one row per occurrence, one series_id)
+ *   PATCH  /calendar/events/series/:seriesId   this and following / all upcoming, per row
+ *   DELETE /calendar/events/series/:seriesId
  *
  * Meetings keep their own routes (routes/meetings.ts) because booking one can
  * create a Meet / Teams event on a connected calendar; the feed only reads
@@ -18,7 +21,8 @@
  * the feed for themselves and writes nothing here.
  */
 
-import type { FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   BUILTIN_TYPES,
@@ -33,6 +37,9 @@ import { badRequest, conflict, fromPostgrest, notFound } from "../lib/errors.js"
 import { fullCaseloadStudentIds, requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { connectedAccountEmail } from "../lib/oauth.js";
+import { expandSeriesDates, MAX_SERIES, shiftInstant, wallDelta, zonedInstant } from "../lib/recurrence.js";
+import { seriesReady } from "../lib/seriesSchema.js";
+import { repeatBody, SERIES_UNAVAILABLE } from "./meetings.js";
 
 type Row = Record<string, unknown>;
 
@@ -93,6 +100,63 @@ const practiceEventBody = z
     sharedWithStudent: z.boolean().optional(),
   })
   .strict();
+
+/** One practice event's fields plus when it repeats: a local date and wall-clock time (null: all day) in an IANA zone. */
+const seriesEventBody = practiceEventBody
+  .omit({ onDate: true, startsAt: true, endsAt: true })
+  .extend({
+    date: isoDate,
+    startMinutes: z.number().int().min(0).max(1439).nullable(),
+    durationMins: z.number().int().min(15).max(1440).optional(),
+    timeZone,
+    repeat: repeatBody,
+  })
+  .strict();
+const seriesParam = z.object({ seriesId: z.string().uuid() });
+const seriesScopeName = z.enum(["following", "all"]);
+/** Times are strings only: clearing a time (making the series all day) isn't a series edit. */
+const seriesEventPatchBody = z
+  .object({
+    anchorId: z.string().uuid(),
+    scope: seriesScopeName,
+    timeZone,
+    patch: practiceEventBody
+      .extend({ startsAt: z.string().datetime({ offset: true }), endsAt: z.string().datetime({ offset: true }) })
+      .partial()
+      .strict(),
+  })
+  .strict();
+const seriesEventDeleteQuery = z.object({ anchorId: z.string().uuid(), scope: seriesScopeName, timeZone: timeZone.optional() }).strict();
+type SeriesFailure = { id: string; date: string; message: string };
+
+const shiftDate = (date: string, n: number) => new Date(Date.parse(`${date}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+
+/**
+ * The caller's rows of a repeating practice event that a scoped change acts on: from the anchor's date
+ * (`following`) or from today in `tz` (`all`). The anchor must be the caller's and in the series, else 404.
+ */
+async function eventSeriesScope(request: FastifyRequest, seriesId: string, anchorId: string, scope: "following" | "all", tz: string) {
+  const owner = request.auth.userId;
+  const { data: anchor, error: aErr } = await request.db
+    .from("calendar_events")
+    .select("*")
+    .eq("id", anchorId)
+    .eq("owner_id", owner)
+    .maybeSingle();
+  if (aErr) throw fromPostgrest(aErr);
+  if (!anchor || anchor.series_id !== seriesId) throw notFound("That event isn't part of this repeating series");
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const { data, error } = await request.db
+    .from("calendar_events")
+    .select("*")
+    .eq("series_id", seriesId)
+    .eq("owner_id", owner)
+    .gte("on_date", scope === "following" ? String(anchor.on_date) : today)
+    .order("on_date", { ascending: true })
+    .limit(500);
+  if (error) throw fromPostgrest(error);
+  return { anchor: anchor as Row, rows: (data ?? []) as Row[] };
+}
 
 /** The caller's saved zone, if it is one this runtime knows. */
 function profileZone(tz: string | null | undefined): string | null {
@@ -338,6 +402,182 @@ export default async function calendarRoutes(app: FastifyInstance) {
         .single();
       if (error) throw fromPostgrest(error);
       return reply.code(201).send(toPracticeEvent(data as Row));
+    }
+  );
+
+  // ---- Repeating practice events (registered before /events/:id) -----------
+
+  /**
+   * A repeating practice event: one row per occurrence, all sharing a fresh `series_id`, ONE insert (so all or
+   * nothing). Timed rows start at `startMinutes` on each date's wall clock in `timeZone` and end `durationMins`
+   * later (start + minutes, so a DST change keeps the length); `startMinutes: null` makes all-day rows.
+   */
+  app.post(
+    "/events/series",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("calendar:events:series", 60, 60)] },
+    async (request, reply) => {
+      if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
+      const b = seriesEventBody.parse(request.body);
+      if (b.startMinutes !== null && b.durationMins === undefined) throw badRequest("Give the event a length");
+      if (b.sharedWithStudent && !b.studentId) throw badRequest("Only an event about a student can be shared");
+      await checkPracticeRefs(request, b);
+      let dates: string[];
+      try {
+        const { preset, count, until } = b.repeat;
+        dates = expandSeriesDates(b.date, { preset, end: count !== undefined ? { count } : { until: until! } }, MAX_SERIES);
+      } catch (err) {
+        if (err instanceof RangeError) throw badRequest(err.message);
+        throw err;
+      }
+      const seriesId = randomUUID();
+      const { data, error } = await request.db
+        .from("calendar_events")
+        .insert(
+          dates.map((d) => {
+            const startsAt = b.startMinutes === null ? null : zonedInstant(d, b.startMinutes, b.timeZone);
+            return {
+              owner_id: request.auth.userId,
+              student_id: b.studentId ?? null,
+              title: b.title,
+              detail: b.detail ?? null,
+              on_date: d,
+              starts_at: startsAt,
+              ends_at: startsAt ? new Date(Date.parse(startsAt) + b.durationMins! * 60_000).toISOString() : null,
+              type_id: b.typeId ?? null,
+              shared_with_student: b.sharedWithStudent ?? false,
+              series_id: seriesId,
+            };
+          })
+        )
+        .select("*");
+      if (error) throw fromPostgrest(error);
+      return reply.code(201).send({ seriesId, events: ((data ?? []) as Row[]).map(toPracticeEvent) });
+    }
+  );
+
+  /**
+   * A change to part of a repeating practice event: the caller's rows of the series from the anchor on
+   * (`following`) or from today in `timeZone` (`all`). Per row, not atomic: a row that fails is left as it was and
+   * listed in `failed`, the answer is still 200. A move shifts every row by the anchor's change (`onDate` gives the
+   * days, else `startsAt`'s wall-clock days; `startsAt` gives the minutes), so a row moved by hand keeps its offset;
+   * an `endsAt` sets every timed row to the anchor's new length, else a row keeps its own. ALL-DAY rows only get
+   * their date shifted: time keys are ignored for them. Times can't be cleared here (null is a 400). `skipped` is
+   * always 0: practice events have no status, and rows before the window are not counted.
+   */
+  app.patch(
+    "/events/series/:seriesId",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("calendar:events:series-update", 60, 60)] },
+    async (request) => {
+      if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
+      const { seriesId } = seriesParam.parse(request.params);
+      const body = seriesEventPatchBody.parse(request.body);
+      const p = body.patch;
+      if (Object.keys(p).length === 0) throw badRequest("Nothing to change");
+      await checkPracticeRefs(request, p);
+      const tz = body.timeZone;
+      const { anchor, rows } = await eventSeriesScope(request, seriesId, body.anchorId, body.scope, tz);
+      const anchorStart = anchor.starts_at ? String(anchor.starts_at) : null;
+      const wall = p.startsAt && anchorStart ? wallDelta(anchorStart, p.startsAt, tz) : null;
+      const shift = { days: p.onDate ? days(String(anchor.on_date), p.onDate) : (wall?.days ?? 0), minutes: wall?.minutes ?? 0 };
+      let duration: number | undefined;
+      if (p.endsAt) {
+        const from = p.startsAt ?? anchorStart;
+        if (!from) throw badRequest("An end time needs a start time");
+        duration = Date.parse(p.endsAt) - Date.parse(from);
+        if (!(duration > 0)) throw badRequest("The end has to be after the start");
+      }
+      const moved = shift.days !== 0 || shift.minutes !== 0;
+
+      let updated = 0;
+      const failed: SeriesFailure[] = [];
+      for (const row of rows) {
+        const update: Row = {};
+        if (p.title !== undefined) update.title = p.title;
+        if (p.detail !== undefined) update.detail = p.detail;
+        if (p.studentId !== undefined) update.student_id = p.studentId;
+        if (p.typeId !== undefined) update.type_id = p.typeId;
+        if (p.sharedWithStudent !== undefined) update.shared_with_student = p.sharedWithStudent;
+        // Un-assigning the student un-shares the event, as the single PATCH does.
+        if (p.studentId === null) update.shared_with_student = false;
+        if (shift.days !== 0) update.on_date = shiftDate(String(row.on_date), shift.days);
+        if (row.starts_at) {
+          const start = String(row.starts_at);
+          const newStart = moved ? shiftInstant(start, shift, tz) : start;
+          if (moved) update.starts_at = newStart;
+          if (duration !== undefined) update.ends_at = new Date(Date.parse(newStart) + duration).toISOString();
+          else if (moved && row.ends_at) {
+            update.ends_at = new Date(Date.parse(newStart) + Date.parse(String(row.ends_at)) - Date.parse(start)).toISOString();
+          }
+        }
+        // An all-day row sent only time keys: nothing of it changes, and it counts as done.
+        if (Object.keys(update).length === 0) {
+          updated += 1;
+          continue;
+        }
+        const { data, error } = await request.db
+          .from("calendar_events")
+          .update(update)
+          .eq("id", String(row.id))
+          .eq("owner_id", request.auth.userId)
+          .select("*")
+          .maybeSingle();
+        if (error || !data) {
+          const message = !error
+            ? "That event isn't on your calendar"
+            : error.code === "23514"
+              ? "Those times or that sharing choice don't fit this event (sharing needs a student)"
+              : "Couldn't change this event. Try again.";
+          request.log.warn({ seriesId, id: row.id, code: error?.code, err: error }, "series event update failed");
+          failed.push({ id: String(row.id), date: String(row.on_date), message });
+          continue;
+        }
+        updated += 1;
+      }
+      return { updated, skipped: 0, failed };
+    }
+  );
+
+  /**
+   * Delete part of a repeating practice event (the PATCH's rows), per row, with each row's type reassignment.
+   * `timeZone` decides "today" for `all` (UTC when left out; the app always sends it). `skipped` is always 0.
+   */
+  app.delete(
+    "/events/series/:seriesId",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("calendar:events:series-delete", 60, 60)] },
+    async (request) => {
+      if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
+      const { seriesId } = seriesParam.parse(request.params);
+      const q = seriesEventDeleteQuery.parse(request.query);
+      const { rows } = await eventSeriesScope(request, seriesId, q.anchorId, q.scope, q.timeZone ?? "UTC");
+      let deleted = 0;
+      const failed: SeriesFailure[] = [];
+      for (const row of rows) {
+        const id = String(row.id);
+        const { data, error } = await request.db
+          .from("calendar_events")
+          .delete()
+          .eq("id", id)
+          .eq("owner_id", request.auth.userId)
+          .select("id");
+        if (error || !data || data.length === 0) {
+          request.log.warn({ seriesId, id, code: error?.code, err: error }, "series event delete failed");
+          failed.push({
+            id,
+            date: String(row.on_date),
+            message: error ? "Couldn't delete this event. Try again." : "That event isn't on your calendar",
+          });
+          continue;
+        }
+        deleted += 1;
+        // Best effort, as DELETE /events/:id.
+        await request.db
+          .from("calendar_event_type_assignments")
+          .delete()
+          .eq("owner_id", request.auth.userId)
+          .eq("event_kind", "milestone")
+          .eq("event_ref", id);
+      }
+      return { deleted, skipped: 0, failed };
     }
   );
 

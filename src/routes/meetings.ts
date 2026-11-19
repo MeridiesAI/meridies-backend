@@ -115,7 +115,7 @@ function conferenceProvider(mode: string): ConnectProvider {
 }
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date");
-const repeatBody = z
+export const repeatBody = z
   .object({
     preset: z.enum(["daily", "weekdays", "weekly", "biweekly", "monthly"]),
     count: z.number().int().min(2).max(52).optional(),
@@ -142,7 +142,7 @@ const seriesMeetingBody = meetingBody
     repeat: repeatBody,
   })
   .strict();
-const SERIES_UNAVAILABLE = () => new HttpError(503, "Repeating events aren't switched on yet.", "series_unavailable");
+export const SERIES_UNAVAILABLE = () => new HttpError(503, "Repeating events aren't switched on yet.", "series_unavailable");
 /** The scoped series routes reach the round through this, so a test can see each call (the `__busy` pattern). */
 export const __seriesInvites = { prepare: prepareSeriesInviteRound, start: startSeriesDelivery };
 
