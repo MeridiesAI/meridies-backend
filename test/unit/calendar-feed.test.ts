@@ -109,15 +109,15 @@ test("tests already taken, test-optional, undated or outside the window are skip
 
 // ---- The builder's scope (it also runs under the service role for the iCal feed) ----
 
-/** A stand-in client: every query builder method chains, awaiting answers no rows; records `.in` filters per table. */
-function fakeDb() {
+/** A stand-in client: every query builder method chains, awaiting answers `rows[table]` (none by default); records `.in` filters per table. */
+function fakeDb(rows: Record<string, unknown[]> = {}) {
   const ins: Array<{ table: string; col: string; ids: string[] }> = [];
   const make = (table: string): unknown =>
     new Proxy(
       {},
       {
         get(_t, prop) {
-          if (prop === "then") return (resolve: (v: unknown) => void) => resolve({ data: [], error: null });
+          if (prop === "then") return (resolve: (v: unknown) => void) => resolve({ data: rows[table] ?? [], error: null });
           return (...args: unknown[]) => {
             if (prop === "in") ins.push({ table, col: String(args[0]), ids: args[1] as string[] });
             return make(table);
@@ -128,6 +128,18 @@ function fakeDb() {
   return { db: { from: (t: string) => make(t) } as never, ins };
 }
 const q = { from: "2027-01-01", to: "2027-01-31", tz: "UTC", includeDone: true, includeCancelled: false };
+
+test("a practice event is marked, a meeting is not", async () => {
+  const { db } = fakeDb({
+    calendar_events: [{ id: "p1", title: "Office hours", on_date: "2027-01-12", starts_at: null, ends_at: null, student_id: null, detail: null, type_id: null }],
+    meetings: [{ id: "m1", student_id: "s1", counselor_id: "c1", title: "Check-in", starts_at: "2027-01-10T15:00:00Z", ends_at: null, status: "scheduled" }],
+  });
+  const { items } = await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload: [] }, q);
+  assert.equal(items.find((i) => i.id === "milestone:p1")?.practice, true);
+  const meeting = items.find((i) => i.id === "meeting:m1");
+  assert.ok(meeting);
+  assert.equal("practice" in meeting, false);
+});
 
 test("inChunks splits a list into batches", () => {
   assert.deepEqual(inChunks([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);

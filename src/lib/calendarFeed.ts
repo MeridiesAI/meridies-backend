@@ -81,6 +81,8 @@ export type CalendarFeedItem = {
   school: string | null;
   /** A student's own event (`student_calendar_events`): theirs to edit and delete. */
   personal?: boolean;
+  /** The counselor's own practice event (`calendar_events`, `ref` its id): the only milestones they can move. */
+  practice?: true;
   /**
    * A booking made through the counselor's public booking link (`public_bookings`, 20261121000001): kind
    * `meeting`, no student, `ref` the booking's id. Not a `meetings` row, so not editable through /meetings.
@@ -822,6 +824,7 @@ export async function buildCalendarFeed(
       studentId: ns(r.student_id),
       detail: ns(r.detail),
       done: false,
+      practice: true,
     });
   }
 
