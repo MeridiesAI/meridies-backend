@@ -17,7 +17,7 @@ type Row = Record<string, unknown>;
 export const INVITE_DAYS = 30;
 export const PARENT_INVITE_TEMPLATE = "parent-invite";
 export const PARENT_MESSAGE_MAX = 4000;
-export const PASSWORD_MIN = 8;
+export const PASSWORD_MIN = 10;
 
 /** 32 random bytes, URL-safe: the secret in the emailed link. Only its hash is stored. */
 export function newInviteToken(): string {

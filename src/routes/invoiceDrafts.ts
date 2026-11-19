@@ -18,7 +18,7 @@ import { z } from "zod";
 import { crmError, todayIn } from "../lib/crm.js";
 import { badRequest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole } from "../lib/guards.js";
-import { checkInvoiceAgreement } from "../lib/invoiceAgreement.js";
+import { checkInvoiceAgreement, draftSendNow } from "../lib/invoiceAgreement.js";
 import { DRAFT_COLUMNS, draftPayload, draftProblem, draftStates, sendAtFor, toDraftDTO, type DraftPayload } from "../lib/invoiceDrafts.js";
 import { textingAvailable, textingUnavailable } from "../lib/invoiceTexting.js";
 import { limit } from "../lib/limits.js";
@@ -53,6 +53,8 @@ export default async function invoiceDraftRoutes(app: FastifyInstance) {
     if (problem) throw new HttpError(problem.status, problem.message, problem.code);
     if (repeatYearly && state !== "scheduled") throw badRequest("Only a scheduled invoice can repeat every year");
     checkInvoiceAgreement(payload.agreement, { to: payload.to || String(contact.parent_email || contact.student_email || ""), send: true });
+    // A drafted contract is signed by whoever presses Send; a cron can't sign, so it is sent now or saved unscheduled.
+    if (state === "scheduled" && payload.agreement && "draftId" in payload.agreement) throw draftSendNow();
     if (payload.channel === "text") {
       if (!String(contact.parent_phone || contact.student_phone || "").trim()) throw new HttpError(400, "Add a phone number to the contact's card first", "contact_no_phone");
       if (!(await textingAvailable(request.auth.userId))) throw textingUnavailable();

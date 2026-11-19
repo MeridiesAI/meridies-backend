@@ -186,6 +186,10 @@ const envSchema = z.object({
   STRIPE_BILLING_WEBHOOK_SECRET: blankIsUnset(
     z.string().regex(/^whsec_[A-Za-z0-9+/=]{10,}$/, "STRIPE_BILLING_WEBHOOK_SECRET must look like whsec_...").optional()
   ),
+  // Basic alerts by email (lib/opsAlerts.ts): off unless OPS_ALERTS_ENABLED is exactly "true". They go to ALERT_EMAIL, else to
+  // COMPANY_CONTACT_EMAIL. No outside service: the email goes through Resend, which is already in use.
+  OPS_ALERTS_ENABLED: blankIsUnset(z.string().optional()),
+  ALERT_EMAIL: blankIsUnset(z.string().email().optional()),
   // How many proxies stand between the internet and this process (Railway's
   // edge: one). Unset: one on Railway and in development, none elsewhere in
   // production (lib/proxyTrust.ts). request.ip is the address the outermost

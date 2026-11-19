@@ -74,11 +74,13 @@ revoke all on public.family_consent_requests from public, anon, authenticated;
 grant select on public.family_consent_requests to authenticated;
 grant all on public.family_consent_requests to service_role;
 
--- A Consultant reads the requests they made for their own students. Nobody else: not the student, not a parent.
+-- Whichever Consultant currently has the student reads the student's consent requests, so a caseload transfer never
+-- orphans a family's consent. Nobody else: not the student, not a parent, not a former Consultant. `counselor_id` is who
+-- made the request (history) and stays with them on a transfer.
 drop policy if exists family_consent_requests_select on public.family_consent_requests;
 create policy family_consent_requests_select on public.family_consent_requests
   for select to authenticated
-  using (counselor_id = (select auth.uid()) and private.is_counselor_of(student_id, (select auth.uid())));
+  using (private.is_counselor_of(student_id, (select auth.uid())));
 
 select private.attach_approval_gate('public.family_consent_requests');
 

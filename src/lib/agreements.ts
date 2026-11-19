@@ -23,7 +23,7 @@ import { z } from "zod";
 import { env } from "../env.js";
 import { AGREEMENT_CONSENT_SENTENCE } from "./agreementConsent.js";
 import { crmError } from "./crm.js";
-import { brandedEmail, brandedText, escapeHtml } from "./email.js";
+import { brandedEmail, brandedText, escapeAttr, escapeHtml } from "./email.js";
 import { HttpError } from "./errors.js";
 import { isResultsNotApplied } from "./resultsAvailability.js";
 
@@ -310,11 +310,17 @@ export function agreementPageBody(p: {
   accepted?: { signerName: string; acceptedAt: string; bodySha256: string } | null;
   /** A contract file the text is about (an uploaded PDF or DOCX): where the family opens it. */
   file?: { href: string } | null;
+  /** The counselor's drawn signature, shown under the text it signs. */
+  signature?: { href: string; name: string } | null;
 }): string {
   const head = `<h1>${escapeHtml(p.title)}</h1>${
     p.file ? `\n<p><a href="${escapeHtml(p.file.href)}" style="font-size:16px"><strong>Open the contract file</strong></a> (read it before you accept)</p>` : ""
   }
-<pre style="${PRE}">${escapeHtml(p.bodyText)}</pre>`;
+<pre style="${PRE}">${escapeHtml(p.bodyText)}</pre>${
+    p.signature
+      ? `\n<img src="${escapeAttr(p.signature.href)}" alt="Signature of ${escapeAttr(p.signature.name)}" style="max-width:320px;height:auto;display:block;margin:12px 0;background:#fff;border:1px solid #e5e7eb;border-radius:4px">`
+      : ""
+  }`;
   if (p.accepted) {
     return `${head}
 <p><strong>Accepted by ${escapeHtml(p.accepted.signerName)}</strong> on ${escapeHtml(p.accepted.acceptedAt)} (UTC).</p>
@@ -329,6 +335,28 @@ ${error}<form method="post">
 <button type="submit" style="padding:12px 18px;font-size:16px">Accept the agreement</button>
 </form>
 <p style="color:#6b7280;font-size:13px">${escapeHtml(NOT_CERTIFIED_LINE)} Your name, the time, your IP address and browser are recorded with a fingerprint of the text above.</p>`;
+}
+
+// ---- A drawn signature's image -----------------------------------------------------------------
+
+/** The line a drawn signature adds to the agreement's text (lib/contractDraft.ts): the text the family accepts names the image. */
+export const signatureImageLine = (sha256: string) => `Signature image SHA-256: ${sha256}`;
+
+/** An `agreement_signatures` row; `bytes` is its decoded `image_png`, only read for the image route. */
+export type StoredSignature = { signer_name: string; kind: string; image_sha256: string | null; bytes: Buffer | null };
+
+/** A drawn signature whose recorded hash is named, on a line of its own, in the text the family accepts. */
+export const textNamesSignature = (s: StoredSignature, bodyText: string): boolean =>
+  s.kind === "drawn" && s.image_sha256 !== null && bodyText.split("\n").includes(signatureImageLine(s.image_sha256));
+
+/**
+ * May this agreement's signature image be served? `none`: no snapshot or a typed one (nothing to show). `ok`: drawn, the
+ * bytes hash to the recorded SHA-256 and the text names that hash. `mismatch`: drawn but either fails, so nothing is served.
+ */
+export function signatureVerdict(s: StoredSignature | null, bodyText: string): "none" | "ok" | "mismatch" {
+  if (!s || s.kind !== "drawn") return "none";
+  const hashed = s.bytes !== null && createHash("sha256").update(s.bytes).digest("hex") === s.image_sha256;
+  return hashed && textNamesSignature(s, bodyText) ? "ok" : "mismatch";
 }
 
 // ---- Emails ----------------------------------------------------------------------------------

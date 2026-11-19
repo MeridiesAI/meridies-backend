@@ -1,3 +1,5 @@
+import { AlertTracker, alertText, kindOf } from "./lib/opsAlerts.js";
+import { escapeHtml, sendEmail } from "./lib/email.js";
 import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -94,6 +96,7 @@ import pipelineUnsubscribeRoutes from "./routes/pipelineUnsubscribe.js";
 import pipelineStripeRoutes from "./routes/pipelineStripe.js";
 import invoiceSettingsRoutes from "./routes/invoiceSettings.js";
 import contractRoutes from "./routes/contracts.js";
+import contractDraftRoutes from "./routes/contractDrafts.js";
 import invoiceDraftRoutes from "./routes/invoiceDrafts.js";
 // v10 sync imports: calendar-files-axis
 import calendarRoutes from "./routes/calendar.js";
@@ -272,6 +275,7 @@ export function buildApp() {
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
   app.register(invoiceSettingsRoutes, { prefix: "/pipeline" });
   app.register(contractRoutes, { prefix: "/pipeline" });
+  app.register(contractDraftRoutes, { prefix: "/pipeline" });
   app.register(invoiceDraftRoutes, { prefix: "/pipeline" });
   // Absolute paths (/pay/:token): the public pay link page.
   app.register(payRoutes);
@@ -336,6 +340,28 @@ export function buildApp() {
       );
     }
   });
+
+  // Basic alerts (lib/opsAlerts.ts). Reads only the status code and whether the path is a webhook; changes nothing.
+  if (env.OPS_ALERTS_ENABLED === "true") {
+    const tracker = new AlertTracker();
+    app.addHook("onResponse", async (request, reply) => {
+      const kind = kindOf(reply.statusCode, request.url);
+      if (!kind) return;
+      const breach = tracker.record(kind, Date.now());
+      if (!breach) return;
+      const { subject, lines } = alertText(breach);
+      const sent = await sendEmail({
+        to: env.ALERT_EMAIL ?? env.COMPANY_CONTACT_EMAIL,
+        recipient_kind: "counselor",
+        logger: request.log,
+        subject,
+        text: lines.join("\n"),
+        html: lines.map((l) => (l ? `<p style="margin:0 0 6px;">${escapeHtml(l)}</p>` : "<br>")).join(""),
+        template: `ops-alert-${kind}`,
+      }).catch((err: unknown) => ({ sent: false, error: err instanceof Error ? err.message : "send failed" }));
+      if (!sent.sent) request.log.error({ kind, err: sent.error }, "ops alert email not sent");
+    });
+  }
 
   app.setErrorHandler((err: FastifyError | ZodError | HttpError, request, reply) => {
     if (err instanceof ZodError) {
