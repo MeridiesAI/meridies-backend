@@ -2,7 +2,7 @@
 // Per row and not atomic: each affected row goes through applyMeetingPatch ("defer") or is deleted on its own, a row
 // that fails is reported and left alone, and ONE series invite round covers the rows that changed. Fastify + an
 // in-memory meetings table; Zoom, the token store and the rate limiter are answered by a fetch stub, so nothing real
-// is called or emailed. Rows are in the future (2027) so `starts_at > now` holds whenever this runs.
+// is called or emailed. Rows are far in the future (2040) so `starts_at > now` holds whenever this runs.
 process.env.ZOOM_CLIENT_ID = "zoom-client-id-0000";
 process.env.ZOOM_CLIENT_SECRET = "zoom-client-secret-0000";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key-000000";
@@ -212,9 +212,9 @@ const fresh = (rows: Row[], over: Partial<State> = {}): State => ({
   attendeeReads: 0,
   ...over,
 });
-// Weekly Tuesdays 9:00 New York, 2027 (EST: 14:00Z).
+// Weekly, 9:00 New York, January 2040 (EST: 14:00Z); far enough ahead that `starts_at > now` always holds.
 const weekly = (count: number, over: (n: number) => Row = () => ({})) =>
-  Array.from({ length: count }, (_, i) => row(i + 1, new Date(Date.UTC(2027, 0, 5 + 7 * i, 14)).toISOString(), over(i + 1)));
+  Array.from({ length: count }, (_, i) => row(i + 1, new Date(Date.UTC(2040, 0, 5 + 7 * i, 14)).toISOString(), over(i + 1)));
 const TZ = "America/New_York";
 type App = Awaited<ReturnType<typeof build>>;
 const patchSeries = (app: App, payload: unknown, series = SERIES) =>
@@ -256,7 +256,7 @@ test("all skips a held row (skipped: 1) and never touches a past row", async () 
 });
 
 test("following counts a non-scheduled row in the window as skipped, and rows of another series or student are never read", async () => {
-  const rows = [...weekly(4, (n) => (n === 4 ? { status: "cancelled" } : {})), row(20, "2027-02-02T14:00:00.000Z", { series_id: OTHER_SERIES }), row(21, "2027-02-09T14:00:00.000Z", { student_id: FOREIGN })];
+  const rows = [...weekly(4, (n) => (n === 4 ? { status: "cancelled" } : {})), row(20, "2040-02-02T14:00:00.000Z", { series_id: OTHER_SERIES }), row(21, "2040-02-09T14:00:00.000Z", { student_id: FOREIGN })];
   const state = fresh(rows);
   const app = await build(state);
   const res = await patchSeries(app, { anchorId: id(2), scope: "following", timeZone: TZ, patch: { agenda: "Bring drafts" } });
@@ -267,31 +267,31 @@ test("following counts a non-scheduled row in the window as skipped, and rows of
 });
 
 test("a row nudged +30 min earlier keeps its own offset after a +1 day move", async () => {
-  const rows = weekly(3, (n) => (n === 2 ? { starts_at: "2027-01-12T14:30:00.000Z", ends_at: "2027-01-12T15:15:00.000Z" } : {}));
+  const rows = weekly(3, (n) => (n === 2 ? { starts_at: "2040-01-12T14:30:00.000Z", ends_at: "2040-01-12T15:15:00.000Z" } : {}));
   const state = fresh(rows);
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { startsAt: "2027-01-06T14:00:00.000Z" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { startsAt: "2040-01-06T14:00:00.000Z" } });
   assert.equal(res.statusCode, 200, res.body);
   assert.deepEqual(
     state.rows.map((r) => [r.starts_at, r.ends_at]),
     [
-      ["2027-01-06T14:00:00.000Z", "2027-01-06T14:45:00.000Z"],
-      ["2027-01-13T14:30:00.000Z", "2027-01-13T15:15:00.000Z"],
-      ["2027-01-20T14:00:00.000Z", "2027-01-20T14:45:00.000Z"],
+      ["2040-01-06T14:00:00.000Z", "2040-01-06T14:45:00.000Z"],
+      ["2040-01-13T14:30:00.000Z", "2040-01-13T15:15:00.000Z"],
+      ["2040-01-20T14:00:00.000Z", "2040-01-20T14:45:00.000Z"],
     ]
   );
   await app.close();
 });
 
-test("a move across the DST end keeps the local wall clock (America/New_York, Nov 7 2027)", async () => {
-  // Tuesdays 9:00 local: EDT (13:00Z) before Nov 7, EST (14:00Z) after. Move all to 10:00 local.
-  const rows = ["2027-10-26T13:00:00.000Z", "2027-11-02T13:00:00.000Z", "2027-11-09T14:00:00.000Z", "2027-11-16T14:00:00.000Z"].map((t, i) => row(i + 1, t));
+test("a move across the DST end keeps the local wall clock (America/New_York, Nov 4 2040)", async () => {
+  // Tuesdays 9:00 local: EDT (13:00Z) before Nov 4, EST (14:00Z) after. Move all to 10:00 local.
+  const rows = ["2040-10-23T13:00:00.000Z", "2040-10-30T13:00:00.000Z", "2040-11-06T14:00:00.000Z", "2040-11-13T14:00:00.000Z"].map((t, i) => row(i + 1, t));
   const state = fresh(rows);
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { startsAt: "2027-10-26T14:00:00.000Z" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { startsAt: "2040-10-23T14:00:00.000Z" } });
   assert.equal(res.statusCode, 200, res.body);
-  assert.deepEqual(state.rows.map((r) => r.starts_at), ["2027-10-26T14:00:00.000Z", "2027-11-02T14:00:00.000Z", "2027-11-09T15:00:00.000Z", "2027-11-16T15:00:00.000Z"]);
-  assert.deepEqual(state.rows.map((r) => r.ends_at), ["2027-10-26T14:45:00.000Z", "2027-11-02T14:45:00.000Z", "2027-11-09T15:45:00.000Z", "2027-11-16T15:45:00.000Z"]);
+  assert.deepEqual(state.rows.map((r) => r.starts_at), ["2040-10-23T14:00:00.000Z", "2040-10-30T14:00:00.000Z", "2040-11-06T15:00:00.000Z", "2040-11-13T15:00:00.000Z"]);
+  assert.deepEqual(state.rows.map((r) => r.ends_at), ["2040-10-23T14:45:00.000Z", "2040-10-30T14:45:00.000Z", "2040-11-06T15:45:00.000Z", "2040-11-13T15:45:00.000Z"]);
   await app.close();
 });
 
@@ -306,7 +306,7 @@ test("a provider 409 on row 2: one failed entry with its local date and message,
   assert.equal(out.updated, 2);
   assert.equal(out.failed.length, 1);
   assert.equal(out.failed[0].id, id(2));
-  assert.equal(out.failed[0].date, "2027-01-12");
+  assert.equal(out.failed[0].date, "2040-01-12");
   assert.match(out.failed[0].message, /Zoom/, "the provider's words, not a database error");
   assert.equal(state.rows[1]!.title, "Weekly check-in", "the failed row is untouched");
   assert.deepEqual([state.rows[0]!.title, state.rows[2]!.title], ["New title", "New title"]);
@@ -360,17 +360,17 @@ test("mode, attendeeIds, status or sendInvites inside patch is a 400 and changes
 });
 
 test("a resize (endsAt only) sets each row's duration from its own start", async () => {
-  const rows = weekly(3, (n) => (n === 2 ? { starts_at: "2027-01-12T14:30:00.000Z", ends_at: "2027-01-12T15:00:00.000Z" } : {}));
+  const rows = weekly(3, (n) => (n === 2 ? { starts_at: "2040-01-12T14:30:00.000Z", ends_at: "2040-01-12T15:00:00.000Z" } : {}));
   const state = fresh(rows);
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { endsAt: "2027-01-05T15:30:00.000Z" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { endsAt: "2040-01-05T15:30:00.000Z" } });
   assert.equal(res.statusCode, 200, res.body);
   assert.deepEqual(
     state.rows.map((r) => [r.starts_at, r.ends_at]),
     [
-      ["2027-01-05T14:00:00.000Z", "2027-01-05T15:30:00.000Z"],
-      ["2027-01-12T14:30:00.000Z", "2027-01-12T16:00:00.000Z"],
-      ["2027-01-19T14:00:00.000Z", "2027-01-19T15:30:00.000Z"],
+      ["2040-01-05T14:00:00.000Z", "2040-01-05T15:30:00.000Z"],
+      ["2040-01-12T14:30:00.000Z", "2040-01-12T16:00:00.000Z"],
+      ["2040-01-19T14:00:00.000Z", "2040-01-19T15:30:00.000Z"],
     ]
   );
   assert.deepEqual(Object.keys(state.updates[0]!.values), ["ends_at"], "the start is not sent");
@@ -380,16 +380,16 @@ test("a resize (endsAt only) sets each row's duration from its own start", async
 test("an end at or before the start is a 400", async () => {
   const state = fresh(weekly(2));
   const app = await build(state);
-  let res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { endsAt: "2027-01-05T14:00:00.000Z" } });
+  let res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { endsAt: "2040-01-05T14:00:00.000Z" } });
   assert.equal(res.statusCode, 400, res.body);
-  res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { startsAt: "2027-01-05T16:00:00.000Z", endsAt: "2027-01-05T15:00:00.000Z" } });
+  res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { startsAt: "2040-01-05T16:00:00.000Z", endsAt: "2040-01-05T15:00:00.000Z" } });
   assert.equal(res.statusCode, 400, res.body);
   assert.equal(state.updates.length, 0);
   await app.close();
 });
 
 test("an anchor that isn't part of the series is a 404", async () => {
-  const state = fresh([...weekly(2), row(30, "2027-01-05T14:00:00.000Z", { series_id: OTHER_SERIES })]);
+  const state = fresh([...weekly(2), row(30, "2040-01-05T14:00:00.000Z", { series_id: OTHER_SERIES })]);
   const app = await build(state);
   let res = await patchSeries(app, { anchorId: id(30), scope: "all", timeZone: TZ, patch: { title: "x" } });
   assert.equal(res.statusCode, 404, res.body);
@@ -455,9 +455,9 @@ test("DELETE all removes upcoming scheduled rows only, with ONE cancel round fro
   assert.deepEqual(prepared[0]!.after, []);
   assert.equal(prepared[0]!.notify, true);
   assert.deepEqual(prepared[0]!.before.map((b) => [b.id, b.status, b.startsAt]), [
-    [id(1), "scheduled", "2027-01-05T14:00:00.000Z"],
-    [id(2), "scheduled", "2027-01-12T14:00:00.000Z"],
-    [id(4), "scheduled", "2027-01-26T14:00:00.000Z"],
+    [id(1), "scheduled", "2040-01-05T14:00:00.000Z"],
+    [id(2), "scheduled", "2040-01-12T14:00:00.000Z"],
+    [id(4), "scheduled", "2040-01-26T14:00:00.000Z"],
   ]);
   assert.equal(charges("meeting-invites:").length, 0, "a cancel is never charged");
   assert.equal(out.invites.status, "sending");
@@ -484,7 +484,7 @@ test("DELETE: a row whose delete errors is in failed, not in deleted, and its st
   assert.equal(res.statusCode, 200, res.body);
   const out = res.json();
   assert.equal(out.deleted, 2);
-  assert.deepEqual(out.failed, [{ id: id(2), date: "2027-01-12", message: "Couldn't delete this meeting. Try again." }]);
+  assert.deepEqual(out.failed, [{ id: id(2), date: "2040-01-12", message: "Couldn't delete this meeting. Try again." }]);
   assert.deepEqual(state.rows.map((r) => r.id), [id(2)]);
   assert.deepEqual(prepared[0]!.before.map((b) => b.id), [id(1), id(3)]);
   await app.close();

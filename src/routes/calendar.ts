@@ -153,6 +153,7 @@ async function eventSeriesScope(request: FastifyRequest, seriesId: string, ancho
     .eq("owner_id", owner)
     .gte("on_date", scope === "following" ? String(anchor.on_date) : today)
     .order("on_date", { ascending: true })
+    // A series is at most MAX_SERIES (52) rows, so this bound is never reached; it only keeps the read finite.
     .limit(500);
   if (error) throw fromPostgrest(error);
   return { anchor: anchor as Row, rows: (data ?? []) as Row[] };

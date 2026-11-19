@@ -349,7 +349,7 @@ test("sendInvites with invites ready: ONE invite round for all 4 rows (one charg
   const state = fresh();
   const app = await build(state);
   // Ahead of now: a round tells only about occurrences still to come.
-  const res = await post(app, { ...body, date: "2030-03-05", sendInvites: true });
+  const res = await post(app, { ...body, date: "2040-03-06", sendInvites: true });
   assert.equal(res.statusCode, 201, res.body);
   assert.ok(state.rows.every((r) => r.send_invites === true));
   assert.equal(inviteCharges().length, 1);

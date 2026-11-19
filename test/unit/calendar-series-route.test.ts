@@ -1,6 +1,7 @@
 // POST /calendar/events/series, PATCH and DELETE /calendar/events/series/:seriesId: a repeating practice event.
 // Fastify + an in-memory calendar_events table (with the two DB invariants as CHECKs answering 23514); the rate
-// limiter's RPC is answered by a fetch stub. Occurrence rows are in 2027 so "today" never reaches them.
+// limiter's RPC is answered by a fetch stub. Only the DELETE `all` test reads the clock (today in a zone); the rest
+// use `following`, whose window is the anchor's date, and fixtures in 2040.
 process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key-000000";
 
 import assert from "node:assert/strict";
@@ -16,6 +17,9 @@ type Row = Record<string, unknown>;
 const OWNER = "00000000-0000-4000-8000-000000000001";
 const OTHER_OWNER = "00000000-0000-4000-8000-000000000009";
 const STUDENT = "00000000-0000-4000-8000-000000000002";
+const FOREIGN_STUDENT = "00000000-0000-4000-8000-000000000003";
+const OWN_TYPE = "00000000-0000-4000-8000-0000000000a1";
+const FOREIGN_TYPE = "00000000-0000-4000-8000-0000000000a2";
 const SERIES = "00000000-0000-4000-8000-00000000c0de";
 const OTHER_SERIES = "00000000-0000-4000-8000-00000000beef";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -80,15 +84,19 @@ function fakeDb(s: State) {
         if (op("delete")) s.assignmentDeletes.push(String(eqs.find(([k]) => k === "event_ref")?.[1]));
         return { data: null, error: null };
       }
-      if (table === "profiles") return { data: { id: STUDENT, counselor_id: OWNER, archived_at: null }, error: null };
+      const eqId = eqs.find(([k]) => k === "id")?.[1];
+      // RLS hides another counselor's student and another owner's type: no row.
+      if (table === "profiles") return { data: eqId === STUDENT ? { id: STUDENT, counselor_id: OWNER } : null, error: null };
+      if (table === "calendar_event_types") return { data: eqId === OWN_TYPE ? { id: OWN_TYPE } : null, error: null };
       if (table !== "calendar_events") return { data: [], error: null };
       const match = (r: Row) =>
         eqs.every(([k, v]) => r[k] === v) && all("gte").every(([, [k, v]]) => String(r[k as string]) >= String(v));
       if (op("insert")) {
-        const values = op("insert")![1][0] as Row[];
+        const values = [op("insert")![1][0]].flat() as Row[];
         s.inserts.push(values);
         const saved = values.map((v, i) => ({ id: id(100 + s.rows.length + i), created_at: "c", updated_at: "u", ...v }));
         s.rows.push(...saved);
+        if (op("single")) return { data: { ...saved[0] }, error: null };
         return { data: saved.map((r) => ({ ...r })), error: null };
       }
       if (op("update")) {
@@ -159,10 +167,10 @@ const ev = (n: number, onDate: string, startsAt: string | null, over: Row = {}):
   updated_at: "u",
   ...over,
 });
-// Weekly Tuesdays 9:00-10:00 New York, 2027 (EST: 14:00Z).
+// Weekly 9:00-10:00 New York, January 2040 (EST: 14:00Z).
 const weekly = (count: number) =>
   Array.from({ length: count }, (_, i) => {
-    const d = new Date(Date.UTC(2027, 0, 5 + 7 * i, 14));
+    const d = new Date(Date.UTC(2040, 0, 5 + 7 * i, 14));
     return ev(i + 1, d.toISOString().slice(0, 10), d.toISOString());
   });
 const create = (app: App, payload: unknown) => app.inject({ method: "POST", url: "/calendar/events/series", payload: payload as object });
@@ -177,14 +185,14 @@ const todayIn = (tz: string) => new Intl.DateTimeFormat("en-CA", { timeZone: tz,
 test("POST weekly x3 timed: 3 rows in ONE insert, one series_id, 7 days apart on the wall clock", async () => {
   const state = fresh();
   const app = await build(state);
-  const res = await create(app, { title: "Planning", date: "2027-01-05", startMinutes: 540, durationMins: 45, timeZone: TZ, repeat: { preset: "weekly", count: 3 } });
+  const res = await create(app, { title: "Planning", date: "2040-01-05", startMinutes: 540, durationMins: 45, timeZone: TZ, repeat: { preset: "weekly", count: 3 } });
   assert.equal(res.statusCode, 201, res.body);
   assert.equal(state.inserts.length, 1);
   const body = res.json();
   assert.equal(body.events.length, 3);
-  assert.deepEqual(body.events.map((e: Row) => e.onDate), ["2027-01-05", "2027-01-12", "2027-01-19"]);
-  assert.deepEqual(body.events.map((e: Row) => e.startsAt), ["2027-01-05T14:00:00.000Z", "2027-01-12T14:00:00.000Z", "2027-01-19T14:00:00.000Z"]);
-  assert.deepEqual(body.events.map((e: Row) => e.endsAt), ["2027-01-05T14:45:00.000Z", "2027-01-12T14:45:00.000Z", "2027-01-19T14:45:00.000Z"]);
+  assert.deepEqual(body.events.map((e: Row) => e.onDate), ["2040-01-05", "2040-01-12", "2040-01-19"]);
+  assert.deepEqual(body.events.map((e: Row) => e.startsAt), ["2040-01-05T14:00:00.000Z", "2040-01-12T14:00:00.000Z", "2040-01-19T14:00:00.000Z"]);
+  assert.deepEqual(body.events.map((e: Row) => e.endsAt), ["2040-01-05T14:45:00.000Z", "2040-01-12T14:45:00.000Z", "2040-01-19T14:45:00.000Z"]);
   for (const r of state.inserts[0]!) {
     assert.equal(r.series_id, body.seriesId);
     assert.equal(r.owner_id, OWNER);
@@ -204,24 +212,24 @@ test("POST across the 2027-11-07 New York DST end keeps 9:00 local", async () =>
 test("POST all day: starts_at and ends_at null", async () => {
   const state = fresh();
   const app = await build(state);
-  const res = await create(app, { title: "Essay day", date: "2027-01-05", startMinutes: null, timeZone: TZ, repeat: { preset: "daily", count: 2 } });
+  const res = await create(app, { title: "Essay day", date: "2040-01-05", startMinutes: null, timeZone: TZ, repeat: { preset: "daily", count: 2 } });
   assert.equal(res.statusCode, 201, res.body);
   for (const r of state.inserts[0]!) {
     assert.equal(r.starts_at, null);
     assert.equal(r.ends_at, null);
   }
-  assert.deepEqual(state.inserts[0]!.map((r) => r.on_date), ["2027-01-05", "2027-01-06"]);
+  assert.deepEqual(state.inserts[0]!.map((r) => r.on_date), ["2040-01-05", "2040-01-06"]);
   await app.close();
 });
 
 test("POST refuses: timed without durationMins, sharing without a student, over the cap, a stray key", async () => {
   const app = await build(fresh());
-  const base = { title: "P", date: "2027-01-05", startMinutes: 540, durationMins: 30, timeZone: TZ, repeat: { preset: "weekly", count: 3 } };
+  const base = { title: "P", date: "2040-01-05", startMinutes: 540, durationMins: 30, timeZone: TZ, repeat: { preset: "weekly", count: 3 } };
   const { durationMins: _d, ...noDuration } = base;
   assert.equal((await create(app, noDuration)).statusCode, 400);
   assert.equal((await create(app, { ...base, sharedWithStudent: true })).statusCode, 400);
   assert.equal((await create(app, { ...base, repeat: { preset: "daily", until: "2028-06-01" } })).statusCode, 400);
-  assert.equal((await create(app, { ...base, onDate: "2027-01-05" })).statusCode, 400);
+  assert.equal((await create(app, { ...base, onDate: "2040-01-05" })).statusCode, 400);
   await app.close();
 });
 
@@ -246,21 +254,21 @@ test("PATCH following {days:1}: moves on_date and instants of the anchor and lat
 
 test("PATCH onDate drives days; a nudged row keeps its own offset; an all-day row only moves its date", async () => {
   const rows = weekly(3);
-  rows[1]!.starts_at = "2027-01-12T15:30:00.000Z"; // nudged to 10:30 local by hand
-  rows[1]!.ends_at = "2027-01-12T16:00:00.000Z";
+  rows[1]!.starts_at = "2040-01-12T15:30:00.000Z"; // nudged to 10:30 local by hand
+  rows[1]!.ends_at = "2040-01-12T16:00:00.000Z";
   rows[2]!.starts_at = null; // made all day by hand
   rows[2]!.ends_at = null;
   const state = fresh(rows);
   const app = await build(state);
   // Anchor row 1: one day later and an hour later.
-  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { onDate: "2027-01-06", startsAt: "2027-01-06T15:00:00.000Z" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { onDate: "2040-01-06", startsAt: "2040-01-06T15:00:00.000Z" } });
   assert.equal(res.statusCode, 200, res.body);
   assert.equal(res.json().updated, 3);
-  assert.equal(state.rows[0]!.starts_at, "2027-01-06T15:00:00.000Z");
-  assert.equal(state.rows[1]!.on_date, "2027-01-13");
-  assert.equal(state.rows[1]!.starts_at, "2027-01-13T16:30:00.000Z", "nudged row keeps its offset");
-  assert.equal(state.rows[1]!.ends_at, "2027-01-13T17:00:00.000Z", "and its own 30 minutes");
-  assert.equal(state.rows[2]!.on_date, "2027-01-20");
+  assert.equal(state.rows[0]!.starts_at, "2040-01-06T15:00:00.000Z");
+  assert.equal(state.rows[1]!.on_date, "2040-01-13");
+  assert.equal(state.rows[1]!.starts_at, "2040-01-13T16:30:00.000Z", "nudged row keeps its offset");
+  assert.equal(state.rows[1]!.ends_at, "2040-01-13T17:00:00.000Z", "and its own 30 minutes");
+  assert.equal(state.rows[2]!.on_date, "2040-01-20");
   assert.equal(state.rows[2]!.starts_at, null, "all-day row ignores the time keys");
   assert.equal(state.rows[2]!.ends_at, null);
   assert.deepEqual(Object.keys(state.updates[2]!.values), ["on_date"]);
@@ -272,7 +280,7 @@ test("PATCH a move across the DST end keeps the local time", async () => {
   const state = fresh(rows);
   const app = await build(state);
   // 9:00 -> 10:00 local on the anchor (EDT).
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { startsAt: "2027-10-31T14:00:00.000Z" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { startsAt: "2027-10-31T14:00:00.000Z" } });
   assert.equal(res.statusCode, 200, res.body);
   assert.equal(state.rows[1]!.starts_at, "2027-11-07T15:00:00.000Z", "10:00 EST");
   assert.equal(state.rows[1]!.on_date, "2027-11-07");
@@ -282,7 +290,7 @@ test("PATCH a move across the DST end keeps the local time", async () => {
 test("PATCH resize (endsAt only) sets every timed row's length", async () => {
   const state = fresh(weekly(3));
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { endsAt: "2027-01-05T14:30:00.000Z" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { endsAt: "2040-01-05T14:30:00.000Z" } });
   assert.equal(res.statusCode, 200, res.body);
   for (const r of state.rows) assert.equal(Date.parse(String(r.ends_at)) - Date.parse(String(r.starts_at)), 30 * 60_000);
   assert.deepEqual(Object.keys(state.updates[0]!.values), ["ends_at"]);
@@ -292,8 +300,8 @@ test("PATCH resize (endsAt only) sets every timed row's length", async () => {
 test("PATCH refuses with 400: end not after start, a null time, an unknown or forbidden key", async () => {
   const state = fresh(weekly(2));
   const app = await build(state);
-  const p = (patch: unknown) => patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch });
-  assert.equal((await p({ endsAt: "2027-01-05T14:00:00.000Z" })).statusCode, 400);
+  const p = (patch: unknown) => patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch });
+  assert.equal((await p({ endsAt: "2040-01-05T14:00:00.000Z" })).statusCode, 400);
   assert.equal((await p({ startsAt: null })).statusCode, 400);
   assert.equal((await p({ endsAt: null })).statusCode, 400);
   assert.equal((await p({ colour: "red" })).statusCode, 400);
@@ -304,20 +312,20 @@ test("PATCH refuses with 400: end not after start, a null time, an unknown or fo
 });
 
 test("PATCH 404: anchor in another series, or another owner's", async () => {
-  const rows = [...weekly(2), ev(7, "2027-01-05", null, { series_id: OTHER_SERIES }), ev(8, "2027-01-05", null, { owner_id: OTHER_OWNER })];
+  const rows = [...weekly(2), ev(7, "2040-01-05", null, { series_id: OTHER_SERIES }), ev(8, "2040-01-05", null, { owner_id: OTHER_OWNER })];
   const state = fresh(rows);
   const app = await build(state);
-  assert.equal((await patchSeries(app, { anchorId: id(7), scope: "all", timeZone: TZ, patch: { title: "x" } })).statusCode, 404);
-  assert.equal((await patchSeries(app, { anchorId: id(8), scope: "all", timeZone: TZ, patch: { title: "x" } })).statusCode, 404);
+  assert.equal((await patchSeries(app, { anchorId: id(7), scope: "following", timeZone: TZ, patch: { title: "x" } })).statusCode, 404);
+  assert.equal((await patchSeries(app, { anchorId: id(8), scope: "following", timeZone: TZ, patch: { title: "x" } })).statusCode, 404);
   assert.equal(state.updates.length, 0);
   await app.close();
 });
 
 test("PATCH never touches another owner's row of the same series id", async () => {
-  const rows = [...weekly(2), ev(8, "2027-01-19", null, { owner_id: OTHER_OWNER })];
+  const rows = [...weekly(2), ev(8, "2040-01-19", null, { owner_id: OTHER_OWNER })];
   const state = fresh(rows);
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { title: "Mine" } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { title: "Mine" } });
   assert.equal(res.json().updated, 2);
   assert.equal(state.rows[2]!.title, "Planning block");
   await app.close();
@@ -328,11 +336,11 @@ test("PATCH per row: a failing row is reported, the others updated, still 200; a
   rows[2]!.student_id = STUDENT; // only row 3 can be shared
   const state = fresh(rows, { updateFails: new Set([id(2)]) });
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { sharedWithStudent: true } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { sharedWithStudent: true } });
   assert.equal(res.statusCode, 200, res.body);
   const body = res.json();
   assert.equal(body.updated, 1);
-  assert.deepEqual(body.failed.map((f: Row) => [f.id, f.date]), [[id(1), "2027-01-05"], [id(2), "2027-01-12"]]);
+  assert.deepEqual(body.failed.map((f: Row) => [f.id, f.date]), [[id(1), "2040-01-05"], [id(2), "2040-01-12"]]);
   assert.match(body.failed[0].message, /student/i);
   assert.equal(body.failed[1].message, "Couldn't change this event. Try again.");
   assert.equal(state.rows[2]!.shared_with_student, true);
@@ -343,7 +351,7 @@ test("PATCH un-assigning the student un-shares", async () => {
   const rows = weekly(2).map((r) => ({ ...r, student_id: STUDENT, shared_with_student: true }));
   const state = fresh(rows);
   const app = await build(state);
-  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { studentId: null } });
+  const res = await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { studentId: null } });
   assert.equal(res.json().updated, 2);
   assert.deepEqual(state.updates[0]!.values, { student_id: null, shared_with_student: false });
   await app.close();
@@ -387,15 +395,15 @@ test("DELETE per row: a failure is reported, never thrown", async () => {
   const res = await deleteSeries(app, `anchorId=${id(1)}&scope=following&timeZone=${encodeURIComponent(TZ)}`);
   assert.equal(res.statusCode, 200, res.body);
   assert.equal(res.json().deleted, 2);
-  assert.deepEqual(res.json().failed, [{ id: id(2), date: "2027-01-12", message: "Couldn't delete this event. Try again." }]);
+  assert.deepEqual(res.json().failed, [{ id: id(2), date: "2040-01-12", message: "Couldn't delete this event. Try again." }]);
   assert.deepEqual(state.rows.map((r) => r.id), [id(2)]);
   await app.close();
 });
 
 test("DELETE 404 for an anchor outside the series", async () => {
-  const state = fresh([...weekly(2), ev(7, "2027-01-05", null, { series_id: OTHER_SERIES })]);
+  const state = fresh([...weekly(2), ev(7, "2040-01-05", null, { series_id: OTHER_SERIES })]);
   const app = await build(state);
-  assert.equal((await deleteSeries(app, `anchorId=${id(7)}&scope=all`)).statusCode, 404);
+  assert.equal((await deleteSeries(app, `anchorId=${id(7)}&scope=following`)).statusCode, 404);
   assert.equal(state.deletes.length, 0);
   await app.close();
 });
@@ -406,15 +414,40 @@ test("all three answer 503 series_unavailable without the column", async () => {
   const state = fresh(weekly(2), { seriesColumn: false });
   const app = await build(state);
   const responses = [
-    await create(app, { title: "P", date: "2027-01-05", startMinutes: null, timeZone: TZ, repeat: { preset: "weekly", count: 2 } }),
-    await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { title: "x" } }),
-    await deleteSeries(app, `anchorId=${id(1)}&scope=all`),
+    await create(app, { title: "P", date: "2040-01-05", startMinutes: null, timeZone: TZ, repeat: { preset: "weekly", count: 2 } }),
+    await patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch: { title: "x" } }),
+    await deleteSeries(app, `anchorId=${id(1)}&scope=following`),
   ];
   for (const res of responses) {
     assert.equal(res.statusCode, 503, res.body);
     assert.equal(res.json().code, "series_unavailable");
   }
   assert.equal(state.inserts.length + state.updates.length + state.deletes.length, 0);
+  await app.close();
+});
+
+test("a foreign studentId or typeId is refused (404) on the series POST and PATCH, nothing written", async () => {
+  const state = fresh(weekly(2));
+  const app = await build(state);
+  const base = { title: "P", date: "2040-01-05", startMinutes: null, timeZone: TZ, repeat: { preset: "weekly", count: 2 } };
+  assert.equal((await create(app, { ...base, studentId: FOREIGN_STUDENT })).statusCode, 404);
+  assert.equal((await create(app, { ...base, typeId: FOREIGN_TYPE })).statusCode, 404);
+  assert.equal((await create(app, { ...base, studentId: STUDENT, typeId: OWN_TYPE })).statusCode, 201, "own refs pass");
+  const p = (patch: unknown) => patchSeries(app, { anchorId: id(1), scope: "following", timeZone: TZ, patch });
+  assert.equal((await p({ studentId: FOREIGN_STUDENT })).statusCode, 404);
+  assert.equal((await p({ typeId: FOREIGN_TYPE })).statusCode, 404);
+  assert.equal(state.inserts.length, 1);
+  assert.equal(state.updates.length, 0);
+  await app.close();
+});
+
+test("the single POST /calendar/events still makes one event (201)", async () => {
+  const state = fresh();
+  const app = await build(state);
+  const res = await app.inject({ method: "POST", url: "/calendar/events", payload: { title: "One", onDate: "2040-01-05" } });
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(res.json().title, "One");
+  assert.equal(state.rows.length, 1);
   await app.close();
 });
 
