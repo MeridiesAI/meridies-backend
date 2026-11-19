@@ -114,6 +114,12 @@ const envSchema = z.object({
   BOOKING_BUSY_FIXTURE: blankIsUnset(z.string().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
+  // The public website (meridiesai.com): the family consent form's links point there. CORS_ORIGIN must list it too.
+  SITE_URL: z.string().url().default("https://meridiesai.com"),
+  // Platform terms (platform_terms_acceptances). TERMS_VERSION names the text people accept; with
+  // TERMS_UPDATE_PROMPT_ENABLED exactly "true", GET /terms/status says a Consultant who has not accepted it must.
+  TERMS_VERSION: z.string().trim().min(1).max(40).default("1.0"),
+  TERMS_UPDATE_PROMPT_ENABLED: blankIsUnset(z.string().optional()),
 
   // Web Push (VAPID). Optional: unset, push routes answer 503 push_unavailable and the sweep does nothing.
   // Generate once with `npx web-push generate-vapid-keys`; the subject is a mailto: or https: contact.
@@ -173,6 +179,10 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: blankIsUnset(
     z.string().regex(/^whsec_[A-Za-z0-9+/=]{10,}$/, "STRIPE_WEBHOOK_SECRET must look like whsec_...").optional()
   ),
+  // Basic alerts by email (lib/opsAlerts.ts): off unless OPS_ALERTS_ENABLED is exactly "true". They go to ALERT_EMAIL, else to
+  // COMPANY_CONTACT_EMAIL. No outside service: the email goes through Resend, which is already in use.
+  OPS_ALERTS_ENABLED: blankIsUnset(z.string().optional()),
+  ALERT_EMAIL: blankIsUnset(z.string().email().optional()),
   // How many proxies stand between the internet and this process (Railway's
   // edge: one). Unset: one on Railway and in development, none elsewhere in
   // production (lib/proxyTrust.ts). request.ip is the address the outermost

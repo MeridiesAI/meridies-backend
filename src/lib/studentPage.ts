@@ -13,6 +13,7 @@
  *    term of scrubber.
  */
 
+import { isUnderMinAge, UNDER_AGE_MESSAGE } from "./age.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { FastifyBaseLogger, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -233,7 +234,7 @@ export const infoPatchSchema = z
     parentEmail: z.union([z.string().trim().email().max(254), z.literal("")]).nullable(),
     parentPhone: optionalText(40),
     gender: z.enum(["female", "male", "non-binary", "undisclosed"]).nullable(),
-    birthday: z.string().date().nullable(),
+    birthday: z.string().date().refine((v) => !isUnderMinAge(v), { message: UNDER_AGE_MESSAGE }).nullable(),
     citizenship: z.enum(["us-citizen", "permanent-resident", "international"]).nullable(),
     firstGen: z.boolean().nullable(),
     livingWithParent: z.boolean().nullable(),

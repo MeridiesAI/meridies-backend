@@ -1,3 +1,5 @@
+import { AlertTracker, alertText, kindOf } from "./lib/opsAlerts.js";
+import { escapeHtml, sendEmail } from "./lib/email.js";
 import cors from "@fastify/cors";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
@@ -104,6 +106,8 @@ import meRoutes from "./routes/me.js";
 import myEventRoutes from "./routes/myEvents.js";
 import profileUpdateRoutes from "./routes/profileUpdates.js";
 import resumeRoutes from "./routes/resume.js";
+import familyConsentRoutes from "./routes/familyConsent.js";
+import platformTermsRoutes from "./routes/platformTerms.js";
 import studentOwnRoutes from "./routes/studentOwn.js";
 import highSchoolProfileRoutes from "./routes/highSchoolProfile.js";
 import intakeFillRoutes from "./routes/intakeFill.js";
@@ -262,6 +266,8 @@ export function buildApp() {
   app.register(pipelineRoutes, { prefix: "/pipeline" });
   app.register(pipelineActivityRoutes, { prefix: "/pipeline" });
   app.register(resumeRoutes, { prefix: "/resume" });
+  app.register(familyConsentRoutes);
+  app.register(platformTermsRoutes, { prefix: "/terms" });
   app.register(pipelineSequenceRoutes, { prefix: "/pipeline" });
   app.register(pipelineUnsubscribeRoutes);
   app.register(pipelineStripeRoutes, { prefix: "/pipeline" });
@@ -330,6 +336,28 @@ export function buildApp() {
       );
     }
   });
+
+  // Basic alerts (lib/opsAlerts.ts). Reads only the status code and whether the path is a webhook; changes nothing.
+  if (env.OPS_ALERTS_ENABLED === "true") {
+    const tracker = new AlertTracker();
+    app.addHook("onResponse", async (request, reply) => {
+      const kind = kindOf(reply.statusCode, request.url);
+      if (!kind) return;
+      const breach = tracker.record(kind, Date.now());
+      if (!breach) return;
+      const { subject, lines } = alertText(breach);
+      const sent = await sendEmail({
+        to: env.ALERT_EMAIL ?? env.COMPANY_CONTACT_EMAIL,
+        recipient_kind: "counselor",
+        logger: request.log,
+        subject,
+        text: lines.join("\n"),
+        html: lines.map((l) => (l ? `<p style="margin:0 0 6px;">${escapeHtml(l)}</p>` : "<br>")).join(""),
+        template: `ops-alert-${kind}`,
+      }).catch((err: unknown) => ({ sent: false, error: err instanceof Error ? err.message : "send failed" }));
+      if (!sent.sent) request.log.error({ kind, err: sent.error }, "ops alert email not sent");
+    });
+  }
 
   app.setErrorHandler((err: FastifyError | ZodError | HttpError, request, reply) => {
     if (err instanceof ZodError) {
