@@ -7,7 +7,7 @@
  * team's own test accounts that need free access and have no Stripe customer, [{ "email": "...", "kind": "internal" }]
  * (kept as a custom plan with no Stripe link: never billed, never shown a price). See scripts/billing/founding.placeholder.json.
  * `--validate-only` checks the file's shape and prints the plan, touching no database. Needs SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (from .env) and migration
- * 20261129000002 applied.
+ * 20261130000001 applied.
  *
  * TEST MODE ONLY: it refuses to run when STRIPE_SECRET_KEY is a live key, and it needs no Stripe key at all (it reads only
  * your database). Rules:
@@ -78,7 +78,7 @@ for (const e of parsed.data) {
     continue;
   }
   const cur = await db.from("plan_subscriptions").select("kind, status, stripe_customer_id").eq("counselor_id", prof.data.id).maybeSingle();
-  if (cur.error) fail(`Could not read plans (${cur.error.code}). Is migration 20261129000002 applied?`);
+  if (cur.error) fail(`Could not read plans (${cur.error.code}). Is migration 20261130000001 applied?`);
   if (cur.data?.kind === "founding" && cur.data.status === "canceled") {
     console.log(`SKIP ${e.email}: a cancelled founding account stays cancelled (it can come back as a standard plan)`);
     skipped++;
