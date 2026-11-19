@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildCalendarFeed, collegeFeedItems, FEED_BATCH_CONCURRENCY, FEED_ID_CHUNK, inChunks, testFeedItems, type FeedKind } from "../../src/lib/calendarFeed.js";
+import { resetSeriesReady } from "../../src/lib/seriesSchema.js";
 
 const window = { from: "2027-01-01", to: "2027-01-31" };
 const typeOf = (kind: FeedKind) => kind;
@@ -109,36 +110,112 @@ test("tests already taken, test-optional, undated or outside the window are skip
 
 // ---- The builder's scope (it also runs under the service role for the iCal feed) ----
 
-/** A stand-in client: every query builder method chains, awaiting answers `rows[table]` (none by default); records `.in` filters per table. */
-function fakeDb(rows: Record<string, unknown[]> = {}) {
+/**
+ * A stand-in client: every query builder method chains, awaiting answers `rows[table]` (none by default); records `.in`
+ * filters per table and every `.select` string. `seriesMissing` makes the series probe (meetings, `series_id`) answer
+ * 42703, as a database without 20261129000002 does.
+ */
+function fakeDb(rows: Record<string, unknown[]> = {}, opts: { seriesMissing?: boolean } = {}) {
   const ins: Array<{ table: string; col: string; ids: string[] }> = [];
-  const make = (table: string): unknown =>
+  const selects: Array<{ table: string; cols: string }> = [];
+  const make = (table: string, cols = ""): unknown =>
     new Proxy(
       {},
       {
         get(_t, prop) {
-          if (prop === "then") return (resolve: (v: unknown) => void) => resolve({ data: rows[table] ?? [], error: null });
+          if (prop === "then") {
+            return (resolve: (v: unknown) => void) =>
+              resolve(
+                opts.seriesMissing && table === "meetings" && cols === "series_id"
+                  ? { data: null, error: { code: "42703", message: "column meetings.series_id does not exist" } }
+                  : { data: rows[table] ?? [], error: null }
+              );
+          }
           return (...args: unknown[]) => {
             if (prop === "in") ins.push({ table, col: String(args[0]), ids: args[1] as string[] });
-            return make(table);
+            if (prop === "select") {
+              selects.push({ table, cols: String(args[0]) });
+              return make(table, String(args[0]));
+            }
+            return make(table, cols);
           };
         },
       }
     );
-  return { db: { from: (t: string) => make(t) } as never, ins };
+  return { db: { from: (t: string) => make(t) } as never, ins, selects };
 }
 const q = { from: "2027-01-01", to: "2027-01-31", tz: "UTC", includeDone: true, includeCancelled: false };
 
 test("a practice event is marked, a meeting is not", async () => {
   const { db } = fakeDb({
-    calendar_events: [{ id: "p1", title: "Office hours", on_date: "2027-01-12", starts_at: null, ends_at: null, student_id: null, detail: null, type_id: null }],
+    calendar_events: [
+      { id: "p1", title: "Office hours", on_date: "2027-01-12", starts_at: null, ends_at: null, student_id: null, detail: null, type_id: null },
+      { id: "p2", title: "Parent call", on_date: "2027-01-13", starts_at: "2027-01-13T15:00:00Z", ends_at: "2027-01-13T15:30:00Z", student_id: "s1", detail: null, type_id: null },
+    ],
     meetings: [{ id: "m1", student_id: "s1", counselor_id: "c1", title: "Check-in", starts_at: "2027-01-10T15:00:00Z", ends_at: null, status: "scheduled" }],
   });
   const { items } = await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload: [] }, q);
-  assert.equal(items.find((i) => i.id === "milestone:p1")?.practice, true);
+  const allDay = items.find((i) => i.id === "milestone:p1");
+  assert.equal(allDay?.practice, true);
+  assert.equal(allDay?.allDay, true);
+  assert.equal(allDay?.startsAt, null);
+  const timed = items.find((i) => i.id === "milestone:p2");
+  assert.equal(timed?.practice, true);
+  assert.equal(timed?.allDay, false);
+  assert.equal(timed?.startsAt, "2027-01-13T15:00:00Z");
+  assert.equal(timed?.endsAt, "2027-01-13T15:30:00Z");
   const meeting = items.find((i) => i.id === "meeting:m1");
   assert.ok(meeting);
   assert.equal("practice" in meeting, false);
+});
+
+// ---- Repeating events (20261129000002): the feed names series_id only once the column exists ----
+
+const seriesRows = {
+  calendar_events: [
+    { id: "p1", title: "Office hours", on_date: "2027-01-12", starts_at: null, ends_at: null, student_id: null, detail: null, type_id: null, series_id: "ser-p" },
+    { id: "p2", title: "Parent call", on_date: "2027-01-13", starts_at: "2027-01-13T15:00:00Z", ends_at: "2027-01-13T15:30:00Z", student_id: null, detail: null, type_id: null, series_id: null },
+  ],
+  meetings: [
+    { id: "m1", student_id: "s1", counselor_id: "c1", title: "Check-in", starts_at: "2027-01-10T15:00:00Z", ends_at: null, status: "scheduled", series_id: "ser-m" },
+    { id: "m2", student_id: "s1", counselor_id: "c1", title: "One-off", starts_at: "2027-01-11T15:00:00Z", ends_at: null, status: "scheduled", series_id: null },
+  ],
+};
+const feedSelect = (selects: Array<{ table: string; cols: string }>, table: string) =>
+  selects.filter((s) => s.table === table && s.cols !== "series_id").map((s) => s.cols);
+
+test("with the series column in, the meeting select names series_id and each item carries seriesId", async () => {
+  resetSeriesReady();
+  const { db, selects } = fakeDb(seriesRows);
+  const { items } = await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload: [] }, q);
+  const cols = feedSelect(selects, "meetings");
+  assert.equal(cols.length, 1);
+  assert.match(cols[0]!, /\bseries_id\b/);
+  const by = new Map(items.map((i) => [i.id, i]));
+  assert.equal(by.get("meeting:m1")?.seriesId, "ser-m");
+  assert.equal(by.get("meeting:m2")?.seriesId, null);
+  assert.equal(by.get("milestone:p1")?.seriesId, "ser-p");
+  assert.equal(by.get("milestone:p2")?.seriesId, null);
+  resetSeriesReady();
+});
+
+test("without the series column the meeting select never names series_id and no item carries seriesId", async () => {
+  resetSeriesReady();
+  const { db, selects } = fakeDb(seriesRows, { seriesMissing: true });
+  const { items } = await buildCalendarFeed({ db, ownerId: "c1", role: "counselor", caseload: [] }, q);
+  const cols = feedSelect(selects, "meetings");
+  assert.equal(cols.length, 1);
+  assert.doesNotMatch(cols[0]!, /series_id/);
+  assert.ok(items.some((i) => i.id === "meeting:m1"), "the feed still answers");
+  const meetings = items.filter((i) => i.kind === "meeting");
+  assert.equal(meetings.length, 2);
+  assert.ok(meetings.every((i) => !("seriesId" in i)), "a meeting row has no seriesId key before the migration");
+  // A practice event reads `select *`, so it carries seriesId only when its row has the key (an older database's has none).
+  const older = fakeDb({ ...seriesRows, calendar_events: [{ id: "p3", title: "Old", on_date: "2027-01-14", starts_at: null, ends_at: null, student_id: null, detail: null, type_id: null }] }, { seriesMissing: true });
+  resetSeriesReady();
+  const out = await buildCalendarFeed({ db: older.db, ownerId: "c1", role: "counselor", caseload: [] }, q);
+  assert.equal("seriesId" in out.items.find((i) => i.id === "milestone:p3")!, false);
+  resetSeriesReady();
 });
 
 test("inChunks splits a list into batches", () => {

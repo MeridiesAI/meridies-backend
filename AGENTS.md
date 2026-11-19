@@ -1923,7 +1923,13 @@ filter and hand-entered dedupe as the school's, and the same `ref` (the row id),
 student's `student_academics.planned_test_date` is a `milestone` `test:<student>` of pseudo-type `test` (like
 `personal`: not a `FeedKind`, since `calendar_event_type_assignments.event_kind` is check-constrained), titled
 "Planned test date", detail the status (Scheduled, Prepping, Retaking), skipped when `test_status` is `taken` or
-`test-optional`. Both show on the counselor's calendar (whole or one student) and the student's own. Pure parts:
+`test-optional`. Both show on the counselor's calendar (whole or one student) and the student's own.
+`practice: true` marks a practice event (`calendar_events`): the counselor's own to move, and also on the shared events in
+a student's feed, so a client gates dragging on role as well. `seriesId` (a meeting's or practice event's repeating series,
+null for a one-off) is there only once `20261129000002` is applied: the meeting select names `series_id` only after
+`seriesReady()` (`lib/seriesSchema.ts`, a zero-row probe: ready kept, missing rechecked after 30 s) sees the column, because
+an explicit select naming it earlier is a 42703 and a 500 for every counselor's calendar; a practice event reads `select *`
+and carries it when its row has the key. Pure parts:
 `collegeFeedItems`, `testFeedItems`. Tests: `test/unit/calendar-feed.test.ts`, `test/integration/calendar-feed.test.mjs`.
 
 **Subscribing** (`routes/calendarIcal.ts`, `lib/calendarIcal.ts`, `buildFeedIcs` / `feedIcsEvents` in `lib/ics.ts`).
