@@ -10,7 +10,9 @@
 --     never reads it again once it is signed.
 --   * `agreement_signatures`  the frozen copy of that signature taken when a contract is sent, one per
 --     agreement. Insert-only: the caller's own client writes it right after saving the draft agreement
---     (insert policy: the agreement is theirs and still a draft), nothing updates it, and a trigger refuses
+--     (insert policy: the agreement is theirs, still a draft, and the row equals the caller's own saved
+--     signature), nothing updates it, only the service role can read `image_png` (a client's SELECT is
+--     column-limited, so the image is reachable only through the family's link), and a trigger refuses
 --     an update and a truncate always and a delete unless it is the cascade from its agreement (a trigger
 --     nested inside the parent's own delete, `pg_trigger_depth() > 1`). A direct delete is refused for every
 --     role, postgres included. A signed agreement still can't be deleted (its acceptance RESTRICTs), so its
@@ -168,18 +170,34 @@ create policy agreement_signatures_select on public.agreement_signatures
     where a.id = agreement_id and private.crm_can_bill(a.contact_id, (select auth.uid()))
   ));
 
--- The caller's own client writes it right after saving the draft agreement: theirs, and still a draft.
+-- The caller's own client writes it right after saving the draft agreement: theirs, still a draft, and the row
+-- must be the caller's OWN saved signature as it stands (a counselor can't read another's image and stamp it
+-- on their own contract). The subquery on counselor_signatures runs under its owner-only policy.
 drop policy if exists agreement_signatures_insert on public.agreement_signatures;
 create policy agreement_signatures_insert on public.agreement_signatures
   for insert to authenticated
-  with check (exists (
-    select 1 from public.agreements a
-    where a.id = agreement_id and a.counselor_id = (select auth.uid()) and a.status = 'draft'
-  ));
+  with check (
+    exists (
+      select 1 from public.agreements a
+      where a.id = agreement_id and a.counselor_id = (select auth.uid()) and a.status = 'draft'
+    )
+    and exists (
+      select 1 from public.counselor_signatures cs
+      where cs.counselor_id = (select auth.uid())
+        and cs.signer_name = agreement_signatures.signer_name
+        and cs.kind = agreement_signatures.kind
+        and cs.image_png is not distinct from agreement_signatures.image_png
+        and cs.image_sha256 is not distinct from agreement_signatures.image_sha256
+    )
+  );
 
--- No update or delete grant for anyone (the service role reads the image for the family's page, and may write).
+-- No update or delete grant for anyone. A client never reads the image or sets the time: `image_png` is the
+-- service role's alone (the token-gated /agree/:token/signature route), and `signed_at` is the default now().
+-- So a client must name its columns (no `select *`) and insert with return=minimal.
 revoke all on public.agreement_signatures from public, anon, authenticated, service_role;
-grant select, insert on public.agreement_signatures to authenticated, service_role;
+grant select, insert on public.agreement_signatures to service_role;
+grant select (agreement_id, signer_name, kind, image_sha256, signed_at) on public.agreement_signatures to authenticated;
+grant insert (agreement_id, signer_name, kind, image_png, image_sha256) on public.agreement_signatures to authenticated;
 
 select private.attach_approval_gate('public.agreement_signatures');
 
