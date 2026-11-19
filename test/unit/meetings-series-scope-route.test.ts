@@ -266,7 +266,7 @@ test("following counts a non-scheduled row in the window as skipped, and rows of
   await app.close();
 });
 
-test("a row nudged +30 min earlier keeps its own offset after a +1 day move", async () => {
+test("a row nudged +30 min later keeps its own offset after a +1 day move", async () => {
   const rows = weekly(3, (n) => (n === 2 ? { starts_at: "2040-01-12T14:30:00.000Z", ends_at: "2040-01-12T15:15:00.000Z" } : {}));
   const state = fresh(rows);
   const app = await build(state);

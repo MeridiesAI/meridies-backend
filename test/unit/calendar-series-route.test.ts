@@ -228,7 +228,9 @@ test("POST refuses: timed without durationMins, sharing without a student, over 
   const { durationMins: _d, ...noDuration } = base;
   assert.equal((await create(app, noDuration)).statusCode, 400);
   assert.equal((await create(app, { ...base, sharedWithStudent: true })).statusCode, 400);
-  assert.equal((await create(app, { ...base, repeat: { preset: "daily", until: "2028-06-01" } })).statusCode, 400);
+  const overSpan = await create(app, { ...base, repeat: { preset: "weekly", until: "2041-06-01" } });
+  assert.equal(overSpan.statusCode, 400);
+  assert.equal(overSpan.json().error, "A series can run for at most 366 days.");
   assert.equal((await create(app, { ...base, onDate: "2040-01-05" })).statusCode, 400);
   await app.close();
 });
