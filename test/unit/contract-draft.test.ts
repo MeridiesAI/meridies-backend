@@ -94,6 +94,24 @@ test("caps the rendered text", () => {
   assert.deepEqual(render(`${body}a`), { ok: false, reason: "too_long" });
 });
 
+test("caps the merged title at 160, and the merged text rather than the template", () => {
+  const render = (title: string, student_name: string, sections: ContractSection[] = textSection("x")) =>
+    renderContractText({ title, sections, values: { ...VALUES, student_name }, signature: SIGNATURE });
+  assert.deepEqual(render("{{student_name}}", "n".repeat(200)), { ok: false, reason: "too_long" });
+  const atCap = render("{{student_name}}", "n".repeat(160));
+  assert.ok(atCap.ok);
+  assert.equal(atCap.title.length, 160);
+
+  // Under 60,000 as a template (16,000), over it once merged (100,000).
+  const template = "{{student_name}}".repeat(1000);
+  assert.ok(template.length < CONTRACT_BODY_MAX);
+  assert.deepEqual(render("T", "n".repeat(100), textSection(template)), { ok: false, reason: "too_long" });
+});
+
+test("an empty token is an unknown field named by the empty string", () => {
+  assert.deepEqual(unresolvedFields("T", textSection("a {{}} b {{  }}"), VALUES), [""]);
+});
+
 test("edit helpers", () => {
   const starter = addClause(addClause(STARTER_SECTIONS, "n1"), "n2");
   const added = starter.at(-1);

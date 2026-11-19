@@ -15,6 +15,7 @@ export type SignatureBlock = { signerName: string; practiceName: string; signedO
 
 // Counted in UTF-16 units (`.length`), like the database column it mirrors.
 export const CONTRACT_BODY_MAX = 60000;
+const CONTRACT_TITLE_MAX = 160;
 
 // Plain starter wording for the counselor's attorney to review. No promise about admission anywhere.
 export const STARTER_SECTIONS: ContractSection[] = [
@@ -106,7 +107,8 @@ export function renderContractText(input: { title: string; sections: ContractSec
   const blocks = sections.map((s, i) => `${i + 1}. ${m(s.heading)}\n${s.kind === "list" ? s.items.map((item) => `- ${m(item)}`).join("\n") : m(s.body)}`);
   const signed = `Signed for ${signature.practiceName} by ${signature.signerName}, ${signature.signedOn}.`;
   const bodyText = [title, ...blocks, signature.imageSha256 ? `${signed}\nSignature image SHA-256: ${signature.imageSha256}` : signed].join("\n\n");
-  return bodyText.length > CONTRACT_BODY_MAX ? { ok: false, reason: "too_long" } : { ok: true, title, bodyText };
+  // The merged title must fit agreements.title (160), the merged text the body cap; both count `.length`.
+  return bodyText.length > CONTRACT_BODY_MAX || title.length > CONTRACT_TITLE_MAX ? { ok: false, reason: "too_long" } : { ok: true, title, bodyText };
 }
 
 export function addClause(sections: ContractSection[], id: string): ContractSection[] {
