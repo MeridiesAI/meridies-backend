@@ -1944,11 +1944,14 @@ an IANA `timeZone` and `repeat: { preset: daily | weekdays | weekly | biweekly |
 occurrence starts at the same wall-clock time in that zone (across a DST change) and ends `durationMins` later. Limits
 (`MAX_SERIES` 52, `MAX_SERIES_WITH_LINKS` 12 with `createConference`, `MAX_SPAN_DAYS` 366) are a 400 in words, never a
 silent truncation. All or nothing: provider events first, then ONE insert and the attendee rows; any failure deletes what
-was made. `PATCH /meetings/series/:seriesId { anchorId, scope: following | all, timeZone, notifyAttendees?, patch }`
+was made. With calendar links the provider calls stop after 45 s (`SERIES_PROVIDER_DEADLINE_MS`): everything made is
+deleted and the answer is 503 `calendar_slow` ("Calendar is slow, nothing was booked. Try again with fewer meetings or
+without a calendar link."). The app must not auto-retry a failed series create and must refetch before reporting
+failure (a create the app gave up on may still have finished). `PATCH /meetings/series/:seriesId { anchorId, scope: following | all, timeZone, notifyAttendees?, patch }`
 changes the anchor and every later row (`following`) or every upcoming one (`all`), per row through `applyMeetingPatch`
 (the same code as `PATCH /meetings/:id`): a move shifts each row by the anchor's wall-clock change (days, minutes), so a
-row moved by hand keeps its offset; an end sets one length; `patch` takes only title, agenda, location,
-guardiansInvited, startsAt, endsAt (mode, link, status, attendees and the invite switch are per meeting: a 400). Held,
+row moved by hand keeps its offset; an end sets one length; `patch` takes only title, agenda, location, startsAt,
+endsAt, and at least one of them (mode, link, status, attendees, guardians and the invite switch are per meeting: a 400). Held,
 no-show, cancelled and past rows are never touched and counted in `skipped`; a row that fails is left as it was and listed
 in `failed` (`{ id, date, message }`) with the answer still 200. `DELETE /meetings/series/:seriesId?anchorId&scope&timeZone`
 deletes the same rows (attendee rows cascade). Practice events: `POST /calendar/events/series` (`startMinutes: null` makes

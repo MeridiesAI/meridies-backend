@@ -50,6 +50,7 @@ const tokenRow = () => ({
 
 type PrepareInput = { kind: string; before: Array<Row>; after: Array<Row>; attendeeIds: string[]; notify: boolean };
 let prepared: PrepareInput[] = [];
+let warns: Array<{ obj: Row; msg: string | undefined }> = [];
 let started: unknown[] = [];
 
 beforeEach(() => {
@@ -57,6 +58,7 @@ beforeEach(() => {
   zoomRefuse = new Set();
   prepared = [];
   started = [];
+  warns = [];
   resetSeriesReady();
   resetInvitesReady();
   // The real round is prepared (so its charge is visible); delivery is recorded, never run.
@@ -190,6 +192,7 @@ async function build(state: State) {
     request.auth = { userId: OWNER, token: "t" };
     request.profile = { id: OWNER, role: "counselor", timezone: "UTC" } as unknown as FastifyRequest["profile"];
     request.db = fakeDb(state);
+    request.log.warn = ((obj: Row, msg?: string) => void warns.push({ obj, msg })) as typeof request.log.warn;
   });
   app.setErrorHandler((err: Error, _request, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "Invalid request", details: err.issues });
@@ -308,6 +311,11 @@ test("a provider 409 on row 2: one failed entry with its local date and message,
   assert.equal(out.failed[0].id, id(2));
   assert.equal(out.failed[0].date, "2040-01-12");
   assert.match(out.failed[0].message, /Zoom/, "the provider's words, not a database error");
+  const rowWarns = warns.filter((w) => w.msg === "series row failed");
+  assert.equal(rowWarns.length, 1, "the failed row is logged");
+  assert.equal(rowWarns[0]!.obj.seriesId, SERIES);
+  assert.equal(rowWarns[0]!.obj.meetingId, id(2));
+  assert.match(String(rowWarns[0]!.obj.err), /Zoom/);
   assert.equal(state.rows[1]!.title, "Weekly check-in", "the failed row is untouched");
   assert.deepEqual([state.rows[0]!.title, state.rows[2]!.title], ["New title", "New title"]);
   assert.equal(zoomMoves().length, 3);
@@ -350,12 +358,23 @@ test("notifyAttendees false: invites none, no round prepared, nothing charged", 
   await app.close();
 });
 
-test("mode, attendeeIds, status or sendInvites inside patch is a 400 and changes nothing", async () => {
+test("mode, attendeeIds, status, sendInvites, joinUrl or guardiansInvited inside patch is a 400 and changes nothing", async () => {
   const app = await build(fresh(weekly(2)));
-  for (const extra of [{ mode: "zoom" }, { attendeeIds: [FOREIGN] }, { status: "cancelled" }, { sendInvites: true }, { joinUrl: "https://x.org" }]) {
+  // Guardians change one meeting at a time: a series round can't send newly invited parents a REQUEST.
+  for (const extra of [{ mode: "zoom" }, { attendeeIds: [FOREIGN] }, { status: "cancelled" }, { sendInvites: true }, { joinUrl: "https://x.org" }, { guardiansInvited: true }]) {
     const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: { title: "x", ...extra } });
     assert.equal(res.statusCode, 400, `${JSON.stringify(extra)}: ${res.body}`);
   }
+  await app.close();
+});
+
+test("an empty patch is a 400 Nothing to change, and no row is touched", async () => {
+  const state = fresh(weekly(3));
+  const app = await build(state);
+  const res = await patchSeries(app, { anchorId: id(1), scope: "all", timeZone: TZ, patch: {} });
+  assert.equal(res.statusCode, 400, res.body);
+  assert.equal(res.json().error, "Nothing to change");
+  assert.equal(state.updates.length, 0);
   await app.close();
 });
 
@@ -487,6 +506,10 @@ test("DELETE: a row whose delete errors is in failed, not in deleted, and its st
   assert.deepEqual(out.failed, [{ id: id(2), date: "2040-01-12", message: "Couldn't delete this meeting. Try again." }]);
   assert.deepEqual(state.rows.map((r) => r.id), [id(2)]);
   assert.deepEqual(prepared[0]!.before.map((b) => b.id), [id(1), id(3)]);
+  assert.deepEqual(
+    warns.filter((w) => w.msg === "series row failed").map((w) => [w.obj.seriesId, w.obj.meetingId]),
+    [[SERIES, id(2)]]
+  );
   await app.close();
 });
 

@@ -17,7 +17,8 @@ const { HttpError } = await import("../../src/lib/errors.js");
 const { encryptToken } = await import("../../src/lib/tokenCrypto.js");
 const { resetSeriesReady } = await import("../../src/lib/seriesSchema.js");
 const { resetInvitesReady } = await import("../../src/lib/meetingInvites.js");
-const { default: meetingRoutes } = await import("../../src/routes/meetings.js");
+const { default: meetingRoutes, __seriesInvites } = await import("../../src/routes/meetings.js");
+const realNow = __seriesInvites.now;
 
 type Row = Record<string, unknown>;
 const OWNER = "00000000-0000-4000-8000-000000000001";
@@ -30,6 +31,8 @@ type Call = { url: string; method: string; body: string | null };
 let calls: Call[] = [];
 let zoomFailOn = 0; // the nth Zoom create answers 500 (0: never)
 let zoomCreates = 0;
+let clock = 0; // the series create's clock (ms); each Zoom create advances it by `zoomTakes`
+let zoomTakes = 0;
 const realFetch = globalThis.fetch;
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
 
@@ -48,6 +51,9 @@ beforeEach(() => {
   calls = [];
   zoomFailOn = 0;
   zoomCreates = 0;
+  clock = 0;
+  zoomTakes = 0;
+  __seriesInvites.now = () => clock;
   resetSeriesReady();
   resetInvitesReady();
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -63,6 +69,7 @@ beforeEach(() => {
     if (url.includes("/rest/v1/")) return json([], 201);
     if (url === "https://api.zoom.us/v2/users/me/meetings") {
       zoomCreates += 1;
+      clock += zoomTakes;
       if (zoomCreates === zoomFailOn) return json({ message: "Zoom is down" }, 500);
       return json({ id: 81200000000 + zoomCreates, join_url: `https://us05web.zoom.us/j/${81200000000 + zoomCreates}` }, 201);
     }
@@ -72,6 +79,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   globalThis.fetch = realFetch;
+  __seriesInvites.now = realNow;
 });
 const zoomDeletes = () => calls.filter((c) => c.method === "DELETE" && c.url.startsWith("https://api.zoom.us/v2/meetings/"));
 const inviteCharges = () =>
@@ -366,5 +374,35 @@ test("sendInvites before the invite columns exist answers unavailable and charge
   assert.equal(res.json().invites.status, "unavailable");
   assert.ok(state.rows.every((r) => !("send_invites" in r)));
   assert.equal(inviteCharges().length, 0);
+  await app.close();
+});
+
+test("calendar too slow: past 45 s before the next provider call, the events made are deleted, no row, 503 calendar_slow", async () => {
+  zoomTakes = 20_000; // after 3 events the clock reads 60 s, past the deadline, so the 4th is never asked for
+  const state = fresh();
+  const app = await build(state);
+  const res = await post(app, { ...body, mode: "zoom", createConference: true, sendInvites: true });
+  assert.equal(res.statusCode, 503, res.body);
+  assert.deepEqual(res.json(), {
+    error: "Calendar is slow, nothing was booked. Try again with fewer meetings or without a calendar link.",
+    code: "calendar_slow",
+  });
+  assert.equal(zoomCreates, 3);
+  assert.deepEqual(zoomDeletes().map((c) => c.url.split("/").pop()?.split("?")[0]).sort(), ["81200000001", "81200000002", "81200000003"]);
+  assert.equal(state.inserts, 0);
+  assert.equal(state.rows.length, 0);
+  assert.equal(inviteCharges().length, 0);
+  await app.close();
+});
+
+test("calendar under the deadline: every event made and the series booked as before", async () => {
+  zoomTakes = 10_000; // 4 events, 40 s in all
+  const state = fresh();
+  const app = await build(state);
+  const res = await post(app, { ...body, mode: "zoom", createConference: true });
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(zoomCreates, 4);
+  assert.equal(zoomDeletes().length, 0);
+  assert.equal(state.rows.length, 4);
   await app.close();
 });

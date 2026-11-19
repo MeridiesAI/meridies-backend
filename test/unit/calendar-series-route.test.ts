@@ -26,10 +26,13 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 const TZ = "America/New_York";
 
 const realFetch = globalThis.fetch;
+let limitCalls: Array<{ p_key: string; p_limit: number; p_window_seconds: number }> = [];
 beforeEach(() => {
   resetSeriesReady();
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  limitCalls = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.includes("/rest/v1/rpc/consume_rate_limit")) limitCalls.push(JSON.parse(String(init?.body)));
     if (url.includes("/rest/v1/rpc/consume_rate_limit")) return new Response("true", { status: 200, headers: { "content-type": "application/json" } });
     throw new TypeError(`fetch failed for ${url}`);
   }) as typeof fetch;
@@ -222,7 +225,7 @@ test("POST all day: starts_at and ends_at null", async () => {
   await app.close();
 });
 
-test("POST refuses: timed without durationMins, sharing without a student, over the cap, a stray key", async () => {
+test("POST refuses: timed without durationMins, sharing without a student, over the 366-day span, a stray key", async () => {
   const app = await build(fresh());
   const base = { title: "P", date: "2040-01-05", startMinutes: 540, durationMins: 30, timeZone: TZ, repeat: { preset: "weekly", count: 3 } };
   const { durationMins: _d, ...noDuration } = base;
@@ -232,6 +235,16 @@ test("POST refuses: timed without durationMins, sharing without a student, over 
   assert.equal(overSpan.statusCode, 400);
   assert.equal(overSpan.json().error, "A series can run for at most 366 days.");
   assert.equal((await create(app, { ...base, onDate: "2040-01-05" })).statusCode, 400);
+  await app.close();
+});
+
+test("POST is limited to 20 a minute, like a meeting series", async () => {
+  const app = await build(fresh());
+  await create(app, { title: "P", date: "2040-01-05", startMinutes: 540, durationMins: 30, timeZone: TZ, repeat: { preset: "weekly", count: 2 } });
+  assert.deepEqual(
+    limitCalls.filter((c) => c.p_key.startsWith("calendar:events:series:")).map((c) => [c.p_limit, c.p_window_seconds]),
+    [[20, 60]]
+  );
   await app.close();
 });
 

@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { expandSeriesDates, MAX_SERIES, MAX_SERIES_WITH_LINKS, shiftInstant, wallDelta, zonedInstant } from "../lib/recurrence.js";
-import { seriesReady } from "../lib/seriesSchema.js";
+import { repeatBody, SERIES_UNAVAILABLE, seriesReady } from "../lib/seriesSchema.js";
 import { prepareSeriesInviteRound, startSeriesDelivery } from "../lib/seriesInvites.js";
 import { badRequest, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
@@ -115,14 +115,6 @@ function conferenceProvider(mode: string): ConnectProvider {
 }
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date");
-export const repeatBody = z
-  .object({
-    preset: z.enum(["daily", "weekdays", "weekly", "biweekly", "monthly"]),
-    count: z.number().int().min(2).max(52).optional(),
-    until: isoDate.optional(),
-  })
-  .strict()
-  .refine((r) => (r.count === undefined) !== (r.until === undefined), "Give a count or an end date");
 const realTimeZone = (tz: string) => {
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: tz });
@@ -142,9 +134,16 @@ const seriesMeetingBody = meetingBody
     repeat: repeatBody,
   })
   .strict();
-export const SERIES_UNAVAILABLE = () => new HttpError(503, "Repeating events aren't switched on yet.", "series_unavailable");
-/** The scoped series routes reach the round through this, so a test can see each call (the `__busy` pattern). */
-export const __seriesInvites = { prepare: prepareSeriesInviteRound, start: startSeriesDelivery };
+/** A series create with calendar links gives up after this long, so a slow provider can't outlast the app's wait. */
+const SERIES_PROVIDER_DEADLINE_MS = 45_000;
+const CALENDAR_SLOW = () =>
+  new HttpError(503, "Calendar is slow, nothing was booked. Try again with fewer meetings or without a calendar link.", "calendar_slow");
+/**
+ * Tests only: the scoped series routes reach the round through this so a test can see each call, and the series
+ * create reads the time through `now` so a test can pass the deadline without waiting (the `__busy` pattern).
+ * @internal
+ */
+export const __seriesInvites = { prepare: prepareSeriesInviteRound, start: startSeriesDelivery, now: () => Date.now() };
 
 const meetingPatch = meetingBody
   .omit({ studentId: true })
@@ -167,7 +166,7 @@ const seriesPatchBody = z
     scope: seriesScopeName,
     timeZone: seriesTimeZone,
     notifyAttendees: z.boolean().optional(),
-    patch: meetingBody.pick({ title: true, agenda: true, location: true, guardiansInvited: true, startsAt: true, endsAt: true }).partial().strict(),
+    patch: meetingBody.pick({ title: true, agenda: true, location: true, startsAt: true, endsAt: true }).partial().strict(),
   })
   .strict();
 const seriesDeleteQuery = z.object({ anchorId: z.string().uuid(), scope: seriesScopeName, timeZone: seriesTimeZone.optional() }).strict();
@@ -346,7 +345,9 @@ export default async function meetingRoutes(app: FastifyInstance) {
       let saved: Row[];
       try {
         if (provider) {
+          const deadline = __seriesInvites.now() + SERIES_PROVIDER_DEADLINE_MS;
           for (const t of times) {
+            if (__seriesInvites.now() > deadline) throw CALENDAR_SLOW();
             const event = await createConferenceEvent(
               request.auth.userId,
               provider,
@@ -392,7 +393,12 @@ export default async function meetingRoutes(app: FastifyInstance) {
       } catch (err) {
         // Best effort, as the single path: the original error is what the counselor hears.
         for (const c of created) {
-          await deleteCalendarEvent(request.auth.userId, c.provider, c.eventId, request.log).catch(() => undefined);
+          await deleteCalendarEvent(request.auth.userId, c.provider, c.eventId, request.log).catch((err: unknown) =>
+            request.log.warn(
+              { eventId: c.eventId, provider: c.provider, err: err instanceof Error ? err.message : "unknown" },
+              "series rollback: provider event not deleted"
+            )
+          );
         }
         if (inserted) {
           const { error } = await request.db.from("meetings").delete().eq("series_id", seriesId);
@@ -423,7 +429,8 @@ export default async function meetingRoutes(app: FastifyInstance) {
    * (`all`). See `seriesScope` for which rows. Per row and not atomic: each row is its own applyMeetingPatch
    * ("defer"), a row that fails (a provider refusal, a write error) is left as it was and listed in `failed`, and the
    * answer is still 200. A move shifts each row by the anchor's wall-clock change in `timeZone` (an occurrence moved
-   * by hand keeps its own offset); an end sets every row to the same length; other fields are copied. ONE invite
+   * by hand keeps its own offset); an end sets every row to the same length; title, agenda and location are copied.
+   * Guardians, attendees, mode, link and status change one meeting at a time (the strict body refuses them). ONE invite
    * round for the rows that changed, one charge.
    */
   app.patch(
@@ -433,6 +440,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
       if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
       const { seriesId } = seriesParam.parse(request.params);
       const body = seriesPatchBody.parse(request.body);
+      if (Object.keys(body.patch).length === 0) throw badRequest("Nothing to change");
       const { anchor, affected, skipped } = await seriesScope(request, seriesId, body.anchorId, body.scope);
       const { startsAt, endsAt, ...copied } = body.patch;
       const tz = body.timeZone;
@@ -474,6 +482,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
           before.push(done.before);
           after.push(done.after);
         } catch (err) {
+          request.log.warn({ seriesId, meetingId: row.id, err: err instanceof Error ? err.message : "unknown" }, "series row failed");
           failed.push(seriesFailure(row, err, tz, "Couldn't change this meeting. Try again."));
         }
       }
@@ -512,6 +521,7 @@ export default async function meetingRoutes(app: FastifyInstance) {
           if (error) throw fromPostgrest(error);
           gone.push(state);
         } catch (err) {
+          request.log.warn({ seriesId, meetingId: row.id, err: err instanceof Error ? err.message : "unknown" }, "series row failed");
           failed.push(seriesFailure(row, err, q.timeZone ?? "UTC", "Couldn't delete this meeting. Try again."));
         }
       }

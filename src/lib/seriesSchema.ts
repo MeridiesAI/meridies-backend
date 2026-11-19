@@ -5,6 +5,22 @@
  * is a 42703 and a 500 for every counselor's calendar. It, and the series routes, ask here first.
  */
 
+import { z } from "zod";
+import { HttpError } from "./errors.js";
+
+/** What every series route answers until the migration is applied. */
+export const SERIES_UNAVAILABLE = () => new HttpError(503, "Repeating events aren't switched on yet.", "series_unavailable");
+
+/** How a series repeats (meetings and practice events alike): a preset and a count or an end date, not both. */
+export const repeatBody = z
+  .object({
+    preset: z.enum(["daily", "weekdays", "weekly", "biweekly", "monthly"]),
+    count: z.number().int().min(2).max(52).optional(),
+    until: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date").optional(),
+  })
+  .strict()
+  .refine((r) => (r.count === undefined) !== (r.until === undefined), "Give a count or an end date");
+
 const MISSING_TTL_MS = 30_000;
 let readiness: { ready: boolean; until: number } | null = null;
 const SCHEMA_CODES = new Set(["42703", "42P01", "PGRST204", "PGRST205"]);

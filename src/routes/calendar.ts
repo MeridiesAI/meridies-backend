@@ -38,8 +38,7 @@ import { fullCaseloadStudentIds, requireRole, resolveStudentId } from "../lib/gu
 import { limit } from "../lib/limits.js";
 import { connectedAccountEmail } from "../lib/oauth.js";
 import { expandSeriesDates, MAX_SERIES, shiftInstant, wallDelta, zonedInstant } from "../lib/recurrence.js";
-import { seriesReady } from "../lib/seriesSchema.js";
-import { repeatBody, SERIES_UNAVAILABLE } from "./meetings.js";
+import { repeatBody, SERIES_UNAVAILABLE, seriesReady } from "../lib/seriesSchema.js";
 
 type Row = Record<string, unknown>;
 
@@ -415,7 +414,7 @@ export default async function calendarRoutes(app: FastifyInstance) {
    */
   app.post(
     "/events/series",
-    { preHandler: [app.authenticate, requireRole("counselor"), limit("calendar:events:series", 60, 60)] },
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("calendar:events:series", 20, 60)] },
     async (request, reply) => {
       if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
       const b = seriesEventBody.parse(request.body);
