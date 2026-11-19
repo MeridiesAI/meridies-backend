@@ -1488,6 +1488,7 @@ the database (`20261010*`):
   missing, onSheet }] }` (`onSheet`: the sheet already has that organization and position). Sensitive kinds are
   refused. **Nothing is written**: the counselor adds each row they confirm through the sheet's own routes.
   Tests: `test/unit/activity-list-import.test.ts`.
+- **The roster's Last login** (no migration). `GET /students` rows carry `lastActiveAt` (`profiles.last_active_at`, stamped hourly by `touchLastActive`; `rosterLastActive` in `lib/inactivity.ts`: an ISO instant, null when never or unreadable); the school practice type is `profile.practiceType`, no column. Counselor-only: `GET /students/:id` and `/me` don't carry it. Test: `test/unit/rosterActivity.test.ts`.
 - **The questionnaire fills the record** (`20261023010001`-`04`). The
   onboarding questionnaire saves `profiles.profile.intakeAnswers` (`PATCH
   /auth/me`, the profile bounded at 300,000 bytes measured after the merge,

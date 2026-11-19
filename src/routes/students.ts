@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { badRequest, forbidden, fromPostgrest, notFound } from "../lib/errors.js";
 import { assertCanEditStudent, assertCanViewStudent, canArchive, requireRole } from "../lib/guards.js";
+import { rosterLastActive } from "../lib/inactivity.js";
 import { limit } from "../lib/limits.js";
 import { isProfileTooLarge, MAX_PROFILE_BYTES, mergeProfile, profileBytes } from "../lib/profileSize.js";
 import { signAvatarUrls } from "../lib/studentAvatar.js";
@@ -33,7 +34,7 @@ import {
 const idParam = z.object({ id: z.string().uuid("Not a valid student id") });
 
 const ROSTER_COLUMNS =
-  "id, full_name, email, role, onboarding_step, onboarding_complete, counselor_id, avatar_url, timezone, title, headline, hometown, high_school, grad_year, profile, counselor_approved_at, archived_at" as const;
+  "id, full_name, email, role, onboarding_step, onboarding_complete, counselor_id, avatar_url, timezone, title, headline, hometown, high_school, grad_year, profile, counselor_approved_at, archived_at, last_active_at" as const;
 
 const patchStudentSchema = z
   .object({
@@ -101,6 +102,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       }),
       nextDeadline: next.get(row.id as string) ?? null,
       counselorStatus: status.get(row.id as string) ?? null,
+      lastActiveAt: rosterLastActive(row as never),
     }));
   });
 
