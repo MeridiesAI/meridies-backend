@@ -23,7 +23,7 @@ const eventsText = async (id) =>
 const thisYear = Number(await sql(`select extract(year from current_date)::int`));
 const dob = (age, md = "03-09") => `${thisYear - age}-${md}`;
 
-// ---- Validation: a real calendar date, not in the future, age 10 to 25 -------------------------
+// ---- Validation: a real calendar date, not in the future, age 13 to 25 -------------------------
 {
   const today = "2026-11-08";
   const want = {
@@ -33,8 +33,9 @@ const dob = (age, md = "03-09") => `${thisYear - age}-${md}`;
     "2008-13-01": null,
     "2026-11-09": null, // tomorrow
     "2030-01-01": null, // the future
-    "2016-11-08": "2016-11-08", // 10 today
-    "2016-11-09": null, // 10 tomorrow: 9 today
+    "2013-11-08": "2013-11-08", // 13 today
+    "2013-11-09": null, // 13 tomorrow: 12 today
+    "2016-11-08": null, // 10 today: under 13
     "2000-11-09": "2000-11-09", // 25, 26 tomorrow
     "2000-11-08": null, // 26 today
     "1990-01-01": null,
@@ -49,7 +50,7 @@ const dob = (age, md = "03-09") => `${thisYear - age}-${md}`;
     const got = await sql(`select coalesce(private.intake_birthday('${input}', date '${today}')::text, 'null')`);
     if (got !== (expected ?? "null")) { all = false; console.log(`  ${JSON.stringify(input)} -> ${got}`); }
   }
-  check("only a real, past date of someone aged 10 to 25 is a birthday", all);
+  check("only a real, past date of someone aged 13 to 25 is a birthday", all);
   check("a null answer is no birthday", (await sql(`select coalesce(private.intake_birthday(null, date '2026-11-08')::text, 'null')`)) === "null");
 }
 
