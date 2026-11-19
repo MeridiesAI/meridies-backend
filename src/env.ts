@@ -114,6 +114,12 @@ const envSchema = z.object({
   BOOKING_BUSY_FIXTURE: blankIsUnset(z.string().optional()),
   // Base URL of the frontend, used to build the invite accept link.
   APP_URL: z.string().url().default("https://app.meridiesai.com"),
+  // The public website (meridiesai.com): the family consent form's links point there. CORS_ORIGIN must list it too.
+  SITE_URL: z.string().url().default("https://meridiesai.com"),
+  // Platform terms (platform_terms_acceptances). TERMS_VERSION names the text people accept; with
+  // TERMS_UPDATE_PROMPT_ENABLED exactly "true", GET /terms/status says a Consultant who has not accepted it must.
+  TERMS_VERSION: z.string().trim().min(1).max(40).default("1.0"),
+  TERMS_UPDATE_PROMPT_ENABLED: blankIsUnset(z.string().optional()),
 
   // Web Push (VAPID). Optional: unset, push routes answer 503 push_unavailable and the sweep does nothing.
   // Generate once with `npx web-push generate-vapid-keys`; the subject is a mailto: or https: contact.
