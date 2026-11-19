@@ -31,8 +31,12 @@
  * student still can't move anything.
  */
 
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { expandSeriesDates, MAX_SERIES, MAX_SERIES_WITH_LINKS, zonedInstant } from "../lib/recurrence.js";
+import { seriesReady } from "../lib/seriesSchema.js";
+import { prepareSeriesInviteRound, startSeriesDelivery } from "../lib/seriesInvites.js";
 import { badRequest, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
@@ -109,6 +113,36 @@ function conferenceProvider(mode: string): ConnectProvider {
   if (mode === "zoom") return "zoom";
   throw badRequest("Only Google Meet, Teams and Zoom meetings get a link made for them");
 }
+
+const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date");
+const repeatBody = z
+  .object({
+    preset: z.enum(["daily", "weekdays", "weekly", "biweekly", "monthly"]),
+    count: z.number().int().min(2).max(52).optional(),
+    until: isoDate.optional(),
+  })
+  .strict()
+  .refine((r) => (r.count === undefined) !== (r.until === undefined), "Give a count or an end date");
+const realTimeZone = (tz: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+};
+/** One meeting's fields plus when it repeats: a local date and wall-clock time in an IANA zone. */
+const seriesMeetingBody = meetingBody
+  .omit({ startsAt: true, endsAt: true })
+  .extend({
+    date: isoDate,
+    startMinutes: z.number().int().min(0).max(1439),
+    durationMins: z.number().int().min(15).max(1440),
+    timeZone: z.string().min(1).max(64).refine(realTimeZone, "That isn't a time zone we know"),
+    repeat: repeatBody,
+  })
+  .strict();
+const SERIES_UNAVAILABLE = () => new HttpError(503, "Repeating events aren't switched on yet.", "series_unavailable");
 
 const meetingPatch = meetingBody
   .omit({ studentId: true })
@@ -252,6 +286,118 @@ export default async function meetingRoutes(app: FastifyInstance) {
         startInviteDelivery(prepared.round, request.log);
       }
       return reply.code(201).send({ ...(await withAttendees(request, [saved]))[0], invites });
+    }
+  );
+
+  /**
+   * A repeating series: every occurrence at the same local wall-clock time in `timeZone` (across a DST change),
+   * one shared `series_id`, ONE insert. All or nothing: provider events are made first, one at a time, and any
+   * failure after one exists deletes every event and row already made. One invite round for the whole series, only
+   * once everything is saved.
+   */
+  app.post(
+    "/series",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("meetings:series", 20, 60)] },
+    async (request, reply) => {
+      if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
+      const body = seriesMeetingBody.parse(request.body);
+      const student = await resolveStudentId(request, body.studentId, "edit");
+      const mode = body.mode ?? "google-meet";
+      const provider = body.createConference ? conferenceProvider(mode) : null;
+      const { preset, count, until } = body.repeat;
+      let dates: string[];
+      try {
+        const end = count !== undefined ? { count } : { until: until! };
+        dates = expandSeriesDates(body.date, { preset, end }, provider ? MAX_SERIES_WITH_LINKS : MAX_SERIES);
+      } catch (err) {
+        if (err instanceof RangeError) throw badRequest(err.message);
+        throw err;
+      }
+      // The end is start + duration (not a second wall-clock read), so a meeting over a DST change keeps its length.
+      const times = dates.map((d) => {
+        const startsAt = zonedInstant(d, body.startMinutes, body.timeZone);
+        return { startsAt, endsAt: new Date(Date.parse(startsAt) + body.durationMins * 60_000).toISOString() };
+      });
+      const invitees = await checkAttendees(request, student, body.attendeeIds);
+      const ready = await invitesReady(request.db);
+      const endError = inviteEndError(ready, body.sendInvites === true, times[0]!.endsAt);
+      if (endError) throw badRequest(endError);
+
+      const seriesId = randomUUID();
+      const created: { provider: ConnectProvider; eventId: string; joinUrl: string }[] = [];
+      let inserted = false;
+      let saved: Row[];
+      try {
+        if (provider) {
+          for (const t of times) {
+            const event = await createConferenceEvent(
+              request.auth.userId,
+              provider,
+              { title: body.title, startsAt: t.startsAt, endsAt: t.endsAt, description: body.agenda ?? null },
+              request.log
+            );
+            created.push({ provider, ...event });
+          }
+        }
+        const { data, error } = await request.db
+          .from("meetings")
+          .insert(
+            times.map((t, i) => ({
+              student_id: student,
+              counselor_id: request.auth.userId,
+              title: body.title,
+              mode,
+              location: body.location ?? null,
+              join_url: created[i]?.joinUrl ?? body.joinUrl ?? null,
+              calendar_provider: created[i]?.provider ?? null,
+              calendar_event_id: created[i]?.eventId ?? null,
+              starts_at: t.startsAt,
+              ends_at: t.endsAt,
+              agenda: body.agenda ?? null,
+              guardians_invited: body.guardiansInvited ?? false,
+              deadline_id: body.deadlineId ?? null,
+              created_by: request.auth.userId,
+              series_id: seriesId,
+              ...inviteColumns(ready, body.sendInvites),
+            }))
+          )
+          .select("*");
+        if (error) throw fromPostgrest(error);
+        inserted = true;
+        saved = (data ?? []) as Row[];
+        if (invitees.length > 0) {
+          const { error: aErr } = await request.db.from("meeting_attendees").upsert(
+            saved.flatMap((m) => invitees.map((id) => ({ meeting_id: m.id, student_id: id }))),
+            { onConflict: "meeting_id,student_id", ignoreDuplicates: true }
+          );
+          if (aErr) throw fromPostgrest(aErr);
+        }
+      } catch (err) {
+        // Best effort, as the single path: the original error is what the counselor hears.
+        for (const c of created) {
+          await deleteCalendarEvent(request.auth.userId, c.provider, c.eventId, request.log).catch(() => undefined);
+        }
+        if (inserted) {
+          const { error } = await request.db.from("meetings").delete().eq("series_id", seriesId);
+          if (error) request.log.error({ seriesId, code: error.code }, "series rollback: rows not deleted");
+        }
+        throw err;
+      }
+
+      let invites: InviteRoundSummary = { status: "none" };
+      if (body.sendInvites && !ready) invites = INVITES_UNAVAILABLE;
+      else if (body.sendInvites) {
+        const prepared = await prepareSeriesInviteRound(request, {
+          kind: "create",
+          before: [],
+          after: saved.map(meetingState),
+          attendeeIds: [student, ...invitees],
+          notify: true,
+        });
+        invites = prepared.summary;
+        startSeriesDelivery(prepared.round, request.log);
+      }
+      return reply.code(201).send({ seriesId, meetings: await withAttendees(request, saved), invites });
     }
   );
 
