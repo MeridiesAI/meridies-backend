@@ -3,13 +3,14 @@
 // One series change is one invite round: one email per recipient listing every date (message_deliveries, and
 // Mailpit when MAILPIT_URL is set and the API sends there through DEV_MAIL_URL). Sends run after the response,
 // so the checks poll. Dates are in 2031, weekly over the New York DST start (Sun Mar 9 2031).
+// These dates rot in March 2031 (they must stay in the future): pinned to that DST boundary on purpose, move them then.
 import { user, call, check, sql } from "./harness.mjs";
 import { studentOf } from "./imports-helpers.mjs";
 
 const MAILPIT = process.env.MAILPIT_URL?.replace(/\/+$/, "") ?? null;
 const TZ = "America/New_York";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const nbsp = (s) => String(s ?? "").replace(/[  ]/g, " ");
+const nbsp = (s) => String(s ?? "").replace(/[\u202F\u00A0]/g, " ");
 
 const c = await user("ser-counselor");
 const other = await user("ser-other");
