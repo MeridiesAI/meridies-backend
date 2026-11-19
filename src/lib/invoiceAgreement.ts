@@ -14,6 +14,10 @@
  * pointed at by the invoice's `message_delivery_id`) names the agreement with
  * its link left out. No column, no migration.
  *
+ * One exception, a drafted contract (`{ draftId }`, migration 20261129000001): it is rendered for the family and
+ * signed with the SENDER's saved signature at send time, and an `agreement_signatures` row keeps that signature as
+ * it was. Never from the cron (409 `draft_contract_send_now`).
+ *
  * The agreement's own rules are untouched: text only, immutable once sent (the
  * database's guard), accepted only through `accept_agreement` on the public
  * page. Typed-name acceptance, NOT a certified electronic signature.
@@ -46,6 +50,8 @@ import { isResultsNotApplied } from "./resultsAvailability.js";
 import type { EmailAttachment } from "./email.js";
 import { AGREEMENT_CONSENT_VERSION } from "./agreementConsent.js";
 import { HttpError, notFound } from "./errors.js";
+import { MERGE_FIELDS, renderContractText, type MergeValues } from "./contractDraft.js";
+import { contractDraftError } from "./contractDraftApi.js";
 
 type Row = Record<string, unknown>;
 
@@ -55,6 +61,9 @@ export const invoiceAgreementInput = z.union([
   z.object({ title: agreementTitle, bodyText: agreementBodyText }).strict(),
   // A contract from the practice's library (lib/contracts.ts): saved as an agreement bound to the file.
   z.object({ contractId: z.string().uuid() }).strict(),
+  // A contract drafted in Meridies (lib/contractDraft.ts): rendered for this family and signed with the sender's
+  // saved signature when the invoice goes out, then frozen like any sent agreement.
+  z.object({ draftId: z.string().uuid() }).strict(),
 ]);
 export type InvoiceAgreementInput = z.infer<typeof invoiceAgreementInput>;
 
@@ -86,8 +95,10 @@ export function withAgreementSubject(subject: string): string {
 export async function resolveInvoiceAgreement(
   db: SupabaseClient,
   contactId: string,
-  input: InvoiceAgreementInput
+  input: InvoiceAgreementInput,
+  sender?: DraftSender
 ): Promise<ResolvedAgreement> {
+  if ("draftId" in input) return resolveDraft(db, contactId, input.draftId, sender);
   if ("contractId" in input) {
     const { data, error } = await db.from("contract_files").select("id, name, storage_path, mime, size_bytes, sha256, archived_at").eq("id", input.contractId).maybeSingle();
     if (error) throw isResultsNotApplied(error) ? contractsUnavailable() : agreementsError(error);
@@ -115,7 +126,106 @@ export async function resolveInvoiceAgreement(
 
 /** The file a contract agreement is bound to. */
 export type ContractRef = { id: string; name: string; path: string; mime: ContractType; sizeBytes: number; sha256: string };
-export type ResolvedAgreement = { id: string | null; title: string; contract?: ContractRef };
+export type ResolvedAgreement = { id: string | null; title: string; contract?: ContractRef; draft?: RenderedDraft };
+
+/** Who presses Send: the signer, always (never the draft's writer). */
+export type DraftSender = { counselorId: string; counselorName: string; practiceName: string };
+type SavedSignature = { signer_name: string; kind: string; image_png: string | null; image_sha256: string | null };
+/** A drafted contract rendered for this family and this sender, not yet saved. */
+export type RenderedDraft = { id: string; bodyText: string; signature: SavedSignature };
+
+export const draftSendNow = () =>
+  new HttpError(409, "A drafted contract is signed when you send it, so it can't be scheduled.", "draft_contract_send_now");
+const signatureNeeded = () => new HttpError(409, "Add your signature in Settings first", "signature_needed");
+const SIGNATURE_COLUMNS = "signer_name, kind, image_png, image_sha256";
+
+const CARD_FIELDS: Record<string, string> = { family_name: "the parent's or student's name", student_name: "the student's name" };
+
+/** What a contract's unresolved fields mean, in words: an unknown field names itself, an empty one says where to fill it. */
+export function contractFieldsMessage(fields: string[]): string {
+  const unknown = fields.filter((f) => !(MERGE_FIELDS as readonly string[]).includes(f)).map((f) => (f ? `{{${f}}}` : "an empty {{ }}"));
+  const card = fields.filter((f) => f in CARD_FIELDS).map((f) => CARD_FIELDS[f]);
+  return [
+    unknown.length ? `The contract uses a field Meridies doesn't know: ${unknown.join(", ")}` : "",
+    card.length ? `Fill in ${card.join(" and ")} on the family's card first` : "",
+    fields.includes("counselor_name") ? "Fill in your name in Settings first" : "",
+  ]
+    .filter(Boolean)
+    .join(". ");
+}
+
+/** A name as one line: every whitespace run (line breaks included) one space, so a name can't forge a heading. */
+const oneLine = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
+
+/** The sender's saved signature on their own client, or null. */
+async function savedSignature(db: SupabaseClient, counselorId: string): Promise<SavedSignature | null> {
+  const { data, error } = await db.from("counselor_signatures").select(SIGNATURE_COLUMNS).eq("counselor_id", counselorId).maybeSingle();
+  if (error) throw contractDraftError(error);
+  return (data as SavedSignature | null) ?? null;
+}
+
+/**
+ * A drafted contract for this family: the practice's unarchived draft, the card's names and the sender's saved
+ * signature, rendered now so every refusal (404, 409 signature_needed, 400 fields/length) comes before the invoice
+ * is numbered or anything is written. Writes nothing (the preview uses it as is).
+ */
+async function resolveDraft(db: SupabaseClient, contactId: string, draftId: string, sender: DraftSender | undefined): Promise<ResolvedAgreement> {
+  // No sender is the scheduled-invoice cron: nobody is there to sign.
+  if (!sender) throw draftSendNow();
+  const [draftRes, contactRes] = await Promise.all([
+    db.from("contract_drafts").select("id, title, sections, archived_at").eq("id", draftId).maybeSingle(),
+    db.from("pipeline_contacts").select("parent_name, parent_email, student_name").eq("id", contactId).maybeSingle(),
+  ]);
+  if (draftRes.error) throw contractDraftError(draftRes.error);
+  if (contactRes.error) throw agreementsError(contactRes.error);
+  const draft = draftRes.data as Row | null;
+  if (!draft || draft.archived_at) throw notFound("That contract draft isn't in your library");
+  const contact = (contactRes.data as Row | null) ?? {};
+  const signature = await savedSignature(db, sender.counselorId);
+  if (!signature) throw signatureNeeded();
+  const signedOn = new Date().toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" });
+  const values: MergeValues = {
+    // The rule POST /agreements/:id/send uses for the recipient: the parent when the card has a parent address.
+    family_name: oneLine(String(contact.parent_email ?? "").trim() ? contact.parent_name : contact.student_name),
+    student_name: oneLine(contact.student_name),
+    counselor_name: oneLine(sender.counselorName),
+    date: signedOn,
+  };
+  const r = renderContractText({
+    title: String(draft.title),
+    sections: draft.sections as Parameters<typeof renderContractText>[0]["sections"],
+    values,
+    signature: { signerName: oneLine(signature.signer_name), practiceName: oneLine(sender.practiceName), signedOn, imageSha256: signature.image_sha256 },
+  });
+  if (!r.ok) {
+    throw r.reason === "too_long"
+      ? new HttpError(400, "This contract is too long to send. Shorten it and try again.", "contract_too_long")
+      : new HttpError(400, contractFieldsMessage(r.fields), "contract_fields_missing");
+  }
+  return { id: null, title: r.title, draft: { id: String(draft.id), bodyText: r.bodyText, signature } };
+}
+
+const sameSignature = (a: SavedSignature, b: SavedSignature) =>
+  a.signer_name === b.signer_name && a.kind === b.kind && (a.image_png ?? null) === (b.image_png ?? null) && (a.image_sha256 ?? null) === (b.image_sha256 ?? null);
+
+/**
+ * The signature as it was signed, copied unchanged from the sender's saved row (the insert policy demands exactly
+ * that). No `.select()`: the image column isn't readable by the client, so PostgREST must return nothing.
+ */
+async function insertSignatureSnapshot(db: SupabaseClient, agreementId: string, counselorId: string, sig: SavedSignature): Promise<void> {
+  const insert = () =>
+    db.from("agreement_signatures").insert({ agreement_id: agreementId, signer_name: sig.signer_name, kind: sig.kind, image_png: sig.image_png, image_sha256: sig.image_sha256 });
+  let { error } = await insert();
+  if (error?.code === "42501") {
+    // Refused: the saved signature changed or went since the text was rendered. The text names the one rendered,
+    // so only that one may be stamped: retry once when it reads the same again, else ask for a fresh send.
+    const now = await savedSignature(db, counselorId);
+    if (!now) throw signatureNeeded();
+    if (!sameSignature(now, sig)) throw new HttpError(409, "Your signature changed while this was sending. Send it again.", "signature_changed");
+    ({ error } = await insert());
+  }
+  if (error) throw contractDraftError(error);
+}
 
 /** A new agreement written in the invoice form, saved as a draft (exactly as `POST /agreements` saves one). */
 export async function saveInlineAgreement(
@@ -177,6 +287,9 @@ export async function issueInvoiceAgreement(
 ): Promise<{ id: string; title: string; url: string; contract?: ContractRef }> {
   const publicApiUrl = env.PUBLIC_API_URL;
   if (!publicApiUrl) throw agreementsUnavailable();
+  const draft = p.resolved.draft;
+  // Never signed by a cron or anyone but the signed-in sender.
+  if ((draft || "draftId" in p.input) && (p.service || !draft)) throw draftSendNow();
   const id =
     p.resolved.id ??
     (p.resolved.contract
@@ -185,14 +298,20 @@ export async function issueInvoiceAgreement(
           contactId: p.contactId,
           counselorId: p.counselorId,
           title: p.resolved.title,
-          bodyText: "bodyText" in p.input ? p.input.bodyText : "",
+          bodyText: draft ? draft.bodyText : "bodyText" in p.input ? p.input.bodyText : "",
         }));
   try {
+    if (draft) await insertSignatureSnapshot(db, id, p.counselorId, draft.signature);
     const { url } = p.service
       ? await mintAgreementLinkAsService(db, id, { publicApiUrl, supersede: true, createdBy: p.counselorId })
       : await mintAgreementLink(db, id, { publicApiUrl });
     return { id, title: p.resolved.title, url, ...(p.resolved.contract ? { contract: p.resolved.contract } : {}) };
   } catch (err) {
+    if (draft) {
+      // No signed-but-unsent agreement may stay sendable: void it (as POST /agreements/:id/void does), then report.
+      await db.from("agreements").update({ status: "void" }).eq("id", id).in("status", ["draft", "sent"]);
+      if (err instanceof HttpError) throw err;
+    }
     throw agreementsError(err as { code?: string; message?: string });
   }
 }

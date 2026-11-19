@@ -33,6 +33,7 @@ import { invoiceStatus, readPractice, type PracticeIdentity } from "../lib/invoi
 import { draftInvoice, draftStatus, invoiceEmail, type InvoiceDraft } from "../lib/invoiceSend.js";
 import {
   checkInvoiceAgreement,
+  type DraftSender,
   INVOICE_AGREEMENT_TEMPLATE,
   invoiceAgreementInput,
   issueInvoiceAgreement,
@@ -468,6 +469,18 @@ function practiceOf(request: FastifyRequest, contact: Row): Promise<PracticeIden
   // A solo counselor's own name is already on the request; anyone else's is read.
   const own = !firmId && counselorId === request.auth.userId ? request.profile.full_name ?? null : null;
   return readPractice(request.db, { firmId, counselorId }, own);
+}
+
+/**
+ * The signer of a drafted contract: the caller, with the practice name the acceptance emails use (the firm's name,
+ * else the sender's own). Read only when a draft is attached.
+ */
+async function draftSender(request: FastifyRequest, contact: Row, input: object | undefined): Promise<DraftSender | undefined> {
+  if (!input || !("draftId" in input)) return undefined;
+  const counselorName = request.profile.full_name ?? "";
+  const firmId = (contact.firm_id as string | null) ?? null;
+  const practiceName = (await readPractice(request.db, { firmId, counselorId: request.auth.userId }, counselorName || null)).name;
+  return { counselorId: request.auth.userId, counselorName, practiceName };
 }
 
 async function requireAccount(request: FastifyRequest, contactId: string): Promise<AccountDTO> {
@@ -1240,7 +1253,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       const draft = draftInvoice(account, await paymentCreditsReady(request), b, today);
       // An agreement to go with it: checked and read, nothing saved and no link minted.
       checkInvoiceAgreement(b.agreement, { to: b.to || String(contact.parent_email || contact.student_email || ""), send: true });
-      const agreement = b.agreement ? await resolveInvoiceAgreement(request.db, id, b.agreement) : null;
+      const agreement = b.agreement ? await resolveInvoiceAgreement(request.db, id, b.agreement, await draftSender(request, contact, b.agreement)) : null;
       const practiceId = String(contact.firm_id ?? contact.counselor_id);
       const [practice, cards, extras] = await Promise.all([practiceOf(request, contact), takesCards(request, practiceId), composeExtras(request, contact, b, b.style)]);
       // Card button: only when cards are accepted on this invoice (an invoice with no list takes them, as always).
@@ -1317,7 +1330,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
         phoneOf(contact);
         if (b.send && !(await textingAvailable(request.auth.userId))) throw textingUnavailable();
       }
-      const resolved = b.agreement ? await resolveInvoiceAgreement(request.db, id, b.agreement) : null;
+      const resolved = b.agreement ? await resolveInvoiceAgreement(request.db, id, b.agreement, await draftSender(request, contact, b.agreement)) : null;
       const composer = hasComposerFields(b);
       let extras = await composeExtras(request, contact, b);
       const cardOk = takesCardMethod(b.methods ?? null);
@@ -1537,7 +1550,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
             contactId,
             counselorId: request.auth.userId,
             input: b.agreement,
-            resolved: await resolveInvoiceAgreement(request.db, contactId, b.agreement),
+            resolved: await resolveInvoiceAgreement(request.db, contactId, b.agreement, await draftSender(request, contact, b.agreement)),
           })
         : null;
       // An invoice the composer made resends with the look, ways to pay, lines and note it went out with.
