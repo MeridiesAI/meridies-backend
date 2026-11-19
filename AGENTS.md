@@ -142,6 +142,9 @@ src/
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
 │   ├── calendarFeed.ts    # the Calendar's one feed of everything dated
+│   ├── recurrence.ts      # repeating series date maths: presets, count/until, the limits, wall-clock instants across DST (pure)
+│   ├── seriesSchema.ts    # seriesReady: is series_id there (20261129000002); the feed and the series routes ask first
+│   ├── seriesInvites.ts   # ONE invite round for a whole series change: one email per recipient listing the dates
 │   ├── calendarIcal.ts    # the subscribed feed: token hashing, the counselor's .ics under the service role
 │   ├── practiceSettings.ts # Data & privacy switches, enforced (AI summaries, document reading, report sharing, students' AI tools)
 │   ├── studentListFit.ts   # the Reach / Target / Safety tag on a school a student added from Build College Lists (server-computed)
@@ -230,7 +233,7 @@ src/
 │   ├── guardians.ts       # /guardians    the parents directory (read-only list + CSV), counselor
 │   ├── accessReview.ts    # /access-review/:token   Meridies approves a pending counselor
 │   ├── webhooks.ts        # /webhooks     Resend + Twilio delivery status, and families' replies (signed)
-│   ├── calendar.ts        # /calendar     feed, event types, practice events
+│   ├── calendar.ts        # /calendar     feed, event types, practice events (and repeating ones: /events/series)
 │   ├── calendarIcal.ts    # /calendar/ical  the subscribed feed: public .ics by token, make/rotate/revoke the URL
 │   ├── booking.ts         # /booking      a counselor's booking settings and meeting types; read/cancel a public-link booking
 │   ├── studentBooking.ts  # /me/booking   a student's types, free slots; book, move, cancel their own meetings
@@ -1931,6 +1934,39 @@ null for a one-off) is there only once `20261129000002` is applied: the meeting 
 an explicit select naming it earlier is a 42703 and a 500 for every counselor's calendar; a practice event reads `select *`
 and carries it when its row has the key. Pure parts:
 `collegeFeedItems`, `testFeedItems`. Tests: `test/unit/calendar-feed.test.ts`, `test/integration/calendar-feed.test.mjs`.
+
+**Repeating series** (`20261129000002`; `lib/recurrence.ts`, `lib/seriesSchema.ts`, `lib/seriesInvites.ts`, the
+`/series` routes in `routes/meetings.ts` and `routes/calendar.ts`). A repeating meeting or practice event is ordinary rows,
+one per occurrence, sharing a nullable `series_id` (an id the API mints; it names no table, null is a one-off). There is
+no recurrence rule stored and no master row: every occurrence is edited, moved, held or deleted like any meeting.
+`POST /meetings/series` (counselor, 20 a minute) takes a meeting's fields with `date`, `startMinutes`, `durationMins`,
+an IANA `timeZone` and `repeat: { preset: daily | weekdays | weekly | biweekly | monthly, count (2-52) | until }`; every
+occurrence starts at the same wall-clock time in that zone (across a DST change) and ends `durationMins` later. Limits
+(`MAX_SERIES` 52, `MAX_SERIES_WITH_LINKS` 12 with `createConference`, `MAX_SPAN_DAYS` 366) are a 400 in words, never a
+silent truncation. All or nothing: provider events first, then ONE insert and the attendee rows; any failure deletes what
+was made. `PATCH /meetings/series/:seriesId { anchorId, scope: following | all, timeZone, notifyAttendees?, patch }`
+changes the anchor and every later row (`following`) or every upcoming one (`all`), per row through `applyMeetingPatch`
+(the same code as `PATCH /meetings/:id`): a move shifts each row by the anchor's wall-clock change (days, minutes), so a
+row moved by hand keeps its offset; an end sets one length; `patch` takes only title, agenda, location,
+guardiansInvited, startsAt, endsAt (mode, link, status, attendees and the invite switch are per meeting: a 400). Held,
+no-show, cancelled and past rows are never touched and counted in `skipped`; a row that fails is left as it was and listed
+in `failed` (`{ id, date, message }`) with the answer still 200. `DELETE /meetings/series/:seriesId?anchorId&scope&timeZone`
+deletes the same rows (attendee rows cascade). Practice events: `POST /calendar/events/series` (`startMinutes: null` makes
+all-day rows), `PATCH` / `DELETE /calendar/events/series/:seriesId` the same scopes on the caller's own rows (`all` from
+today in `timeZone`; an all-day row only has its date shifted). Another counselor's series is a 404, a student 403.
+**One series change is one invite round** (`lib/seriesInvites.ts`): one email per recipient (the students attending,
+guardians when invited, the counselor's copy) listing every affected date, charged once to `meeting-invites:<owner>` for a
+create or an update and never for a cancel, so a 12-row series doesn't email a family 12 times or spend 12 of the 60 an
+hour. The safe variant, until a real-inbox test of multi-event invites: only the create attaches a file (ONE .ics,
+`METHOD:PUBLISH`, a VEVENT per occurrence with its own UID and SEQUENCE, no ATTENDEE); an update and a cancel are
+text-only lists of the changed or cancelled dates ("change them there: your calendar keeps the old times until you do").
+An update tells only about still-scheduled rows whose family-visible fields changed; `ics_sequence` is the trigger's, so
+it rises only on changed rows. **The `series_unavailable` convention:** every series route asks `seriesReady()` first and
+answers 503 `{ code: "series_unavailable", error: "Repeating events aren't switched on yet." }` until the column exists;
+the feed then leaves `seriesId` out. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Tests:
+`test/unit/recurrence.test.ts`, `series-schema.test.ts`, `series-invites.test.ts`, `meetings-series-route.test.ts`,
+`meetings-series-scope-route.test.ts`, `calendar-series-route.test.ts`, `meetings-patch-characterization.test.ts`;
+`test/integration/meeting-series.test.mjs` (emails counted per recipient in `message_deliveries` and Mailpit).
 
 **Subscribing** (`routes/calendarIcal.ts`, `lib/calendarIcal.ts`, `buildFeedIcs` / `feedIcsEvents` in `lib/ics.ts`).
 `POST /calendar/ical` (counselor, 10 an hour) makes the feed URL, or replaces it (the old one stops at once), and
