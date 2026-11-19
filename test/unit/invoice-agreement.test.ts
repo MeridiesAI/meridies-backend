@@ -280,6 +280,8 @@ test("missing and unknown fields are named in words", () => {
   assert.equal(contractFieldsMessage(["counselor_name"]), "Fill in your name in Settings first");
   assert.equal(contractFieldsMessage(["fee"]), "The contract uses a field Meridies doesn't know: {{fee}}");
   assert.equal(contractFieldsMessage([""]), "The contract uses a field Meridies doesn't know: an empty {{ }}");
+  // inherited property names are unknown fields, not card fields
+  assert.equal(contractFieldsMessage(["constructor", "__proto__"]), "The contract uses a field Meridies doesn't know: {{constructor}}, {{__proto__}}");
   assert.equal(contractFieldsMessage(["Student_Name"]), "The contract uses a field Meridies doesn't know: {{Student_Name}}");
 });
 

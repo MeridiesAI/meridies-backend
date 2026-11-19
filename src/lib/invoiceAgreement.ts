@@ -144,7 +144,7 @@ const CARD_FIELDS: Record<string, string> = { family_name: "the parent's or stud
 /** What a contract's unresolved fields mean, in words: an unknown field names itself, an empty one says where to fill it. */
 export function contractFieldsMessage(fields: string[]): string {
   const unknown = fields.filter((f) => !(MERGE_FIELDS as readonly string[]).includes(f)).map((f) => (f ? `{{${f}}}` : "an empty {{ }}"));
-  const card = fields.filter((f) => f in CARD_FIELDS).map((f) => CARD_FIELDS[f]);
+  const card = fields.filter((f) => Object.hasOwn(CARD_FIELDS, f)).map((f) => CARD_FIELDS[f]);
   return [
     unknown.length ? `The contract uses a field Meridies doesn't know: ${unknown.join(", ")}` : "",
     card.length ? `Fill in ${card.join(" and ")} on the family's card first` : "",
