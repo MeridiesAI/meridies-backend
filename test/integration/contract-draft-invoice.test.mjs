@@ -12,9 +12,10 @@
 // a firm member signs as themselves; a scheduled invoice can't carry a draft and the cron refuses one. The
 // family's page shows a drawn signature under the text (open, accepted and "already accepted"), serves its PNG
 // at /agree/<token>/signature behind the same link checks as /file, and an agreement with no snapshot or a
-// typed one has no image and no such route. (A stored image whose hash isn't the one the text names is a 503;
-// the snapshot table refuses updates, so that case is a unit test with a stub: test/unit/agreements.test.ts.)
+// typed one has no image and no such route. A stored image that doesn't match the signed text is a 503 and
+// nothing is served: staged by inserting snapshot rows as postgres (the table refuses UPDATE and DELETE, not INSERT).
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { API, CRON_SECRET, call, check, sql, user } from "./harness.mjs";
 
 const MAILPIT = process.env.MAILPIT_URL ?? "http://127.0.0.1:54324";
@@ -199,6 +200,48 @@ const plainPage = await pub("GET", `/agree/${tokPlain}`);
 check("an agreement with no snapshot: no image, the form follows the text", plainSent.status === 201 && plainPage.status === 200 && !plainPage.text.includes("<img") && /<\/pre>\n<form method="post">/.test(plainPage.text), plainPage.text.slice(0, 120));
 check("...and /signature is 404 for it", (await pubBytes(sigPath(tokPlain))).status === 404);
 
+// ---- A stored image that doesn't match the signed text is never served (503) -------------------------------------------
+// The snapshot table refuses UPDATE and DELETE but not INSERT, and sql() runs as postgres, so each case is its own
+// sent agreement (plain text, no snapshot) given one forged drawn row. Rows can't be deleted; every run makes fresh agreements.
+const P = Buffer.from(PNG_B64, "base64");
+const Q = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+const H = sha(P);
+const HQ = sha(Q);
+const textNaming = (h) => `Staged terms.\n\nSigned for cdi-solo by Casey Forged, ${today}.${h ? `\nSignature image SHA-256: ${h}` : ""}`;
+async function staged(label, text, bytes, rowSha) {
+  const r = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, inv(`${label} ${tag}`, { agreement: { title: `${label} ${tag}`, bodyText: text } }));
+  const id = r.body.agreement?.id;
+  const tok = tokenIn((await mailWith(parentEmail, `Invoice ${r.body.invoiceNumber}`))?.Text);
+  await sql(`insert into public.agreement_signatures (agreement_id, signer_name, kind, image_png, image_sha256) values ('${id}', 'Casey Forged', 'drawn', decode('${bytes.toString("hex")}', 'hex'), '${rowSha}')`);
+  return { id, tok };
+}
+const refused = (r) => r.status === 503 && !(r.headers.get("content-type") ?? "").startsWith("image/") && !r.bytes.includes(P) && !r.bytes.includes(Q) && !r.bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+check("(the staged images are different bytes)", H !== HQ);
+const okRow = await staged("Staged ok", textNaming(HQ), Q, HQ);
+const okImg = await pubBytes(sigPath(okRow.tok));
+check("control: a consistent forged row (bytes, row hash and text agree) is served", okImg.status === 200 && okImg.headers.get("content-type") === "image/png" && okImg.bytes.equals(Q), String(okImg.status));
+const badBytes = await staged("Staged bytes", textNaming(H), Q, H);
+const r1 = await pubBytes(sigPath(badBytes.tok));
+check("stored bytes that don't hash to the row's hash (the text names that hash): 503, nothing served", refused(r1), `${r1.status} ${r1.headers.get("content-type")}`);
+const otherText = await staged("Staged text", textNaming(H), Q, HQ);
+const r2 = await pubBytes(sigPath(otherText.tok));
+check("a consistent row whose image the text does NOT name (it names another hash): 503, nothing served", refused(r2), `${r2.status} ${r2.headers.get("content-type")}`);
+const noLine = await staged("Staged noline", textNaming(null), Q, HQ);
+const r3 = await pubBytes(sigPath(noLine.tok));
+check("a drawn row whose text has no `Signature image SHA-256:` line at all: 503, not 200", refused(r3), `${r3.status} ${r3.headers.get("content-type")}`);
+if (process.env.API_LOG) {
+  let log = "";
+  for (let i = 0; i < 20; i++) {
+    log = readFileSync(process.env.API_LOG, "utf8");
+    if ([badBytes, otherText, noLine].every((x) => log.includes(`"agreement":"${x.id}"`))) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const lines = log.split("\n").filter((l) => l.includes("the signature image doesn't match"));
+  check("each refusal is logged by agreement id", [badBytes, otherText, noLine].every((x) => lines.some((l) => l.includes(`"agreement":"${x.id}"`))));
+  check("...and never with the image bytes", !log.includes(Q.toString("hex")) && !log.includes(Q.toString("base64")) && !log.includes(P.toString("hex")) && !log.includes(P.toString("base64")));
+  check("...and the control (consistent) logged no refusal", !lines.some((l) => l.includes(okRow.id)));
+}
+
 // ---- Refusals before anything is written --------------------------------------------------------------------------------
 const D2 = (await call(S.token, "POST", "/pipeline/contract-drafts", { title: "Plain", sections: sections() })).body;
 const noName = (await call(S.token, "POST", "/pipeline/contacts", { stageId: stage.id, studentName: `No parent name ${tag}`, parentEmail: `cdi-np-${tag}@families.test` })).body;
@@ -218,7 +261,7 @@ const needsSend = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/
 check("send: false with a draft: 400 agreement_needs_send", needsSend.status === 400 && needsSend.body.code === "agreement_needs_send", JSON.stringify(needsSend.body));
 const textInv = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, inv("X", { channel: "text", agreement: { draftId: D2.id } }));
 check("a text invoice with a draft: 400 text_no_agreement", textInv.status === 400 && textInv.body.code === "text_no_agreement", JSON.stringify(textInv.body));
-check("none of them wrote anything", (await agreementsOf(noName.id)) === refusedBefore.a && (await invoicesOf(noName.id)) === refusedBefore.i && (await agreementsOf(contact.id)) === 4);
+check("none of them wrote anything", (await agreementsOf(noName.id)) === refusedBefore.a && (await invoicesOf(noName.id)) === refusedBefore.i && (await agreementsOf(contact.id)) === 8);
 
 // ---- A firm member signs as themselves ---------------------------------------------------------------------------------------
 const A = await user("cdi-owner");
