@@ -66,6 +66,12 @@ export function lastActivityAt(lastActiveAt: string | null, lastEventAt: string 
   return new Date(t).toISOString();
 }
 
+/** `GET /students`' `lastActiveAt`: the row's `last_active_at` as an ISO instant, null when unset or unreadable. */
+export function rosterLastActive(row: { last_active_at?: string | null }): string | null {
+  const t = ms(row.last_active_at);
+  return t === null ? null : new Date(t).toISOString();
+}
+
 export function inactiveDays(lastActivity: string, now: Date): number {
   return Math.floor((now.getTime() - (ms(lastActivity) ?? now.getTime())) / DAY_MS);
 }

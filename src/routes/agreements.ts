@@ -52,7 +52,10 @@ import {
   hashAgreementToken,
   mintAgreementLink,
   parseAcceptForm,
+  signatureVerdict,
+  textNamesSignature,
   truncateUserAgent,
+  type StoredSignature,
   type TokenLookup,
   isOpenAgreement,
   OPEN_AGREEMENT_STATUSES,
@@ -110,8 +113,8 @@ function agreementDto(r: Row, opts: { withBody: boolean; acceptance?: Row | null
 
 // ---- The public page -----------------------------------------------------------------
 
-// No script source at all: the page is a plain form post.
-const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+// No script source at all: the page is a plain form post. `img-src 'self'` is for the counselor's signature image only.
+const CSP = "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
 function page(reply: FastifyReply, status: number, body: string) {
   return reply
@@ -316,7 +319,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
     return { svc, lookup };
   }
 
-  async function acceptedPage(svc: NonNullable<ReturnType<typeof serviceClient>>, agreement: Row, file: { href: string } | null = null): Promise<string> {
+  async function acceptedPage(svc: NonNullable<ReturnType<typeof serviceClient>>, agreement: Row, token: string, file: { href: string } | null = null): Promise<string> {
     const acc = await svc.from("agreement_acceptances").select("signer_name, accepted_at, body_sha256").eq("agreement_id", String(agreement.id)).maybeSingle();
     if (acc.error || !acc.data) throw new Error(`read acceptance: ${acc.error?.code ?? "missing"}`);
     const a = acc.data as Row;
@@ -326,6 +329,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
       error: null,
       accepted: { signerName: String(a.signer_name), acceptedAt: new Date(String(a.accepted_at)).toISOString(), bodySha256: String(a.body_sha256) },
       file,
+      signature: await signatureLink(svc, agreement, token),
     });
   }
 
@@ -335,6 +339,70 @@ export default async function agreementRoutes(app: FastifyInstance) {
     const path = (r.data as Row | null)?.storage_path;
     return !r.error && typeof path === "string" ? path : null;
   }
+
+  /**
+   * The signature frozen on an agreement when it was sent, if any (migration 20261129000002). Tolerant of a database
+   * without it (null); any other read error throws, so the page is "unavailable" rather than shown without its image.
+   * `image_png` (service role only, "\\x<hex>" from PostgREST) is read only when `withImage`.
+   */
+  async function signatureOf(svc: NonNullable<ReturnType<typeof serviceClient>>, agreementId: string, withImage = false): Promise<StoredSignature | null> {
+    const r = await svc.from("agreement_signatures").select(`signer_name, kind, image_sha256${withImage ? ", image_png" : ""}`).eq("agreement_id", agreementId).maybeSingle();
+    if (r.error) {
+      if (isResultsNotApplied(r.error)) return null;
+      throw new Error(`read signature: ${r.error.code ?? "unknown"}`);
+    }
+    const row = r.data as Row | null;
+    if (!row) return null;
+    const png = row.image_png;
+    return {
+      signer_name: String(row.signer_name),
+      kind: String(row.kind),
+      image_sha256: (row.image_sha256 as string | null) ?? null,
+      bytes: typeof png === "string" && png.startsWith("\\x") ? Buffer.from(png.slice(2), "hex") : null,
+    };
+  }
+
+  /** The image the family sees under the text: only a drawn signature whose hash the text names (else the image route would refuse it). */
+  async function signatureLink(svc: NonNullable<ReturnType<typeof serviceClient>>, agreement: Row, token: string): Promise<{ href: string; name: string } | null> {
+    const sig = await signatureOf(svc, String(agreement.id));
+    return sig && textNamesSignature(sig, String(agreement.body_text)) ? { href: `/agree/${token}/signature`, name: sig.signer_name } : null;
+  }
+
+  /**
+   * The counselor's drawn signature as a PNG, for the family the link was sent to: the same link checks as the file
+   * (void, expired and unknown links get nothing). The bytes are served only when they hash to the SHA-256 recorded
+   * with them AND the text the family accepts names that SHA-256: the page must not show an image the text doesn't.
+   */
+  app.get("/agree/:token/signature", async (request, reply) => {
+    const { token } = request.params as { token: string };
+    try {
+      if (!(await withinLimits(request, token, "view"))) return page(reply, 429, TOO_MANY);
+      const o = await open(request, token);
+      if ("status" in o) return page(reply, o.status, o.body);
+      if (o.lookup.state === "expired") return page(reply, 410, EXPIRED);
+      const lookup = o.lookup;
+      if (lookup.state !== "open" && lookup.state !== "accepted") return page(reply, 404, INVALID);
+      const sig = await signatureOf(o.svc, String(lookup.agreement.id), true);
+      const verdict = signatureVerdict(sig, String(lookup.agreement.body_text));
+      if (verdict === "none") return page(reply, 404, INVALID);
+      if (verdict === "mismatch" || !sig?.bytes) {
+        request.log.error({ agreement: String(lookup.agreement.id) }, "agree: the signature image doesn't match its recorded SHA-256 or the agreement's text; not served");
+        return page(reply, 503, UNAVAILABLE);
+      }
+      return reply
+        .code(200)
+        .header("Cache-Control", "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Robots-Tag", "noindex")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Content-Security-Policy", "default-src 'none'; sandbox")
+        .type("image/png")
+        .send(sig.bytes);
+    } catch (err) {
+      request.log.error({ err: serializeErr(err) }, "agree: could not show the signature");
+      return page(reply, 503, UNAVAILABLE);
+    }
+  });
 
   /**
    * The contract file itself, for the family the link was sent to: the same token, the same checks as the page
@@ -389,9 +457,10 @@ export default async function agreementRoutes(app: FastifyInstance) {
       if (lookup.state === "expired") return page(reply, 410, EXPIRED);
       if (lookup.state === "invalid") return page(reply, 404, INVALID);
       const file = (await contractOf(svc, String(lookup.agreement.id))) ? { href: `/agree/${token}/file` } : null;
-      if (lookup.state === "accepted") return page(reply, 200, await acceptedPage(svc, lookup.agreement, file));
+      if (lookup.state === "accepted") return page(reply, 200, await acceptedPage(svc, lookup.agreement, token, file));
       if (lookup.state !== "open") return page(reply, 404, INVALID);
-      return page(reply, 200, agreementPageBody({ title: String(lookup.agreement.title), bodyText: String(lookup.agreement.body_text), error: null, file }));
+      const signature = await signatureLink(svc, lookup.agreement, token);
+      return page(reply, 200, agreementPageBody({ title: String(lookup.agreement.title), bodyText: String(lookup.agreement.body_text), error: null, file, signature }));
     } catch (err) {
       request.log.error({ err: serializeErr(err) }, "agree: could not show the agreement");
       return page(reply, 503, UNAVAILABLE);
@@ -406,13 +475,15 @@ export default async function agreementRoutes(app: FastifyInstance) {
       if ("status" in o) return page(reply, o.status, o.body);
       const { svc, lookup } = o;
       if (lookup.state === "expired") return page(reply, 410, EXPIRED);
-      if (lookup.state === "accepted") return page(reply, 409, `<h2>Already accepted</h2>${await acceptedPage(svc, lookup.agreement)}`);
+      if (lookup.state === "accepted") return page(reply, 409, `<h2>Already accepted</h2>${await acceptedPage(svc, lookup.agreement, token)}`);
       if (lookup.state !== "open") return page(reply, 404, INVALID);
       const agreement = lookup.agreement;
+      // Read before the accept commits: a failed read must not turn a recorded acceptance into an error page.
+      const signature = await signatureLink(svc, agreement, token);
 
       const form = parseAcceptForm(typeof request.body === "string" ? request.body : "");
       if (!form.ok) {
-        return page(reply, 400, agreementPageBody({ title: String(agreement.title), bodyText: String(agreement.body_text), error: FORM_ERROR }));
+        return page(reply, 400, agreementPageBody({ title: String(agreement.title), bodyText: String(agreement.body_text), error: FORM_ERROR, signature }));
       }
 
       const [contactRes, counselorRes, firmRes] = await Promise.all([
@@ -461,7 +532,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
         return page(reply, 503, UNAVAILABLE);
       }
       const result = String((data as Row | null)?.result ?? "");
-      if (result === "already") return page(reply, 409, `<h2>Already accepted</h2>${await acceptedPage(svc, agreement)}`);
+      if (result === "already") return page(reply, 409, `<h2>Already accepted</h2>${await acceptedPage(svc, agreement, token)}`);
       if (result === "expired") return page(reply, 410, EXPIRED);
       if (result === "void") return page(reply, 410, VOID);
       if (result !== "accepted") return page(reply, 404, INVALID);
@@ -511,6 +582,7 @@ export default async function agreementRoutes(app: FastifyInstance) {
         bodyText: String(agreement.body_text),
         error: null,
         accepted: { signerName: form.signerName, acceptedAt: acceptedAt.toISOString(), bodySha256: String(agreement.body_sha256) },
+        signature,
       });
       return page(reply, 200, thanks + recorded);
     } catch (err) {

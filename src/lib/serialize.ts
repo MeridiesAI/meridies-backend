@@ -791,7 +791,7 @@ export const toMeeting = (r: Row) => ({
   sendInvites: r.send_invites === true,
   /** "Notes sent" mark (Time saved). Absent before 20261027000001, so the app hides the switch. */
   ...("notes_sent_at" in r ? { notesSentAt: nstr(r.notes_sent_at) } : {}),
-  /** The repeating series this meeting belongs to (null for a one-off). Absent before 20261129000002, so no key and no 42703. */
+  /** The repeating series this meeting belongs to (null for a one-off). Absent before 20261129000003, so no key and no 42703. */
   ...("series_id" in r ? { seriesId: nstr(r.series_id) } : {}),
   createdAt: nstr(r.created_at),
 });

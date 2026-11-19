@@ -1,5 +1,5 @@
 // Repeating series (routes/meetings.ts /series, routes/calendar.ts /events/series, lib/seriesInvites.ts): real
-// accounts on a local Supabase against a running API (see harness.mjs), with migration 20261129000002 applied.
+// accounts on a local Supabase against a running API (see harness.mjs), with migration 20261129000003 applied.
 // One series change is one invite round: one email per recipient listing every date (message_deliveries, and
 // Mailpit when MAILPIT_URL is set and the API sends there through DEV_MAIL_URL). Sends run after the response,
 // so the checks poll. Dates are in 2031, weekly over the New York DST start (Sun Mar 9 2031).

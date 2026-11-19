@@ -25,7 +25,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { approvedCounselorIds } from "./access.js";
 import { todayIn } from "./crm.js";
 import { HttpError } from "./errors.js";
-import { checkInvoiceAgreement, contractAttachment, issueInvoiceAgreement, resolveInvoiceAgreement } from "./invoiceAgreement.js";
+import { checkInvoiceAgreement, contractAttachment, draftSendNow, issueInvoiceAgreement, resolveInvoiceAgreement } from "./invoiceAgreement.js";
 import { hasComposerFields, toStoredLines } from "./invoiceComposer.js";
 import { draftPayload, payloadProblem, type DraftPayload } from "./invoiceDrafts.js";
 import { invoiceStatus, readPractice, type PracticeIdentity } from "./invoiceDocument.js";
@@ -231,6 +231,8 @@ async function sendDraft(svc: SupabaseClient, draft: Row, creator: string, claim
   // The shape parsed; the composer's own rules (lines add up, reminders in range, a text carries no agreement) hold now too.
   const rule = payloadProblem(p);
   if (rule) throw new Permanent(rule.message);
+  // Backstop for a row the route didn't write: a drafted contract is signed only by a signed-in sender.
+  if (p.agreement && "draftId" in p.agreement) throw new Permanent(draftSendNow().message);
   const contactId = String(draft.contact_id);
 
   const { data: c, error: cErr } = await svc.from("pipeline_contacts").select("*").eq("id", contactId).maybeSingle();

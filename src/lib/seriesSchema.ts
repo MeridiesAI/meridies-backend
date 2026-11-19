@@ -1,5 +1,5 @@
 /**
- * Repeating events: whether `series_id` exists on `meetings` and `calendar_events` (20261129000002).
+ * Repeating events: whether `series_id` exists on `meetings` and `calendar_events` (20261129000003).
  *
  * The calendar feed selects meeting columns by name, so naming `series_id` before the migration is applied
  * is a 42703 and a 500 for every counselor's calendar. It, and the series routes, ask here first.

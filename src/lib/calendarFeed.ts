@@ -89,7 +89,7 @@ export type CalendarFeedItem = {
   practice?: true;
   /**
    * The repeating series a meeting or practice event belongs to (null when it is a one-off). Absent until
-   * 20261129000002 is applied (`seriesReady`), so an app reads absent as null.
+   * 20261129000003 is applied (`seriesReady`), so an app reads absent as null.
    */
   seriesId?: string | null;
   /**

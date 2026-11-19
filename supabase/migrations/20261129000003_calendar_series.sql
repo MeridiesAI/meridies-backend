@@ -5,6 +5,8 @@
 --                                    mints when it creates a series, so the "following" and "all upcoming" scopes can
 --                                    find the sibling rows.
 --
+-- Sorts after 20261129000002_contract_drafts (Supabase keys a migration by its numeric prefix alone, so the two
+-- cannot share one); it touches nothing contract_drafts creates and needs nothing from it.
 -- Additive and idempotent. Deploy order: either. Safe for the previous build (explicit select lists ignore the
 -- column). Not in REQUIRED_SCHEMA: until it is applied the series routes answer 503 series_unavailable and the
 -- calendar feed does not select the column (`seriesReady`). No table is created, so no RLS or approval gate to

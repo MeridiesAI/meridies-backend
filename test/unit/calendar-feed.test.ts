@@ -113,7 +113,7 @@ test("tests already taken, test-optional, undated or outside the window are skip
 /**
  * A stand-in client: every query builder method chains, awaiting answers `rows[table]` (none by default); records `.in`
  * filters per table and every `.select` string. `seriesMissing` makes the series probe (meetings, `series_id`) answer
- * 42703, as a database without 20261129000002 does.
+ * 42703, as a database without 20261129000003 does.
  */
 function fakeDb(rows: Record<string, unknown[]> = {}, opts: { seriesMissing?: boolean } = {}) {
   const ins: Array<{ table: string; col: string; ids: string[] }> = [];
@@ -169,7 +169,7 @@ test("a practice event is marked, a meeting is not", async () => {
   assert.equal("practice" in meeting, false);
 });
 
-// ---- Repeating events (20261129000002): the feed names series_id only once the column exists ----
+// ---- Repeating events (20261129000003): the feed names series_id only once the column exists ----
 
 const seriesRows = {
   calendar_events: [
