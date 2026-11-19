@@ -106,6 +106,11 @@ check("the counselor's feed has the 4 meetings, each with seriesId", feed.status
 const oneOff = await call(c.token, "POST", "/meetings", { studentId: s1.id, title: "One-off", startsAt: "2031-03-04T15:00:00Z", endsAt: "2031-03-04T16:00:00Z" });
 feed = await call(c.token, "GET", `/calendar/feed?${window}`);
 check("…and a one-off meeting carries seriesId null", (feed.body?.items ?? []).find((i) => i.id === `meeting:${oneOff.body?.id}`)?.seriesId === null);
+// The meeting modal opens every meeting through GET /meetings/:id, so its seriesId must be there too.
+const member = await call(c.token, "GET", `/meetings/${rows[0].id}`);
+check("GET /meetings/:id returns the member's seriesId", member.status === 200 && member.body?.seriesId === seriesId, JSON.stringify(member.body).slice(0, 200));
+const single = await call(c.token, "GET", `/meetings/${oneOff.body?.id}`);
+check("…and a one-off's is null", single.status === 200 && single.body?.seriesId === null, JSON.stringify(single.body).slice(0, 200));
 
 // ---- Scoped update ---------------------------------------------------------------------------------------------
 

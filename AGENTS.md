@@ -1966,8 +1966,11 @@ text-only lists of the changed or cancelled dates ("change them there: your cale
 An update tells only about still-scheduled rows whose family-visible fields changed; `ics_sequence` is the trigger's, so
 it rises only on changed rows. **The `series_unavailable` convention:** every series route asks `seriesReady()` first and
 answers 503 `{ code: "series_unavailable", error: "Repeating events aren't switched on yet." }` until the column exists;
-the feed then leaves `seriesId` out. **Deploy order:** either; not in `REQUIRED_SCHEMA`. Tests:
-`test/unit/recurrence.test.ts`, `series-schema.test.ts`, `series-invites.test.ts`, `meetings-series-route.test.ts`,
+the feed then leaves `seriesId` out. **A meeting's own answers carry it too**: `GET /meetings`, `GET /meetings/:id` and the
+POST/PATCH answers (all `select *` through `toMeeting`) return `seriesId` (the series id, or null for a one-off) when the row has a
+`series_id` key and no key at all before the migration, so the app's meeting modal can offer the series scope (it opens every
+meeting through `GET /meetings/:id`, not the feed). **Deploy order:** either; not in `REQUIRED_SCHEMA`. Tests:
+`test/unit/kpi-meeting-dto.test.ts` (the `seriesId` cases), `test/unit/recurrence.test.ts`, `series-schema.test.ts`, `series-invites.test.ts`, `meetings-series-route.test.ts`,
 `meetings-series-scope-route.test.ts`, `calendar-series-route.test.ts`, `meetings-patch-characterization.test.ts`;
 `test/integration/meeting-series.test.mjs` (emails counted per recipient in `message_deliveries` and Mailpit).
 
