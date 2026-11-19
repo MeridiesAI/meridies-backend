@@ -185,9 +185,9 @@ check("a client-sent hash is refused, never trusted", (await sig({ kind: "drawn"
 check("a name with a line break or none is 400", (await sig({ kind: "typed", signerName: "Case\ny" })).status === 400 && (await sig({ kind: "typed", signerName: "  " })).status === 400 && (await sig({ kind: "typed", signerName: "n".repeat(121) })).status === 400);
 // A lone UTF-16 surrogate passes JSON but Postgres refuses it (22P02): a 400 in words, never a 500.
 const loneDraft = await call(S.token, "POST", "/pipeline/contract-drafts", draftBody("Half an emoji \uD800"));
-check("a draft title with a lone surrogate is 400 in words, not 500", loneDraft.status === 400 && /broken character/.test(loneDraft.body.error), JSON.stringify(loneDraft.body));
+check("a draft title with a lone surrogate is 400 in words, not 500", loneDraft.status === 400 && /broken character/.test(JSON.stringify(loneDraft.body.details)), JSON.stringify(loneDraft.body));
 const loneBody = await call(S.token, "POST", "/pipeline/contract-drafts", { title: "Fine", sections: sections().map((x, i) => (i === 3 ? { ...x, body: "a\uDC00b" } : x)) });
-check("...and a lone surrogate in a body too", loneBody.status === 400 && /broken character/.test(loneBody.body.error), JSON.stringify(loneBody.body));
+check("...and a lone surrogate in a body too", loneBody.status === 400 && /broken character/.test(JSON.stringify(loneBody.body.details)), JSON.stringify(loneBody.body));
 check("a signer name with one is 400", (await sig({ kind: "typed", signerName: "Casey\uD800" })).status === 400);
 check("every refusal left the saved signature as it was", JSON.stringify((await call(S.token, "GET", "/pipeline/signature")).body.signature) === JSON.stringify(drawn.body));
 check("(a whole emoji is fine)", (await sig({ kind: "typed", signerName: "Casey \uD83D\uDE00" })).status === 200);
