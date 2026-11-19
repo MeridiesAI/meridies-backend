@@ -9,7 +9,11 @@
 // freezes (text, snapshot, link, acceptance hash); replacing the signature or editing/archiving the draft
 // changes nothing already sent; Send again with { agreementId } re-signs nothing; a drawn signature binds its
 // hash; missing/unknown fields and an over-long text are 400 before anything is written; the old guards hold;
-// a firm member signs as themselves; a scheduled invoice can't carry a draft and the cron refuses one.
+// a firm member signs as themselves; a scheduled invoice can't carry a draft and the cron refuses one. The
+// family's page shows a drawn signature under the text (open, accepted and "already accepted"), serves its PNG
+// at /agree/<token>/signature behind the same link checks as /file, and an agreement with no snapshot or a
+// typed one has no image and no such route. (A stored image whose hash isn't the one the text names is a 503;
+// the snapshot table refuses updates, so that case is a unit test with a stub: test/unit/agreements.test.ts.)
 import { createHash } from "node:crypto";
 import { API, CRON_SECRET, call, check, sql, user } from "./harness.mjs";
 
@@ -23,7 +27,11 @@ const pub = async (method, path, body) => {
     headers: { "X-Forwarded-For": MY_IP, ...(body !== undefined ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) },
     body,
   });
-  return { status: r.status, text: await r.text() };
+  return { status: r.status, text: await r.text(), headers: r.headers };
+};
+const pubBytes = async (path) => {
+  const r = await fetch(API + path, { redirect: "manual", headers: { "X-Forwarded-For": MY_IP } });
+  return { status: r.status, headers: r.headers, bytes: Buffer.from(await r.arrayBuffer()) };
 };
 const mailsTo = async (email) => {
   const r = await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${email}"`)}`);
@@ -34,6 +42,17 @@ async function mailWith(email, needle) {
   for (let i = 0; i < 24; i++) {
     const m = (await mailsTo(email)).find((x) => x.Subject.includes(needle));
     if (m) return fullMail(m);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return null;
+}
+// The link in a mail to `email` whose subject has `needle`, other than `oldTok` (a resend mints a new one).
+async function linkAfter(email, needle, oldTok) {
+  for (let i = 0; i < 24; i++) {
+    for (const m of (await mailsTo(email)).filter((x) => x.Subject.includes(needle))) {
+      const t = tokenIn((await fullMail(m)).Text);
+      if (t && t !== oldTok) return t;
+    }
     await new Promise((r) => setTimeout(r, 250));
   }
   return null;
@@ -103,6 +122,10 @@ const accepted = await pub("POST", `/agree/${tok1}`, "signerName=Pat+Parent&cons
 check("the family accepts with a typed name", accepted.status === 200 && /acceptance is recorded/i.test(accepted.text), accepted.text.slice(0, 120));
 const acc1 = (await call(S.token, "GET", `/agreements/${ag1.id}`)).body;
 check("the recorded hash is the sha256 of the signed text", acc1.status === "accepted" && acc1.acceptance?.bodySha256 === sha(ag1.bodyText), JSON.stringify(acc1.acceptance));
+const typedPage = await pub("GET", `/agree/${tok1}`);
+check("a typed signature has no image on the (accepted) page", typedPage.status === 200 && !typedPage.text.includes("<img") && typedPage.text.includes("Accepted by Pat Parent"), typedPage.text.slice(0, 80));
+const typedSig = await pubBytes(`/agree/${tok1}/signature`);
+check("...and /signature is 404 for it", typedSig.status === 404 && !(typedSig.headers.get("content-type") ?? "").startsWith("image/"), String(typedSig.status));
 
 // ---- Replacing the signature changes nothing already sent ----------------------------------------------------------
 await call(S.token, "PUT", "/pipeline/signature", { kind: "drawn", signerName: "Casey Drawn", imagePngBase64: PNG_B64 });
@@ -118,6 +141,36 @@ const pngSha = sha(Buffer.from(PNG_B64, "base64"));
 check("a drawn signature's text names the image hash", drawn.status === 201 && ag2.bodyText?.includes(`Signed for cdi-solo by Casey Drawn, ${today}.\nSignature image SHA-256: ${pngSha}`), ag2.bodyText?.slice(-160));
 check("...the snapshot's own hash, and its image the saved bytes", snap2?.image_sha256 === pngSha && snap2.kind === "drawn" && snap2.png === Buffer.from(PNG_B64, "base64").toString("hex"), JSON.stringify(snap2));
 
+// ---- The family's page shows the drawn signature -----------------------------------------------------------------------
+const mail2 = await mailWith(parentEmail, `Invoice ${drawn.body.invoiceNumber}`);
+const tok2 = tokenIn(mail2?.Text);
+const sigPath = (t) => `/agree/${t}/signature`;
+const imgTag = (t) => `<img src="${sigPath(t)}" alt="Signature of Casey Drawn"`;
+const open2 = tok2 ? await pub("GET", `/agree/${tok2}`) : { status: 0, text: "", headers: new Headers() };
+check("the open page shows the signature under the text, above the form", open2.status === 200 && open2.text.includes(imgTag(tok2)) && open2.text.indexOf("</pre>") < open2.text.indexOf("<img") && open2.text.indexOf("<img") < open2.text.indexOf("<form"), open2.text.slice(0, 200));
+const pageCsp = open2.headers.get("content-security-policy") ?? "";
+check("the page's CSP lets its own image load: img-src 'self', default-src 'none', nothing else widened", /(^|; )img-src 'self'(;|$)/.test(pageCsp) && /(^|; )default-src 'none'(;|$)/.test(pageCsp) && !/script-src|connect-src|object-src|https?:|data:|\*/.test(pageCsp), pageCsp);
+const png = await pubBytes(sigPath(tok2));
+check("the image is 200 image/png, the saved bytes, hashing to image_sha256", png.status === 200 && png.headers.get("content-type") === "image/png" && sha(png.bytes) === snap2.image_sha256 && png.bytes.toString("hex") === snap2.png, `${png.status} ${png.headers.get("content-type")}`);
+const h = (n) => png.headers.get(n);
+check("...no-store, nosniff, no referrer, noindex, and a sandboxing CSP of its own", /no-store/.test(h("cache-control")) && h("x-content-type-options") === "nosniff" && h("referrer-policy") === "no-referrer" && h("x-robots-tag") === "noindex" && h("content-security-policy") === "default-src 'none'; sandbox", JSON.stringify([...png.headers]));
+check("a wrong link gets no image (404)", (await pubBytes(sigPath("A".repeat(43)))).status === 404);
+check("a malformed link gets none either (404)", (await pubBytes(sigPath("short"))).status === 404);
+
+// A second drawn contract, accepted: its page, the "already accepted" answer and the image all still show it.
+const drawn3 = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, inv(`Third ${tag}`, { agreement: { draftId: D.id } }));
+const tok3 = tokenIn((await mailWith(parentEmail, `Invoice ${drawn3.body.invoiceNumber}`))?.Text);
+const done3 = await pub("POST", `/agree/${tok3}`, "signerName=Pat+Parent&consent=yes");
+check("accepting a drawn-signature contract: the answer shows the image", done3.status === 200 && /acceptance is recorded/i.test(done3.text) && done3.text.includes(imgTag(tok3)), done3.text.slice(0, 120));
+const acceptedPage3 = await pub("GET", `/agree/${tok3}`);
+check("the accepted page shows the image above the accepted lines", acceptedPage3.status === 200 && acceptedPage3.text.includes(imgTag(tok3)) && acceptedPage3.text.indexOf("<img") < acceptedPage3.text.indexOf("Accepted by") && !acceptedPage3.text.includes("<form"));
+const again3 = await pub("POST", `/agree/${tok3}`, "signerName=Pat+Parent&consent=yes");
+check("a second submit (409 already accepted) shows it too", again3.status === 409 && again3.text.includes(imgTag(tok3)), String(again3.status));
+const png3 = await pubBytes(sigPath(tok3));
+check("and the image is still served once accepted", png3.status === 200 && png3.headers.get("content-type") === "image/png" && sha(png3.bytes) === snap2.image_sha256);
+const bad3 = await pub("POST", `/agree/${tok2}`, "signerName=&consent=no");
+check("the form-error page (open, 400) keeps the image", bad3.status === 400 && bad3.text.includes(imgTag(tok2)), String(bad3.status));
+
 // ---- Edit, then archive, the draft --------------------------------------------------------------------------------------
 await call(S.token, "PUT", `/pipeline/contract-drafts/${D.id}`, { title: "Changed", sections: sections("Something else for {{student_name}}.") });
 check("editing the draft leaves the sent text alone", (await call(S.token, "GET", `/agreements/${ag2.id}`)).body.bodyText === ag2.bodyText);
@@ -128,13 +181,23 @@ check("an archived draft can't be attached (404)", archived.status === 404, JSON
 
 // ---- Send again with the agreement: no second signature, same text, a new link ------------------------------------------
 const inv2 = await sql(`select id from public.pipeline_invoices where contact_id = '${contact.id}' and number = '${drawn.body.invoiceNumber}'`);
-const mail2 = await mailWith(parentEmail, `Invoice ${drawn.body.invoiceNumber}`);
-const tok2 = tokenIn(mail2?.Text);
 const snapsBefore = await snapshotsOf(contact.id);
 const again = await call(S.token, "POST", `/pipeline/invoices/${inv2}/send`, { agreement: { agreementId: ag2.id } });
 check("Send again with the drafted contract's agreement", again.status === 200 && again.body.agreement?.id === ag2.id, JSON.stringify(again.body));
 check("...still one snapshot for it, the same text", (await snapshotsOf(contact.id)) === snapsBefore && JSON.stringify(await snapshot(ag2.id)) === JSON.stringify(snap2) && (await call(S.token, "GET", `/agreements/${ag2.id}`)).body.bodyText === ag2.bodyText);
 check("...and the earlier link stopped (a new one went)", tok2 && (await pub("GET", `/agree/${tok2}`)).status === 410);
+check("...its image stopped with it (410, like the file)", (await pubBytes(sigPath(tok2))).status === 410);
+const tok2b = await linkAfter(parentEmail, `Invoice ${drawn.body.invoiceNumber}`, tok2);
+check("the new link still shows the image", tok2b && (await pubBytes(sigPath(tok2b))).status === 200 && (await pub("GET", `/agree/${tok2b}`)).text.includes(imgTag(tok2b)));
+const voided = await call(S.token, "POST", `/agreements/${ag2.id}/void`);
+check("a withdrawn agreement: its page and its image are 410", voided.status === 200 && (await pub("GET", `/agree/${tok2b}`)).status === 410 && (await pubBytes(sigPath(tok2b))).status === 410, JSON.stringify(voided.body));
+
+// An agreement with no snapshot (every older one) is the page it always was.
+const plainSent = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, inv(`Plain ${tag}`, { agreement: { title: `Plain ${tag}`, bodyText: "Plain terms with no signature." } }));
+const tokPlain = tokenIn((await mailWith(parentEmail, `Invoice ${plainSent.body.invoiceNumber}`))?.Text);
+const plainPage = await pub("GET", `/agree/${tokPlain}`);
+check("an agreement with no snapshot: no image, the form follows the text", plainSent.status === 201 && plainPage.status === 200 && !plainPage.text.includes("<img") && /<\/pre>\n<form method="post">/.test(plainPage.text), plainPage.text.slice(0, 120));
+check("...and /signature is 404 for it", (await pubBytes(sigPath(tokPlain))).status === 404);
 
 // ---- Refusals before anything is written --------------------------------------------------------------------------------
 const D2 = (await call(S.token, "POST", "/pipeline/contract-drafts", { title: "Plain", sections: sections() })).body;
@@ -155,7 +218,7 @@ const needsSend = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/
 check("send: false with a draft: 400 agreement_needs_send", needsSend.status === 400 && needsSend.body.code === "agreement_needs_send", JSON.stringify(needsSend.body));
 const textInv = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, inv("X", { channel: "text", agreement: { draftId: D2.id } }));
 check("a text invoice with a draft: 400 text_no_agreement", textInv.status === 400 && textInv.body.code === "text_no_agreement", JSON.stringify(textInv.body));
-check("none of them wrote anything", (await agreementsOf(noName.id)) === refusedBefore.a && (await invoicesOf(noName.id)) === refusedBefore.i && (await agreementsOf(contact.id)) === 2);
+check("none of them wrote anything", (await agreementsOf(noName.id)) === refusedBefore.a && (await invoicesOf(noName.id)) === refusedBefore.i && (await agreementsOf(contact.id)) === 4);
 
 // ---- A firm member signs as themselves ---------------------------------------------------------------------------------------
 const A = await user("cdi-owner");

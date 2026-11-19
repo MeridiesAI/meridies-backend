@@ -31,6 +31,7 @@ test("a pay or agreement token never reaches the logs, whatever follows it", () 
   assert.equal(loggedUrl(`/pay/${token}/contract`), "/pay/…/contract");
   assert.equal(loggedUrl(`//pay/${token}/contract/?x=1`), "/pay/…/contract?x=…");
   assert.equal(loggedUrl(`/agree/${token}/file`), "/agree/…/file");
+  assert.equal(loggedUrl(`/agree/${token}/signature`), "/agree/…/signature");
   assert.equal(loggedUrl(`/agree/${token}/file/extra/${token}`), "/agree/…/…");
   for (const url of [`/pay/${token}/contract`, `/agree/${token}/file`, `/pay/${token}/${token}`]) {
     assert.ok(!loggedUrl(url).includes(token), url);
