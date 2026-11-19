@@ -138,6 +138,8 @@ src/
 │   ├── invoiceSettings.ts # the practice's methods and look as an invoice reads them (degrades to defaults)
 │   ├── invoiceSchedule.ts, invoiceComposer.ts, invoiceStyle.ts, paymentMethods.ts, packageTemplates.ts, invoiceCardFee.ts, contracts.ts, invoiceDrafts.ts # the composer's pure parts
 │   ├── invoiceDispatch.ts # the scheduled-invoice and reminder crons
+│   ├── contractDraft.ts   # drafted contracts, pure: outline, merge fields, render to text (byte-identical copy in meridies-demo and meridies-app)
+│   ├── contractDraftApi.ts # drafted contracts: request bodies, signature PNG check, DTOs, the 503 mapper
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -218,6 +220,7 @@ src/
 │   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)
 │   ├── pay.ts             # /pay/:token   public: an invoice's pay link, opens Stripe Checkout
 │   ├── agreements.ts      # /agreements (counselor) + /agree/:token (public): typed-name acceptance, OFF unless AGREEMENTS_ENABLED=true
+│   ├── contractDrafts.ts  # /pipeline/contract-drafts + /pipeline/signature   drafted contracts and the consultant's saved signature
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
@@ -704,6 +707,45 @@ forget it.
   invoice needs the counselor's own number (409 `texting_unavailable`). Not in `REQUIRED_SCHEMA`; each part degrades
   without its file. Tests: `test/unit/invoice-*.test.ts`, `contracts.test.ts`, `test/integration/invoice-composer`,
   `invoice-drafts`, `contracts`.
+- **Drafted contracts** (`20261129000001`; design in `docs/superpowers/specs/2026-11-18-contract-drafting-design.md`,
+  plan in `docs/superpowers/plans/2026-11-18-contract-drafting.md`). A consultant drafts a contract from a fixed outline
+  (text, list, text, then clauses; <= 40 sections, <= 50,000 characters), saves **one** personal signature (typed, or a
+  drawn PNG <= 60 KB and <= 1200 x 400), and attaches the draft to an invoice. At send it is rendered to plain text,
+  signed with the sender's saved signature and frozen as an **ordinary agreement**, so the typed-name acceptance, hash and
+  certificate above are reused unchanged. Still **not a certified e-signature**; text only, no PDF. Files:
+  `lib/contractDraft.ts` (pure: sections, merge fields, `renderContractText`), `lib/contractDraftApi.ts` (zod bodies,
+  PNG sniff, DTOs, the 503 mapper), `routes/contractDrafts.ts`, and the `{ draftId }` branch of `lib/invoiceAgreement.ts`.
+  **`contractDraft.ts` is copied byte for byte to `meridies-demo` and `meridies-app` as `lib/contractDraft.ts`; change all
+  three together.** Tables: `contract_drafts` (practice-shared like `contract_files`: any practice member reads, a firm
+  owner/admin or the solo counselor writes; no delete, `DELETE` archives; 100 unarchived a practice), `counselor_signatures`
+  (one row per consultant, owner only, no delete) and `agreement_signatures` (the snapshot a sent agreement was signed
+  with). `agreement_signatures` is **insert-only and immutable** (no update/delete for anyone, a trigger refuses both even
+  as postgres): it cascades from its agreement but never from an accepted one (the acceptance RESTRICTs), and is captured by
+  AxIS trash. `image_png` is readable **only by the service role** (column-level grants: `authenticated` selects the other
+  columns), and an insert must equal the caller's saved signature (name, kind, image and hash) on the caller's own
+  `draft` agreement, so **never `select *` on it from a client**. Routes (all `/pipeline`, counselor):
+  `GET/POST /contract-drafts`, `PUT/DELETE /contract-drafts/:id`, `POST /contract-drafts/:id/duplicate`,
+  `GET/PUT /signature` (`PUT` hashes the decoded bytes itself; a client `imageSha256` is a 400); then `agreement: { draftId }`
+  on `POST /contacts/:id/invoices` and its `/preview`. Public: `GET /agree/:token/signature`. **Merge fields**:
+  `{{family_name}}` (the parent's name when the card has a parent email, else the student's), `{{student_name}}`,
+  `{{counselor_name}}`, `{{date}}` (long UTC date); anything else is refused, and an empty value is refused. **Errors**:
+  `contract_drafts_unavailable` 503 (no migration), `signature_needed` 409 (nothing saved, or it vanished mid-send),
+  `signature_changed` 409 (changed between render and snapshot; the new agreement is voided), `contract_fields_missing`
+  400 (a field unknown or empty), `contract_too_long` 400 (text > 60,000), `draft_contract_send_now` 409,
+  `contract_drafts_full` 409. **Scheduled invoices refuse a drafted contract** (`routes/invoiceDrafts.ts` 409
+  `draft_contract_send_now` on a scheduled save; an unscheduled save is fine; `invoiceDispatch` fails a forged row
+  `Permanent`): it is signed when the consultant presses Send and the cron never signs. **Send again must use
+  `{ agreementId }`, never `{ draftId }`**: a `draftId` renders and signs a NEW agreement. **The family's image:** the
+  sign page shows `<img src=/agree/:token/signature>` (page CSP gains `img-src 'self'`, nothing else); the route serves
+  the PNG only when its bytes hash to the snapshot's `image_sha256` **and** the agreement text names that hash (the line
+  `Signature image SHA-256: <hash>`), else 503 and a log line with the agreement id only, never the bytes; a typed
+  signature or an agreement with no snapshot is 404. **Preview writes nothing** (no invoice number, no agreement, no
+  snapshot). **Switch:** behind `AGREEMENTS_ENABLED` (off is 404 `agreements_off` before anything is written). **Deploy
+  order:** migration `20261129000001` after `20261128000001`, applied with the Apply migrations workflow; without it the
+  draft and signature routes answer 503 `contract_drafts_unavailable` and the sign page renders without an image; not in
+  `REQUIRED_SCHEMA`, so the app and demo may deploy before it. Tests: `test/unit/contract-draft.test.ts`,
+  `contract-draft-api.test.ts`, `invoice-agreement.test.ts`, `agreements.test.ts`; `test/integration/contract-drafts.test.mjs`,
+  `contract-draft-invoice.test.mjs` (CI runs the API with the switch on).
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a
