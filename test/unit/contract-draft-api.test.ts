@@ -164,6 +164,35 @@ test("no field holds a control character; only a body keeps its line breaks and 
   assert.match(message(withBody("a\u0000b")), /body can't contain control characters/i);
 });
 
+test("no field holds a lone surrogate (Postgres refuses it, a 500); a whole emoji is fine", () => {
+  const withTitle = (title: string) => draft({ title });
+  const withHeading = (h: string) => draft({ sections: [{ ...base[0]!, heading: h } as ContractSection, base[1]!, base[2]!] });
+  const withItem = (item: string) => draft({ sections: [base[0]!, { id: "p", kind: "list", heading: "P", items: ["ok", item] }, base[2]!] });
+  const withBody = (b: string) => draft({ sections: [...base, clause(1, { body: b })] });
+  const textBody = (b: string) => draft({ sections: [{ ...base[0]!, body: b } as ContractSection, base[1]!, base[2]!] });
+  const withId = (idv: string) => draft({ sections: [{ ...base[0]!, id: idv } as ContractSection, base[1]!, base[2]!] });
+  const message = (input: unknown) => JSON.stringify(contractDraftBody.safeParse(input).error?.issues.map((i) => i.message));
+  for (const lone of ["\uD800", "\uDBFF", "\uDC00", "\uDFFF", "\uDE00\uD83D"]) {
+    for (const [name, make] of [["title", withTitle], ["heading", withHeading], ["item", withItem], ["clause body", withBody], ["text body", textBody], ["section id", withId]] as const) {
+      const input = make(`a${lone}b`);
+      rejects(input);
+      assert.match(message(input), /broken character/, name);
+    }
+    assert.equal(signatureBody.safeParse({ kind: "typed", signerName: `Casey${lone}` }).success, false);
+    assert.equal(signatureBody.safeParse({ kind: "drawn", signerName: `${lone}Casey`, imagePngBase64: PNG_B64 }).success, false);
+  }
+  assert.match(message(withTitle("a\uD800")), /title has a broken character/i);
+  assert.match(JSON.stringify(signatureBody.safeParse({ kind: "typed", signerName: "a\uD800" }).error?.issues.map((i) => i.message)), /name has a broken character/i);
+  // A pair is one character and stays.
+  const emoji = "Ready \uD83D\uDE00 \u00e9";
+  assert.ok(contractDraftBody.safeParse(withTitle(emoji)).success);
+  assert.ok(contractDraftBody.safeParse(withHeading(emoji)).success);
+  assert.ok(contractDraftBody.safeParse(withItem(emoji)).success);
+  assert.ok(contractDraftBody.safeParse(withBody(emoji)).success);
+  assert.ok(contractDraftBody.safeParse(textBody(emoji)).success);
+  assert.ok(signatureBody.safeParse({ kind: "typed", signerName: emoji }).success);
+});
+
 test("the whole draft is at most 50,000 characters", () => {
   const room = 50_000 - "T".length - base.reduce((n, s) => n + s.heading.length + (s.kind === "list" ? s.items.join("").length : s.body.length), 0) - "H".length;
   const big = (n: number) => draft({ title: "T", sections: [...base, clause(1, { heading: "H", body: "x".repeat(n) })] });

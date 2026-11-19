@@ -51,7 +51,8 @@ import type { EmailAttachment } from "./email.js";
 import { AGREEMENT_CONSENT_VERSION } from "./agreementConsent.js";
 import { HttpError, notFound } from "./errors.js";
 import { MERGE_FIELDS, renderContractText, type MergeValues } from "./contractDraft.js";
-import { contractDraftError } from "./contractDraftApi.js";
+import { contractDraftBody, contractDraftError } from "./contractDraftApi.js";
+import { serializeErr } from "./requestLog.js";
 
 type Row = Record<string, unknown>;
 
@@ -180,6 +181,9 @@ async function resolveDraft(db: SupabaseClient, contactId: string, draftId: stri
   if (contactRes.error) throw agreementsError(contactRes.error);
   const draft = draftRes.data as Row | null;
   if (!draft || draft.archived_at) throw notFound("That contract draft isn't in your library");
+  // The row is only as good as what wrote it (an admin can write jsonb through PostgREST): hold it to the save rules again.
+  const checked = contractDraftBody.safeParse({ title: draft.title, sections: draft.sections });
+  if (!checked.success) throw new HttpError(400, "This drafted contract needs fixing in your library before it can be sent.", "contract_draft_invalid");
   const contact = (contactRes.data as Row | null) ?? {};
   const signature = await savedSignature(db, sender.counselorId);
   if (!signature) throw signatureNeeded();
@@ -192,8 +196,8 @@ async function resolveDraft(db: SupabaseClient, contactId: string, draftId: stri
     date: signedOn,
   };
   const r = renderContractText({
-    title: String(draft.title),
-    sections: draft.sections as Parameters<typeof renderContractText>[0]["sections"],
+    title: checked.data.title,
+    sections: checked.data.sections,
     values,
     signature: { signerName: oneLine(signature.signer_name), practiceName: oneLine(sender.practiceName), signedOn, imageSha256: signature.image_sha256 },
   });
@@ -221,7 +225,7 @@ async function insertSignatureSnapshot(db: SupabaseClient, agreementId: string, 
     // so only that one may be stamped: retry once when it reads the same again, else ask for a fresh send.
     const now = await savedSignature(db, counselorId);
     if (!now) throw signatureNeeded();
-    if (!sameSignature(now, sig)) throw new HttpError(409, "Your signature changed while this was sending. Send it again.", "signature_changed");
+    if (!sameSignature(now, sig)) throw new HttpError(409, "Your signature changed while the contract was being signed, so nothing was sent to the family. Attach the contract again and send the invoice again.", "signature_changed");
     ({ error } = await insert());
   }
   if (error) throw contractDraftError(error);
@@ -283,6 +287,8 @@ export async function issueInvoiceAgreement(
     input: InvoiceAgreementInput;
     resolved: ResolvedAgreement;
     service?: boolean;
+    /** Where a failed void is reported (the request's logger); the console without one. */
+    logger?: { error: (obj: unknown, msg?: string) => void };
   }
 ): Promise<{ id: string; title: string; url: string; contract?: ContractRef }> {
   const publicApiUrl = env.PUBLIC_API_URL;
@@ -309,7 +315,11 @@ export async function issueInvoiceAgreement(
   } catch (err) {
     if (draft) {
       // No signed-but-unsent agreement may stay sendable: void it (as POST /agreements/:id/void does), then report.
-      await db.from("agreements").update({ status: "void" }).eq("id", id).in("status", ["draft", "sent"]);
+      const voided = await db.from("agreements").update({ status: "void" }).eq("id", id).in("status", ["draft", "sent"]);
+      // A void that fails leaves an agreement whose text says "Signed for ..." with no snapshot, still sendable: say so (ids only).
+      if (voided.error) {
+        (p.logger ?? console).error({ agreement: id, err: serializeErr(err), voidErr: serializeErr(voided.error) }, "invoice agreement: could not void a drafted contract after a failed send; void it by hand");
+      }
       if (err instanceof HttpError) throw err;
     }
     throw agreementsError(err as { code?: string; message?: string });

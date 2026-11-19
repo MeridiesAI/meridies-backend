@@ -1369,16 +1369,17 @@ export default async function pipelineRoutes(app: FastifyInstance) {
       let agreement: { id: string; title: string; url: string; contract?: Awaited<ReturnType<typeof issueInvoiceAgreement>>["contract"] } | null = null;
       if (b.agreement && resolved) {
         try {
-          agreement = await issueInvoiceAgreement(request.db, { contactId: id, counselorId: request.auth.userId, input: b.agreement, resolved });
+          agreement = await issueInvoiceAgreement(request.db, { contactId: id, counselorId: request.auth.userId, input: b.agreement, resolved, logger: request.log });
           // Which agreement came with this invoice, so the pay page can offer it (a failure here costs only that link).
           const linked = await request.db.from("pipeline_invoices").update({ agreement_id: agreement.id }).eq("id", String(invoice.id));
           if (linked.error) request.log.warn({ code: linked.error.code }, "pipeline: could not link the agreement to the invoice");
         } catch (err) {
           // Rare (the agreement was read a moment ago): the invoice is on file, unsent. Say so.
           const e = err instanceof HttpError ? err : new HttpError(500, "Something went wrong");
+          // signature_changed says what to do itself: the new agreement is void, so the old "send it again" would be a dead end.
           throw new HttpError(
             e.statusCode,
-            `Invoice ${String(invoice.number)} was saved but not sent: ${e.message}. Send it again from the family's history.`,
+            `Invoice ${String(invoice.number)} was saved but not sent: ${e.message}${e.code === "signature_changed" ? "" : ". Send it again from the family's history."}`,
             e.code
           );
         }
@@ -1551,6 +1552,7 @@ export default async function pipelineRoutes(app: FastifyInstance) {
             counselorId: request.auth.userId,
             input: b.agreement,
             resolved: await resolveInvoiceAgreement(request.db, contactId, b.agreement, await draftSender(request, contact, b.agreement)),
+            logger: request.log,
           })
         : null;
       // An invoice the composer made resends with the look, ways to pay, lines and note it went out with.

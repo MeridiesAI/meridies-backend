@@ -33,15 +33,19 @@ const TOTAL_MAX = 50_000;
 const LINE_CONTROL = /[\u0000-\u001f\u007f]/;
 const BODY_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const noControls = (re: RegExp, what: string) => [(s: string) => !re.test(s), `${what} can't contain control characters`] as const;
+// A lone UTF-16 surrogate (half an emoji) passes JSON but Postgres refuses it (22P02), which would answer 500.
+// /\p{Cs}/u matches only an unpaired one (a pair reads as one code point); String.isWellFormed isn't in tsconfig's ES2022 lib.
+const wellFormed = (what: string) => [(s: string) => !/\p{Cs}/u.test(s), `${what} has a broken character (half of an emoji or symbol). Remove it and try again`] as const;
 
-const id = z.string().min(1).max(ID_MAX);
-const title = z.string().trim().min(1).max(160).refine(...noControls(LINE_CONTROL, "The title"));
-const heading = z.string().trim().min(1).refine(...noControls(LINE_CONTROL, "A heading"));
-const item = z.string().trim().min(1).max(ITEM_MAX).refine(...noControls(LINE_CONTROL, "A list item"));
+const id = z.string().min(1).max(ID_MAX).refine(...wellFormed("A section id"));
+const title = z.string().trim().min(1).max(160).refine(...noControls(LINE_CONTROL, "The title")).refine(...wellFormed("The title"));
+const heading = z.string().trim().min(1).refine(...noControls(LINE_CONTROL, "A heading")).refine(...wellFormed("A heading"));
+const item = z.string().trim().min(1).max(ITEM_MAX).refine(...noControls(LINE_CONTROL, "A list item")).refine(...wellFormed("A list item"));
 const body = z
   .string()
   .refine((s) => s.trim().length > 0, "Can't be empty")
-  .refine(...noControls(BODY_CONTROL, "A body"));
+  .refine(...noControls(BODY_CONTROL, "A body"))
+  .refine(...wellFormed("A body"));
 const section = z.discriminatedUnion("kind", [
   z.object({ id, kind: z.literal("text"), heading, body }).strict(),
   z.object({ id, kind: z.literal("list"), heading, items: z.array(item).min(1).max(ITEMS_MAX) }).strict(),
@@ -70,7 +74,8 @@ const signerName = z
   .trim()
   .min(1)
   .max(120)
-  .refine((s) => !/[\u0000-\u001f\u007f-\u009f]/.test(s), "A name can't hold control characters");
+  .refine((s) => !/[\u0000-\u001f\u007f-\u009f]/.test(s), "A name can't hold control characters")
+  .refine(...wellFormed("A name"));
 
 export const signatureBody = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("typed"), signerName }).strict(),

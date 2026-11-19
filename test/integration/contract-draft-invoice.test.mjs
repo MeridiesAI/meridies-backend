@@ -14,9 +14,12 @@
 // at /agree/<token>/signature behind the same link checks as /file, and an agreement with no snapshot or a
 // typed one has no image and no such route. A stored image that doesn't match the signed text is a 503 and
 // nothing is served: staged by inserting snapshot rows as postgres (the table refuses UPDATE and DELETE, not INSERT).
-import { createHash } from "node:crypto";
+// A draft row written by hand (a list with no items) is 400 at preview and send. The agreement_signatures guards are
+// proved last: UPDATE/DELETE/TRUNCATE refused even as postgres, the cascade and AxIS Restore, the column grants, and
+// the insert policy (it must be the caller's own saved signature, on their own draft agreement).
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { API, CRON_SECRET, call, check, sql, user } from "./harness.mjs";
+import { API, CRON_SECRET, call, check, rest, sql, user } from "./harness.mjs";
 
 const MAILPIT = process.env.MAILPIT_URL ?? "http://127.0.0.1:54324";
 const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -302,3 +305,89 @@ await fetch(`${API}/internal/invoice-drafts/dispatch`, { method: "POST", headers
 const forgedRow = JSON.parse(await sql(`select row_to_json(x)::text from (select state, last_error from public.pipeline_invoice_drafts where id = '${forged.split("\n")[0]}') x`));
 check("the cron refuses a stored drafted contract", forgedRow.state === "failed" && /signed when you send it/.test(forgedRow.last_error ?? ""), JSON.stringify(forgedRow));
 check("...and signed nothing", (await agreementsOf(contact.id)) === agBefore);
+
+// ---- A draft row written by hand is held to the save rules again at send ----------------------------------------------------
+// contract_drafts is writable through PostgREST by an admin, so a row can hold any jsonb: here a list with no items.
+const forgedDraft = (
+  await sql(`insert into public.contract_drafts (counselor_id, practice_id, title, sections, created_by) values ('${S.id}', '${S.id}', 'Forged ${tag}', '[{"kind":"list"}]'::jsonb, '${S.id}') returning id`)
+).split("\n")[0];
+const forgedBefore = { a: await agreementsOf(contact.id), i: await invoicesOf(contact.id), s: await snapshotsOf(contact.id) };
+const forgedPreview = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices/preview`, inv("X", { agreement: { draftId: forgedDraft } }));
+const forgedSend = await call(S.token, "POST", `/pipeline/contacts/${contact.id}/invoices`, inv("X", { agreement: { draftId: forgedDraft } }));
+const forgedMsg = "This drafted contract needs fixing in your library before it can be sent.";
+check("a forged draft row: the preview is 400 contract_draft_invalid, in words", forgedPreview.status === 400 && forgedPreview.body.code === "contract_draft_invalid" && forgedPreview.body.error === forgedMsg, JSON.stringify(forgedPreview.body));
+check("...and so is the send (not a 500)", forgedSend.status === 400 && forgedSend.body.code === "contract_draft_invalid" && forgedSend.body.error === forgedMsg, JSON.stringify(forgedSend.body));
+check("...with no invoice, agreement or snapshot written", (await agreementsOf(contact.id)) === forgedBefore.a && (await invoicesOf(contact.id)) === forgedBefore.i && (await snapshotsOf(contact.id)) === forgedBefore.s);
+
+// ---- agreement_signatures: the database's own guards -------------------------------------------------------------------------
+// S's saved signature is set here so every row below is judged against a known one.
+const PNGB = Buffer.from(PNG_B64, "base64");
+await call(S.token, "PUT", "/pipeline/signature", { kind: "drawn", signerName: "Casey Guard", imagePngBase64: PNG_B64 });
+const GRP = "/rest/v1/agreement_signatures";
+const hex = (b) => `\\x${b.toString("hex")}`;
+const mine = (agreementId, over = {}) => ({ agreement_id: agreementId, signer_name: "Casey Guard", kind: "drawn", image_png: hex(PNGB), image_sha256: sha(PNGB), ...over });
+const insertSnap = (token, body) => rest(token, "POST", GRP, body, { Prefer: "return=minimal" });
+const snapCount = (id) => count(`select count(*) from public.agreement_signatures where agreement_id = '${id}'`);
+const refusedRls = (r) => r.status === 403 && r.body?.code === "42501";
+// Run as postgres inside a transaction that is rolled back, so a guard that did not hold would still change nothing.
+const sqlError = async (q) => {
+  try {
+    await sql(`begin; ${q}; rollback;`);
+    return null;
+  } catch (e) {
+    return String(e.stderr ?? e.message);
+  }
+};
+const newAgreement = async (token, contactId, title) => (await call(token, "POST", "/agreements", { contactId, title: `${title} ${tag}`, bodyText: "Terms." })).body.id;
+const stageG = (await call(S.token, "GET", "/pipeline")).body.stages[0];
+const K = (await call(S.token, "POST", "/pipeline/contacts", { stageId: stageG.id, studentName: `Guard Kid ${tag}`, parentName: "Gail Guard", parentEmail: `cdi-guard-${tag}@families.test` })).body;
+
+// The insert policy: only the caller's own saved signature, on their own draft agreement.
+const G = await newAgreement(S.token, K.id, "Guard draft");
+check("an insert whose image hash is not the saved signature's is refused", refusedRls(await insertSnap(S.token, mine(G, { image_sha256: "0".repeat(64) }))) && (await snapCount(G)) === 0);
+check("...nor another signer name", refusedRls(await insertSnap(S.token, mine(G, { signer_name: "Casey Other" }))) && (await snapCount(G)) === 0);
+const Q64 = Q.toString("hex");
+check("...nor another image, even with its own correct hash", refusedRls(await insertSnap(S.token, mine(G, { image_png: `\\x${Q64}`, image_sha256: HQ }))) && (await snapCount(G)) === 0);
+check("...nor a typed one when the saved signature is drawn", refusedRls(await insertSnap(S.token, { agreement_id: G, signer_name: "Casey Guard", kind: "typed" })) && (await snapCount(G)) === 0);
+const Hsent = await newAgreement(S.token, K.id, "Guard sent");
+check("(the agreement to be sent is a draft first)", (await call(S.token, "POST", `/agreements/${Hsent}/send`)).status === 200);
+check("an agreement already sent can't be given a snapshot, even the caller's own signature", refusedRls(await insertSnap(S.token, mine(Hsent))) && (await snapCount(Hsent)) === 0);
+const A2 = await newAgreement(A.token, bc.id, "Colleague draft");
+const typedMine = (agreementId) => ({ agreement_id: agreementId, signer_name: "Member Bea", kind: "typed" });
+check("a colleague's draft agreement can't be given a snapshot, even with the caller's own saved signature", refusedRls(await insertSnap(B.token, typedMine(A2))) && (await snapCount(A2)) === 0);
+const B2 = await newAgreement(B.token, bc.id, "Own draft");
+check("(control: the same insert on their own draft agreement goes through)", (await insertSnap(B.token, typedMine(B2))).status === 201 && (await snapCount(B2)) === 1);
+const okSnap = await insertSnap(S.token, mine(G));
+check("control: the caller's own saved signature on their own draft agreement goes through", okSnap.status === 201 && (await snapCount(G)) === 1, JSON.stringify(okSnap.body));
+
+// Column grants: the image is the service role's alone.
+const noImg = await rest(S.token, "GET", `${GRP}?agreement_id=eq.${G}&select=image_png`);
+check("an authenticated select of image_png is denied", refusedRls(noImg) && !JSON.stringify(noImg.body).includes(PNGB.toString("hex")) && !JSON.stringify(noImg.body).includes(PNG_B64), JSON.stringify(noImg.body));
+check("...select=* is denied too", refusedRls(await rest(S.token, "GET", `${GRP}?agreement_id=eq.${G}&select=*`)));
+const cols = await rest(S.token, "GET", `${GRP}?agreement_id=eq.${G}&select=agreement_id,signer_name,kind,image_sha256`);
+check("the other columns read for the practice's own member", cols.status === 200 && JSON.stringify(cols.body) === JSON.stringify([{ agreement_id: G, signer_name: "Casey Guard", kind: "drawn", image_sha256: sha(PNGB) }]), JSON.stringify(cols.body));
+check("another practice reads no snapshot rows", ((await rest((await user("cdi-guard-other")).token, "GET", `${GRP}?agreement_id=eq.${G}&select=agreement_id`)).body ?? []).length === 0);
+
+// Immutable: a signature is never changed or removed, by a client or by postgres itself.
+const snapG = await snapshot(G);
+const signedAtG = await sql(`select signed_at::text from public.agreement_signatures where agreement_id = '${G}'`);
+const permanent = /permanent record/;
+check("UPDATE is refused, even as postgres", permanent.test((await sqlError(`update public.agreement_signatures set signer_name = 'Changed' where agreement_id = '${G}'`)) ?? ""));
+check("DELETE is refused, even as postgres", permanent.test((await sqlError(`delete from public.agreement_signatures where agreement_id = '${G}'`)) ?? ""));
+check("TRUNCATE is refused, even as postgres", permanent.test((await sqlError("truncate public.agreement_signatures")) ?? ""));
+check("PostgREST has no UPDATE or DELETE for it either", refusedRls(await rest(S.token, "PATCH", `${GRP}?agreement_id=eq.${G}`, { signer_name: "Changed" })) && refusedRls(await rest(S.token, "DELETE", `${GRP}?agreement_id=eq.${G}`)));
+check("...and the row is exactly as it was", JSON.stringify(await snapshot(G)) === JSON.stringify(snapG) && (await sql(`select signed_at::text from public.agreement_signatures where agreement_id = '${G}'`)) === signedAtG);
+
+// The cascade: removing a DRAFT agreement removes its snapshot (the delete runs nested inside the foreign key's own trigger).
+const G4 = await newAgreement(S.token, K.id, "Cascade draft");
+check("(a draft agreement with a snapshot)", (await insertSnap(S.token, mine(G4))).status === 201 && (await snapCount(G4)) === 1);
+await sql(`delete from public.agreements where id = '${G4}'`);
+check("deleting the draft agreement removes its snapshot", (await sql(`select count(*) from public.agreements where id = '${G4}'`)) === "0" && (await snapCount(G4)) === 0);
+
+// ...and through the contact, with AxIS Restore putting the snapshot back with its image.
+const action = randomUUID();
+const gone = await rest(S.token, "DELETE", `/rest/v1/pipeline_contacts?id=eq.${K.id}`, undefined, { "x-meridies-axis-action": action, Prefer: "return=representation" });
+check("an AxIS-marked delete of the contact goes through and takes the snapshot with its agreement", gone.status === 200 && (await snapCount(G)) === 0 && (await agreementsOf(K.id)) === 0, JSON.stringify(gone.body));
+check("the snapshot is kept in the trash", (await sql(`select count(*) from private.axis_trash where action_id = '${action}' and table_name = 'agreement_signatures'`)) === "1");
+const back = await rest(S.token, "POST", "/rest/v1/rpc/axis_trash_restore", { p_action: action });
+check("Restore puts the snapshot back with its image, hash and time", back.status === 200 && back.body?.ok === true && JSON.stringify(await snapshot(G)) === JSON.stringify(snapG) && (await sql(`select signed_at::text from public.agreement_signatures where agreement_id = '${G}'`)) === signedAtG, JSON.stringify(back.body));

@@ -191,7 +191,7 @@ type Row = Record<string, unknown>;
 type PgErr = { code: string; message: string } | null;
 
 /** A Supabase client stand-in: canned rows per table, failures on demand, and a log of every write. */
-function stubDb(o: { rows?: Record<string, Row | null>; insertError?: Record<string, PgErr>; rpcError?: PgErr }) {
+function stubDb(o: { rows?: Record<string, Row | null>; insertError?: Record<string, PgErr>; rpcError?: PgErr; updateError?: PgErr }) {
   const writes: string[] = [];
   const rows: Record<string, Row | null> = {
     contract_drafts: { id: DRAFT_ID, title: "Agreement for {{student_name}}", sections: SECTIONS, archived_at: null },
@@ -203,7 +203,7 @@ function stubDb(o: { rows?: Record<string, Row | null>; insertError?: Record<str
     let op = "select";
     const result = () => {
       if (op === "insert") return { data: table === "agreements" ? { id: "ag-1" } : null, error: o.insertError?.[table] ?? null };
-      if (op === "update") return { data: null, error: null };
+      if (op === "update") return { data: null, error: o.updateError ?? null };
       return { data: rows[table] ?? null, error: null };
     };
     const q = {
@@ -293,6 +293,25 @@ test("render failures map to 400s before anything is written", async () => {
   assert.deepEqual([...empty.writes, ...long.writes], []);
 });
 
+test("a hand-written draft row is held to the save rules again: 400 contract_draft_invalid, nothing written", async () => {
+  // contract_drafts is writable through PostgREST by an admin, so the row may be any jsonb.
+  const bad: Row[] = [
+    { id: DRAFT_ID, title: "T", sections: [{ kind: "list" }], archived_at: null },
+    { id: DRAFT_ID, title: "T", sections: [SECTIONS[0], SECTIONS[1], SECTIONS[2], ...Array.from({ length: 38 }, (_, i) => ({ id: `c${i}`, kind: "clause", heading: "H", body: "x" }))], archived_at: null },
+    { id: DRAFT_ID, title: "T", sections: [{ ...SECTIONS[0], body: "x".repeat(50_001) }, SECTIONS[1], SECTIONS[2]], archived_at: null },
+    { id: DRAFT_ID, title: "T", sections: "nope", archived_at: null },
+    { id: DRAFT_ID, title: 7, sections: SECTIONS, archived_at: null },
+  ];
+  for (const row of bad) {
+    const { db, writes } = stubDb({ rows: { contract_drafts: row } });
+    let err: unknown;
+    await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER).catch((e) => (err = e));
+    assert.ok(err instanceof HttpError && err.statusCode === 400 && err.code === "contract_draft_invalid", JSON.stringify(row).slice(0, 80));
+    assert.equal(err.message, "This drafted contract needs fixing in your library before it can be sent.");
+    assert.deepEqual(writes, []);
+  }
+});
+
 test("issuing a draft: save, snapshot copied from the saved row, then the link", async () => {
   await withApiUrl(async () => {
     const { db, writes } = stubDb({});
@@ -324,9 +343,39 @@ test("a snapshot refused because the signature changed: voided, 409, never stamp
     const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
     // The saved row now differs from the one the text names.
     resolved.draft = { ...resolved.draft!, signature: { ...resolved.draft!.signature, signer_name: "Someone Earlier" } };
-    assert.equal(await rejects(issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved })), "409 signature_changed");
+    const thrown = await issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved }).catch((e: unknown) => e);
+    assert.ok(thrown instanceof HttpError && thrown.statusCode === 409 && thrown.code === "signature_changed", String(thrown));
+    // What it leaves is said as it is: nothing went to the family, and the new agreement is void (no "send it again" with it).
+    assert.match(thrown.message, /signature changed while the contract was being signed, so nothing was sent to the family\. Attach the contract again and send the invoice again\.$/);
     assert.equal(writes.filter((w) => w.startsWith("insert agreement_signatures")).length, 1);
     assert.equal(writes.at(-1), `update agreements ${JSON.stringify({ status: "void" })}`);
+  });
+});
+
+test("a void that itself fails is logged with the agreement id and the original error, and the original error goes on", async () => {
+  await withApiUrl(async () => {
+    const logger = { error: (o: unknown, m?: string) => void calls.push([o as Record<string, unknown>, m]) };
+    const calls: Array<[Record<string, unknown>, string | undefined]> = [];
+    const failures = { insertError: { agreement_signatures: { code: "23514", message: "check boom" } } };
+    const run = async (updateError: PgErr) => {
+      calls.length = 0;
+      const { db } = stubDb({ ...failures, updateError });
+      const resolved = await resolveInvoiceAgreement(db, "c", { draftId: DRAFT_ID }, SENDER);
+      return issueInvoiceAgreement(db, { contactId: "c", counselorId: "c-1", input: { draftId: DRAFT_ID }, resolved, logger }).catch((e: unknown) => e);
+    };
+    // The void works: nothing to report, the original error goes on.
+    const quiet = await run(null);
+    assert.ok(quiet instanceof HttpError, String(quiet));
+    assert.equal(calls.length, 0);
+    // The void fails too: one line naming the agreement, both errors; the thrown error is still the original.
+    const loud = await run({ code: "XX000", message: "void boom" });
+    assert.ok(loud instanceof HttpError && loud.message === (quiet as HttpError).message && loud.statusCode === (quiet as HttpError).statusCode, String(loud));
+    assert.equal(calls.length, 1);
+    const [obj, msg] = calls[0]!;
+    assert.equal(obj.agreement, "ag-1");
+    assert.ok((obj.err as { message: string }).message.includes((quiet as HttpError).message), "the original error");
+    assert.match((obj.voidErr as { message: string }).message, /void boom/);
+    assert.match(msg ?? "", /could not void/);
   });
 });
 

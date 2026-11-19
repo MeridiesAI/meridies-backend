@@ -730,9 +730,12 @@ forget it.
   `{{family_name}}` (the parent's name when the card has a parent email, else the student's), `{{student_name}}`,
   `{{counselor_name}}`, `{{date}}` (long UTC date); anything else is refused, and an empty value is refused. **Errors**:
   `contract_drafts_unavailable` 503 (no migration), `signature_needed` 409 (nothing saved, or it vanished mid-send),
-  `signature_changed` 409 (changed between render and snapshot; the new agreement is voided), `contract_fields_missing`
-  400 (a field unknown or empty), `contract_too_long` 400 (text > 60,000), `draft_contract_send_now` 409,
-  `contract_drafts_full` 409. **Scheduled invoices refuse a drafted contract** (`routes/invoiceDrafts.ts` 409
+  `signature_changed` 409 (changed between render and snapshot; the new agreement is voided, nothing went to the family,
+  and on a new invoice the invoice is saved unsent with no agreement: attach the contract again and send), `contract_fields_missing`
+  400 (a field unknown or empty), `contract_too_long` 400 (text > 60,000), `contract_draft_invalid` 400 (a stored draft
+  that no longer passes the save rules, e.g. jsonb an admin wrote through PostgREST: send re-runs `contractDraftBody`),
+  `draft_contract_send_now` 409, `contract_drafts_full` 409. A lone UTF-16 surrogate in a draft or signer name is a 400
+  (Postgres would refuse it with a 500). A failed void after a failed send is logged with the agreement id. **Scheduled invoices refuse a drafted contract** (`routes/invoiceDrafts.ts` 409
   `draft_contract_send_now` on a scheduled save; an unscheduled save is fine; `invoiceDispatch` fails a forged row
   `Permanent`): it is signed when the consultant presses Send and the cron never signs. **Send again must use
   `{ agreementId }`, never `{ draftId }`**: a `draftId` renders and signs a NEW agreement. **The family's image:** the
