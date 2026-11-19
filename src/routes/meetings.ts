@@ -47,6 +47,7 @@ import {
   prepareInviteRound,
   startInviteDelivery,
   type InviteRoundSummary,
+  type MeetingState,
 } from "../lib/meetingInvites.js";
 import {
   calendarAccess,
@@ -264,106 +265,9 @@ export default async function meetingRoutes(app: FastifyInstance) {
       const patch = meetingPatch.parse(request.body);
 
       const existing = await loadMeeting(request, id);
-      const primary = String(existing.student_id);
-      await resolveStudentId(request, primary, "edit");
-      const invitees =
-        patch.attendeeIds === undefined
-          ? null
-          : await checkAttendees(request, primary, patch.attendeeIds);
+      await resolveStudentId(request, String(existing.student_id), "edit");
 
-      // A meeting links only a note written about the same student (RLS already
-      // hides other counselors' notes, so a foreign id reads as missing).
-      if (patch.meetingNoteId) {
-        const { data: note, error: noteError } = await request.db
-          .from("meeting_notes")
-          .select("student_id")
-          .eq("id", patch.meetingNoteId)
-          .maybeSingle();
-        if (noteError) throw fromPostgrest(noteError);
-        if (!note || String((note as Row).student_id) !== primary) {
-          throw badRequest("That note isn't about this student");
-        }
-      }
-
-      const ready = await invitesReady(request.db);
-      const before = meetingState(existing);
-      const endError = inviteEndError(
-        ready,
-        patch.sendInvites ?? before.sendInvites,
-        patch.endsAt !== undefined ? patch.endsAt : before.endsAt
-      );
-      if (endError) throw badRequest(endError);
-      // Who held the invite before this change, read before anything moves.
-      const tracking = ready && (before.sendInvites || patch.sendInvites === true);
-      const attendeesBefore = tracking ? await attendeeIds(request, before) : [];
-
-      const calendarValues: Record<string, unknown> = {};
-      await syncCalendar(request, existing, patch, calendarValues);
-
-      const values: Record<string, unknown> = {};
-
-      if (patch.title !== undefined) values.title = patch.title;
-      if (patch.mode !== undefined) values.mode = patch.mode;
-      if (patch.location !== undefined) values.location = patch.location;
-      if (patch.joinUrl !== undefined) values.join_url = patch.joinUrl;
-      if (patch.startsAt !== undefined) values.starts_at = patch.startsAt;
-      if (patch.endsAt !== undefined) values.ends_at = patch.endsAt;
-      if (patch.agenda !== undefined) values.agenda = patch.agenda;
-      if (patch.guardiansInvited !== undefined) values.guardians_invited = patch.guardiansInvited;
-      if (patch.deadlineId !== undefined) values.deadline_id = patch.deadlineId;
-      if (patch.status !== undefined) values.status = patch.status;
-      if (patch.meetingNoteId !== undefined) values.meeting_note_id = patch.meetingNoteId;
-      // A calendar-backed meeting's link belongs to the calendar, not the form.
-      if (existing.calendar_event_id && !("calendar_event_id" in calendarValues)) delete values.join_url;
-      Object.assign(values, calendarValues, inviteColumns(ready, patch.sendInvites));
-
-      // Only the invitees changed (or nothing did): nothing to write on the meeting row itself.
-      let saved = existing;
-      if (Object.keys(values).length > 0) {
-        const { data, error } = await request.db
-          .from("meetings")
-          .update(values)
-          .eq("id", id)
-          .select("*")
-          .single();
-        if (error) throw fromPostgrest(error);
-        saved = data as Row;
-      }
-
-      // The row change is committed, so invitees hear about it even if the
-      // attendee write then fails: the round runs on what actually persisted.
-      let attendeeError: unknown = null;
-      if (invitees) {
-        try {
-          await replaceAttendees(request, id, primary, invitees);
-        } catch (err) {
-          attendeeError = err;
-        }
-      }
-
-      let invites: InviteRoundSummary = { status: "none" };
-      if (patch.sendInvites && !ready) invites = INVITES_UNAVAILABLE;
-      if (tracking) {
-        const attendeesAfter = !invitees
-          ? attendeesBefore
-          : attendeeError
-            ? await attendeeIds(request, before).catch(() => null)
-            : [primary, ...invitees];
-        if (attendeesAfter) {
-          const prepared = await prepareInviteRound(request, {
-            before,
-            after: meetingState(saved),
-            attendeesBefore,
-            attendeesAfter,
-            notify: patch.notifyAttendees ?? true,
-          });
-          invites = prepared.summary;
-          startInviteDelivery(prepared.round, request.log);
-        } else {
-          invites = { status: "skipped", reason: "Couldn't read who is invited" };
-        }
-      }
-      if (attendeeError) throw attendeeError;
+      const { saved, invites } = await applyMeetingPatch(request, existing, patch, { invites: "inline" });
       return { ...(await withAttendees(request, [saved]))[0], invites };
     }
   );
@@ -554,6 +458,130 @@ async function loadMeeting(request: FastifyRequest, id: string): Promise<Row> {
 }
 
 type MeetingPatch = z.infer<typeof meetingPatch>;
+
+/**
+ * One change to one stored meeting: the attendee and note checks, the calendar event, the row, the attendees and the
+ * invite round. PATCH /meetings/:id calls it with "inline"; the series route calls it once per row with "defer".
+ *
+ * The caller has parsed `patch`, loaded `existing` (loadMeeting) and shown the caller may edit its student
+ * (`resolveStudentId(request, primary, "edit")`): this does not repeat that, and a caller must not skip it. Every other
+ * check and write is here, in the order the route always ran them.
+ *
+ * invites "inline": the round is prepared and handed to delivery, and `invites` says who is being emailed (what the
+ * route answers). "defer": nothing is read for, prepared or sent as a round and `invites` is none; the caller sends one
+ * round for the whole batch from `before` and `after`. "defer" is for a patch without `attendeeIds`: a failed attendee
+ * write throws after the row is saved, so the caller would get no `before`/`after` for it.
+ */
+async function applyMeetingPatch(
+  request: FastifyRequest,
+  existing: Row,
+  patch: MeetingPatch,
+  opts: { invites: "inline" | "defer" }
+): Promise<{ saved: Row; before: MeetingState; after: MeetingState; invites: InviteRoundSummary }> {
+  const id = String(existing.id);
+  const primary = String(existing.student_id);
+  const invitees =
+    patch.attendeeIds === undefined
+      ? null
+      : await checkAttendees(request, primary, patch.attendeeIds);
+
+  // A meeting links only a note written about the same student (RLS already
+  // hides other counselors' notes, so a foreign id reads as missing).
+  if (patch.meetingNoteId) {
+    const { data: note, error: noteError } = await request.db
+      .from("meeting_notes")
+      .select("student_id")
+      .eq("id", patch.meetingNoteId)
+      .maybeSingle();
+    if (noteError) throw fromPostgrest(noteError);
+    if (!note || String((note as Row).student_id) !== primary) {
+      throw badRequest("That note isn't about this student");
+    }
+  }
+
+  const ready = await invitesReady(request.db);
+  const before = meetingState(existing);
+  const endError = inviteEndError(
+    ready,
+    patch.sendInvites ?? before.sendInvites,
+    patch.endsAt !== undefined ? patch.endsAt : before.endsAt
+  );
+  if (endError) throw badRequest(endError);
+  // Who held the invite before this change, read before anything moves. A deferred round is the caller's: none here.
+  const inline = opts.invites === "inline";
+  const tracking = inline && ready && (before.sendInvites || patch.sendInvites === true);
+  const attendeesBefore = tracking ? await attendeeIds(request, before) : [];
+
+  const calendarValues: Record<string, unknown> = {};
+  await syncCalendar(request, existing, patch, calendarValues);
+
+  const values: Record<string, unknown> = {};
+
+  if (patch.title !== undefined) values.title = patch.title;
+  if (patch.mode !== undefined) values.mode = patch.mode;
+  if (patch.location !== undefined) values.location = patch.location;
+  if (patch.joinUrl !== undefined) values.join_url = patch.joinUrl;
+  if (patch.startsAt !== undefined) values.starts_at = patch.startsAt;
+  if (patch.endsAt !== undefined) values.ends_at = patch.endsAt;
+  if (patch.agenda !== undefined) values.agenda = patch.agenda;
+  if (patch.guardiansInvited !== undefined) values.guardians_invited = patch.guardiansInvited;
+  if (patch.deadlineId !== undefined) values.deadline_id = patch.deadlineId;
+  if (patch.status !== undefined) values.status = patch.status;
+  if (patch.meetingNoteId !== undefined) values.meeting_note_id = patch.meetingNoteId;
+  // A calendar-backed meeting's link belongs to the calendar, not the form.
+  if (existing.calendar_event_id && !("calendar_event_id" in calendarValues)) delete values.join_url;
+  Object.assign(values, calendarValues, inviteColumns(ready, patch.sendInvites));
+
+  // Only the invitees changed (or nothing did): nothing to write on the meeting row itself.
+  let saved = existing;
+  if (Object.keys(values).length > 0) {
+    const { data, error } = await request.db
+      .from("meetings")
+      .update(values)
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) throw fromPostgrest(error);
+    saved = data as Row;
+  }
+
+  // The row change is committed, so invitees hear about it even if the
+  // attendee write then fails: the round runs on what actually persisted.
+  let attendeeError: unknown = null;
+  if (invitees) {
+    try {
+      await replaceAttendees(request, id, primary, invitees);
+    } catch (err) {
+      attendeeError = err;
+    }
+  }
+
+  const after = meetingState(saved);
+  let invites: InviteRoundSummary = { status: "none" };
+  if (inline && patch.sendInvites && !ready) invites = INVITES_UNAVAILABLE;
+  if (tracking) {
+    const attendeesAfter = !invitees
+      ? attendeesBefore
+      : attendeeError
+        ? await attendeeIds(request, before).catch(() => null)
+        : [primary, ...invitees];
+    if (attendeesAfter) {
+      const prepared = await prepareInviteRound(request, {
+        before,
+        after,
+        attendeesBefore,
+        attendeesAfter,
+        notify: patch.notifyAttendees ?? true,
+      });
+      invites = prepared.summary;
+      startInviteDelivery(prepared.round, request.log);
+    } else {
+      invites = { status: "skipped", reason: "Couldn't read who is invited" };
+    }
+  }
+  if (attendeeError) throw attendeeError;
+  return { saved, before, after, invites };
+}
 
 /**
  * Remove the calendar event behind a meeting. Best effort: a counselor must be
