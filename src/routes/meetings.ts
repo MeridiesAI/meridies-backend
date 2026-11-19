@@ -34,7 +34,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { expandSeriesDates, MAX_SERIES, MAX_SERIES_WITH_LINKS, zonedInstant } from "../lib/recurrence.js";
+import { expandSeriesDates, MAX_SERIES, MAX_SERIES_WITH_LINKS, shiftInstant, wallDelta, zonedInstant } from "../lib/recurrence.js";
 import { seriesReady } from "../lib/seriesSchema.js";
 import { prepareSeriesInviteRound, startSeriesDelivery } from "../lib/seriesInvites.js";
 import { badRequest, forbidden, fromPostgrest, HttpError, notFound } from "../lib/errors.js";
@@ -143,6 +143,8 @@ const seriesMeetingBody = meetingBody
   })
   .strict();
 const SERIES_UNAVAILABLE = () => new HttpError(503, "Repeating events aren't switched on yet.", "series_unavailable");
+/** The scoped series routes reach the round through this, so a test can see each call (the `__busy` pattern). */
+export const __seriesInvites = { prepare: prepareSeriesInviteRound, start: startSeriesDelivery };
 
 const meetingPatch = meetingBody
   .omit({ studentId: true })
@@ -154,6 +156,21 @@ const meetingPatch = meetingBody
   })
   .partial()
   .strict();
+
+const seriesParam = z.object({ seriesId: z.string().uuid() });
+const seriesTimeZone = z.string().min(1).max(64).refine(realTimeZone, "That isn't a time zone we know");
+const seriesScopeName = z.enum(["following", "all"]);
+/** A scoped series patch: no status, mode, link, attendees or invite switch (each is a per-meeting change). */
+const seriesPatchBody = z
+  .object({
+    anchorId: z.string().uuid(),
+    scope: seriesScopeName,
+    timeZone: seriesTimeZone,
+    notifyAttendees: z.boolean().optional(),
+    patch: meetingBody.pick({ title: true, agenda: true, location: true, guardiansInvited: true, startsAt: true, endsAt: true }).partial().strict(),
+  })
+  .strict();
+const seriesDeleteQuery = z.object({ anchorId: z.string().uuid(), scope: seriesScopeName, timeZone: seriesTimeZone.optional() }).strict();
 
 export default async function meetingRoutes(app: FastifyInstance) {
   app.get(
@@ -401,6 +418,109 @@ export default async function meetingRoutes(app: FastifyInstance) {
     }
   );
 
+  /**
+   * A change to part of a repeating series: the anchor and every later occurrence (`following`) or every upcoming one
+   * (`all`). See `seriesScope` for which rows. Per row and not atomic: each row is its own applyMeetingPatch
+   * ("defer"), a row that fails (a provider refusal, a write error) is left as it was and listed in `failed`, and the
+   * answer is still 200. A move shifts each row by the anchor's wall-clock change in `timeZone` (an occurrence moved
+   * by hand keeps its own offset); an end sets every row to the same length; other fields are copied. ONE invite
+   * round for the rows that changed, one charge.
+   */
+  app.patch(
+    "/series/:seriesId",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("meetings:series-update", 60, 60)] },
+    async (request) => {
+      if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
+      const { seriesId } = seriesParam.parse(request.params);
+      const body = seriesPatchBody.parse(request.body);
+      const { anchor, affected, skipped } = await seriesScope(request, seriesId, body.anchorId, body.scope);
+      const { startsAt, endsAt, ...copied } = body.patch;
+      const tz = body.timeZone;
+      const delta = startsAt !== undefined ? wallDelta(String(anchor.starts_at), startsAt, tz) : null;
+      // undefined: each row keeps its own length; null: no end on any row.
+      let duration: number | null | undefined;
+      if (endsAt === null) duration = null;
+      else if (endsAt !== undefined) {
+        duration = Date.parse(endsAt) - Date.parse(startsAt ?? String(anchor.starts_at));
+        if (!(duration > 0)) throw badRequest("The end has to be after the start");
+      }
+
+      const notify = body.notifyAttendees !== false;
+      const ready = await invitesReady(request.db);
+      // Who holds the invite, read once before anything moves: a scoped patch can't change attendees, so it is the
+      // same for every row of the series.
+      const attendees =
+        notify && ready && affected.some((r) => r.send_invites === true)
+          ? await attendeeIds(request, meetingState(affected[0]!)).catch(() => null)
+          : [];
+
+      const before: MeetingState[] = [];
+      const after: MeetingState[] = [];
+      const failed: SeriesFailure[] = [];
+      for (const row of affected) {
+        const rowPatch: MeetingPatch = { ...copied, notifyAttendees: false };
+        if (delta) rowPatch.startsAt = shiftInstant(String(row.starts_at), delta, tz);
+        const start = Date.parse(rowPatch.startsAt ?? String(row.starts_at));
+        if (duration === null) rowPatch.endsAt = null;
+        else if (duration !== undefined) rowPatch.endsAt = new Date(start + duration).toISOString();
+        else if (delta && row.ends_at) {
+          rowPatch.endsAt = new Date(start + Date.parse(String(row.ends_at)) - Date.parse(String(row.starts_at))).toISOString();
+        }
+        try {
+          await resolveStudentId(request, String(row.student_id), "edit");
+          // Known hazard (as PATCH /meetings/:id): if the provider move succeeds and the row update then fails, the
+          // provider event stays moved while the row keeps its old time; the row is reported failed.
+          const done = await applyMeetingPatch(request, row, rowPatch, { invites: "defer" });
+          before.push(done.before);
+          after.push(done.after);
+        } catch (err) {
+          failed.push(seriesFailure(row, err, tz, "Couldn't change this meeting. Try again."));
+        }
+      }
+
+      const invites = notify && ready ? await seriesRound(request, "update", before, after, attendees) : NO_INVITES;
+      return { updated: after.length, skipped, failed, invites };
+    }
+  );
+
+  /** Delete part of a repeating series (the same rows as the PATCH), per row; ONE cancel round, never charged. */
+  app.delete(
+    "/series/:seriesId",
+    { preHandler: [app.authenticate, requireRole("counselor"), limit("meetings:series-delete", 60, 60)] },
+    async (request) => {
+      if (!(await seriesReady(request.db))) throw SERIES_UNAVAILABLE();
+      const { seriesId } = seriesParam.parse(request.params);
+      const q = seriesDeleteQuery.parse(request.query);
+      const { affected, skipped } = await seriesScope(request, seriesId, q.anchorId, q.scope);
+      const ready = await invitesReady(request.db);
+      // Read while the meetings and their attendees still exist.
+      const attendees =
+        ready && affected.some((r) => r.send_invites === true)
+          ? await attendeeIds(request, meetingState(affected[0]!)).catch(() => null)
+          : [];
+
+      const gone: MeetingState[] = [];
+      const failed: SeriesFailure[] = [];
+      for (const row of affected) {
+        try {
+          await resolveStudentId(request, String(row.student_id), "edit");
+          const state = meetingState(row);
+          // As DELETE /meetings/:id: the event goes first, best effort. If the row delete then fails the event is
+          // already gone and the row stays; it is reported failed.
+          await dropCalendarEvent(request, row);
+          const { error } = await request.db.from("meetings").delete().eq("id", String(row.id));
+          if (error) throw fromPostgrest(error);
+          gone.push(state);
+        } catch (err) {
+          failed.push(seriesFailure(row, err, q.timeZone ?? "UTC", "Couldn't delete this meeting. Try again."));
+        }
+      }
+
+      const invites = ready ? await seriesRound(request, "cancel", gone, [], attendees) : NO_INVITES;
+      return { deleted: gone.length, skipped, failed, invites };
+    }
+  );
+
   app.patch(
     "/:id",
     {
@@ -503,6 +623,59 @@ export default async function meetingRoutes(app: FastifyInstance) {
       return latestInvitePerAddress((data ?? []) as Row[]);
     }
   );
+}
+
+/**
+ * The rows a scoped series change acts on. The anchor must be in the series (else 404) and its student editable
+ * (else 403). The window is the series' rows of the anchor's student starting at or after the anchor (`following`)
+ * or after now (`all`). Of those, scheduled rows that haven't started are `affected`; every other row in the window
+ * (held, no-show, cancelled, or a `following` row already past) is counted in `skipped` and never touched. Past rows
+ * before the window aren't counted.
+ */
+async function seriesScope(request: FastifyRequest, seriesId: string, anchorId: string, scope: "following" | "all") {
+  const anchor = await loadMeeting(request, anchorId);
+  if (anchor.series_id !== seriesId) throw notFound("That meeting isn't part of this repeating series");
+  await resolveStudentId(request, String(anchor.student_id), "edit");
+  const now = Date.now();
+  const base = request.db.from("meetings").select("*").eq("series_id", seriesId).eq("student_id", String(anchor.student_id));
+  const { data, error } = await (scope === "following"
+    ? base.gte("starts_at", String(anchor.starts_at))
+    : base.gt("starts_at", new Date(now).toISOString())
+  )
+    .order("starts_at", { ascending: true })
+    .limit(500);
+  if (error) throw fromPostgrest(error);
+  const window = (data ?? []) as Row[];
+  const affected = window.filter((r) => r.status === "scheduled" && Date.parse(String(r.starts_at)) > now);
+  return { anchor, affected, skipped: window.length - affected.length };
+}
+
+type SeriesFailure = { id: string; date: string; message: string };
+
+/** A row the scoped change couldn't make: its local date and the reason in words (a bare database error isn't). */
+function seriesFailure(row: Row, err: unknown, timeZone: string, fallback: string): SeriesFailure {
+  const date = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(
+    new Date(String(row.starts_at))
+  );
+  const message = err instanceof HttpError && err.statusCode !== 500 ? err.message : fallback;
+  return { id: String(row.id), date, message };
+}
+
+const NO_INVITES: InviteRoundSummary = { status: "none" };
+
+/** ONE round for a scoped series change, when any row held invites. `attendees` null: they couldn't be read. */
+async function seriesRound(
+  request: FastifyRequest,
+  kind: "update" | "cancel",
+  before: MeetingState[],
+  after: MeetingState[],
+  attendees: string[] | null
+): Promise<InviteRoundSummary> {
+  if (!before.some((b) => b.sendInvites)) return NO_INVITES;
+  if (!attendees) return { status: "skipped", reason: "Couldn't read who is invited" };
+  const prepared = await __seriesInvites.prepare(request, { kind, before, after, attendeeIds: attendees, notify: true });
+  __seriesInvites.start(prepared.round, request.log);
+  return prepared.summary;
 }
 
 /** The students invited to a meeting, primary first. A read error throws (who to tell is never guessed). */
