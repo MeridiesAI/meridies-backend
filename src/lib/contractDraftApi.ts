@@ -28,12 +28,23 @@ const ID_MAX = 64;
 /** Title, headings, bodies and list items together. */
 const TOTAL_MAX = 50_000;
 
+// A NUL can't be stored in jsonb (Postgres refuses it, which would answer 500), and no other control character belongs
+// in a contract. Single-line fields take none (a tab or a line break included); a body keeps its line breaks and tabs.
+const LINE_CONTROL = /[\u0000-\u001f\u007f]/;
+const BODY_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const noControls = (re: RegExp, what: string) => [(s: string) => !re.test(s), `${what} can't contain control characters`] as const;
+
 const id = z.string().min(1).max(ID_MAX);
-const heading = z.string().trim().min(1);
-const body = z.string().refine((s) => s.trim().length > 0, "Can't be empty");
+const title = z.string().trim().min(1).max(160).refine(...noControls(LINE_CONTROL, "The title"));
+const heading = z.string().trim().min(1).refine(...noControls(LINE_CONTROL, "A heading"));
+const item = z.string().trim().min(1).max(ITEM_MAX).refine(...noControls(LINE_CONTROL, "A list item"));
+const body = z
+  .string()
+  .refine((s) => s.trim().length > 0, "Can't be empty")
+  .refine(...noControls(BODY_CONTROL, "A body"));
 const section = z.discriminatedUnion("kind", [
   z.object({ id, kind: z.literal("text"), heading, body }).strict(),
-  z.object({ id, kind: z.literal("list"), heading, items: z.array(z.string().trim().min(1).max(ITEM_MAX)).min(1).max(ITEMS_MAX) }).strict(),
+  z.object({ id, kind: z.literal("list"), heading, items: z.array(item).min(1).max(ITEMS_MAX) }).strict(),
   z.object({ id, kind: z.literal("clause"), heading, body }).strict(),
 ]);
 
@@ -41,7 +52,7 @@ const section = z.discriminatedUnion("kind", [
 const OUTLINE = ["text", "list", "text"] as const;
 
 export const contractDraftBody = z
-  .object({ title: z.string().trim().min(1).max(160), sections: z.array(section).max(SECTIONS_MAX) })
+  .object({ title, sections: z.array(section).max(SECTIONS_MAX) })
   .strict()
   .superRefine((d, ctx) => {
     const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message, path: ["sections"] });
@@ -67,10 +78,13 @@ export const signatureBody = z.discriminatedUnion("kind", [
 ]);
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const PNG_END = [0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
 
-/** The size a PNG's own header gives (magic, then a 13-byte IHDR chunk first), 1-1200 wide and 1-400 tall; anything else null. */
+/** The size a PNG's own header gives (magic, then a 13-byte IHDR chunk first, the IEND chunk last), 1-1200 wide and 1-400 tall; anything else null. */
 export function sniffPng(bytes: Uint8Array): { width: number; height: number } | null {
-  if (bytes.length < 33 || !PNG_MAGIC.every((b, i) => bytes[i] === b)) return null;
+  if (bytes.length < 33 + PNG_END.length || !PNG_MAGIC.every((b, i) => bytes[i] === b)) return null;
+  // A whole file ends with the IEND chunk; one cut short, or with anything after it, is not a PNG to keep.
+  if (!PNG_END.every((b, i) => bytes[bytes.length - PNG_END.length + i] === b)) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (v.getUint32(8) !== 13 || v.getUint32(12) !== 0x49484452) return null;
   const width = v.getUint32(16);

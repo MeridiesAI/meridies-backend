@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { crc32 } from "node:zlib";
 import { STARTER_SECTIONS, type ContractSection } from "../../src/lib/contractDraft.js";
 import {
   SIGNATURE_MAX_BYTES,
@@ -24,6 +25,17 @@ const sized = (width: number, height: number) => {
   return b;
 };
 
+// The real PNG made `total` bytes long by a valid tEXt chunk between its IHDR and its image data, so the IEND stays last.
+const padded = (total: number) => {
+  const data = Buffer.alloc(total - png.length - 12);
+  const type = Buffer.from("tEXt");
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(data.length);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([type, data])));
+  return Buffer.concat([png.subarray(0, 33), head, type, data, crc, png.subarray(33)]);
+};
+
 test("sniffPng reads a real PNG's size", () => {
   assert.deepEqual(sniffPng(png), { width: 1, height: 1 });
   assert.deepEqual(sniffPng(sized(1200, 400)), { width: 1200, height: 400 });
@@ -37,6 +49,12 @@ test("sniffPng refuses everything else", () => {
   assert.equal(sniffPng(png.subarray(0, 8)), null);
   assert.equal(sniffPng(png.subarray(0, 20)), null);
   assert.equal(sniffPng(png.subarray(0, 32)), null);
+  // Cut off after the header, or with anything after it where the end should be: not a whole PNG.
+  assert.equal(sniffPng(png.subarray(0, 40)), null);
+  assert.equal(sniffPng(png.subarray(0, 33)), null);
+  assert.equal(sniffPng(png.subarray(0, png.length - 1)), null);
+  assert.equal(sniffPng(Buffer.concat([png.subarray(0, 33), Buffer.from("<script>alert(1)</script>")])), null);
+  assert.equal(sniffPng(Buffer.concat([png, Buffer.from([0])])), null);
   assert.equal(sniffPng(new Uint8Array()), null);
   // The first chunk must be a 13-byte IHDR.
   const notIhdr = Buffer.from(png);
@@ -116,6 +134,36 @@ test("title, headings and list items are saved trimmed", () => {
   assert.deepEqual(parsed.sections[1], { id: "p", kind: "list", heading: "P", items: ["a", "b"] });
 });
 
+test("no field holds a control character; only a body keeps its line breaks and tabs", () => {
+  const withTitle = (title: string) => draft({ title });
+  const withHeading = (h: string) => draft({ sections: [{ ...base[0]!, heading: h } as ContractSection, base[1]!, base[2]!] });
+  const withItem = (item: string) => draft({ sections: [base[0]!, { id: "p", kind: "list", heading: "P", items: ["ok", item] }, base[2]!] });
+  const withBody = (b: string) => draft({ sections: [...base, clause(1, { body: b })] });
+  const textBody = (b: string) => draft({ sections: [{ ...base[0]!, body: b } as ContractSection, base[1]!, base[2]!] });
+  // Single-line fields: no C0 (tab and newline too), no DEL.
+  for (const c of ["\n", "\r", "\t", "\u0000", "\u001f", "\u007f"]) {
+    rejects(withTitle(`Letter${c}two`));
+    rejects(withHeading(`Head${c}ing`));
+    rejects(withItem(`item${c}x`));
+  }
+  rejects(withTitle("Letter\u0000"));
+  // Bodies: line breaks and tabs are text; NUL and the other controls are not.
+  for (const c of ["\u0000", "\u0001", "\u0008", "\u000b", "\u000c", "\u000e", "\u001f", "\u007f"]) {
+    rejects(withBody(`Pay by ${c}Friday`));
+    rejects(textBody(`Pay by ${c}Friday`));
+  }
+  const ok = "First line\nSecond line\r\n\tindented";
+  assert.ok(contractDraftBody.safeParse(withBody(ok)).success);
+  assert.ok(contractDraftBody.safeParse(textBody(ok)).success);
+  assert.equal(contractDraftBody.parse(withBody(ok)).sections[3]!.kind === "clause" && (contractDraftBody.parse(withBody(ok)).sections[3] as { body: string }).body, ok);
+  // Each says so in words.
+  const message = (input: unknown) => JSON.stringify(contractDraftBody.safeParse(input).error?.issues.map((i) => i.message));
+  assert.match(message(withTitle("a\u0000b")), /title can't contain control characters/i);
+  assert.match(message(withHeading("a\u0000b")), /heading can't contain control characters/i);
+  assert.match(message(withItem("a\tb")), /item can't contain control characters/i);
+  assert.match(message(withBody("a\u0000b")), /body can't contain control characters/i);
+});
+
 test("the whole draft is at most 50,000 characters", () => {
   const room = 50_000 - "T".length - base.reduce((n, s) => n + s.heading.length + (s.kind === "list" ? s.items.join("").length : s.body.length), 0) - "H".length;
   const big = (n: number) => draft({ title: "T", sections: [...base, clause(1, { heading: "H", body: "x".repeat(n) })] });
@@ -158,10 +206,13 @@ test("a drawn image is decoded strictly, and only a PNG of the right size and we
   assert.equal(decodeSignaturePng(Buffer.from("<html></html>").toString("base64")), null);
   assert.equal(decodeSignaturePng(Buffer.from([0xff, 0xd8, 0xff, 0xe0, ...new Array(40).fill(0)]).toString("base64")), null);
   assert.equal(decodeSignaturePng(sized(1201, 10).toString("base64")), null);
-  const heavy = Buffer.concat([png, Buffer.alloc(SIGNATURE_MAX_BYTES - png.length + 1)]);
+  assert.equal(decodeSignaturePng(png.subarray(0, 40).toString("base64")), null);
+  const heavy = padded(SIGNATURE_MAX_BYTES + 1);
   assert.equal(heavy.length, SIGNATURE_MAX_BYTES + 1);
+  assert.deepEqual(sniffPng(heavy), { width: 1, height: 1 });
   assert.equal(decodeSignaturePng(heavy.toString("base64")), null);
-  const exact = Buffer.concat([png, Buffer.alloc(SIGNATURE_MAX_BYTES - png.length)]);
+  const exact = padded(SIGNATURE_MAX_BYTES);
+  assert.equal(exact.length, SIGNATURE_MAX_BYTES);
   assert.ok(decodeSignaturePng(exact.toString("base64")));
 });
 

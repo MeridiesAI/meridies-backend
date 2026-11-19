@@ -126,7 +126,9 @@ export default async function contractDraftRoutes(app: FastifyInstance) {
     let png: Buffer | null = null;
     if (b.kind === "drawn") {
       png = decodeSignaturePng(b.imagePngBase64);
-      if (!png) throw badRequest("The signature image must be a PNG of at most 60 KB, no larger than 1200 by 400 pixels");
+      if (!png) {
+        throw badRequest(b.imagePngBase64.startsWith("data:") ? "Send the raw base64, without a data: prefix" : "The signature image must be a PNG of at most 60 KB, no larger than 1200 by 400 pixels");
+      }
     }
     // One row per consultant. The hash is of the bytes decoded here, never a client's.
     const { data, error } = await request.db

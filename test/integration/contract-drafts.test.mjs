@@ -11,6 +11,7 @@
 // stored hash is the server's, replaced in place), what a bad image does, and that no one else reads it.
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { crc32 } from "node:zlib";
 import { call, check, rest, sql, user } from "./harness.mjs";
 
 const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -22,6 +23,16 @@ async function joinFirm(firmId, u, seat = "counselor") {
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const png = Buffer.from(PNG_B64, "base64");
 const SIGNATURE_MAX = 61_440;
+// The real PNG made `total` bytes long by a valid tEXt chunk after its IHDR, so the IEND stays the last chunk.
+const padded = (total) => {
+  const data = Buffer.alloc(total - png.length - 12);
+  const type = Buffer.from("tEXt");
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(data.length);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([type, data])));
+  return Buffer.concat([png.subarray(0, 33), head, type, data, crc, png.subarray(33)]);
+};
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const sections = (extra = []) => [
   { id: "services", kind: "text", heading: "Services", body: "{{counselor_name}} will guide {{student_name}} and {{family_name}}." },
@@ -84,6 +95,18 @@ check("an empty clause body is refused", (await put(draftBody("x", [{ id: "e", k
 check("41 sections are refused", (await put(draftBody("x", Array.from({ length: 37 }, (_, i) => ({ id: `k${i}`, kind: "clause", heading: `K${i}`, body: "x" }))))).status === 400);
 check("over 50,000 characters are refused", (await put(draftBody("x", [{ id: "big", kind: "clause", heading: "Big", body: "b".repeat(50_000) }]))).status === 400);
 check("a refused edit changed nothing", (await sql(`select title from public.contract_drafts where id = '${dup.body.id}'`)) === `Engagement v2 ${tag} (copy)`);
+// A NUL can't be stored (Postgres refuses it in jsonb), so it is a 400 before the database, never a 500.
+const draftsOf = async () => (await sql(`select count(*) from public.contract_drafts where counselor_id = '${S.id}'`));
+const beforeNul = await draftsOf();
+const nulBody = (extra) => draftBody(`Nul ${tag}`, [{ id: "nul", kind: "clause", heading: "Payment", body: "Pay by\u0000Friday", ...extra }]);
+const nulPost = await call(S.token, "POST", "/pipeline/contract-drafts", nulBody());
+check("a NUL in a clause body is 400 on create, and nothing is stored", nulPost.status === 400 && (await draftsOf()) === beforeNul && (await sql(`select count(*) from public.contract_drafts where title = 'Nul ${tag}'`)) === "0", JSON.stringify(nulPost.body).slice(0, 200));
+check("...and on edit, leaving the draft as it was", (await put(nulBody())).status === 400 && (await sql(`select title from public.contract_drafts where id = '${dup.body.id}'`)) === `Engagement v2 ${tag} (copy)`);
+check("a NUL in a title, heading or list item is 400", (await put(draftBody("T\u0000x"))).status === 400 && (await put(draftBody("x", [{ id: "h", kind: "clause", heading: "H\u0000x", body: "b" }]))).status === 400 && (await put({ title: "x", sections: [sections()[0], { id: "prerequisites", kind: "list", heading: "P", items: ["a\u0000b"] }, sections()[2]] })).status === 400);
+check("a line break in a title or a tab in a list item is 400", (await put(draftBody("T\nx"))).status === 400 && (await put({ title: "x", sections: [sections()[0], { id: "prerequisites", kind: "list", heading: "P", items: ["a\tb"] }, sections()[2]] })).status === 400);
+const multi = await put(draftBody("x", [{ id: "multi", kind: "clause", heading: "Payment", body: "Line one\nLine two\r\n\tindented" }]));
+check("a body keeps its line breaks and tabs", multi.status === 200 && multi.body.sections[4].body === "Line one\nLine two\r\n\tindented", JSON.stringify(multi.body.sections?.[4]));
+await put({ title: `Engagement v2 ${tag} (copy)`, sections: dup.body.sections });
 check("a malformed id is 400, an unknown one 404", (await put(draftBody("x"), "nope")).status === 400 && (await put(draftBody("x"), "00000000-0000-4000-8000-000000000000")).status === 404);
 
 // ---- A firm: members read, owners write ------------------------------------------------------------------------------------
@@ -142,14 +165,20 @@ check("a drawn signature reads back the same", JSON.stringify(back.body.signatur
 const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9, ...new Array(30).fill(0)]);
 const wide = Buffer.from(png);
 wide.writeUInt32BE(1201, 16);
-const heavy = Buffer.concat([png.subarray(0, 33), Buffer.alloc(61_500), png.subarray(33)]); // a real header, then padding: 61,570 bytes in all
+const heavy = padded(61_570); // a whole PNG, only too big
 const sig = (b) => call(S.token, "PUT", "/pipeline/signature", b);
 check("a JPEG is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: jpeg.toString("base64") })).status === 400);
 check("HTML is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: Buffer.from("<html><script>1</script></html>").toString("base64") })).status === 400);
 check("a PNG over 61,440 bytes is 400", heavy.length > 61_440 && (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: heavy.toString("base64") })).status === 400, String(heavy.length));
 check("a PNG wider than 1200 is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: wide.toString("base64") })).status === 400);
 check("bad base64 is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: "***not base64***" })).status === 400 && (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: PNG_B64.slice(0, -3) })).status === 400);
-check("a data URL is not base64", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: `data:image/png;base64,${PNG_B64}` })).status === 400);
+const dataUrl = await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: `data:image/png;base64,${PNG_B64}` });
+check("a data URL is 400 and says to send the raw base64", dataUrl.status === 400 && /raw base64, without a data: prefix/.test(dataUrl.body.error), JSON.stringify(dataUrl.body));
+const generic = await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: jpeg.toString("base64") });
+check("(any other bad image keeps the general message)", generic.status === 400 && /must be a PNG/.test(generic.body.error), JSON.stringify(generic.body));
+check("a PNG cut off after its header is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: png.subarray(0, 40).toString("base64") })).status === 400 && (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: png.subarray(0, 33).toString("base64") })).status === 400);
+check("a valid header followed by a script is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: Buffer.concat([png.subarray(0, 33), Buffer.from("<script>alert(1)</script>")]).toString("base64") })).status === 400);
+check("a whole PNG with a byte after its end is 400", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: Buffer.concat([png, Buffer.from([0])]).toString("base64") })).status === 400);
 check("drawn with no image is 400", (await sig({ kind: "drawn", signerName: "Casey" })).status === 400);
 check("typed with an image is 400", (await sig({ kind: "typed", signerName: "Casey", imagePngBase64: PNG_B64 })).status === 400);
 check("a client-sent hash is refused, never trusted", (await sig({ kind: "drawn", signerName: "Casey", imagePngBase64: PNG_B64, imageSha256: "0".repeat(64) })).status === 400);
@@ -160,10 +189,10 @@ const swapped = await call(S.token, "PUT", "/pipeline/signature", { kind: "typed
 const trow = JSON.parse(await sql(`select row_to_json(s)::text from (select kind, signer_name, image_png is null as no_image, image_sha256 from public.counselor_signatures where counselor_id = '${S.id}') s`));
 check("replacing with a typed one clears the image on the same row", swapped.status === 200 && swapped.body.imageDataUrl === null && trow.kind === "typed" && trow.no_image === true && trow.image_sha256 === null && trow.signer_name === "Casey C.", JSON.stringify(trow));
 check("(still one row, updatedAt moved on)", (await sql(`select count(*) from public.counselor_signatures where counselor_id = '${S.id}'`)) === "1" && Date.parse(swapped.body.updatedAt) >= Date.parse(drawn.body.updatedAt));
-const max = Buffer.concat([png.subarray(0, 33), Buffer.alloc(SIGNATURE_MAX - png.length), png.subarray(33)]);
+const max = padded(SIGNATURE_MAX);
 const maxSave = await sig({ kind: "drawn", signerName: "Casey C.", imagePngBase64: max.toString("base64") });
 check("a PNG of exactly 61,440 bytes saves whole, hash and all", max.length === SIGNATURE_MAX && maxSave.status === 200 && maxSave.body.imageDataUrl === `data:image/png;base64,${max.toString("base64")}` && (await sql(`select length(image_png)::text || ':' || image_sha256 from public.counselor_signatures where counselor_id = '${S.id}'`)) === `${SIGNATURE_MAX}:${sha(max)}`, `${maxSave.status}`);
-check("one byte more is 400", (await sig({ kind: "drawn", signerName: "Casey C.", imagePngBase64: Buffer.concat([max, Buffer.from([0])]).toString("base64") })).status === 400);
+check("one byte more is 400", (await sig({ kind: "drawn", signerName: "Casey C.", imagePngBase64: padded(SIGNATURE_MAX + 1).toString("base64") })).status === 400);
 check("a firm member has a signature of their own", (await call(B.token, "PUT", "/pipeline/signature", { kind: "typed", signerName: "Morgan Member" })).status === 200 && (await call(A.token, "GET", "/pipeline/signature")).body.signature === null);
 
 check("another counselor reads no signature of ours", (await call(O.token, "GET", "/pipeline/signature")).body.signature === null);
