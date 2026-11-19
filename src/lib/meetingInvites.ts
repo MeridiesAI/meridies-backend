@@ -188,11 +188,11 @@ function ended(m: MeetingState, now: Date): boolean {
 }
 
 /** Invites on, scheduled, not over: the state in which invitees hold the meeting on their calendars. */
-function live(m: MeetingState, now: Date): boolean {
+export function live(m: MeetingState, now: Date): boolean {
   return m.sendInvites && m.status === "scheduled" && !ended(m, now);
 }
 
-function material(a: MeetingState, b: MeetingState): boolean {
+export function material(a: MeetingState, b: MeetingState): boolean {
   const t = (v: string | null) => (v ? Date.parse(v) : null);
   return (
     a.title !== b.title ||
@@ -224,6 +224,31 @@ function audiences(students: string[], guardians: boolean): Audience[] {
 /** The owner's own copy, unless the meeting is already on their connected calendar. */
 function counselorCopy(m: MeetingState, method: IcsMethod, template: InviteTemplate): PlannedMessage[] {
   return m.onProviderCalendar ? [] : [{ audience: "counselor", studentId: m.primaryStudentId, method, template }];
+}
+
+/**
+ * One message to every student and (when the meeting invites them) their guardians, plus the owner's copy when
+ * `ownerCopy`: a series round's plan (lib/seriesInvites.ts), so resolveRound applies the same recipient rules.
+ */
+export function audiencePlan(
+  describe: MeetingState,
+  students: string[],
+  ownerCopy: boolean,
+  method: IcsMethod,
+  template: InviteTemplate,
+  linkMeeting: boolean
+): InvitePlan {
+  const ids = uniq(students);
+  return {
+    messages: [
+      ...to(ids, describe.guardiansInvited, method, template),
+      ...(ownerCopy ? [{ audience: "counselor" as const, studentId: describe.primaryStudentId, method, template }] : []),
+    ],
+    keep: method === "CANCEL" ? [] : audiences(ids, describe.guardiansInvited),
+    describe,
+    sequence: describe.sequence,
+    linkMeeting,
+  };
 }
 
 export function planInviteRound(i: PlanInput): InvitePlan | null {
@@ -571,6 +596,57 @@ export function inviteEmail(
   };
 }
 
+/**
+ * The email for a series round (lib/seriesInvites.ts): every date listed, since only a new series carries a
+ * file. `rows` are the occurrences this recipient is told about, first to last.
+ */
+export function seriesEmail(
+  r: Pick<InviteRecipient, "kind" | "template" | "studentName">,
+  rows: MeetingState[],
+  timeZone: string,
+  counselorName: string | null
+): { subject: string; html: string; text: string } {
+  const m = rows[0]!;
+  const title = plainLine(m.title, 150) || "Meeting";
+  const who = plainLine(counselorName ?? "", 120) || "Your counselor";
+  const cancel = r.template === "meeting-cancel";
+  const n = rows.length;
+  const dates = n === 1 ? "1 date" : `${n} dates`;
+  const these = n === 1 ? "this date" : "these dates";
+  const lead =
+    r.template === "meeting-invite"
+      ? r.kind === "counselor"
+        ? `A copy of this repeating meeting (${dates}) for your own calendar.`
+        : `${who} invited you to a repeating meeting (${dates}).`
+      : r.template === "meeting-update"
+        ? `${n === 1 ? "This date" : `These ${n} dates`} of a repeating meeting changed.`
+        : `${n === 1 ? "This date" : `These ${n} dates`} of a repeating meeting ${n === 1 ? "is" : "are"} cancelled.`;
+  const about =
+    r.kind === "guardian" && r.studentName ? `${who} booked this in Meridies for ${plainLine(r.studentName, 120)}.` : `${who} booked this in Meridies.`;
+  const body = {
+    heading: `${PREFIX[r.template]}: ${title}`,
+    paragraphs: [
+      lead,
+      ...rows.map((x) => `When: ${whenLong(x.startsAt, x.endsAt, timeZone)}`),
+      ...(cancel ? [] : [`Where: ${meetingWhere(m)}`]),
+      ...(!cancel && m.agenda?.trim() ? [m.agenda.trim()] : []),
+      ...(r.kind === "counselor" ? [] : [about]),
+    ],
+    ...(r.kind === "student" && !cancel ? { cta: { label: "Open your calendar", url: `${env.APP_URL.replace(/\/+$/, "")}/dashboard/student/calendar` } } : {}),
+    footnote:
+      r.template === "meeting-invite"
+        ? `The calendar file is attached. Open it to add ${n === 1 ? "this date" : "every date"} to your calendar.`
+        : cancel
+          ? `If you added ${these} to your calendar, delete ${n === 1 ? "it" : "them"} there.`
+          : `If you added ${these} to your calendar, change ${n === 1 ? "it" : "them"} there: your calendar keeps the old ${n === 1 ? "time" : "times"} until you do.`,
+  };
+  return {
+    subject: plainLine(`${PREFIX[r.template]}: ${title} · ${n === 1 ? "" : `${dates} from `}${whenShort(m.startsAt, timeZone)}`, 250),
+    html: brandedEmail(body),
+    text: brandedText(body),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Delivery, after the response
 // ---------------------------------------------------------------------------
@@ -583,51 +659,32 @@ export function fromAddress(): string | null {
   return validEmail(m ? m[1] : env.INVITE_FROM_EMAIL);
 }
 
-type Deps = { send: typeof sendEmail; pause: (ms: number) => Promise<void>; now: () => Date };
-const defaultDeps: Deps = { send: sendEmail, pause: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => new Date() };
+export type Deps = { send: typeof sendEmail; pause: (ms: number) => Promise<void>; now: () => Date };
+export const defaultDeps: Deps = { send: sendEmail, pause: (ms) => new Promise((r) => setTimeout(r, ms)), now: () => new Date() };
 
-/** Send every message of a round, one at a time. Never throws. */
-export async function deliverInviteRound(
+type Attachment = { filename: string; content: string; contentType: string };
+type Composed = { subject: string; html: string; text: string; attachments?: Attachment[] };
+
+/**
+ * Send each recipient of a round what `compose` writes for them, one at a time, spaced out. Never throws: a
+ * recipient whose compose or send throws is counted failed and the rest still go.
+ */
+export async function sendRound(
   round: ResolvedRound,
   log: Log,
-  deps: Deps = defaultDeps
+  deps: Deps,
+  compose: (r: InviteRecipient, sentBy: string | null) => Composed
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0;
   let failed = 0;
   const sentBy = fromAddress();
-  const m = round.meeting;
   for (const [i, r] of round.recipients.entries()) {
     if (i > 0) await deps.pause(SEND_SPACING_MS);
     try {
-      if (!m.endsAt) throw new Error("no end time");
-      const ics = buildMeetingIcs({
-        meetingId: m.id,
-        sequence: round.sequence,
-        method: r.method,
-        startsAt: m.startsAt,
-        endsAt: m.endsAt,
-        title: m.title,
-        agenda: m.agenda,
-        mode: m.mode,
-        location: m.location,
-        joinUrl: m.joinUrl,
-        organizer: round.organizer,
-        sentBy: sentBy && sentBy !== round.organizer.email ? sentBy : null,
-        attendee: r.method === "PUBLISH" ? null : { name: r.name, email: r.email },
-        now: deps.now(),
-      });
-      const email = inviteEmail(r, m, round.timeZone, round.organizer.name);
       const result = await deps.send({
         to: r.email,
-        ...email,
+        ...compose(r, sentBy),
         template: r.template,
-        attachments: [
-          {
-            filename: r.method === "CANCEL" ? "cancel.ics" : "invite.ics",
-            content: Buffer.from(ics, "utf8").toString("base64"),
-            contentType: `text/calendar; charset=utf-8; method=${r.method}`,
-          },
-        ],
         replyTo: round.organizer.email,
         retryOn429: true,
         student_id: r.studentId,
@@ -646,6 +703,45 @@ export async function deliverInviteRound(
   return { sent, failed };
 }
 
+/** Send every message of a round, one at a time. Never throws. */
+export async function deliverInviteRound(
+  round: ResolvedRound,
+  log: Log,
+  deps: Deps = defaultDeps
+): Promise<{ sent: number; failed: number }> {
+  const m = round.meeting;
+  return sendRound(round, log, deps, (r, sentBy) => {
+    if (!m.endsAt) throw new Error("no end time");
+    const ics = buildMeetingIcs({
+      meetingId: m.id,
+      sequence: round.sequence,
+      method: r.method,
+      startsAt: m.startsAt,
+      endsAt: m.endsAt,
+      title: m.title,
+      agenda: m.agenda,
+      mode: m.mode,
+      location: m.location,
+      joinUrl: m.joinUrl,
+      organizer: round.organizer,
+      sentBy: sentBy && sentBy !== round.organizer.email ? sentBy : null,
+      attendee: r.method === "PUBLISH" ? null : { name: r.name, email: r.email },
+      now: deps.now(),
+    });
+    const email = inviteEmail(r, m, round.timeZone, round.organizer.name);
+    return {
+      ...email,
+      attachments: [
+        {
+          filename: r.method === "CANCEL" ? "cancel.ics" : "invite.ics",
+          content: Buffer.from(ics, "utf8").toString("base64"),
+          contentType: `text/calendar; charset=utf-8; method=${r.method}`,
+        },
+      ],
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // What the routes call
 // ---------------------------------------------------------------------------
@@ -660,10 +756,10 @@ export const INVITES_UNAVAILABLE: InviteRoundSummary = { status: "unavailable", 
 export const INVITE_ROUNDS_PER_HOUR = 60;
 /** Rounds a counselor's students start themselves (student booking), per counselor per hour, in their own bucket. */
 export const BOOKING_INVITE_ROUNDS_PER_HOUR = 60;
-const NO_ADDRESS = "No one invited has an email address on file";
-const THROTTLED = "Too many calendar invites this hour, so invites and updates weren't emailed";
+export const NO_ADDRESS = "No one invited has an email address on file";
+export const THROTTLED = "Too many calendar invites this hour, so invites and updates weren't emailed";
 
-type Prepared = { summary: InviteRoundSummary; round: ResolvedRound | null };
+export type Prepared = { summary: InviteRoundSummary; round: ResolvedRound | null };
 
 /**
  * Plan, throttle and resolve a round before the response, so the counselor

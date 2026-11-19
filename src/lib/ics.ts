@@ -154,8 +154,8 @@ export function modeLabel(mode: IcsMode): string {
   return MODE_LABEL[mode];
 }
 
-/** The whole file: CRLF line ends, folded, ending in CRLF. */
-export function buildMeetingIcs(e: IcsEventInput): string {
+/** One VEVENT's lines, unfolded, so a calendar may hold several (lib/seriesInvites.ts). Throws on bad input. */
+export function meetingVevent(e: IcsEventInput): string[] {
   if (!Number.isInteger(e.sequence) || e.sequence < 0) throw new Error("SEQUENCE must be a whole number");
   const start = icsDate(e.startsAt);
   const end = icsDate(e.endsAt);
@@ -171,11 +171,6 @@ export function buildMeetingIcs(e: IcsEventInput): string {
   ].filter(Boolean);
 
   const lines: string[] = [
-    "BEGIN:VCALENDAR",
-    "PRODID:-//Meridies//Meetings//EN",
-    "VERSION:2.0",
-    "CALSCALE:GREGORIAN",
-    `METHOD:${e.method}`,
     "BEGIN:VEVENT",
     `UID:${meetingUid(e.meetingId)}`,
     `SEQUENCE:${e.sequence}`,
@@ -197,10 +192,20 @@ export function buildMeetingIcs(e: IcsEventInput): string {
   lines.push(
     `STATUS:${e.method === "CANCEL" ? "CANCELLED" : "CONFIRMED"}`,
     "TRANSP:OPAQUE",
-    "END:VEVENT",
-    "END:VCALENDAR"
+    "END:VEVENT"
   );
+  return lines;
+}
+
+/** The calendar around VEVENTs: CRLF line ends, folded, ending in CRLF. */
+export function meetingCalendar(method: IcsMethod, vevents: string[]): string {
+  const lines = ["BEGIN:VCALENDAR", "PRODID:-//Meridies//Meetings//EN", "VERSION:2.0", "CALSCALE:GREGORIAN", `METHOD:${method}`, ...vevents, "END:VCALENDAR"];
   return lines.map(foldLine).join(CRLF) + CRLF;
+}
+
+/** The whole file: CRLF line ends, folded, ending in CRLF. */
+export function buildMeetingIcs(e: IcsEventInput): string {
+  return meetingCalendar(e.method, meetingVevent(e));
 }
 
 // ---- The subscribable calendar feed (GET /calendar/ical/:token.ics) -------------------

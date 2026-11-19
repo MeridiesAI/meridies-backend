@@ -34,6 +34,7 @@ import type { FastifyRequest } from "fastify";
 import { fromPostgrest } from "./errors.js";
 import { googleEventHtmlLink } from "./calendarLink.js";
 import { publicBookingReady } from "./publicBookingStore.js";
+import { seriesReady } from "./seriesSchema.js";
 import type { Role } from "./serialize.js";
 
 type Row = Record<string, unknown>;
@@ -81,6 +82,16 @@ export type CalendarFeedItem = {
   school: string | null;
   /** A student's own event (`student_calendar_events`): theirs to edit and delete. */
   personal?: boolean;
+  /**
+   * A practice event (`calendar_events`, `ref` its id). The counselor can move their own; a student's feed also
+   * carries `practice: true` on the events shared with them, so gate dragging on role as well.
+   */
+  practice?: true;
+  /**
+   * The repeating series a meeting or practice event belongs to (null when it is a one-off). Absent until
+   * 20261129000003 is applied (`seriesReady`), so an app reads absent as null.
+   */
+  seriesId?: string | null;
   /**
    * A booking made through the counselor's public booking link (`public_bookings`, 20261121000001): kind
    * `meeting`, no student, `ref` the booking's id. Not a `meetings` row, so not editable through /meetings.
@@ -139,6 +150,7 @@ export const toPracticeEvent = (r: Row) => ({
   endsAt: ns(r.ends_at),
   typeId: ns(r.type_id),
   sharedWithStudent: Boolean(r.shared_with_student),
+  ...("series_id" in r ? { seriesId: ns(r.series_id) } : {}),
   createdAt: s(r.created_at),
   updatedAt: s(r.updated_at),
 });
@@ -522,9 +534,15 @@ export async function buildCalendarFeed(
     if (error) throw fromPostgrest(error);
     attendeeMeetingIds = (data ?? []).map((r) => s((r as Row).meeting_id));
   }
+  // series_id only once the column exists: an explicit select naming a missing column is a 42703 and a 500.
+  const withSeries = await seriesReady(db);
   let meetings = db
     .from("meetings")
-    .select("id, student_id, counselor_id, title, starts_at, ends_at, status, agenda, location, mode, join_url")
+    .select(
+      withSeries
+        ? "id, student_id, counselor_id, title, starts_at, ends_at, status, agenda, location, mode, join_url, series_id"
+        : "id, student_id, counselor_id, title, starts_at, ends_at, status, agenda, location, mode, join_url"
+    )
     .gte("starts_at", fromInstant)
     .lt("starts_at", toInstant);
   if (!isStudent) meetings = meetings.eq("counselor_id", me);
@@ -719,7 +737,8 @@ export async function buildCalendarFeed(
     });
   }
 
-  const meetingRows = (mt.data ?? []) as Row[];
+  // (via unknown: the select is one of two strings, which the client's column parser can't type)
+  const meetingRows = (mt.data ?? []) as unknown as Row[];
   const attendees = new Map<string, string[]>();
   if (meetingRows.length > 0) {
     const { data, error } = await db
@@ -762,6 +781,7 @@ export async function buildCalendarFeed(
       meetingStatus: s(r.status),
       joinUrl: ns(r.join_url),
       mode: ns(r.mode),
+      ...(withSeries ? { seriesId: ns(r.series_id) } : {}),
     });
   }
 
@@ -822,6 +842,9 @@ export async function buildCalendarFeed(
       studentId: ns(r.student_id),
       detail: ns(r.detail),
       done: false,
+      practice: true,
+      // `select *`: the key is there once the column is, and absent on an older database.
+      ...("series_id" in r ? { seriesId: ns(r.series_id) } : {}),
     });
   }
 
