@@ -19,10 +19,10 @@ async function uploadPdf(u, bytes = PDF) {
 }
 
 /** Give a signer a known link, as Send would (the real one only goes out by email). */
-function linkFor(signerId) {
+async function linkFor(signerId) {
   const token = randomBytes(32).toString("base64url");
   const hash = createHash("sha256").update(token).digest("hex");
-  sql(`update public.contract_hub_signers set token_hash = '${hash}', token_expires_at = now() + interval '1 day' where id = '${signerId}'`);
+  await sql(`update public.contract_hub_signers set token_hash = '${hash}', token_expires_at = now() + interval '1 day' where id = '${signerId}'`);
   return token;
 }
 const pub = async (method, path, body) => {
@@ -76,10 +76,10 @@ check("a client can't read link hashes", hashRead.status !== 200, `${hashRead.st
 
 // ---- Clients write nothing ----
 const forge = await rest(me.token, "PATCH", `/rest/v1/contract_hub_envelopes?id=eq.${env.id}`, { status: "completed" }, { Prefer: "return=representation" });
-const after = sql(`select status from public.contract_hub_envelopes where id = '${env.id}'`);
+const after = await sql(`select status from public.contract_hub_envelopes where id = '${env.id}'`);
 check("the owner can't mark it completed through PostgREST", after === "draft", `${forge.status} ${after}`);
 const forgeSigner = await rest(me.token, "PATCH", `/rest/v1/contract_hub_signers?id=eq.${ana.id}`, { status: "signed" });
-check("nor sign for a signer", sql(`select status from public.contract_hub_signers where id = '${ana.id}'`) === "waiting", `${forgeSigner.status}`);
+check("nor sign for a signer", await sql(`select status from public.contract_hub_signers where id = '${ana.id}'`) === "waiting", `${forgeSigner.status}`);
 
 // ---- Fields and send ----
 const early = await call(me.token, "POST", `/contract-hub/envelopes/${env.id}/send`);
@@ -102,10 +102,10 @@ const twice = await call(me.token, "POST", `/contract-hub/envelopes/${env.id}/se
 check("a second send is refused", twice.status === 409, `${twice.status}`);
 const lateFields = await call(me.token, "PUT", `/contract-hub/envelopes/${env.id}/fields`, { fields: [] });
 check("fields can't change once sent", lateFields.status === 409, `${lateFields.status}`);
-check("each signer got a link", sql(`select count(*) from public.contract_hub_signers where envelope_id = '${env.id}' and token_hash is not null`) === "2");
+check("each signer got a link", await sql(`select count(*) from public.contract_hub_signers where envelope_id = '${env.id}' and token_hash is not null`) === "2");
 
 // ---- Signing ----
-const anaToken = linkFor(ana.id);
+const anaToken = await linkFor(ana.id);
 const view = await pub("GET", `/contract-hub/sign/${anaToken}`);
 check("the link shows the document to its signer", view.status === 200 && view.body.signer.name === "Ana Ruiz" && view.body.fields.length === 5, JSON.stringify(view.body));
 check("the link shows no email", !JSON.stringify(view.body).includes("@test.local"), "");
@@ -123,7 +123,7 @@ check("Ana signs; Ben still to sign", signedAna.status === 200 && signedAna.body
 const reused = await pub("GET", `/contract-hub/sign/${anaToken}`);
 check("a used link stops working", reused.status === 404, `${reused.status}`);
 
-const benToken = linkFor(ben.id);
+const benToken = await linkFor(ben.id);
 const noInitials = await pub("POST", `/contract-hub/sign/${benToken}`, { consent: true, signature: { kind: "drawn", value: `data:image/png;base64,${PNG}` } });
 check("initials are required when placed", noInitials.status === 400, `${noInitials.status}`);
 const notPng = await pub("POST", `/contract-hub/sign/${benToken}`, { consent: true, signature: { kind: "drawn", value: "R0lGODlhAQABAAAAACw=" }, initials: { kind: "typed", value: "BR" } });
@@ -139,7 +139,7 @@ check(
     && done.body.events.some((e) => /Completed/.test(e.text)),
   JSON.stringify(done.body),
 );
-check("signing kept the IP and browser", sql(`select count(*) from public.contract_hub_signers where envelope_id = '${env.id}' and signed_at is not null and signed_user_agent is not null`) === "2");
+check("signing kept the IP and browser", await sql(`select count(*) from public.contract_hub_signers where envelope_id = '${env.id}' and signed_at is not null and signed_user_agent is not null`) === "2");
 
 // ---- Decline, void, delete ----
 async function draftWithOne(title) {
@@ -152,7 +152,7 @@ async function draftWithOne(title) {
 {
   const d = await draftWithOne("To decline");
   await call(me.token, "POST", `/contract-hub/envelopes/${d.env.id}/send`);
-  const t = linkFor(d.signer.id);
+  const t = await linkFor(d.signer.id);
   const dec = await pub("POST", `/contract-hub/sign/${t}/decline`, { reason: "Wrong fee" });
   check("a signer can decline", dec.status === 200, JSON.stringify(dec.body));
   const g = await call(me.token, "GET", `/contract-hub/envelopes/${d.env.id}`);
@@ -161,7 +161,7 @@ async function draftWithOne(title) {
 {
   const d = await draftWithOne("To void");
   await call(me.token, "POST", `/contract-hub/envelopes/${d.env.id}/send`);
-  const t = linkFor(d.signer.id);
+  const t = await linkFor(d.signer.id);
   const v = await call(me.token, "POST", `/contract-hub/envelopes/${d.env.id}/void`);
   check("the owner voids it", v.status === 200 && v.body.status === "voided", `${v.status}`);
   const dead = await pub("GET", `/contract-hub/sign/${t}`);
@@ -172,15 +172,15 @@ async function draftWithOne(title) {
 {
   const d = await draftWithOne("Draft to delete");
   const del = await call(me.token, "DELETE", `/contract-hub/envelopes/${d.env.id}`);
-  check("a draft is deleted", del.status === 200 && sql(`select count(*) from public.contract_hub_envelopes where id = '${d.env.id}'`) === "0", `${del.status}`);
+  check("a draft is deleted", del.status === 200 && await sql(`select count(*) from public.contract_hub_envelopes where id = '${d.env.id}'`) === "0", `${del.status}`);
 }
 {
   // A link from a counselor who has lost approval answers nothing.
   const d = await draftWithOne("Unapproved");
   await call(me.token, "POST", `/contract-hub/envelopes/${d.env.id}/send`);
-  const t = linkFor(d.signer.id);
-  sql(`update public.profiles set counselor_approved_at = null where id = '${me.id}'`);
+  const t = await linkFor(d.signer.id);
+  await sql(`update public.profiles set counselor_approved_at = null where id = '${me.id}'`);
   const r = await pub("GET", `/contract-hub/sign/${t}`);
   check("an unapproved counselor's link is 404", r.status === 404, `${r.status}`);
-  sql(`update public.profiles set counselor_approved_at = now() where id = '${me.id}'`);
+  await sql(`update public.profiles set counselor_approved_at = now() where id = '${me.id}'`);
 }
