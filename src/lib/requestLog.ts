@@ -19,6 +19,8 @@ export function loggedUrl(url: string): string {
     // an agreement link (routes/agreements.ts) is the capability to accept it. The token
     // is dropped whatever follows it (/pay/<token>/contract, /agree/<token>/file).
     .replace(/^\/*(pay|agree)\/[^/]*(\/.*)?$/, (_m, kind: string, rest: string | undefined) => `/${kind}/…${afterToken(rest)}`)
+    // A Contract Hub signing link (routes/contractHub.ts) is the capability to sign as that person.
+    .replace(/^\/*contract-hub\/sign\/[^/]*(\/.*)?$/, (_m, rest: string | undefined) => `/contract-hub/sign/…${afterToken(rest)}`)
     // The subscribed calendar feed's URL is its only credential (routes/calendarIcal.ts).
     .replace(/^\/*calendar\/ical\/[^/]+\/?$/, "/calendar/ical/…");
   const keys = query

@@ -188,6 +188,13 @@ const REVIEWED = [
   // service_role only), which re-checks the token, its expiry and the agreement's status under a row lock. The
   // counselor routes run on the caller's own client.
   "routes/agreements.ts",
+  // routes/contractHub.ts: clients write nothing to the Contract Hub tables (20261130000001), so the counselor routes
+  // write with the service role, each only after the caller's own RLS read returned the envelope (ownEnvelope), and only
+  // to that envelope and the PDF in the caller's own folder of the private contract-hub bucket. The public /sign/:token
+  // routes (nobody signed in): the hashed token decides, they read only the envelope it names, refuse when its counselor
+  // isn't approved (isCounselorApproved), and write only through contract_hub_sign / contract_hub_decline (EXECUTE to
+  // service_role only), which re-check the envelope's and signer's status under a row lock.
+  "routes/contractHub.ts",
   // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
   // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
   // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't
