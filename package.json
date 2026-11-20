@@ -10,9 +10,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit",
-    "test": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
+    "typecheck": "bun check",
+    "lint": "bun check",
+    "test": "node scripts/ci/run-unit-tests.mjs",
     "test:integration": "node scripts/test-integration.mjs",
     "eval:axis": "node --import tsx evals/axis/run.mjs",
     "eval:axis:quality": "node --import tsx evals/axis/quality.mjs",
@@ -21,7 +21,10 @@
     "test:perf": "node test/integration/perf-roster.mjs",
     "seed:e2e": "node scripts/seed/e2e-stack.mjs",
     "ingest:features": "tsx scripts/ingest/college-features.ts",
-    "ingest:accessibility": "tsx --env-file-if-exists=.env scripts/ingest/ipeds-accessibility.ts"
+    "ingest:accessibility": "tsx --env-file-if-exists=.env scripts/ingest/ipeds-accessibility.ts",
+    "test:node": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
+    "test:timings": "node scripts/ci/run-unit-tests.mjs --all --runtime bun --update-timings",
+    "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",
