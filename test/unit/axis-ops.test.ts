@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { FastifyRequest } from "fastify";
-import { buildApp } from "../../src/app.js";
+import { sharedApp } from "./sharedApp.js";
 import { assertAllowedCall } from "../../src/lib/axis/ops/dispatch.js";
 import { allOps, catalogText, getOp, READ_OPS, riskOf, WRITE_OPS } from "../../src/lib/axis/ops/registry.js";
 import {
@@ -80,9 +80,8 @@ test("the catalog fits the prompt and names every operation once", () => {
 });
 
 test("every operation's request reaches a registered route", async () => {
-  const app = buildApp();
-  await app.ready();
-  try {
+  const app = await sharedApp();
+  {
     for (const d of allOps()) {
       const input = sampleInput(d.name);
       const call = d.request(input as never);
@@ -96,8 +95,6 @@ test("every operation's request reaches a registered route", async () => {
       assert.ok(!notFound, `${d.name}: no route for ${call.method} ${call.url.split("?")[0]}`);
       assert.equal(res.statusCode, 401, `${d.name}: ${call.method} ${call.url} answered ${res.statusCode} without a token (expected the auth check)`);
     }
-  } finally {
-    await app.close();
   }
 });
 
@@ -123,15 +120,12 @@ test("an encoding, a dot segment or a case can't carry a request past the denyli
     "/axis;x/warm", "/axis/warm#x", "/students/%252e%252e", "/%00axis", "/students/\u0000",
   ];
   for (const url of sneaky) assert.throws(() => assertAllowedCall({ method: "POST", url }), Error, url);
-  const app = buildApp();
-  await app.ready();
-  try {
+  const app = await sharedApp();
+  {
     for (const url of ["/%61xis/warm", "/students/%2e%2e/axis/warm", "/./axis/warm"]) {
       const res = await app.inject({ method: "POST", url, payload: "{}", headers: { "content-type": "application/json" } });
       assert.notEqual(res.statusCode, 404, `${url} no longer reaches /axis/warm; keep the case but update this check`);
     }
-  } finally {
-    await app.close();
   }
   // What the catalog does send still passes, a trailing slash included.
   for (const url of ["/meetings/", `/tasks/${SAMPLE_UUID}`, `/deadlines?studentId=${SAMPLE_UUID}&q=a%2Fb`, "/colleges/search?q=St.%20Mary..."]) {

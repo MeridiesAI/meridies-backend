@@ -107,7 +107,7 @@ async function studentBrief(request: FastifyRequest, studentId: string): Promise
     db.from("student_colleges").select("name, round, fit, status").eq("student_id", studentId).order("sort_order").limit(60),
   ]);
   if (!profile.data) throw notFound("That student isn't on your roster");
-  const blob = ((profile.data.profile ?? {}) as Row) ?? {};
+  const blob = (profile.data.profile ?? {}) as Row;
   const majors = await intendedMajors(request, studentId, blob);
   const name = String(profile.data.full_name ?? "Student");
   const json = JSON.stringify(

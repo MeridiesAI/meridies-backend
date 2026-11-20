@@ -130,10 +130,15 @@ function dbContainer() {
   if (r.error || r.status !== 0) return null;
   return r.stdout.split("\n").map((s) => s.trim()).find((s) => s.startsWith("supabase_db_")) ?? null;
 }
-/** Postgres logs to the container's stderr; keep both streams. */
-const dbLog = (name) => {
-  const r = spawnSync("docker", ["logs", "--since", "120s", name], { encoding: "utf8" });
-  return r.status === 0 ? r.stdout + r.stderr : "";
+/**
+ * Postgres logs to the container's stderr; keep both streams. Only from `since` on (just before the accept), and with
+ * room for a busy database: past spawnSync's default 1 MB the read failed with ENOBUFS and came back as "", which read
+ * as "no warning" (Integration slice 3 on PR #204). A failed read is reported, never taken for an empty log.
+ */
+const dbLog = (name, since) => {
+  const r = spawnSync("docker", ["logs", "--since", since, name], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || r.status !== 0) return { log: "", error: r.error?.code ?? `docker logs exited ${r.status}: ${String(r.stderr).slice(0, 200)}` };
+  return { log: r.stdout + r.stderr, error: null };
 };
 
 const container = dbContainer();
@@ -144,20 +149,25 @@ if (!container) {
   const invF = await invite(f, {});
   // Built in SQL so the literal never appears in any statement text either.
   await sql(`update public.invitations set info = jsonb_build_object('birthday', '2008-02-' || '30') where id = '${invF.id}'`);
+  // A few seconds early: docker compares against the container's own log timestamps.
+  const since = new Date(Date.now() - 5000).toISOString();
   const accF = await accept(f, invF.token);
   // Poll until this invitation's warning is flushed to the log (up to 10 s).
   let log = "";
+  let readError = null;
   for (let t = 0; t < 20 && !log.includes(invF.id); t++) {
     await new Promise((r) => setTimeout(r, 500));
-    log = dbLog(container);
+    ({ log, error: readError } = dbLog(container, since));
+    if (readError) break;
   }
   const ours = log.split("\n").filter((l) => l.includes(invF.id));
   check(
     LOG_CHECK,
     accF.status === 200 &&
+      !readError &&
       ours.some((l) => l.includes("student_personal_details not filled") && l.includes("sqlstate 22008")) &&
       !log.includes("2008-02-30"),
-    `${accF.status} ${container}: ${ours.join(" / ").slice(0, 240)}`
+    `${accF.status} ${container}${readError ? ` (log read failed: ${readError})` : ""}: ${ours.join(" / ").slice(0, 240)}`
   );
 }
 
