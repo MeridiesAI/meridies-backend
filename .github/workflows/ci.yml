@@ -1,7 +1,11 @@
 name: CI
 
 # Only PRs into main and pushes to main; docs-only changes don't run it.
+# The merge queue (merge_group) runs the full suite on the exact commit that lands on main; a pull
+# request runs only the unit tests its diff can reach. Pushes to main run everything too and seed the
+# caches pull requests read (node_modules, the build's .tsbuildinfo, the unit test times).
 on:
+  merge_group:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -30,8 +34,8 @@ concurrency:
 permissions:
   contents: read
 
-# Every check is its own job, so they run side by side; the slowest one sets the time. Each job
-# restores node_modules from cache (npm ci only when the lockfile changes; .github/actions/setup).
+# Every check is its own job, so they run side by side and none waits on another; the slowest one
+# sets the time. Each ends with a budget (scripts/ci/budget.mjs): over its running budget, it fails.
 jobs:
   typecheck:
     name: Typecheck (bun check)
@@ -41,9 +45,12 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          filter: blob:none
       - uses: ./.github/actions/setup
-      # The same errors as tsc, on every core, in about a second. `npm run typecheck:tsc` runs tsc itself.
+      # The same errors as tsc, on every core. `npm run typecheck:tsc` runs tsc itself.
       - run: bun check
+      - if: always()
+        run: node scripts/ci/budget.mjs 5 15
 
   build:
     name: Build + parse worker smoke
@@ -53,15 +60,28 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          filter: blob:none
       - uses: ./.github/actions/setup
-      # dist/ is what Railway runs, so it is still emitted by tsc.
-      - run: npm run build
+      # dist/ is what Railway runs, so tsc still emits it. Incremental, on main's last .tsbuildinfo and
+      # dist/: tsc re-emits only what changed and what depends on it.
+      - id: tsb
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: |
+            dist
+            .ci/build.tsbuildinfo
+          key: tsbuild-${{ runner.os }}-${{ hashFiles('package-lock.json', 'tsconfig.json') }}-${{ github.sha }}
+          restore-keys: tsbuild-${{ runner.os }}-${{ hashFiles('package-lock.json', 'tsconfig.json') }}-
+      - if: steps.tsb.outputs.cache-matched-key == ''
+        run: echo "CI_COLD=true" >> "$GITHUB_ENV"
+      - run: npx tsc -p tsconfig.json --incremental --tsBuildInfoFile .ci/build.tsbuildinfo
       # The import parser's child process, from dist/ (the unit tests run the source).
       - run: node scripts/smoke/parse-worker.mjs
+      - if: always()
+        run: node scripts/ci/budget.mjs 35 15
 
-  # Bun runs the unit tests in two shards, balanced by the per-file times in test/unit/timings.json.
-  # On a pull request only the test files the diff can reach run (scripts/ci/select-unit-tests.mjs);
-  # on main, everything.
+  # Bun runs the unit tests in two shards, balanced by recorded per-file times: main's last full run
+  # (restored below), else test/unit/timings.json. Random order every run; the seed is in the log.
   unit-bun:
     name: Unit tests (bun, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
@@ -74,13 +94,35 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          filter: blob:none
           # The PR's merge commit and its first parent (the base): enough to diff the PR's changes.
           fetch-depth: 2
       - uses: ./.github/actions/setup
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-timings/shard-1.json
+          key: unit-timings-1-${{ github.sha }}
+          restore-keys: unit-timings-1-
+      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-timings/shard-2.json
+          key: unit-timings-2-${{ github.sha }}
+          restore-keys: unit-timings-2-
       - name: Unit tests
         env:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
-        run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime bun --shard "${{ matrix.shard }}/2"
+          SHARD: ${{ matrix.shard }}
+        run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime bun --shard "$SHARD/2" --timings-out "$RUNNER_TEMP/timings/shard-$SHARD.json"
+      # A full run on main records this shard's times for the next pull requests to balance by.
+      - if: github.event_name == 'push'
+        run: mkdir -p .ci-timings && cp "$RUNNER_TEMP/timings/shard-${{ matrix.shard }}.json" .ci-timings/
+      - if: github.event_name == 'push'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: .ci-timings/shard-${{ matrix.shard }}.json
+          key: unit-timings-${{ matrix.shard }}-${{ github.sha }}
+      - if: always()
+        run: node scripts/ci/budget.mjs 30 15
 
   # The few files that test Node itself (worker heap caps, child-process limits, the Stripe SDK's
   # Node crypto, a model download). Production runs Node, so these stay on it.
@@ -92,12 +134,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          filter: blob:none
           fetch-depth: 2
       - uses: ./.github/actions/setup
       - name: Unit tests
         env:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
         run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime node
+      - if: always()
+        run: node scripts/ci/budget.mjs 30 15
 
   # actionlint 1.7.7, checked against the release's published sha256; the runner's own shellcheck
   # lints the run: scripts. No node_modules needed.
@@ -109,6 +154,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
+          filter: blob:none
       - name: actionlint
         run: |
           curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
@@ -119,8 +165,8 @@ jobs:
 
   integration:
     name: Migrations + RLS persona suite (local Supabase)
-    # The slow job: skipped on draft PRs, runs once the PR is ready and on main.
-    if: github.event_name == 'push' || !github.event.pull_request.draft
+    # The slow job: skipped on draft PRs, runs once the PR is ready, in the merge queue and on main.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

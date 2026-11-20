@@ -54,7 +54,8 @@ test("every action is pinned to a full commit, in both workflows and the shared 
     // `./.github/actions/setup` is this repository's own action, at this commit: nothing to pin.
     const uses = [...text.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1]).filter((u) => !u.startsWith("./.github/actions/"));
     assert.ok(uses.length > 0, name);
-    for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `${name}: ${u}`);
+    // owner/repo, or owner/repo/sub-action (actions/cache/restore), at a full commit.
+    for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+(\/[\w.-]+)*@[0-9a-f]{40}$/, `${name}: ${u}`);
   }
 });
 
