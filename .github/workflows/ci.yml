@@ -163,12 +163,19 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color
 
+  # The slow part, split so its pieces run side by side, each on its own throwaway Supabase and API (no
+  # piece waits on another or shares a database): the parallel suites in four slices, the serial suites
+  # (with the migration checks), the suites that need an API of their own, and the seed + speed test.
+  # Skipped on draft PRs; runs once the PR is ready, in the merge queue and on main.
   integration:
-    name: Migrations + RLS persona suite (local Supabase)
-    # The slow job: skipped on draft PRs, runs once the PR is ready, in the merge queue and on main.
+    name: Integration (${{ matrix.part }})
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [suites-1, suites-2, suites-3, suites-4, serial, own-api, seed-and-speed]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: ./.github/actions/setup
@@ -197,6 +204,7 @@ jobs:
       # Run that reader on what this CLI really prints: nothing pending, one file
       # pending, a file older than the newest applied, and the database check.
       - name: Migration plan reader against the pinned CLI
+        if: matrix.part == 'serial'
         run: |
           cd "$RUNNER_TEMP/sb"
           reader="$GITHUB_WORKSPACE/scripts/migrations/plan.mjs"
@@ -224,6 +232,7 @@ jobs:
           node "$reader" gate --after "$RUNNER_TEMP/problems.json"
 
       - name: Every public table has RLS
+        if: matrix.part == 'serial'
         run: test "$(psql "$DB_URL" -tAc "select count(*) from pg_tables where schemaname='public' and rowsecurity=false")" = "0"
 
       - name: Turn on the import_worker login (CI only)
@@ -275,18 +284,23 @@ jobs:
           cat api.log; exit 1
 
       - name: Persona suite
+        if: startsWith(matrix.part, 'suites-') || matrix.part == 'serial'
         env:
           API_URL: http://127.0.0.1:4100
           # account-export.test.mjs checks no exported text or token reached the API's log.
           API_LOG: api.log
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
           BOOKING_BUSY_FIXTURE: /tmp/booking-busy.json
-        run: npm run test:integration
+          PART: ${{ matrix.part }}
+        run: |
+          if [ "$PART" = serial ]; then npm run test:integration -- --part serial
+          else npm run test:integration -- --part parallel --shard "${PART#suites-}/4"; fi
 
       # The AI budget suite pauses AI for the whole database for a moment (the company ceiling) and revokes one
       # budget function, so it runs here, after the parallel suites, against the same API (its ceiling emails go
       # once a day per API process, and none was sent before this step).
       - name: AI budget suite
+        if: matrix.part == 'own-api'
         env:
           AI_BUDGET_SUITE: "1"
           API_URL: http://127.0.0.1:4100
@@ -299,6 +313,7 @@ jobs:
       # persona suite above skips these two files (no MESSAGING_SUITE). No mail
       # catcher here, so sends reach the stand-in Resend and the suite can read them.
       - name: Messaging suites (second API, stand-in Resend and Twilio)
+        if: matrix.part == 'own-api'
         env:
           MESSAGING_SUITE: "1"
           API_URL: http://127.0.0.1:4101
@@ -325,6 +340,7 @@ jobs:
       # The app's signed-in suite seeds its stack with this; keep it running. The
       # accounts it prints stay out of the log.
       - name: E2E stack seed runs
+        if: matrix.part == 'seed-and-speed'
         env:
           API_URL: http://127.0.0.1:4100
         run: npm run seed:e2e -- --students 5 --roster 3 > /dev/null
@@ -332,12 +348,13 @@ jobs:
       # B14. Report only: runners are too noisy to gate a merge on 500 ms. It
       # still fails when the seed or a timed call breaks. PERF_ENFORCE=1 by hand.
       - name: 60-student speed test (report only)
+        if: matrix.part == 'seed-and-speed'
         env:
           API_URL: http://127.0.0.1:4100
         run: npm run test:perf
 
       - name: Keep the speed test's numbers
-        if: always()
+        if: always() && matrix.part == 'seed-and-speed'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perf-roster

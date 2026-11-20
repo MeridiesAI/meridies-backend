@@ -5243,7 +5243,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   - **Budgets** (`scripts/ci/budget.mjs`, the last step of each job): typecheck 5 s, build 35 s, a unit
     shard 30 s, the Node unit job 30 s of running; over it, the job fails. Setup (15 s) is reported, not
     enforced, on GitHub's hosted runners; a cold run (node_modules or the build cache missed) reports both.
-    The integration job (local Supabase) has no budget yet: it needs prepared runners.
+    The integration jobs (local Supabase) have no budget yet: each starts Supabase (about 73 s), which needs
+    prepared runners. They run as seven parts side by side, each on its own throwaway Supabase and API
+    (`scripts/test-integration.mjs --part parallel --shard i/4`, `--part serial`, the AI budget and messaging
+    suites, the seed and speed test); the slices are checked to hold every parallel suite exactly once.
   - `NODE_ONLY` files (`scripts/ci/select-unit-tests.mjs`) test Node itself and run under `node --test`;
     `npm run test:node` runs every file under Node. Route tests that only inject requests share one app per
     test process (`test/unit/sharedApp.ts`). The unit tests include
