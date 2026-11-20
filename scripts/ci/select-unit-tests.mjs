@@ -11,7 +11,7 @@
 // runs when the diff touches anything outside src/ and test/unit/ (package.json, the lockfile,
 // tsconfig, fixtures, migrations, workflows...), when the base can't be diffed, or with --all. Tests
 // that read files or start processes by path (node:fs, node:child_process) can depend on files no
-// import names, so they always run.
+// import names, so they always run, as do tests that reach a module starting a worker or child process.
 //
 // NODE_ONLY files test the Node runtime itself (worker heap caps, child-process limits, the Stripe
 // SDK's Node crypto provider, a model download) and run under `node --test`, as production runs Node.
@@ -91,9 +91,17 @@ function closure(file) {
   return seen;
 }
 
-const READS_FILES = /\bnode:(fs|child_process)\b|from\s+["'](fs|child_process)(\/promises)?["']/;
+// A test file that reads files or starts processes by path can depend on files no import names. So can
+// any module that starts a worker or a child process (src/lib/imports/parse.ts runs its child by path,
+// src/lib/pdfText.ts its worker). Such tests always run.
+const TEST_READS = /\bnode:(fs|child_process)\b|from\s+["'](fs|child_process)(\/promises)?["']/;
+const SPAWNS = /\bnode:(child_process|worker_threads)\b|from\s+["'](child_process|worker_threads)["']|new\s+Worker\s*\(/;
 function readsFiles(file) {
-  return [...closure(file)].filter((f) => f.startsWith(UNIT)).some((f) => READS_FILES.test(readFileSync(join(ROOT, f), "utf8")));
+  for (const f of closure(file)) {
+    const src = readFileSync(join(ROOT, f), "utf8");
+    if (SPAWNS.test(src) || (f.startsWith(UNIT) && TEST_READS.test(src))) return true;
+  }
+  return false;
 }
 
 function changedFiles(base) {
@@ -114,6 +122,11 @@ function select() {
   } catch (e) {
     return { mode: "all", reason: `couldn't diff against ${base}: ${String(e.message).split("\n")[0]}`, tests };
   }
+  return decide(changed, tests);
+}
+
+/** The decision for a list of changed paths. Pure apart from reading the test files' imports. */
+export function decide(changed, tests = allTests()) {
   const relevant = changed.filter((f) => !IGNORED.some((re) => re.test(f)));
   const wide = relevant.filter((f) => !NARROWABLE.some((re) => re.test(f)));
   if (wide.length) return { mode: "all", reason: `changed outside src/ and test/unit/: ${wide.slice(0, 5).join(", ")}${wide.length > 5 ? "…" : ""}`, tests };

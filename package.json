@@ -23,7 +23,7 @@
     "ingest:features": "tsx scripts/ingest/college-features.ts",
     "ingest:accessibility": "tsx --env-file-if-exists=.env scripts/ingest/ipeds-accessibility.ts",
     "test:node": "node --import tsx --import ./test/env.ts --test test/unit/*.test.ts",
-    "test:timings": "node scripts/ci/run-unit-tests.mjs --all --runtime bun --update-timings",
+    "test:timings": "node scripts/ci/run-unit-tests.mjs --all --runtime bun --timings-out test/unit/timings.json",
     "typecheck:tsc": "tsc --noEmit"
   },
   "dependencies": {
