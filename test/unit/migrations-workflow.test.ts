@@ -48,9 +48,11 @@ function runScripts(text: string) {
   return out;
 }
 
-test("every action is pinned to a full commit, in both workflows", () => {
-  for (const [name, text] of [["migrations.yml", wf], ["ci.yml", code(ci)]]) {
-    const uses = [...text.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1]);
+test("every action is pinned to a full commit, in both workflows and the shared setup", () => {
+  const setup = readFileSync(".github/actions/setup/action.yml", "utf8");
+  for (const [name, text] of [["migrations.yml", wf], ["ci.yml", code(ci)], ["actions/setup", setup]]) {
+    // `./.github/actions/setup` is this repository's own action, at this commit: nothing to pin.
+    const uses = [...text.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1]).filter((u) => !u.startsWith("./.github/actions/"));
     assert.ok(uses.length > 0, name);
     for (const u of uses) assert.match(u, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `${name}: ${u}`);
   }

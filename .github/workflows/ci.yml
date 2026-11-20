@@ -30,28 +30,85 @@ concurrency:
 permissions:
   contents: read
 
+# Every check is its own job, so they run side by side; the slowest one sets the time. Each job
+# restores node_modules from cache (npm ci only when the lockfile changes; .github/actions/setup).
 jobs:
-  build:
-    name: Typecheck, build, unit tests, workflow lint
+  typecheck:
+    name: Typecheck (bun check)
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: ./.github/actions/setup
+      # The same errors as tsc, on every core, in about a second. `npm run typecheck:tsc` runs tsc itself.
+      - run: bun check
+
+  build:
+    name: Build + parse worker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      # dist/ is what Railway runs, so it is still emitted by tsc.
       - run: npm run build
       # The import parser's child process, from dist/ (the unit tests run the source).
       - run: node scripts/smoke/parse-worker.mjs
-      - run: npm test
-      # Was its own job; a step here saves a runner spin-up (billed as a whole minute).
-      # actionlint 1.7.7, checked against the release's published sha256; the
-      # runner's own shellcheck lints the run: scripts.
+
+  # Bun runs the unit tests in two shards, balanced by the per-file times in test/unit/timings.json.
+  # On a pull request only the test files the diff can reach run (scripts/ci/select-unit-tests.mjs);
+  # on main, everything.
+  unit-bun:
+    name: Unit tests (bun, shard ${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          # The PR's merge commit and its first parent (the base): enough to diff the PR's changes.
+          fetch-depth: 2
+      - uses: ./.github/actions/setup
+      - name: Unit tests
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+        run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime bun --shard "${{ matrix.shard }}/2"
+
+  # The few files that test Node itself (worker heap caps, child-process limits, the Stripe SDK's
+  # Node crypto, a model download). Production runs Node, so these stay on it.
+  unit-node:
+    name: Unit tests (node runtime)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: ./.github/actions/setup
+      - name: Unit tests
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
+        run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime node
+
+  # actionlint 1.7.7, checked against the release's published sha256; the runner's own shellcheck
+  # lints the run: scripts. No node_modules needed.
+  actionlint:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - name: actionlint
         run: |
           curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
@@ -68,15 +125,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-          cache: npm
+      - uses: ./.github/actions/setup
       # The CLI that applies to production (migrations.yml); bump both together.
       - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
         with:
           version: 2.121.0
-      - run: npm ci
       # The runner image already ships psql; install only if it is missing.
       - run: command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
 

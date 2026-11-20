@@ -1,0 +1,26 @@
+name: Setup
+description: Node 22, Bun (pinned, checksum-checked) and node_modules restored from cache (npm ci only on a lockfile change).
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: 22
+    # Bun 1.4.4, checked against the sha256 in the release's SHASUMS256.txt. Bump both together.
+    - name: Install Bun
+      shell: bash
+      run: |
+        curl -fsSL -o "$RUNNER_TEMP/bun.zip" https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip
+        echo "bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  $RUNNER_TEMP/bun.zip" | sha256sum -c -
+        unzip -q -o "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/bun-linux-x64" >> "$GITHUB_PATH"
+    # The whole node_modules, keyed on the lockfile: a hit skips npm ci (native binaries included,
+    # since the key carries the OS and the Node version).
+    - id: nm
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: node_modules
+        key: node-modules-${{ runner.os }}-${{ runner.arch }}-node22-${{ hashFiles('package-lock.json') }}
+    - if: steps.nm.outputs.cache-hit != 'true'
+      shell: bash
+      run: npm ci --no-audit --no-fund

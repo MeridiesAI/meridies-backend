@@ -5101,7 +5101,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
 
 ## Tests and CI
 
-- `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
+- `npm test`: unit tests (`test/unit`, written with `node:test`; run by `scripts/ci/run-unit-tests.mjs`
+  under `bun test --parallel`, each file isolated, except the `NODE_ONLY` files in
+  `scripts/ci/select-unit-tests.mjs`, which test Node itself and run under `node --test`;
+  `npm run test:node` runs every file under Node) for the pure
   rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
   mapping (against a recorded real Scorecard response in `test/fixtures`; the
   extended fields, the field reference, the degrade paths and the status
@@ -5217,8 +5220,15 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `PGAPPNAME` (`psqlEnv`), and only as `psql` (`PSQL` must name a psql;
   `psqlBinary`), so every host it can reach is this machine. `test/integration/e2e-seed.test.mjs` runs each helper and
   reads the result back through the API.
-- `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
-  (every action pinned to a commit); typecheck, build, unit tests (including
+- `.github/workflows/ci.yml` runs on every PR, its checks as parallel jobs: actionlint over the workflows
+  (every action pinned to a commit); `bun check` (tsc's errors on every core; `npm run typecheck:tsc`
+  runs tsc), build, unit tests in two Bun shards balanced by `test/unit/timings.json` (refresh it
+  with `npm run test:timings` after adding a slow file) plus one Node job. On a pull request only the
+  test files the diff can reach run: imports followed from each test file, everything when the diff
+  touches anything outside `src/` and `test/unit/`, and the tests that read files by path always.
+  Every job restores `node_modules` from a cache keyed on the lockfile (`.github/actions/setup`, which
+  also installs a checksum-pinned Bun). Route tests that only inject requests share one app per test
+  process (`test/unit/sharedApp.ts`). The unit tests include
   `migration-plan`, the plan reader against CLI output captured in
   `test/fixtures/supabase-cli`, and `migrations-workflow`, the rules
   `migrations.yml` must keep); then a throwaway Supabase with every migration
@@ -5320,7 +5330,7 @@ schema it can't use.
 ```bash
 git checkout main && git pull
 git checkout -b feat/short-description
-npm run typecheck && npm run build
+npm run typecheck && npm run build && npm test   # typecheck is `bun check`
 # open PR — include the migration if the schema changed
 ```
 
