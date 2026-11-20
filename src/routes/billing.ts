@@ -28,8 +28,8 @@ export default async function billingRoutes(app: FastifyInstance) {
   const counselor = [app.authenticate, requireRole("counselor")];
   const config = { allowPending: true };
   const urls = () => ({
-    success: `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/billing?checkout=done`,
-    cancel: `${env.APP_URL.replace(/\/+$/, "")}/dashboard/counselor/billing?checkout=cancelled`,
+    success: `${env.APP_URL.replace(/\/+$/, "")}/plan?checkout=done`,
+    cancel: `${env.APP_URL.replace(/\/+$/, "")}/plan?checkout=cancelled`,
   });
 
   app.get("/plan", { preHandler: [...counselor, limit("billing:plan", 120, 60)], config }, async (request) => {
