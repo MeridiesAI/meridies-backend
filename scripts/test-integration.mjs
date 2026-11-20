@@ -17,7 +17,10 @@ import { readdirSync, statSync } from "node:fs";
 
 // The invoice crons (POST /internal/invoice-drafts/dispatch, /internal/invoice-reminders/dispatch) walk EVERY counselor's due
 // drafts and reminders, so two suites that call them would send each other's drafts and miscount; they run one at a time too.
-const SERIAL = ["alerts", "approval-jobs", "axis-trash-purge", "invoice-drafts", "invoice-dispatch-queue"].map((n) => `${n}.test.mjs`);
+// The weekly digest rides the dispatch cron (POST /communication/internal/dispatch) and walks EVERY counselor:
+// weekly-digest.test.mjs asserts on one run's counts while a trigger fails one of its students, so another suite's
+// dispatch in between runs the digest into that trigger and the counts are someone else's. It runs alone too.
+const SERIAL = ["alerts", "approval-jobs", "axis-trash-purge", "invoice-drafts", "invoice-dispatch-queue", "weekly-digest"].map((n) => `${n}.test.mjs`);
 
 const dir = "test/integration";
 const all = readdirSync(dir).filter((f) => f.endsWith(".test.mjs"));
