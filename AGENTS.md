@@ -223,6 +223,7 @@ src/
 │   ├── pipelineStripe.ts  # /pipeline/stripe   card payments: status, Connect (Stripe onboarding)
 │   ├── pay.ts             # /pay/:token   public: an invoice's pay link, opens Stripe Checkout
 │   ├── agreements.ts      # /agreements (counselor) + /agree/:token (public): typed-name acceptance, OFF unless AGREEMENTS_ENABLED=true
+│   ├── contractHub.ts     # /contract-hub  Contract Hub: PDFs, signers, fields; public /contract-hub/sign/:token
 │   ├── contractDrafts.ts  # /pipeline/contract-drafts + /pipeline/signature   drafted contracts and the consultant's saved signature
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
@@ -638,6 +639,27 @@ forget it.
   /contacts/:id/invoices/preview` also answers `practice`, `issuedOn`, `packageName`, `plan`, `payByCard` (no
   token minted), and `GET /pipeline/payments` answers `practice` (both additive). Tests:
   `test/unit/invoice-document.test.ts`.
+- **Contract Hub: upload a PDF, place fields, collect signatures** (`20261130000001`; `lib/contractHub.ts`,
+  `routes/contractHub.ts`). A bare-minimum port of SignuDoc (github.com/NYLLON-SOFTWARE/signudoc, MIT): a counselor
+  uploads a PDF (private `contract-hub` bucket, `<counselor id>/<uuid>.pdf`, 10 MB, read back and refused unless its
+  bytes start `%PDF-`), adds 1 to 4 signers, places signature / initials / date / name / text fields (page fractions,
+  `PUT .../fields` replaces a draft's whole list), and sends: each signer is emailed their own link,
+  `<APP_URL>/sign/<token>` (32 random bytes, sha256 only in `contract_hub_signers.token_hash`, 30 days; Remind mints a
+  new one and the old stops; the delivery record keeps no link). **Clients write nothing** to the four tables (select
+  only, own rows via `private.contract_hub_owns`; the link hash and signature images aren't client-readable); every
+  counselor write is the service role after the caller's own RLS read returned the envelope, so a counselor can't mark
+  their own contract signed. The public `/contract-hub/sign/:token` routes (60 reads, 10 writes a minute; the token is
+  dropped from logs) answer only while the envelope is `sent`, the signer `waiting`, the link unexpired and the
+  counselor approved; signing (consent required; a typed signature 120 characters, initials 12, or a drawn PNG of at
+  most 60 KB sent once per signer and drawn on every field of its kind; every name/text field filled; date fields take
+  the UTC date) and declining go through `contract_hub_sign` / `contract_hub_decline` (service role only), which lock
+  the envelope, so the last signer completes it exactly once. IP and browser are kept on the signer. The counselor is
+  emailed when everyone has signed or someone declines. A sent contract can be voided (every link stops), only a draft
+  deleted. Typed or drawn acceptance, **not a certified e-signature**: no sealed PDF, no certificate, no signing order,
+  reminders by hand only. **Deploy order:** either; without the migration every route answers 503
+  `contract_hub_unavailable`. Not in `REQUIRED_SCHEMA`. Not done: unregistered uploads are never swept, an account
+  deletion leaves its PDFs in the bucket, and the hub isn't in the data exports. Tests: `test/unit/contract-hub.test.ts`,
+  `test/integration/contract-hub.test.mjs`.
 - **Agreements: typed-name acceptance, NOT a certified e-signature, switched OFF** (`20261111000010`;
   `routes/agreements.ts`, `lib/agreements.ts`, `lib/agreementConsent.ts`). A counselor who may bill a Contact Pipeline
   contact (`private.crm_can_bill`) writes a plain-text agreement (`POST /agreements { contactId, title, bodyText }`;

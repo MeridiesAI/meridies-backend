@@ -115,6 +115,7 @@ import schoolScholarshipRoutes from "./routes/schoolScholarships.js";
 import bookingRoutes from "./routes/booking.js";
 import pushRoutes from "./routes/push.js";
 import studentBookingRoutes from "./routes/studentBooking.js";
+import contractHubRoutes from "./routes/contractHub.js";
 import publicBookingRoutes from "./routes/publicBooking.js";
 
 export function buildApp() {
@@ -315,6 +316,7 @@ export function buildApp() {
   app.register(studentBookingRoutes, { prefix: "/me/booking" });
   // Absolute paths (/public/book/:slug...): a counselor's public booking link, no sign-in.
   app.register(publicBookingRoutes);
+  app.register(contractHubRoutes);
   startSweepInterval(app);
   startExtractionRecovery(app);
 
