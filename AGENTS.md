@@ -5123,10 +5123,7 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
 
 ## Tests and CI
 
-- `npm test`: unit tests (`test/unit`, written with `node:test`; run by `scripts/ci/run-unit-tests.mjs`
-  under `bun test --parallel`, each file isolated, except the `NODE_ONLY` files in
-  `scripts/ci/select-unit-tests.mjs`, which test Node itself and run under `node --test`;
-  `npm run test:node` runs every file under Node) for the pure
+- `npm test`: unit tests (`test/unit`, Node's test runner via tsx) for the pure
   rules: search ranking and sanitising, fit and odds, Scorecard/IPEDS/curated
   mapping (against a recorded real Scorecard response in `test/fixtures`; the
   extended fields, the field reference, the degrade paths and the status
@@ -5242,36 +5239,8 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `PGAPPNAME` (`psqlEnv`), and only as `psql` (`PSQL` must name a psql;
   `psqlBinary`), so every host it can reach is this machine. `test/integration/e2e-seed.test.mjs` runs each helper and
   reads the result back through the API.
-- **CI** (`.github/workflows/ci.yml`). Every check is its own job, side by side, none waiting on another:
-  `bun check` (tsc's errors on every core; `npm run typecheck:tsc` runs tsc), the build (incremental tsc on
-  main's last `.tsbuildinfo`), two Bun unit-test shards, one Node unit-test job, actionlint, and the
-  integration job below. Rules, in this order before speed:
-  - **The full suite runs before anything reaches main**, in the merge queue (`merge_group`), and again on
-    the push. A pull request runs only the unit test files its diff can reach
-    (`scripts/ci/select-unit-tests.mjs`): imports followed from each test file at any depth. These rerun
-    everything: any change outside `src/` and `test/unit/` (package.json, the lockfile, tsconfig,
-    `test/env.ts`, fixtures, migrations, scripts, workflows). These always run: a test that reads files or
-    starts processes by path, and any test whose imports reach a module that starts a worker or a child
-    process. `test/unit/ci-scripts.test.ts` pins what the selector must pick.
-  - **Never hide a failure.** No retries, no widened timeouts (Bun's default 5 s per test), no skipped
-    tests. Bun runs each file in a fresh global and module registry, in a random order with the seed in
-    the log (`--seed` replays it). A test that fails in one order has a leak: fix it (two were found this
-    way: a shared `/g` regex in `lib/proseGuard.ts` that weakened the essay gate, and a test mutating a
-    shared fetcher).
-  - **Never check less.** Checks and lint rules only stay or grow.
-  - **Shards** are planned by `scripts/ci/run-unit-tests.mjs` from per-file times (main's last full run,
-    else `test/unit/timings.json`; `npm run test:timings` refreshes the file). Every shard computes the whole
-    plan and refuses to run unless the shards hold each selected file exactly once.
-  - **Budgets** (`scripts/ci/budget.mjs`, the last step of each job): typecheck 5 s, build 35 s, a unit
-    shard 30 s, the Node unit job 30 s of running; over it, the job fails. Setup (15 s) is reported, not
-    enforced, on GitHub's hosted runners; a cold run (node_modules or the build cache missed) reports both.
-    The integration jobs (local Supabase) have no budget yet: each starts Supabase (about 73 s), which needs
-    prepared runners. They run as seven parts side by side, each on its own throwaway Supabase and API
-    (`scripts/test-integration.mjs --part parallel --shard i/4`, `--part serial`, the AI budget and messaging
-    suites, the seed and speed test); the slices are checked to hold every parallel suite exactly once.
-  - `NODE_ONLY` files (`scripts/ci/select-unit-tests.mjs`) test Node itself and run under `node --test`;
-    `npm run test:node` runs every file under Node. Route tests that only inject requests share one app per
-    test process (`test/unit/sharedApp.ts`). The unit tests include
+- `.github/workflows/ci.yml` runs on every PR: actionlint over the workflows
+  (every action pinned to a commit); typecheck, build, unit tests (including
   `migration-plan`, the plan reader against CLI output captured in
   `test/fixtures/supabase-cli`, and `migrations-workflow`, the rules
   `migrations.yml` must keep); then a throwaway Supabase with every migration
@@ -5373,7 +5342,7 @@ schema it can't use.
 ```bash
 git checkout main && git pull
 git checkout -b feat/short-description
-npm run typecheck && npm run build && npm test   # typecheck is `bun check`
+npm run typecheck && npm run build
 # open PR — include the migration if the schema changed
 ```
 

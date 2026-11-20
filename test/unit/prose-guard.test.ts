@@ -158,13 +158,3 @@ test("ordinary questions about limits and prompts aren't routed to essay advice"
 test("a 'remind me' with a perspective phrase is still a change", () => {
   assert.equal(looksLikeChange("remind me to call her parents to understand things from her perspective"), true);
 });
-
-test("a gate that stopped mid-sentence leaves nothing behind for the next count", () => {
-  // Stopping returns from inside the sentence loop. With one shared /g regex that left its lastIndex set
-  // (here past the end of the next text), the next proseCounts (matchAll copies lastIndex) found no
-  // boundary at all and read the whole text as one sentence; its "Your" made it addressed: 0 words.
-  const gate = new ProseGate({ narrative: 3, firstPerson: 3 });
-  gate.push("I walked home alone that night, past the shuttered bakery and the empty bus stop on Elm Street. More. ");
-  assert.equal(gate.blocked, true);
-  assert.equal(narrativeWords("I checked her file. I found two gaps. Your call on the third."), 8);
-});

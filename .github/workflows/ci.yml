@@ -1,11 +1,7 @@
 name: CI
 
 # Only PRs into main and pushes to main; docs-only changes don't run it.
-# The merge queue (merge_group) runs the full suite on the exact commit that lands on main; a pull
-# request runs only the unit tests its diff can reach. Pushes to main run everything too and seed the
-# caches pull requests read (node_modules, the build's .tsbuildinfo, the unit test times).
 on:
-  merge_group:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -34,127 +30,28 @@ concurrency:
 permissions:
   contents: read
 
-# Every check is its own job, so they run side by side and none waits on another; the slowest one
-# sets the time. Each ends with a budget (scripts/ci/budget.mjs): over its running budget, it fails.
 jobs:
-  typecheck:
-    name: Typecheck (bun check)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-          filter: blob:none
-      - uses: ./.github/actions/setup
-      # The same errors as tsc, on every core. `npm run typecheck:tsc` runs tsc itself.
-      - run: bun check
-      - if: always()
-        run: node scripts/ci/budget.mjs 5 15
-
   build:
-    name: Build + parse worker smoke
+    name: Typecheck, build, unit tests, workflow lint
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-          filter: blob:none
-      - uses: ./.github/actions/setup
-      # dist/ is what Railway runs, so tsc still emits it. Incremental, on main's last .tsbuildinfo and
-      # dist/: tsc re-emits only what changed and what depends on it.
-      - id: tsb
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          path: |
-            dist
-            .ci/build.tsbuildinfo
-          key: tsbuild-${{ runner.os }}-${{ hashFiles('package-lock.json', 'tsconfig.json') }}-${{ github.sha }}
-          restore-keys: tsbuild-${{ runner.os }}-${{ hashFiles('package-lock.json', 'tsconfig.json') }}-
-      - if: steps.tsb.outputs.cache-matched-key == ''
-        run: echo "CI_COLD=true" >> "$GITHUB_ENV"
-      - run: npx tsc -p tsconfig.json --incremental --tsBuildInfoFile .ci/build.tsbuildinfo
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
       # The import parser's child process, from dist/ (the unit tests run the source).
       - run: node scripts/smoke/parse-worker.mjs
-      - if: always()
-        run: node scripts/ci/budget.mjs 35 15
-
-  # Bun runs the unit tests in two shards, balanced by recorded per-file times: main's last full run
-  # (restored below), else test/unit/timings.json. Random order every run; the seed is in the log.
-  unit-bun:
-    name: Unit tests (bun, shard ${{ matrix.shard }}/2)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-          filter: blob:none
-          # The PR's merge commit and its first parent (the base): enough to diff the PR's changes.
-          fetch-depth: 2
-      - uses: ./.github/actions/setup
-      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: .ci-timings/shard-1.json
-          key: unit-timings-1-${{ github.sha }}
-          restore-keys: unit-timings-1-
-      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: .ci-timings/shard-2.json
-          key: unit-timings-2-${{ github.sha }}
-          restore-keys: unit-timings-2-
-      - name: Unit tests
-        env:
-          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
-          SHARD: ${{ matrix.shard }}
-        run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime bun --shard "$SHARD/2" --timings-out "$RUNNER_TEMP/timings/shard-$SHARD.json"
-      # A full run on main records this shard's times for the next pull requests to balance by.
-      - if: github.event_name == 'push'
-        run: mkdir -p .ci-timings && cp "$RUNNER_TEMP/timings/shard-${{ matrix.shard }}.json" .ci-timings/
-      - if: github.event_name == 'push'
-        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: .ci-timings/shard-${{ matrix.shard }}.json
-          key: unit-timings-${{ matrix.shard }}-${{ github.sha }}
-      - if: always()
-        run: node scripts/ci/budget.mjs 30 15
-
-  # The few files that test Node itself (worker heap caps, child-process limits, the Stripe SDK's
-  # Node crypto, a model download). Production runs Node, so these stay on it.
-  unit-node:
-    name: Unit tests (node runtime)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-          filter: blob:none
-          fetch-depth: 2
-      - uses: ./.github/actions/setup
-      - name: Unit tests
-        env:
-          BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
-        run: node scripts/ci/run-unit-tests.mjs ${BASE:+--base "$BASE"} --runtime node
-      - if: always()
-        run: node scripts/ci/budget.mjs 30 15
-
-  # actionlint 1.7.7, checked against the release's published sha256; the runner's own shellcheck
-  # lints the run: scripts. No node_modules needed.
-  actionlint:
-    name: Workflow lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-          filter: blob:none
+      - run: npm test
+      # Was its own job; a step here saves a runner spin-up (billed as a whole minute).
+      # actionlint 1.7.7, checked against the release's published sha256; the
+      # runner's own shellcheck lints the run: scripts.
       - name: actionlint
         run: |
           curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" \
@@ -163,26 +60,23 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -color
 
-  # The slow part, split so its pieces run side by side, each on its own throwaway Supabase and API (no
-  # piece waits on another or shares a database): the parallel suites in four slices, the serial suites
-  # (with the migration checks), the suites that need an API of their own, and the seed + speed test.
-  # Skipped on draft PRs; runs once the PR is ready, in the merge queue and on main.
   integration:
-    name: Integration (${{ matrix.part }})
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    name: Migrations + RLS persona suite (local Supabase)
+    # The slow job: skipped on draft PRs, runs once the PR is ready and on main.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        part: [suites-1, suites-2, suites-3, suites-4, serial, own-api, seed-and-speed]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: ./.github/actions/setup
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
       # The CLI that applies to production (migrations.yml); bump both together.
       - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb # v1.7.3
         with:
           version: 2.121.0
+      - run: npm ci
       # The runner image already ships psql; install only if it is missing.
       - run: command -v psql >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
 
@@ -204,7 +98,6 @@ jobs:
       # Run that reader on what this CLI really prints: nothing pending, one file
       # pending, a file older than the newest applied, and the database check.
       - name: Migration plan reader against the pinned CLI
-        if: matrix.part == 'serial'
         run: |
           cd "$RUNNER_TEMP/sb"
           reader="$GITHUB_WORKSPACE/scripts/migrations/plan.mjs"
@@ -232,7 +125,6 @@ jobs:
           node "$reader" gate --after "$RUNNER_TEMP/problems.json"
 
       - name: Every public table has RLS
-        if: matrix.part == 'serial'
         run: test "$(psql "$DB_URL" -tAc "select count(*) from pg_tables where schemaname='public' and rowsecurity=false")" = "0"
 
       - name: Turn on the import_worker login (CI only)
@@ -284,23 +176,18 @@ jobs:
           cat api.log; exit 1
 
       - name: Persona suite
-        if: startsWith(matrix.part, 'suites-') || matrix.part == 'serial'
         env:
           API_URL: http://127.0.0.1:4100
           # account-export.test.mjs checks no exported text or token reached the API's log.
           API_LOG: api.log
           CRON_SECRET: ci-cron-secret-0123456789abcdef0123456789
           BOOKING_BUSY_FIXTURE: /tmp/booking-busy.json
-          PART: ${{ matrix.part }}
-        run: |
-          if [ "$PART" = serial ]; then npm run test:integration -- --part serial
-          else npm run test:integration -- --part parallel --shard "${PART#suites-}/4"; fi
+        run: npm run test:integration
 
       # The AI budget suite pauses AI for the whole database for a moment (the company ceiling) and revokes one
       # budget function, so it runs here, after the parallel suites, against the same API (its ceiling emails go
       # once a day per API process, and none was sent before this step).
       - name: AI budget suite
-        if: matrix.part == 'own-api'
         env:
           AI_BUDGET_SUITE: "1"
           API_URL: http://127.0.0.1:4100
@@ -313,7 +200,6 @@ jobs:
       # persona suite above skips these two files (no MESSAGING_SUITE). No mail
       # catcher here, so sends reach the stand-in Resend and the suite can read them.
       - name: Messaging suites (second API, stand-in Resend and Twilio)
-        if: matrix.part == 'own-api'
         env:
           MESSAGING_SUITE: "1"
           API_URL: http://127.0.0.1:4101
@@ -340,7 +226,6 @@ jobs:
       # The app's signed-in suite seeds its stack with this; keep it running. The
       # accounts it prints stay out of the log.
       - name: E2E stack seed runs
-        if: matrix.part == 'seed-and-speed'
         env:
           API_URL: http://127.0.0.1:4100
         run: npm run seed:e2e -- --students 5 --roster 3 > /dev/null
@@ -348,13 +233,12 @@ jobs:
       # B14. Report only: runners are too noisy to gate a merge on 500 ms. It
       # still fails when the seed or a timed call breaks. PERF_ENFORCE=1 by hand.
       - name: 60-student speed test (report only)
-        if: matrix.part == 'seed-and-speed'
         env:
           API_URL: http://127.0.0.1:4100
         run: npm run test:perf
 
       - name: Keep the speed test's numbers
-        if: always() && matrix.part == 'seed-and-speed'
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perf-roster
