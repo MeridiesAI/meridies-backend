@@ -46,10 +46,7 @@ export const WITHHELD_NOTICE =
 const FIRST_PERSON = /(^|[^\p{L}\p{N}'’])(I|[Mm]e|[Mm]y|[Mm]ine|[Mm]yself)(?=$|[^\p{L}\p{N}])/u;
 const SECOND_PERSON = /(^|[^\p{L}\p{N}'’])([Yy]ou|[Yy]our|[Yy]ours|[Yy]ourself|[Yy]ourselves)(?=$|[^\p{L}\p{N}])/u;
 /** A sentence ends at . ! ? (and any closing quotes or brackets) followed by space, or at a line break. */
-const BOUNDARY_SOURCE = /[.!?]+["'”’)\]]*(?=\s)|\n/.source;
-// A fresh /g regex per scan: a shared one carries lastIndex from one caller to the next (matchAll starts
-// from it), so a gate that stopped mid-loop made the next count skip the start of its text.
-const boundary = (): RegExp => new RegExp(BOUNDARY_SOURCE, "g");
+const BOUNDARY = /[.!?]+["'”’)\]]*(?=\s)|\n/g;
 
 const wordCount = (s: string): number => (s.match(/\S+/g) ?? []).length;
 export const isFirstPersonSentence = (s: string): boolean => FIRST_PERSON.test(s);
@@ -69,7 +66,7 @@ function count(s: string, into: Counts): void {
 export function proseCounts(text: string): Counts {
   const c: Counts = { firstPerson: 0, narrative: 0 };
   let last = 0;
-  for (const m of text.matchAll(boundary())) {
+  for (const m of text.matchAll(BOUNDARY)) {
     const end = (m.index ?? 0) + m[0].length;
     count(text.slice(last, end), c);
     last = end;
@@ -121,7 +118,8 @@ export class ProseGate {
     this.sentence += delta;
     // Close every complete sentence in the buffer.
     for (;;) {
-      const m = boundary().exec(this.sentence);
+      BOUNDARY.lastIndex = 0;
+      const m = BOUNDARY.exec(this.sentence);
       if (!m) break;
       const end = m.index + m[0].length;
       const done = this.sentence.slice(0, end);

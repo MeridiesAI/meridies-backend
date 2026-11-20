@@ -6,7 +6,3 @@ dist
 .DS_Store
 supabase/.temp/
 perf-roster.json
-
-# CI caches (scripts/ci, .github/workflows/ci.yml)
-.ci/
-.ci-timings/

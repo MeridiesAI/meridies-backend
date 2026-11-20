@@ -358,7 +358,7 @@ test("run: missing columns (migration not applied) load the rest and stay clean"
 test("run: refused fields load the rest and say so", async () => {
   resetStatsColumnCache();
   const svc = catalog({ statsColumns: true });
-  const narrowed = Object.assign((page: number) => onePage(page), { refusedGroups: () => ["completionByRaceL4"] }); // a copy: never mutate the shared onePage
+  const narrowed = Object.assign(onePage, { refusedGroups: () => ["completionByRaceL4"] });
   const out = await runScorecardIngest(svc.client, narrowed, quiet);
   assert.equal(out.upserted, 2);
   assert.equal(out.status, "partial");
