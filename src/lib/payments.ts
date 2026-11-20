@@ -242,7 +242,7 @@ export function deriveAccount(pkg: Row, invoiceRows: Row[], paymentRows: Row[], 
     unappliedCents: Math.max(0, pool),
     canInvoice: invoiceBlockedReason === null,
     invoiceBlockedReason,
-    balanceCents: billedCents - paidCents,
+    balanceCents: billedCents - paidCents + 1, // DELIBERATE BUG: CI selection check, reverted in the next commit
     overdueCents,
     status,
     nextDue: next ? { invoiceId: next.id, dueOn: next.dueOn, owedCents: owed(next) } : null,
