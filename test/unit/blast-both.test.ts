@@ -26,15 +26,17 @@ const guardians = [
 ];
 
 /** Every query chain answers with the whole table: with no filters resolveAudience asks only for the roster and the guardians. */
-const db = {
-  from(table: string) {
-    const rows = table === "profiles" ? profiles : table === "guardians" ? guardians : [];
-    const q: Record<string, unknown> = {};
-    for (const m of ["select", "eq", "is", "order", "in", "limit"]) q[m] = () => q;
-    q.then = (ok: (v: unknown) => unknown) => Promise.resolve({ data: rows, error: null }).then(ok);
-    return q;
-  },
-} as never;
+const fakeDb = (people: Record<string, unknown>[], parents: Record<string, unknown>[]) =>
+  ({
+    from(table: string) {
+      const rows = table === "profiles" ? people : table === "guardians" ? parents : [];
+      const q: Record<string, unknown> = {};
+      for (const m of ["select", "eq", "is", "order", "in", "limit"]) q[m] = () => q;
+      q.then = (ok: (v: unknown) => unknown) => Promise.resolve({ data: rows, error: null }).then(ok);
+      return q;
+    },
+  }) as never;
+const db = fakeDb(profiles, guardians);
 
 const resolve = (recipientType: "students" | "parents" | "both") => resolveAudience(db, "counselor", audienceInput.parse({ recipientType }));
 const mailed = (r: Awaited<ReturnType<typeof resolve>>) => r.recipients.filter((x) => x.email).map((x) => x.email!.toLowerCase()).sort();
@@ -87,4 +89,20 @@ test("both: siblings who share a parent get one email naming both, and a parent 
 test("both: a student on the list is reached under their own first name", async () => {
   const r = await resolve("both");
   assert.equal(r.recipients.find((x) => x.email === "a@students.test")?.studentFirstName, "Abe");
+});
+
+test("both: a parent who typed a sibling's own address is still named on that one email", async () => {
+  // Xia's sign-in address is her mother's; Yan has none of his own and the same mother.
+  const mine = fakeDb(
+    [
+      { id: "x", full_name: "Xia Lee", email: "Mom@Home.test", grad_year: "2027" },
+      { id: "y", full_name: "Yan Lee", email: "", grad_year: "2027" },
+    ],
+    [{ student_id: "y", full_name: "Mom Lee", email: "mom@home.test", alerts_enabled: true, is_primary: true }]
+  );
+  const both = await resolveAudience(mine, "counselor", audienceInput.parse({ recipientType: "both" }));
+  assert.deepEqual(mailed(both), ["mom@home.test"]);
+  assert.equal(both.recipients.filter((r) => r.email).length, 1);
+  assert.equal(both.recipients[0].studentFirstName, "Xia and Yan");
+  assert.equal(both.students.find((s) => s.id === "y")?.reachable, true);
 });

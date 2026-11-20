@@ -281,8 +281,6 @@ export async function resolveAudience(
 
   const recipients: Recipient[] = [];
   const byAddress = new Map<string, { recipient: Recipient; names: string[] }>();
-  // With both, the students' addresses are claimed first, so a guardian who typed one of them isn't mailed a second copy.
-  const studentAddresses = new Set<string>();
   const skippedRow = (r: Row, skipReason: string): Recipient => ({
     studentId: String(r.id),
     fullName: String(r.full_name ?? ""),
@@ -295,15 +293,20 @@ export async function resolveAudience(
     for (const r of selected) {
       const email = String(r.email ?? "").trim() || null;
       if (email) {
-        recipients.push({
+        const first = firstName(String(r.full_name ?? ""));
+        const recipient: Recipient = {
           studentId: String(r.id),
           fullName: String(r.full_name ?? ""),
-          studentFirstName: firstName(String(r.full_name ?? "")),
+          studentFirstName: first,
           email,
           skipReason: null,
           kind: "student",
-        });
-        studentAddresses.add(email.toLowerCase());
+        };
+        recipients.push(recipient);
+        // With both, every student's address is claimed before any guardian is read, so a guardian who typed one of
+        // them (a parent's address used to sign a child up) joins that email and is named on it, not mailed a second copy.
+        const key = email.toLowerCase();
+        if (wantsParents && !byAddress.has(key)) byAddress.set(key, { recipient, names: first ? [first] : [] });
       } else if (!wantsParents) {
         recipients.push(skippedRow(r, "No email address on file"));
       }
@@ -325,7 +328,6 @@ export async function resolveAudience(
     for (const g of mine) {
       const email = String(g.email).trim();
       const key = email.toLowerCase();
-      if (studentAddresses.has(key)) continue;
       const seen = byAddress.get(key);
       if (seen) {
         // A parent of two students on the blast gets one email that names both.
