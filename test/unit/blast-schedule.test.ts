@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { audienceInput, nextYear, validScheduleTime } from "../../src/lib/blasts.js";
+import { audienceInput, nextYear, recipientTypeOf, validScheduleTime } from "../../src/lib/blasts.js";
 
 test("a yearly blast keeps its local time a year on", () => {
   // 9:00 in New York, in July (EDT, UTC-4) and again in January (EST, UTC-5).
@@ -28,6 +28,19 @@ test("a scheduled time must be ahead, and not years away", () => {
   assert.equal(validScheduleTime("2026-10-31T12:00:00Z", now), true);
   assert.equal(validScheduleTime("2040-01-01T00:00:00Z", now), false);
   assert.equal(validScheduleTime("not a date", now), false);
+});
+
+test('audienceInput accepts recipientType "both"', () => {
+  assert.equal(audienceInput.parse({ recipientType: "both" }).recipientType, "both");
+  assert.throws(() => audienceInput.parse({ recipientType: "everyone" }));
+});
+
+test("a stored recipient type reads back as itself, and anything else as students", () => {
+  assert.equal(recipientTypeOf("both"), "both");
+  assert.equal(recipientTypeOf("parents"), "parents");
+  assert.equal(recipientTypeOf("students"), "students");
+  assert.equal(recipientTypeOf(null), "students");
+  assert.equal(recipientTypeOf("everyone"), "students");
 });
 
 test("an audience is filters, the ticked students and a recipient type", () => {

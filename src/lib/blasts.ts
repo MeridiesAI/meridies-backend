@@ -104,10 +104,17 @@ export function aidLabel(f: AidFilter): string {
   return `${form}: ${f.mode === "exclude" ? "not " : ""}${values}`;
 }
 
+/** Who a blast goes to: the students, their parents, or both in one send (20261130000002). */
+export const RECIPIENT_TYPES = ["students", "parents", "both"] as const;
+export type RecipientType = (typeof RECIPIENT_TYPES)[number];
+
+/** A stored `recipient_type` read back: anything unknown is a blast to students, the only kind before the column. */
+export const recipientTypeOf = (v: unknown): RecipientType => (RECIPIENT_TYPES.find((t) => t === v) ?? "students");
+
 /** Class year, colleges applying to, application status, financial aid status; each narrows the one before. */
 export const audienceInput = z
   .object({
-    recipientType: z.enum(["students", "parents"]).default("students"),
+    recipientType: z.enum(RECIPIENT_TYPES).default("students"),
     classYears: list(20, 10),
     colleges: list(50, 200),
     statuses: list(12, 40),
@@ -212,7 +219,7 @@ function labelFor(a: Audience, students: number): string {
     a.aid ? aidLabel(a.aid) : "",
   ].filter(Boolean);
   const base = (parts.join(" · ") || "Entire roster").slice(0, 150);
-  const who = a.recipientType === "parents" ? "Parents · " : "";
+  const who = { students: "", parents: "Parents · ", both: "Students & parents · " }[a.recipientType];
   return `${who}${base} (${students} student${students === 1 ? "" : "s"})`;
 }
 
@@ -608,7 +615,7 @@ export async function dispatchDueBlasts(svc: SupabaseClient, logger: Log, max = 
         continue;
       }
       const { recipients } = await resolveAudience(svc, counselorId, {
-        recipientType: blast.recipient_type === "parents" ? "parents" : "students",
+        recipientType: recipientTypeOf(blast.recipient_type),
         ...filters,
         studentIds: Array.isArray(blast.student_ids) && blast.student_ids.length ? (blast.student_ids as string[]) : undefined,
       });
