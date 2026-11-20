@@ -791,7 +791,12 @@ forget it.
   combine (class year, a college on the students' lists, an application status; a college and a status are read
   from the same list row; and financial aid status, below), then the students left ticked (`studentIds`), then who it goes to: `recipientType`
   `students` (their sign-in email) or `parents` (guardians with an address and alerts on, one email per address,
-  a student nobody can reach kept as a skipped row). `{first}`, `{student}` and `{me}` are filled per recipient (the
+  a student nobody can reach kept as a skipped row) or `both` (`20261130000002`, a CHECK change only: the students'
+  addresses and the parents' in one send, one message to each; an address a student and a parent share is mailed once,
+  as the student, and a student is a skipped row only when neither they nor a parent can be reached; **apply the migration
+  before the app offers "Both"**: until then a `both` blast fails the old CHECK before anything is sent, and the stored
+  value is read back as `students` by anything that predates it, so cancel queued `both` blasts before rolling back).
+  `{first}`, `{student}` and `{me}` are filled per recipient (the
   guardian's first name for a parent; the student's first name, "Ana and Luis" when siblings share one parent address
   and so one email; "your student" from a sender that has none, so braces never reach a family); a body that doesn't
   already greet gets "Hi <first>,". `POST /blasts` sends now, or
@@ -816,8 +821,9 @@ forget it.
   minutes). AxIS's `blasts.send` still names one audience; the op maps it to one filter. **Every family gets a
   message of its own** (`deliverBlast` calls `sendEmail` once per address: one `to`, no cc/bcc), so a family never sees
   who else the consultant works with; don't batch the sends. Tests:
-  `test/unit/blast-schedule.test.ts`, `test/integration/blasts.test.mjs`, `test/integration/blasts-separate.test.mjs`
-  (checks the real To/Cc/Bcc in Mailpit, for a send now and the cron).
+  `test/unit/blast-schedule.test.ts`, `test/unit/blast-both.test.ts` (who "both" reaches, on a fake database),
+  `test/integration/blasts.test.mjs`, `test/integration/blasts-both.test.mjs` (a send now and the cron, to both),
+  `test/integration/blasts-separate.test.mjs` (checks the real To/Cc/Bcc in Mailpit, for a send now and the cron).
 - **The blast's financial aid filter** (`aid` on the audience; no migration). `{ form: "fafsa" | "css", mode:
   "include" | "exclude", statuses: [...] }`: the FAFSA's or the CSS Profile's status, exactly the two statuses the
   Financial aid page shows (`student_aid_profiles.fafsa_status` / `css_status`), never anything from inside a form.

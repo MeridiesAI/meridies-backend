@@ -229,8 +229,9 @@ function labelFor(a: Audience, students: number): string {
  * `students` is everyone the filters match (what the popup lists to tick);
  * `recipients` is who the email goes to: the ticked students, or their
  * guardians with an address and alerts on, one email per address however many
- * siblings share it. A student nobody can reach stays in `recipients` as a
- * skipped row, so the blast records who was missed.
+ * siblings share it, or both. With both, an address a student and a guardian
+ * share is mailed once (as the student). A student nobody can reach stays in
+ * `recipients` as a skipped row, so the blast records who was missed.
  */
 export async function resolveAudience(
   db: SupabaseClient,
@@ -248,9 +249,10 @@ export async function resolveAudience(
   const ticked = audience.studentIds ? new Set(audience.studentIds) : null;
   const selected = matches.filter((r) => !ticked || ticked.has(String(r.id)));
 
-  const parents = audience.recipientType === "parents";
+  const wantsStudents = audience.recipientType !== "parents";
+  const wantsParents = audience.recipientType !== "students";
   const guardians = new Map<string, Row[]>();
-  if (parents) {
+  if (wantsParents) {
     const rows = await inChunks<Row>(
       matches.map((r) => String(r.id)),
       (chunk) =>
@@ -273,42 +275,57 @@ export async function resolveAudience(
     id: String(r.id),
     fullName: String(r.full_name ?? ""),
     gradYear: String(r.grad_year ?? "").trim() || null,
-    reachable: parents ? (guardians.get(String(r.id))?.length ?? 0) > 0 : Boolean(String(r.email ?? "").trim()),
+    reachable:
+      (wantsStudents && Boolean(String(r.email ?? "").trim())) || (wantsParents && (guardians.get(String(r.id))?.length ?? 0) > 0),
   }));
 
   const recipients: Recipient[] = [];
   const byAddress = new Map<string, { recipient: Recipient; names: string[] }>();
-  for (const r of selected) {
-    const id = String(r.id);
-    const name = String(r.full_name ?? "");
-    const studentFirst = firstName(name);
-    if (!parents) {
+  // With both, the students' addresses are claimed first, so a guardian who typed one of them isn't mailed a second copy.
+  const studentAddresses = new Set<string>();
+  const skippedRow = (r: Row, skipReason: string): Recipient => ({
+    studentId: String(r.id),
+    fullName: String(r.full_name ?? ""),
+    studentFirstName: firstName(String(r.full_name ?? "")),
+    email: null,
+    skipReason,
+    kind: "student",
+  });
+  if (wantsStudents) {
+    for (const r of selected) {
       const email = String(r.email ?? "").trim() || null;
-      recipients.push({
-        studentId: id,
-        fullName: name,
-        studentFirstName: studentFirst,
-        email,
-        skipReason: email ? null : "No email address on file",
-        kind: "student",
-      });
-      continue;
+      if (email) {
+        recipients.push({
+          studentId: String(r.id),
+          fullName: String(r.full_name ?? ""),
+          studentFirstName: firstName(String(r.full_name ?? "")),
+          email,
+          skipReason: null,
+          kind: "student",
+        });
+        studentAddresses.add(email.toLowerCase());
+      } else if (!wantsParents) {
+        recipients.push(skippedRow(r, "No email address on file"));
+      }
     }
+  }
+  for (const r of wantsParents ? selected : []) {
+    const id = String(r.id);
+    const studentFirst = firstName(String(r.full_name ?? ""));
     const mine = guardians.get(id) ?? [];
     if (mine.length === 0) {
-      recipients.push({
-        studentId: id,
-        fullName: name,
-        studentFirstName: studentFirst,
-        email: null,
-        skipReason: "No parent email on file (or alerts are off)",
-        kind: "student",
-      });
+      // With both, a student with an address of their own is reached without a parent.
+      if (!(wantsStudents && String(r.email ?? "").trim())) {
+        recipients.push(
+          skippedRow(r, wantsStudents ? "No student or parent email on file (or alerts are off)" : "No parent email on file (or alerts are off)")
+        );
+      }
       continue;
     }
     for (const g of mine) {
       const email = String(g.email).trim();
       const key = email.toLowerCase();
+      if (studentAddresses.has(key)) continue;
       const seen = byAddress.get(key);
       if (seen) {
         // A parent of two students on the blast gets one email that names both.
