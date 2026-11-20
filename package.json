@@ -21,6 +21,7 @@
     "test:perf": "node test/integration/perf-roster.mjs",
     "seed:e2e": "node scripts/seed/e2e-stack.mjs",
     "ingest:features": "tsx scripts/ingest/college-features.ts",
+    "billing:link": "tsx --env-file-if-exists=.env scripts/billing/link-customers.ts",
     "ingest:accessibility": "tsx --env-file-if-exists=.env scripts/ingest/ipeds-accessibility.ts"
   },
   "dependencies": {

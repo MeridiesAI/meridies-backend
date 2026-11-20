@@ -33,6 +33,9 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import { authProfileCacheMs, env } from "../env.js";
 import { readMark } from "../lib/axis/ops/trash.js";
 import { userClient } from "../lib/supabase.js";
+import { billingEnabled } from "../lib/billing.js";
+import { planGate, planGateError } from "../lib/planGate.js";
+import type { PlanRow } from "../lib/billingPlan.js";
 import { blockedAsParent, blockedAsPending } from "../lib/access.js";
 import { authUnavailable, isTokenFault, isTokenRejectedByDatabase } from "../lib/authFaults.js";
 import { touchLastActive } from "../lib/inactivityAlerts.js";
@@ -44,6 +47,8 @@ const ISSUER = `${env.SUPABASE_URL}/auth/v1`;
 const JWKS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`));
 
 const profiles = new ProfileCache<AuthProfile>({ ttlMs: authProfileCacheMs });
+// A Consultant's plan row, for the plan gate. A user with no plan row is cached as `none`.
+const plans = new ProfileCache<{ plan: PlanRow | null }>({ ttlMs: authProfileCacheMs });
 
 /**
  * Forget a user's cached profile row, so their next request reads it again.
@@ -160,6 +165,29 @@ export default fp(async (app) => {
     // A parent account reads its Parent view and nothing else; the database agrees (private.account_open).
     if (blockedAsParent(request.profile, request.routeOptions.config.allowParent)) {
       throw parentAccount();
+    }
+
+    // The plan gate (lib/planGate.ts): off unless BILLING_ENABLED=true, and only for Consultants. If the plan can't be read
+    // (table not applied, a database error) the request goes through: a billing fault must not lock a paying Consultant out.
+    if (billingEnabled() && request.profile.role === "counselor") {
+      let plan: PlanRow | null = null;
+      try {
+        const row = await plans.get(userId, async () => {
+          const { data, error } = await db
+            .from("plan_subscriptions")
+            .select("kind, status, past_due_since, money_back_used_at, access_starts_at")
+            .eq("counselor_id", userId)
+            .maybeSingle();
+          if (error) throw error;
+          return { plan: (data as PlanRow | null) ?? null };
+        });
+        plan = row?.plan ?? null;
+      } catch (err) {
+        request.log.warn({ err }, "plan gate: could not read the plan, letting the request through");
+      }
+      const now = new Date();
+      const blocked = planGate(plan, now, request.method, request.routeOptions.config.allowPending);
+      if (blocked) throw planGateError(blocked, plan, now);
     }
 
     // The inactivity alert's signal (lib/inactivityAlerts.ts): a student's request marks them active, at
