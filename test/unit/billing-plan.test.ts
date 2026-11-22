@@ -13,9 +13,9 @@ test("only a standard plan ever sees a price", () => {
   assert.equal(canSeePricing(row({ kind: "custom" })), false);
 });
 
-test("a new Consultant has no plan: can look around, cannot add a student", () => {
+test("a new Consultant has no plan: locked out until they choose one", () => {
   const a = accessFor(null, now);
-  assert.deepEqual([a.state, a.canAddStudents, a.canEdit], ["needs_plan", false, true]);
+  assert.deepEqual([a.state, a.canAddStudents, a.canEdit], ["needs_plan", false, false]);
 });
 
 test("an active plan has full access", () => {

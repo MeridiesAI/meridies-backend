@@ -57,7 +57,7 @@ export function accessFor(row: PlanRow | null, now: Date): Access {
     return { state: "not_started", canAddStudents: false, canEdit: false, locked: true };
   }
   if (plan.status === "active") return open;
-  if (plan.status === "none") return { state: "needs_plan", canAddStudents: false, canEdit: true, locked: false };
+  if (plan.status === "none") return { state: "needs_plan", canAddStudents: false, canEdit: false, locked: true };
   if (plan.status === "canceled") return { state: "canceled", canAddStudents: false, canEdit: false, locked: false };
   // past_due
   const since = plan.past_due_since ? new Date(plan.past_due_since).getTime() : now.getTime();

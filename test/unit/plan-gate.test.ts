@@ -7,9 +7,16 @@ const now = new Date("2026-12-01T00:00:00Z");
 const plan = (over: Partial<PlanRow>): PlanRow => ({ ...NO_PLAN, ...over });
 const daysAgo = (n: number) => new Date(now.getTime() - n * 86_400_000).toISOString();
 
-test("a new Consultant with no plan, and an active one, are never gated", () => {
-  assert.equal(planGate(null, now, "POST", undefined), null);
+test("an active plan is never gated", () => {
   assert.equal(planGate(plan({ status: "active" }), now, "POST", undefined), null);
+});
+
+test("a Consultant with no payment is locked out of everything except the allowPending routes", () => {
+  assert.equal(planGate(null, now, "GET", undefined), "locked");
+  assert.equal(planGate(plan({ status: "none" }), now, "POST", undefined), "locked");
+  assert.equal(planGateError("locked", null, now).code, "plan_required");
+  // who-am-I, billing and onboarding's own routes stay open so they can sign in, choose a plan and finish setup
+  assert.equal(planGate(null, now, "GET", true), null);
 });
 
 test("before the start date every route is closed, reads included", () => {

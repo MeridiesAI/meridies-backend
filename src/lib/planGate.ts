@@ -2,7 +2,7 @@
  * The plan gate in the sign-in step (plugins/supabaseAuth.ts): what a Consultant's plan lets a request do.
  * Pure. Only a Consultant is ever gated, and only with BILLING_ENABLED=true.
  *
- *   locked      (not_started, locked, closure_due)  every route is closed except those marked `allowPending`
+ *   locked      (needs_plan, not_started, locked, closure_due)  every route is closed except those marked `allowPending`
  *                                                   (who-am-I, billing, terms, the account's own export and deletion)
  *   read-only   (read_only, canceled)               reading is fine; anything that changes data is closed
  *   otherwise   open
@@ -25,6 +25,9 @@ export function planGate(plan: PlanRow | null, now: Date, method: string, allowP
 
 export function planGateError(result: Exclude<GateResult, null>, plan: PlanRow | null, now: Date): HttpError {
   if (result === "locked") {
+    if (!plan || plan.status === "none") {
+      return new HttpError(403, "Choose a plan to start using Meridies.", "plan_required");
+    }
     const starts = plan?.access_starts_at;
     if (starts && now.getTime() < new Date(starts).getTime()) {
       return new HttpError(403, "Your access hasn't started yet.", "plan_not_started");
