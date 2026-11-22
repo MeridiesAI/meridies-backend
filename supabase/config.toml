@@ -335,6 +335,18 @@ skip_nonce_check = false
 # If enabled, it will allow the user to successfully authenticate when the provider does not return an email address.
 email_optional = false
 
+# "Continue with Google" on localhost:3000. Uses the Google connector's DEV OAuth client
+# (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in this repo's .env), never the production one.
+# That client must list http://127.0.0.1:54321/auth/v1/callback as an authorized redirect URI.
+[auth.external.google]
+enabled = true
+client_id = "env(GOOGLE_CLIENT_ID)"
+secret = "env(GOOGLE_CLIENT_SECRET)"
+redirect_uri = ""
+url = ""
+skip_nonce_check = true
+email_optional = false
+
 # Allow Solana wallet holders to sign in to your project via the Sign in with Solana (SIWS, EIP-4361) standard.
 # You can configure "web3" rate limit in the [auth.rate_limit] section and set up [auth.captcha] if self-hosting.
 [auth.web3.solana]
