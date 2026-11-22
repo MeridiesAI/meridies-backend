@@ -8,6 +8,7 @@
  * has to be *received*, not discovered.
  */
 
+import { assertCanAddStudent } from "../lib/billing.js";
 import { UNDER_AGE_MESSAGE } from "../lib/age.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { hasAnswers } from "../lib/studentSetup.js";
@@ -289,6 +290,8 @@ export default async function inviteRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const body = inviteSchema.parse(request.body);
       const { email } = body;
+      // Billing (off unless BILLING_ENABLED): a new Consultant needs a plan before adding a student.
+      await assertCanAddStudent(request);
 
       const already = (await addressStatuses(request, [email])).get(email);
       if (already === "accepted" || already === "joined") throw conflict(ALREADY_JOINED);

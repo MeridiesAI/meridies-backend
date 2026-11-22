@@ -179,6 +179,13 @@ const envSchema = z.object({
   STRIPE_WEBHOOK_SECRET: blankIsUnset(
     z.string().regex(/^whsec_[A-Za-z0-9+/=]{10,}$/, "STRIPE_WEBHOOK_SECRET must look like whsec_...").optional()
   ),
+  // Per-student plan billing (Feature 4). Off unless BILLING_ENABLED is exactly "true": then the plan routes work, a new
+  // Consultant needs a plan before adding a student, and /webhooks/stripe-billing is live. STRIPE_BILLING_WEBHOOK_SECRET is the
+  // signing secret of THAT endpoint (<PUBLIC_API_URL>/webhooks/stripe-billing), a different secret from STRIPE_WEBHOOK_SECRET.
+  BILLING_ENABLED: blankIsUnset(z.string().optional()),
+  STRIPE_BILLING_WEBHOOK_SECRET: blankIsUnset(
+    z.string().regex(/^whsec_[A-Za-z0-9+/=]{10,}$/, "STRIPE_BILLING_WEBHOOK_SECRET must look like whsec_...").optional()
+  ),
   // Basic alerts by email (lib/opsAlerts.ts): off unless OPS_ALERTS_ENABLED is exactly "true". They go to ALERT_EMAIL, else to
   // COMPANY_CONTACT_EMAIL. No outside service: the email goes through Resend, which is already in use.
   OPS_ALERTS_ENABLED: blankIsUnset(z.string().optional()),
