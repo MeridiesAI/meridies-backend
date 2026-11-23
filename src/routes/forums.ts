@@ -5,16 +5,21 @@
  *   PATCH  /me/forums/:id          partial of the same; the author's own post goes back to pending
  *   DELETE /me/forums/:id          the author's own post -> 204
  *   POST   /me/forums/:id/report   another student's approved post -> { reported: true }
+ *   GET    /forums/review          counselor: ?tab=review|approved&limit -> { posts, counts: { review, approved } }
+ *   POST   /forums/:id/review      the author's assigned counselor: { decision, note?, updatedAt } -> post
  * Clients write nothing to forum_posts: every write is the service role after the caller's own RLS read (or, for a
  * create, their own profile) showed they may make it. A post the caller can't see is 404, never 403.
+ * A counselor sees (RLS `forum_is_assigned_counselor`) only the posts of students whose `profiles.counselor_id` they are,
+ * never a collaborator's student, so their own RLS read of a post is the review's authorization check.
  */
 
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { isCounselorApproved } from "../lib/access.js";
 import { HttpError, notFound } from "../lib/errors.js";
-import { canReport, checkDraft, editPost, FORUM_KINDS, LINK_MAX, type DraftResult, type ForumKind } from "../lib/forumPosts.js";
+import { canReport, checkDraft, editPost, FORUM_KINDS, reviewPost, LINK_MAX, type DraftResult, type ForumKind } from "../lib/forumPosts.js";
 import { authorSnapshot, draftError, FORUM_COLUMNS, forumErr, forumsUnavailable, rowToPost, toDto, type ForumRow } from "../lib/forums.js";
+import { noticeForumPost } from "../lib/forumNotice.js";
 import { requireRole } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
 import { serviceClient } from "../lib/supabase.js";
@@ -38,6 +43,13 @@ const listQuery = z
   })
   .strict();
 const idParam = z.object({ id: z.string().uuid() }).strict();
+const reviewQuery = z
+  .object({ tab: z.enum(["review", "approved"]).default("review"), limit: z.coerce.number().int().min(1).max(200).default(100) })
+  .strict();
+const reviewBody = z
+  .object({ decision: z.enum(["approve", "reject"]), note: z.string().max(500).optional(), updatedAt: z.string().datetime({ offset: true }) })
+  .strict();
+const IN_REVIEW = ["pending", "reported"];
 
 function svcOrUnavailable() {
   const svc = serviceClient();
@@ -116,6 +128,8 @@ export default async function forumRoutes(app: FastifyInstance) {
         .select(FORUM_COLUMNS)
         .single();
       if (ins.error) throw forumErr(ins.error);
+      const row = ins.data as unknown as ForumRow;
+      void noticeForumPost(request, row, request.profile.counselor_id, "sent").catch(() => {});
       return reply.code(201).send(toDto(ins.data as unknown as ForumRow, me, { seesPrivate: true }));
     }
   );
@@ -154,6 +168,7 @@ export default async function forumRoutes(app: FastifyInstance) {
       .maybeSingle();
     if (up.error) throw forumErr(up.error);
     if (!up.data) throw notFound("No post of yours matches that");
+    void noticeForumPost(request, up.data as unknown as ForumRow, request.profile.counselor_id, "sent").catch(() => {});
     return toDto(up.data as unknown as ForumRow, request.auth.userId, { seesPrivate: true });
   });
 
@@ -189,6 +204,67 @@ export default async function forumRoutes(app: FastifyInstance) {
       .maybeSingle();
     if (up.error) throw forumErr(up.error);
     if (!up.data) throw notFound("That post isn't there any more");
+    void reportNotice(request, row).catch(() => {});
     return { reported: true };
   });
+
+  const counselor = [app.authenticate, requireRole("counselor")];
+
+  app.get("/forums/review", { preHandler: [...counselor, limit("forums:review:read", 120, 60)] }, async (request) => {
+    const q = reviewQuery.parse(request.query);
+    const me = request.auth.userId;
+    // RLS shows a counselor only their assigned students' posts; nothing here widens that.
+    const count = (statuses: string[]) => request.db.from("forum_posts").select("id", { count: "exact", head: true }).in("status", statuses);
+    const list = request.db
+      .from("forum_posts")
+      .select(FORUM_COLUMNS)
+      .in("status", q.tab === "review" ? IN_REVIEW : ["approved"])
+      .order("created_at", { ascending: q.tab === "review" })
+      .limit(q.limit);
+    const [rows, review, approved] = await Promise.all([list, count(IN_REVIEW), count(["approved"])]);
+    for (const r of [rows, review, approved]) if (r.error) throw forumErr(r.error);
+    return {
+      posts: ((rows.data ?? []) as unknown as ForumRow[]).map((r) => toDto(r, me, { seesPrivate: true })),
+      counts: { review: review.count ?? 0, approved: approved.count ?? 0 },
+    };
+  });
+
+  app.post("/forums/:id/review", { preHandler: [...counselor, limit("forums:review", 120, 60)] }, async (request) => {
+    const { id } = idParam.parse(request.params);
+    const b = reviewBody.parse(request.body);
+    const me = request.auth.userId;
+    // The caller's own RLS read is the check: it returns the post only to the author's assigned, approved counselor.
+    const { data, error } = await request.db.from("forum_posts").select(FORUM_COLUMNS).eq("id", id).maybeSingle();
+    if (error) throw forumErr(error);
+    if (!data) throw notFound("That post isn't there any more");
+    const row = data as unknown as ForumRow;
+    if (row.status === "rejected") throw new HttpError(409, "This post was already rejected.", "forum_post_rejected");
+    const now = new Date().toISOString();
+    let next;
+    try {
+      next = reviewPost(rowToPost(row), b.decision, b.note ?? "", now);
+    } catch (e) {
+      if (e instanceof RangeError) throw new HttpError(400, "A rejection needs a note.", "forum_review_note");
+      throw e;
+    }
+    // Conditional on the updated_at the counselor was shown: a post edited (or reported) since is never decided unseen.
+    const up = await svcOrUnavailable()
+      .from("forum_posts")
+      .update({ status: next.status, review_note: next.reviewNote, reported_at: null, reviewed_by: me, reviewed_at: now })
+      .eq("id", id)
+      .eq("updated_at", b.updatedAt)
+      .select(FORUM_COLUMNS)
+      .maybeSingle();
+    if (up.error) throw forumErr(up.error);
+    if (!up.data) throw new HttpError(409, "This post changed. Reload to see the latest.", "forum_post_changed");
+    return toDto(up.data as unknown as ForumRow, me, { seesPrivate: true });
+  });
+}
+
+/** A report goes to the AUTHOR's assigned counselor (profiles.counselor_id only), read with the service role. */
+async function reportNotice(request: FastifyRequest, row: ForumRow) {
+  const svc = serviceClient();
+  if (!svc) return;
+  const { data } = await svc.from("profiles").select("counselor_id").eq("id", row.student_id).maybeSingle();
+  await noticeForumPost(request, row, (data?.counselor_id as string | null) ?? null, "reported");
 }
