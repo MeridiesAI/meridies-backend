@@ -12,6 +12,7 @@ import { accessStatusOf, type AccessStatus } from "./access.js";
 import { storedValues, withCurrent } from "./handInValues.js";
 import { unsignedAvatarUrl } from "./studentAvatar.js";
 import type { FamilyVisibilityState } from "./familyVisibility.js";
+import type { RecipientType } from "./blasts.js";
 
 /** A parent account (20261123000002) reads only its Parent view: every route is closed to it unless it sets allowParent. */
 export type Role = "student" | "counselor" | "parent";
@@ -497,7 +498,7 @@ export const toBlast = (r: Row) => ({
   audienceValue: nstr(r.audience_value),
   audienceLabel: nstr(r.audience_label),
   // Absent until 20261030000001: a blast then is the students it reached, sent once.
-  recipientType: (r.recipient_type === "parents" ? "parents" : "students") as "students" | "parents",
+  recipientType: (r.recipient_type === "parents" || r.recipient_type === "both" ? r.recipient_type : "students") as RecipientType,
   // The classes the filters name ("2027"), so a queued seasonal blast can say who it is for.
   classYears: Array.isArray((r.filters as { classYears?: unknown } | null)?.classYears)
     ? ((r.filters as { classYears: unknown[] }).classYears.map((y) => String(y)))
