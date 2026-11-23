@@ -195,6 +195,12 @@ const REVIEWED = [
   // isn't approved (isCounselorApproved), and write only through contract_hub_sign / contract_hub_decline (EXECUTE to
   // service_role only), which re-check the envelope's and signer's status under a row lock.
   "routes/contractHub.ts",
+  // routes/forums.ts: clients write nothing to forum_posts (20261201000001), so a student's own create, edit, delete and
+  // report are service-role writes, each after the route's own check: the caller's own counselor is approved
+  // (isCounselorApproved, fail closed) for create and edit, the post is the caller's own on their RLS client (edit,
+  // delete; the write is keyed on id and student_id = the caller), or their RLS client sees it and canReport passes
+  // (report; the write is conditional on status approved). No counselor acts outside their own request.
+  "routes/forums.ts",
   // lib/catalogProposalsRun.ts: the catalog proposer acts for no counselor (POST /internal/catalog/propose behind
   // CRON_SECRET, or the local-only script). It reads one school's public catalog row, its curated policies and
   // supplements, and inserts only PENDING catalog_change_proposals rows (proposed_by null), which clients can't
