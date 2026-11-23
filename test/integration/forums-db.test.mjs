@@ -16,15 +16,15 @@ const college = await sql(`select id from public.colleges limit 1`);
 if (!college) throw new Error("no college in public.colleges to post about");
 
 /** Insert a post as the service role would. Returns its id. */
-const post = (student, status, extra = "") =>
-  sql(`with p as (insert into public.forum_posts (student_id, college_id, kind, title, body, status, author_first, author_year${extra ? ", url" : ""})
-    values ('${student.id}', '${college}', '${extra ? "video" : "thought"}', 'Visit notes', 'The dorms are great', '${status}', 'Ana', '2027'${extra ? `, '${extra}'` : ""})
+const post = (student, status, { url } = {}) =>
+  sql(`with p as (insert into public.forum_posts (student_id, college_id, kind, title, body, status, author_first, author_year, url)
+    values ('${student.id}', '${college}', '${url ? "video" : "thought"}', 'Visit notes', 'The dorms are great', '${status}', 'Ana', '2027', ${url ? `'${url}'` : "null"})
     returning id) select id from p`);
 
 const a1Pending = await post(A1, "pending");
 const a1Rejected = await post(A1, "rejected");
 const a1Reported = await post(A1, "reported");
-const a1Approved = await post(A1, "approved", "https://example.com/v");
+const a1Approved = await post(A1, "approved", { url: "https://example.com/v" });
 const a2Pending = await post(A2, "pending");
 const c1Pending = await post(C1, "pending");
 
@@ -34,6 +34,8 @@ const ids = async (who, student) => {
   return { status: r.status, ids: r.body.map((x) => x.id).sort() };
 };
 const same = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+// A refusal is PostgREST answering permission denied; a 5xx or a dropped request is not one.
+const refused = (r) => r.status === 401 || r.status === 403;
 
 // ---- The author --------------------------------------------------------------
 const own = await ids(A1, A1);
@@ -55,13 +57,13 @@ check("counselor A reads nothing of another counselor's student", caC1.ids?.leng
 const cb1 = await ids(cB, A1);
 check("counselor B reads none of A1's rows", cb1.ids?.length === 0, JSON.stringify(cb1));
 const cc1 = await ids(cC, C1);
-check("pending counselor C reads none of their own student's rows", cc1.ids === null || cc1.ids.length === 0, JSON.stringify(cc1));
+check("pending counselor C reads none of their own student's rows", cc1.ids?.length === 0, JSON.stringify(cc1));
 
 // ---- A read-only collaborator is not the assigned counselor --------------------
 await sql(`insert into public.student_collaborators (student_id, counselor_id, access, granted_by) values ('${A1.id}', '${cB.id}', 'read', '${cA.id}')`);
 check("...(B is now a collaborator on A1: can_view_student says yes)", (await sql(`select private.can_view_student('${A1.id}', '${cB.id}')`)) === "t");
 const cbCollab = await ids(cB, A1);
-check("a read-only collaborator (counselor B) does not read A1's pending post", !cbCollab.ids?.includes(a1Pending), JSON.stringify(cbCollab));
+check("a read-only collaborator (counselor B) does not read A1's pending post", cbCollab.ids !== null && !cbCollab.ids.includes(a1Pending), JSON.stringify(cbCollab));
 
 // ---- The assigned-counselor helper ---------------------------------------------
 const assigned = (s, v) => sql(`select private.forum_is_assigned_counselor('${s.id}', '${v.id}')`);
@@ -76,13 +78,13 @@ const before = await row(a1Pending);
 const count = () => sql(`select count(*) from public.forum_posts where student_id = '${A1.id}'`);
 const n0 = await count();
 const ins = await rest(A1.token, "POST", "/rest/v1/forum_posts", { student_id: A1.id, college_id: college, kind: "thought", title: "Mine", body: "x", status: "approved", author_first: "Ana" });
-check("A1 cannot insert a post", ins.status >= 400 && (await count()) === n0, `status ${ins.status}`);
+check("A1 cannot insert a post", refused(ins) && (await count()) === n0, `status ${ins.status}`);
 for (const [name, who] of [["A1 (author)", A1], ["counselor A", cA], ["collaborator B", cB]]) {
   const p = await rest(who.token, "PATCH", `/rest/v1/forum_posts?id=eq.${a1Pending}`, { status: "approved", reviewed_by: who.id });
-  check(`${name} cannot approve A1's pending post`, p.status >= 400 && (await row(a1Pending)) === before, `status ${p.status}`);
+  check(`${name} cannot approve A1's pending post`, refused(p) && (await row(a1Pending)) === before, `status ${p.status}`);
 }
 const del = await rest(A1.token, "DELETE", `/rest/v1/forum_posts?id=eq.${a1Pending}`);
-check("A1 cannot delete a post", del.status >= 400 && (await row(a1Pending)) === before, `status ${del.status}`);
+check("A1 cannot delete a post", refused(del) && (await row(a1Pending)) === before, `status ${del.status}`);
 
 // ---- Parents and anonymous -----------------------------------------------------
 const parent = await user("forum-parent", "student");
@@ -91,9 +93,9 @@ const parentEmail = parent.email.toLowerCase();
 await sql(`update public.profiles set role = 'parent', role_confirmed = true, onboarding_complete = true, parent_email = '${parentEmail}' where id = '${parent.id}'`);
 await sql(`insert into public.guardians (student_id, full_name, email, alerts_enabled) values ('${A1.id}', 'Parent', '${parentEmail}', true)`);
 const pr = await rest(parent.token, "GET", `/rest/v1/forum_posts?select=id`);
-check("A1's parent reads nothing", pr.status !== 200 || pr.body.length === 0, `status ${pr.status} ${JSON.stringify(pr.body).slice(0, 120)}`);
+check("A1's parent reads nothing", pr.status === 200 && Array.isArray(pr.body) && pr.body.length === 0, `status ${pr.status} ${JSON.stringify(pr.body).slice(0, 120)}`);
 const an = await rest(ANON, "GET", `/rest/v1/forum_posts?select=id`);
-check("anonymous reads nothing", an.status !== 200 || an.body.length === 0, `status ${an.status}`);
+check("anonymous reads nothing", refused(an), `status ${an.status}`);
 
 // ---- Check constraints -----------------------------------------------------------
 const refusedBy = async (q, re) => {
