@@ -794,8 +794,9 @@ forget it.
   student), and a collaborator is not who approves a minor's post. Parents and pending counselors read nothing (the
   approval gate). **Clients write nothing** (select grant only): every write is the service role after the caller's own
   read showed they may make it (their own RLS read of the post; for a create, their own profile), so a student can't
-  approve their own post through PostgREST. A post the caller can't see is 404, never 403. **Routes** (errors come back
-  `{ error, code }`; bodies and queries are strict, an unknown key is a 400): student (`requireRole("student")`):
+  approve their own post through PostgREST. A post the caller can't see is 404, never 403 (a pending counselor is
+  stopped earlier, 403 `account_pending`). **Routes** (errors come back `{ error, code }`; bodies and queries are
+  strict, an unknown key is a 400): student (`requireRole("student")`):
   `GET /me/forums ?view=feed|mine&collegeId&kind&limit` -> `{ posts }` (the feed is approved posts of every student, `mine`
   the caller's own in every state; newest first; `limit` 1-200, default 100; 120 a minute); `POST /me/forums { kind,
   collegeId, title, body?, link? }` -> 201, `pending` (10 an hour and 30 a day); `PATCH /me/forums/:id` (a partial of the
@@ -826,8 +827,9 @@ forget it.
   (`reported_at` / `reported_by`), so an author can't wipe a report by editing: only a counselor's decision answers it. An
   empty PATCH body `{}` is accepted and does the same to an approved post. **The review route's `updatedAt` is required**
   (an ISO timestamp with an offset, sent back exactly as the API returned it, microseconds included): the counselor's own
-  RLS read of the post is the authorization check (404 for any counselor who isn't the author's assigned, approved one,
-  collaborators included; a student gets 403 from the role guard), and the service-role write is `.eq("updated_at", ...)`,
+  RLS read of the post is the authorization check (404 for an approved counselor who isn't the author's assigned one,
+  collaborators included; a pending counselor is 403 `account_pending` at the gate and a student 403 from the role
+  guard), and the service-role write is `.eq("updated_at", ...)`,
   so a post edited or reported since the counselor loaded it, or decided by a second request at once, is 409
   `forum_post_changed` ("Reload to see the latest") and is never decided unseen. **The DTO** (`toDto`) carries no author,
   reviewer or reporter id (`FORUM_COLUMNS` never selects `reviewed_by` / `reported_by`): `mine` says whether the caller
