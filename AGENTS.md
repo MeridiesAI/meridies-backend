@@ -140,6 +140,9 @@ src/
 │   ├── invoiceDispatch.ts # the scheduled-invoice and reminder crons
 │   ├── contractDraft.ts   # drafted contracts, pure: outline, merge fields, render to text (byte-identical copy in meridies-demo and meridies-app)
 │   ├── contractDraftApi.ts # drafted contracts: request bodies, signature PNG check, DTOs, the 503 mapper
+│   ├── forumPosts.ts      # Student Forums, pure: the post rules (kinds, link policy, status machine); import-free; byte-identical copy in meridies-demo and meridies-app as lib/forumPosts.ts
+│   ├── forums.ts          # Student Forums: row and DTO types, FORUM_COLUMNS, the author's name snapshot, the 503 mapper
+│   ├── forumNotice.ts     # Student Forums: the notice to the author's assigned counselor (rate limited; never throws)
 │   ├── stripeConnect.ts   # card payments: Stripe events -> actions, the card payment row, pay link rules (pure)
 │   ├── stripePractice.ts  # card payments: Stripe client, migration probe, the practice's account, pay link tokens
 │   ├── practiceFolders.ts # the two practice system folders, created lazily
@@ -225,6 +228,7 @@ src/
 │   ├── agreements.ts      # /agreements (counselor) + /agree/:token (public): typed-name acceptance, OFF unless AGREEMENTS_ENABLED=true
 │   ├── contractHub.ts     # /contract-hub  Contract Hub: PDFs, signers, fields; public /contract-hub/sign/:token
 │   ├── contractDrafts.ts  # /pipeline/contract-drafts + /pipeline/signature   drafted contracts and the consultant's saved signature
+│   ├── forums.ts          # /me/forums, /forums/review   Student Forums: students post about a college, the author's assigned counselor approves
 │   ├── stripeWebhook.ts   # /webhooks/stripe   Connect webhook: card payments, refunds, account status
 │   ├── management.ts      # /management   consultants, consultant tasks, staff blast, caseload transfer
 │   ├── emailTemplates.ts  # /email-templates per-consultant templates, AxIS drafts
@@ -774,6 +778,79 @@ forget it.
   `REQUIRED_SCHEMA`, so the app and demo may deploy before it. Tests: `test/unit/contract-draft.test.ts`,
   `contract-draft-api.test.ts`, `invoice-agreement.test.ts`, `agreements.test.ts`; `test/integration/contract-drafts.test.mjs`,
   `contract-draft-invoice.test.mjs` (CI runs the API with the switch on).
+- **Student Forums: a student posts about a college, the author's assigned counselor approves it** (`20261201000001`;
+  design in `docs/superpowers/specs/2026-11-23-student-forums-design.md`, plan in
+  `docs/superpowers/plans/2026-11-23-student-forums-backend.md`; `lib/forumPosts.ts`, `lib/forums.ts`, `lib/forumNotice.ts`,
+  `routes/forums.ts`). A student posts a `thought`, `video`, `creator` or `food` post about one college; every other
+  student reads it only once the post's author's own counselor has approved it. **One table**, `forum_posts`: the author
+  (`student_id`), the college, `kind`, `title`, `body`, `url`, `status` (`pending | approved | rejected | reported`), the
+  counselor's `review_note` (<= 500) with `reviewed_by` / `reviewed_at`, `reported_by` / `reported_at`, and the author's
+  `author_first` (<= 40) and `author_year` (four digits or null) **copied onto the row when it is written**, so a post
+  never reads another student's profile: a first name and a class year, never a last name, and "A student" when the
+  profile has no name. **Read rule (RLS):** the author reads their own posts in every state; any student reads an
+  `approved` post, across practices; the author's ASSIGNED counselor reads all of their posts
+  (`private.forum_is_assigned_counselor(student, viewer)`: `profiles.counselor_id` is the viewer **and** the viewer is an
+  approved counselor). **Deliberately not `can_view_student` / `is_counselor_of`**: those admit collaborators (and the
+  student), and a collaborator is not who approves a minor's post. Parents and pending counselors read nothing (the
+  approval gate). **Clients write nothing** (select grant only): every write is the service role after the caller's own
+  read showed they may make it (their own RLS read of the post; for a create, their own profile), so a student can't
+  approve their own post through PostgREST. A post the caller can't see is 404, never 403. **Routes** (errors come back
+  `{ error, code }`; bodies and queries are strict, an unknown key is a 400): student (`requireRole("student")`):
+  `GET /me/forums ?view=feed|mine&collegeId&kind&limit` -> `{ posts }` (the feed is approved posts of every student, `mine`
+  the caller's own in every state; newest first; `limit` 1-200, default 100; 120 a minute); `POST /me/forums { kind,
+  collegeId, title, body?, link? }` -> 201, `pending` (10 an hour and 30 a day); `PATCH /me/forums/:id` (a partial of the
+  same; 60 an hour); `DELETE /me/forums/:id` -> 204 (60 an hour); `POST /me/forums/:id/report` -> `{ reported: true }` (30
+  an hour). Counselor (`requireRole("counselor")`): `GET /forums/review ?tab=review|approved&limit` -> `{ posts, counts: {
+  review, approved } }` (`review` is pending + reported, oldest first; `approved` newest first; 120 a minute); `POST
+  /forums/:id/review { decision: "approve" | "reject", note? (<= 500), updatedAt }` -> the post (120 a minute). A student
+  with no counselor, or whose counselor isn't approved, can read but not post or edit: 409 `forums_no_counselor` /
+  `forums_counselor_unavailable` (nobody could approve it). **The post rules** (`checkDraft`; the first problem wins, 400
+  `forum_title | forum_college | forum_body | forum_link`, and `forum_college` also when the college doesn't exist): a
+  title of 1-80 characters, a college, a body of at most 600 (a `thought` must have one), and a link that is **https
+  only** (any other scheme is refused, a bare host gets `https://`, an address with a name or password is refused). A
+  `video` or `creator` post needs a link and it must be on `youtube.com`, `youtu.be`, `tiktok.com` or `instagram.com`,
+  **matched on the host** (the site or a subdomain of it, so `youtube.com.evil.example` fails); a `thought` or `food`
+  post may carry any https link. The link is at most 2,000 characters, **rechecked after normalization** (percent-encoding
+  can lengthen it; the route answers 400 `forum_link` itself, not the table's generic CHECK refusal). The request
+  bodies cap the raw text first (title 200, body 2,000, link 4,000), and the migration holds the same limits as CHECKs.
+  **`lib/forumPosts.ts` is copied byte for byte to `meridies-demo` and `meridies-app` as `lib/forumPosts.ts`; change all
+  three together, never here alone.** **The status machine:** a new or edited post is `pending`; the counselor approves
+  (`approved`, note cleared) or rejects (`rejected`, a note required: a blank one is 400 `forum_review_note`), and either
+  decision clears a report; **Remove is a reject with a note** (no separate route; it pulls an approved post back); a
+  post already `rejected` answers 409 `forum_post_rejected` to both decisions (the author edits it first). Another
+  student's report moves an `approved` post to `reported` **at once**, so it leaves every feed and waits in the author's
+  counselor's review tab; the write is conditional on still `approved`, so two reports, or a report racing a decision,
+  write once (the loser is 404); reporting your own post is 409 `forum_own_post`, and `forum_not_live` is the defensive 409
+  for a post that isn't approved (RLS already makes another student's such post a 404). An author's PATCH (any state)
+  sends the post back to `pending`, clears the old note and refreshes the name snapshot, but **keeps the report**
+  (`reported_at` / `reported_by`), so an author can't wipe a report by editing: only a counselor's decision answers it. An
+  empty PATCH body `{}` is accepted and does the same to an approved post. **The review route's `updatedAt` is required**
+  (an ISO timestamp with an offset, sent back exactly as the API returned it, microseconds included): the counselor's own
+  RLS read of the post is the authorization check (404 for any counselor who isn't the author's assigned, approved one,
+  collaborators included; a student gets 403 from the role guard), and the service-role write is `.eq("updated_at", ...)`,
+  so a post edited or reported since the counselor loaded it, or decided by a second request at once, is 409
+  `forum_post_changed` ("Reload to see the latest") and is never decided unseen. **The DTO** (`toDto`) carries no author,
+  reviewer or reporter id (`FORUM_COLUMNS` never selects `reviewed_by` / `reported_by`): `mine` says whether the caller
+  wrote it, and `reviewNote` / `reportedAt` are non-null only for the author and for the counselor's review routes. **Notices**
+  (`lib/forumNotice.ts`, `noticeForumPost`): a `system` notification with the href `/dashboard/counselor/forums` to the
+  AUTHOR's `profiles.counselor_id` (never a collaborator; a report reads it with the service role), only while that
+  counselor is approved (`isCounselorApproved`, fail closed). "sent" (after a create or edit; `low`; "<first> sent a Forums
+  post for review") at most once an hour and 20 a day per author; "reported" (`normal`; "A post by <first> was
+  reported") once per post a day. An edit within the hour of a create sends no notice (the same hourly key). The post's
+  text never goes into a notice or a log line. It never throws and never blocks the response (`void ...catch`). **When the
+  migration isn't there** every route that reaches the table answers 503 `forums_unavailable` ("Forums isn't switched on
+  yet"; a write also answers it without the service key); `forumErr` maps a missing table, column or embed (`42P01`, `42703`, `PGRST200`,
+  `PGRST202`, `PGRST204`, `PGRST205`) to it. **Deploy order:** either; without the migration every route answers 503; not
+  in `REQUIRED_SCHEMA`. **Not done:** video uploads (a link only), replies, likes, a dedicated notification kind (the
+  notice is `system`), a feed cursor (the feed has `limit`, max 200, and no cursor: add a keyset cursor when a college passes
+  that), and a redirector link on an allowed host (e.g. `l.instagram.com/?u=...`) is accepted, because the match is on the
+  host, so the counselor's review is the guard. **Before go-live:** applying the migration to production is held for
+  explicit approval, and the terms' guardian-consent question should be answered first (terms section 7 says counselors get
+  a parent or guardian's permission for students under 18; whether that covers posting for other students to read hasn't
+  been decided). Tests: `test/unit/forum-posts.test.ts`, `test/unit/forum-dto.test.ts`,
+  `test/integration/forums-db.test.mjs` (RLS and the CHECKs straight through the database),
+  `test/integration/forums.test.mjs` (needs the API); `test/unit/service-callsites.test.ts` lists `routes/forums.ts` and
+  `lib/forumNotice.ts`.
 - **A GPA can't be above its scale** (`lib/gpa.ts` `gpaOverScale`,
   `lib/gpaCheck.ts`, `20261029000002`, `20261029000004`): unweighted up to
   the number the scale names, weighted up to it plus one, or up to 110 on a
