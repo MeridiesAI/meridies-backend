@@ -2904,11 +2904,21 @@ without them, naming both). A real run holds the `college-features` job lease (6
   actor). Pages go in as `<page url>` blocks, each cut to 6,000 characters and defanged, with the untrusted-content
   rule. The request is data (`buildExtractionRequest`) and the answer is grounded apart (`groundExtraction`), so the
   live call can become a Message Batches entry (`toBatchRequest`, `custom_id` = college id) without touching either.
+  The call runs at temperature 0 (`EXTRACTION_TEMPERATURE`; the first run varied a lot between runs without it). Haiku
+  4.5 takes it on the API version SDK 0.x sends; **remove it before moving to `@anthropic-ai/sdk` 1.0.0** (API version
+  2026-10-21 refuses `temperature` on every model) or to a Claude 4.7+ / Haiku 5.5 model. `runStructured` /
+  `runSystemStructured` send `temperature` only when a caller sets it and only on the forced-tool path
+  (`structuredRequest`: a thinking model such as Sonnet 5.5 refuses it, so it never gets one); this job is the only caller.
 - **Grounding** (dropped and counted, never repaired): a feature key not in `CORE_FEATURES`, a category not in
   `OPPORTUNITY_CATEGORIES`, a value outside 0-1, a `source_url` that isn't a page read this call, a quote that isn't
   on THAT page (`quoteIsOn` from `lib/collegeSiteInfo.ts`: 12+ characters after folding case, quotes, dashes and
-  spaces), an opportunity name not on its page, a description holding a figure its page doesn't (`figures`), and
-  duplicates (first per key; opportunities by normalized name, at most 40). Descriptions are cut to two sentences
+  spaces), a feature quote without that feature's topic words (`quoteIsOnTopic`, `offTopic`: a double-major sentence
+  isn't about required courses; checked before duplicates, so an on-topic second answer for a key still counts), an
+  opportunity name not on its page, an opportunity quote that is only its name, or its name plus its acronym
+  (`quoteIsOnlyName`, `nameOnlyQuote`: a directory listing such as a research-units page says nothing about what it
+  offers, so a description written from it is a guess), a description holding a figure its page doesn't (`figures`),
+  and duplicates (first per key; opportunities by normalized name, at most 40). The script prints each college's
+  non-zero drop counts. Descriptions are cut to two sentences
   and 400 characters. A feature the pages don't speak to is not written: unknown stays unknown (null is never
   written by this job). The quote proves the words are on the page, not that the value is right: a value is the
   model's reading.
