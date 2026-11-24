@@ -2907,7 +2907,8 @@ without them, naming both). A real run holds the `college-features` job lease (6
   The call runs at temperature 0 (`EXTRACTION_TEMPERATURE`; the first run varied a lot between runs without it). Haiku
   4.5 takes it on the API version SDK 0.x sends; **remove it before moving to `@anthropic-ai/sdk` 1.0.0** (API version
   2026-10-21 refuses `temperature` on every model) or to a Claude 4.7+ / Haiku 5.5 model. `runStructured` /
-  `runSystemStructured` send `temperature` only when a caller sets it; this job is the only one that does.
+  `runSystemStructured` send `temperature` only when a caller sets it and only on the forced-tool path
+  (`structuredRequest`: a thinking model such as Sonnet 5.5 refuses it, so it never gets one); this job is the only caller.
 - **Grounding** (dropped and counted, never repaired): a feature key not in `CORE_FEATURES`, a category not in
   `OPPORTUNITY_CATEGORIES`, a value outside 0-1, a `source_url` that isn't a page read this call, a quote that isn't
   on THAT page (`quoteIsOn` from `lib/collegeSiteInfo.ts`: 12+ characters after folding case, quotes, dashes and
