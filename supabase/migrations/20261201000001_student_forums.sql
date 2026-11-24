@@ -13,6 +13,10 @@
 -- collaborator is not who approves a minor's post. Parents and pending counselors read nothing (approval gate).
 -- Clients write NOTHING: every write (post, approve, reject, report) is the API's, with the service role, after
 -- the caller's own RLS read, so a student can't approve their own post through PostgREST.
+-- Clients read the listed columns only (a column grant, the same list as the API's FORUM_COLUMNS): `reported_by`
+-- and `reviewed_by` (and `reviewed_at`) are service-role only, so a reported author can never learn who reported
+-- them, nor any student who reviewed a post. `reported_by` stays on the row after a decision as the record of who
+-- reported it. `student_id` is readable on an approved post (an opaque uuid the routes need for `mine`).
 --
 -- Deploy order: either. Without this file every `/me/forums` and `/forums` route answers 503 `forums_unavailable`.
 -- Additive only. Not in REQUIRED_SCHEMA. Re-runnable.
@@ -76,7 +80,10 @@ drop policy if exists forum_posts_select_counselor on public.forum_posts;
 create policy forum_posts_select_counselor on public.forum_posts
   for select to authenticated using (private.forum_is_assigned_counselor(student_id, (select auth.uid())));
 
+-- Revoking at table level also drops any column grant, so a re-run starts clean.
 revoke all on public.forum_posts from public, anon, authenticated;
-grant select on public.forum_posts to authenticated;
+grant select (id, student_id, college_id, kind, title, body, url, status, review_note, reported_at, author_first,
+              author_year, created_at, updated_at)
+  on public.forum_posts to authenticated;
 
 select private.attach_approval_gate('public.forum_posts');

@@ -97,6 +97,22 @@ check("A1's parent reads nothing", pr.status === 200 && Array.isArray(pr.body) &
 const an = await rest(ANON, "GET", `/rest/v1/forum_posts?select=id`);
 check("anonymous reads nothing", refused(an), `status ${an.status}`);
 
+// ---- Who reported or reviewed a post is never client-readable (column grant) ------
+// A post reported by B1 and then re-approved by counselor A: reported_by stays on the row as the record.
+const reapproved = await post(A1, "approved");
+await sql(`update public.forum_posts set reported_by = '${B1.id}', reported_at = null, reviewed_by = '${cA.id}', reviewed_at = now() where id = '${reapproved}'`);
+check("...(the row keeps reported_by and reviewed_by)", (await sql(`select (reported_by = '${B1.id}') and (reviewed_by = '${cA.id}') from public.forum_posts where id = '${reapproved}'`)) === "t");
+// 42501 is Postgres' permission denied; PostgREST answers it 401 (anon) or 403 (a signed-in role).
+const permissionDenied = (r) => refused(r) && r.body?.code === "42501";
+for (const [name, who] of [["the author", A1], ["another student", A2]]) {
+  for (const cols of ["reported_by", "reviewed_by", "*"]) {
+    const r = await rest(who.token, "GET", `/rest/v1/forum_posts?select=${encodeURIComponent(cols)}&id=eq.${reapproved}`);
+    check(`${name}: select=${cols} is refused (permission denied)`, permissionDenied(r), `status ${r.status} ${JSON.stringify(r.body).slice(0, 160)}`);
+  }
+  const ok = await rest(who.token, "GET", `/rest/v1/forum_posts?select=id,student_id,status,title,reported_at,review_note&id=eq.${reapproved}`);
+  check(`${name}: the granted columns still read (so the refusals aren't an outage)`, ok.status === 200 && ok.body?.length === 1 && ok.body[0].id === reapproved, `status ${ok.status} ${JSON.stringify(ok.body).slice(0, 160)}`);
+}
+
 // ---- Check constraints -----------------------------------------------------------
 const refusedBy = async (q, re) => {
   try {
@@ -120,8 +136,11 @@ check("a bad author_year is refused", await refusedBy(ins2("kind, title, body, a
 
 // ---- Shape -----------------------------------------------------------------------
 check("RLS is on", (await sql(`select relrowsecurity from pg_class where oid = 'public.forum_posts'::regclass`)) === "t");
-check("authenticated holds SELECT and nothing else",
-  (await sql(`select string_agg(privilege_type, ',' order by privilege_type) from information_schema.role_table_grants where table_schema = 'public' and table_name = 'forum_posts' and grantee = 'authenticated'`)) === "SELECT");
+check("authenticated holds no table-wide privilege",
+  (await sql(`select count(*) from information_schema.role_table_grants where table_schema = 'public' and table_name = 'forum_posts' and grantee = 'authenticated'`)) === "0");
+check("authenticated selects exactly the FORUM_COLUMNS columns, never reported_by / reviewed_by / reviewed_at",
+  (await sql(`select string_agg(column_name || ':' || privilege_type, ',' order by column_name) from information_schema.column_privileges where table_schema = 'public' and table_name = 'forum_posts' and grantee = 'authenticated'`)) ===
+    ["author_first", "author_year", "body", "college_id", "created_at", "id", "kind", "reported_at", "review_note", "status", "student_id", "title", "updated_at", "url"].map((c) => `${c}:SELECT`).join(","));
 check("anon holds nothing", (await sql(`select count(*) from information_schema.role_table_grants where table_schema = 'public' and table_name = 'forum_posts' and grantee = 'anon'`)) === "0");
 const upd0 = await sql(`select updated_at from public.forum_posts where id = '${a2Pending}'`);
 await sql(`update public.forum_posts set review_note = 'ok' where id = '${a2Pending}'`);
