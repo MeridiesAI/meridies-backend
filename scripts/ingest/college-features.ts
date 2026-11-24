@@ -72,7 +72,8 @@ console.log(
     `${force ? ", every page" : ""}, ${concurrency} at a time.`
 );
 const outcome = await runCollegeFeaturesJob({ collegeIds, limit, dryRun, force, concurrency }, log, (r) => {
-  console.log(`  ${r.status.padEnd(10)} ${r.name}: ${r.pagesFetched} pages, ${r.featuresFound} features, ${r.opportunitiesFound} opportunities${r.note ? ` (${r.note})` : ""}`);
+  const drops = r.dropped ? Object.entries(r.dropped).filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(", ") : "";
+  console.log(`  ${r.status.padEnd(10)} ${r.name}: ${r.pagesFetched} pages, ${r.featuresFound} features, ${r.opportunitiesFound} opportunities${r.note ? ` (${r.note})` : ""}${drops ? ` [dropped: ${drops}]` : ""}`);
 });
 if (!outcome.ok) {
   console.error(outcome.message);
