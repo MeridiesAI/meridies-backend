@@ -41,7 +41,7 @@ import {
   type CrawledPage,
 } from "../../src/lib/ingest/siteCrawl.js";
 import { extractLinks, extractMainText, linkError, type SitePage } from "../../src/lib/links.js";
-import { CORE_FEATURE_KEYS } from "../../src/lib/listContract.js";
+import { CORE_FEATURE_KEYS, type CoreFeatureKey } from "../../src/lib/listContract.js";
 import { BUDGET_MS, CAP_BUDGET_MS, elapsed } from "./regex-dos-helpers.js";
 
 const fixture = (name: string) => readFileSync(new URL(`../fixtures/college-features/${name}`, import.meta.url), "utf8");
@@ -86,9 +86,116 @@ test("grounding keeps what the pages quote and drops made-up quotes, unknown key
     noQuote: 3, // a quote that is on no page, one cited to the wrong page, the Fake Fellowship
     nameNotOnPage: 1, // Ivy Leadership Institute
     madeUpFigure: 1, // "15 departments" is on the honors page, not the research page it cites
+    nameOnlyQuote: 0,
+    offTopic: 1, // a second small_classes, quoting the senior thesis: nothing about class size
     invalid: 1, // residential 1.4
-    duplicate: 2, // a second small_classes, "the honors college" again
+    duplicate: 1, // "the honors college" again
   });
+});
+
+// The first production run (5 colleges, 2026-11-24). Quotes are written in the shape of what that run stored.
+const BERKELEY_UNITS = "https://vcresearch.berkeley.edu/research-units";
+const CMU_CENTERS = "https://www.cmu.edu/research/centers-and-institutes.html";
+
+test("an opportunity whose quote is only its name (a directory listing) is dropped, whatever the description says", () => {
+  const pages = shownPages([
+    {
+      url: BERKELEY_UNITS,
+      text:
+        "Organized Research Units. Archaeological Research Facility Berkeley Center for Cosmological Physics " +
+        "Berkeley Institute for Data Science (BIDS) Center for Labor Research and Education. " +
+        "The Simons Institute for the Theory of Computing runs a summer program where undergraduates work with visiting researchers.",
+    },
+    { url: CMU_CENTERS, text: "Centers and Institutes. CyLab Security & Privacy Institute Robotics Institute Scott Institute for Energy Innovation" },
+  ]);
+  const opp = (name: string, quote: string, source_url: string) => ({
+    name,
+    category: "research",
+    description: "Undergraduates can participate in its research projects.",
+    quote,
+    source_url,
+  });
+  const g = groundExtraction(
+    {
+      core_features: [],
+      opportunities: [
+        opp("Berkeley Center for Cosmological Physics", "Berkeley Center for Cosmological Physics", BERKELEY_UNITS),
+        // The name and its acronym say no more than the name.
+        opp("Berkeley Institute for Data Science", "Berkeley Institute for Data Science (BIDS)", BERKELEY_UNITS),
+        // Case, "&" and punctuation fold.
+        opp("CyLab Security & Privacy Institute", "CYLAB SECURITY & PRIVACY INSTITUTE", CMU_CENTERS),
+        // A quote that says what it offers stays.
+        opp(
+          "Simons Institute for the Theory of Computing",
+          "The Simons Institute for the Theory of Computing runs a summer program where undergraduates work",
+          BERKELEY_UNITS
+        ),
+      ],
+    },
+    pages
+  );
+  assert.deepEqual(g.opportunities.map((o) => o.name), ["Simons Institute for the Theory of Computing"]);
+  assert.equal(g.dropped.nameOnlyQuote, 3);
+});
+
+test("a feature whose quote isn't about that feature is dropped; the first on-topic quote for a key wins", () => {
+  const CMU = "https://www.cmu.edu/academics/interdisciplinary-programs.html";
+  const CORNELL = "https://www.cornell.edu/about/";
+  const BC = "https://www.bc.edu/bc-web/about.html";
+  const pages = shownPages([
+    {
+      url: CMU,
+      text: "Carnegie Mellon students can pursue a double major or an additional major in another college. Every undergraduate completes general education requirements set by their home college.",
+    },
+    {
+      url: CORNELL,
+      text: "Cornell is a privately endowed research university and a partner of the State University of New York. All first-year students live on campus in residence halls on North Campus.",
+    },
+    {
+      url: BC,
+      text: "Boston College is committed to the formation of the whole person, intellectually, socially and spiritually. More than half of undergraduates study abroad before they graduate.",
+    },
+  ]);
+  const g = groundExtraction(
+    {
+      core_features: [
+        // The three the first run stored: a double-major sentence, and two sentences about something else entirely.
+        { key: "curriculum_flexibility", value: 1, quote: "students can pursue a double major or an additional major in another college", source_url: CMU },
+        { key: "residential", value: 0.7, quote: "Cornell is a privately endowed research university and a partner of the State University of New York", source_url: CORNELL },
+        { key: "study_abroad", value: 0.8, quote: "committed to the formation of the whole person, intellectually, socially and spiritually", source_url: BC },
+        // On-topic quotes for the same keys.
+        { key: "curriculum_flexibility", value: 0.3, quote: "completes general education requirements set by their home college", source_url: CMU },
+        { key: "residential", value: 0.9, quote: "All first-year students live on campus in residence halls", source_url: CORNELL },
+        { key: "study_abroad", value: 0.9, quote: "More than half of undergraduates study abroad before they graduate", source_url: BC },
+      ],
+      opportunities: [],
+    },
+    pages
+  );
+  assert.deepEqual(
+    g.features.map((f) => [f.key, f.value]),
+    [
+      ["curriculum_flexibility", 0.3],
+      ["residential", 0.9],
+      ["study_abroad", 0.9],
+    ]
+  );
+  assert.equal(g.dropped.offTopic, 3);
+  assert.equal(g.dropped.duplicate, 0);
+});
+
+test("the topic check folds case and dashes, and reads a worst-case quote in linear time", () => {
+  const page = { url: HONORS, text: "Nearly every student LIVES ON‑CAMPUS for four years. " + "a".repeat(400) };
+  const g = groundExtraction(
+    { core_features: [{ key: "residential", value: 0.9, quote: "every student LIVES ON‑CAMPUS for four years", source_url: HONORS }], opportunities: [] },
+    shownPages([page])
+  );
+  assert.equal(g.features.length, 1);
+  const worst = "1".repeat(290);
+  const pageW = { url: HONORS, text: `fewer than ${worst} ${"seminar ".repeat(5)}` };
+  assert.ok(
+    elapsed(() => groundExtraction({ core_features: [{ key: "small_classes", value: 0.5, quote: `fewer than ${worst}`, source_url: HONORS }] }, shownPages([pageW]))) < BUDGET_MS
+  );
 });
 
 test("a quote must be on the page it cites, not just somewhere in the run", () => {
@@ -137,19 +244,40 @@ test("descriptions are cut to two sentences; values round to two decimals", () =
   assert.equal(v.features[0]!.value, 0.67);
 });
 
+/** One on-topic sentence per feature: each must pass its own topic check. */
+const ON_TOPIC: Record<CoreFeatureKey, string> = {
+  small_classes: "Most classes have fewer than 20 students.",
+  undergrad_research: "Undergraduates join faculty research labs from their first year.",
+  coop_internships: "Every engineering student completes two co-op terms.",
+  honors_program: "The Honors Program offers its own seminars and housing.",
+  study_abroad: "Students can spend a semester overseas at a partner school.",
+  curriculum_flexibility: "There is no core curriculum outside the major.",
+  greek_life: "About a third of students join a fraternity or sorority.",
+  athletics_culture: "Football Saturdays fill the stadium with fans.",
+  preprofessional: "Employers recruit on campus every fall through the career center.",
+  residential: "Housing is guaranteed for all four years.",
+};
+
 test("every key the contract has is accepted and nothing else", () => {
-  const page = { url: HONORS, text: "This sentence is long enough to quote on the page." };
+  const page = { url: HONORS, text: `${Object.values(ON_TOPIC).join(" ")} This sentence is long enough to quote on the page.` };
   const raw = {
-    core_features: [...CORE_FEATURE_KEYS, "toString", "constructor", "SMALL_CLASSES"].map((key) => ({
-      key,
-      value: 0.5,
-      quote: "long enough to quote on the page",
-      source_url: HONORS,
-    })),
+    core_features: [
+      ...CORE_FEATURE_KEYS.map((key) => ({ key, value: 0.5, quote: ON_TOPIC[key], source_url: HONORS })),
+      ...["toString", "constructor", "SMALL_CLASSES"].map((key) => ({ key, value: 0.5, quote: "long enough to quote on the page", source_url: HONORS })),
+    ],
   };
   const g = groundExtraction(raw, shownPages([page]));
   assert.deepEqual(g.features.map((f) => f.key), CORE_FEATURE_KEYS);
   assert.equal(g.dropped.unknownKey, 3);
+  assert.equal(g.dropped.offTopic, 0);
+});
+
+test("no feature passes on a sentence about none of them", () => {
+  const page = { url: HONORS, text: "This sentence is long enough to quote on the page." };
+  const raw = { core_features: CORE_FEATURE_KEYS.map((key) => ({ key, value: 0.5, quote: "long enough to quote on the page", source_url: HONORS })) };
+  const g = groundExtraction(raw, shownPages([page]));
+  assert.equal(g.features.length, 0);
+  assert.equal(g.dropped.offTopic, CORE_FEATURE_KEYS.length);
 });
 
 test("firstSentences skips abbreviations and stops after n", () => {
@@ -175,9 +303,13 @@ test("the request is plain data and maps one to one onto a Message Batches entry
   assert.ok(req.prompt.includes("College: Example ‹State›"), "a name can't open a tag");
   assert.ok(!/<page[^>]*>[^]*<\/?page[^>]*>[^]*<\/page>/.test(req.prompt.replace(/<page url="[^"]*">|<\/page>/g, "")), "page text can't close its block");
 
+  // Temperature 0: repeat runs over the same pages should read them the same way.
+  assert.equal(req.temperature, 0);
+
   const b = toBatchRequest(req);
   assert.equal(b.custom_id, req.customId);
   assert.equal(b.params.model, "claude-haiku-4-5");
+  assert.equal(b.params.temperature, 0);
   assert.equal(b.params.max_tokens, req.maxTokens);
   assert.deepEqual(b.params.tool_choice, { type: "tool", name: req.toolName });
   assert.deepEqual(b.params.messages, [{ role: "user", content: req.prompt }]);

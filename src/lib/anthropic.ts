@@ -129,6 +129,13 @@ export function structuredRequest(o: {
   schema: Record<string, unknown>;
   toolName: string;
   effort?: Effort;
+  /**
+   * Sent only on the forced-tool path and only when set (the college features job sets 0); every other call sends
+   * none, as before. A thinking model (`refusesForcedTool`) refuses a non-default temperature, so it never gets one.
+   * Haiku 4.5 takes it on the API version SDK 0.x sends (2023-06-01); API version 2026-10-21 (@anthropic-ai/sdk 1.0.0)
+   * refuses it on every model, so drop it before that upgrade.
+   */
+  temperature?: number;
 }): Anthropic.MessageCreateParamsNonStreaming {
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: o.content }];
   if (refusesForcedTool(o.model)) {
@@ -145,6 +152,7 @@ export function structuredRequest(o: {
   return {
     model: o.model,
     max_tokens: o.maxTokens,
+    ...(o.temperature !== undefined ? { temperature: o.temperature } : {}),
     system: o.system,
     messages,
     tools: [{ name: o.toolName, description: "Return the result in this exact structure.", input_schema: o.schema as never }],
@@ -292,6 +300,8 @@ export type RunOptions<T> = {
    * FAST_MODEL, which takes no effort.
    */
   effort?: Effort;
+  /** Sampling temperature, on the forced-tool path only (see `structuredRequest`). Unset sends none. */
+  temperature?: number;
   /** Files the model reads alongside the prompt (see AiAttachment). */
   attachments?: AiAttachment[];
   /** Last line of defence over model output before it is stored or returned. */
@@ -374,7 +384,16 @@ async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: Call
 
   const model = opts.model ?? FAST_MODEL;
   const content = userContent(opts.prompt, opts.attachments);
-  const params = structuredRequest({ model, maxTokens: opts.maxTokens ?? 2048, system: opts.system, content, schema: opts.schema, toolName: opts.toolName, effort: opts.effort });
+  const params = structuredRequest({
+    model,
+    maxTokens: opts.maxTokens ?? 2048,
+    system: opts.system,
+    content,
+    schema: opts.schema,
+    toolName: opts.toolName,
+    effort: opts.effort,
+    temperature: opts.temperature,
+  });
   // A programming mistake, not a user error: a call with no actor must name its system budget.
   const subject: BudgetSubject | null = ctx.subject ?? (actorId ? { userId: actorId, role: ctx.role } : null);
   if (!subject) throw new Error("structuredCall: no actor and no system budget");

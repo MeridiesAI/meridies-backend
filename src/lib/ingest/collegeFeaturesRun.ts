@@ -162,6 +162,7 @@ function liveExtract(log: Log): ExtractCall {
       schema: req.schema,
       toolName: req.toolName,
       maxTokens: req.maxTokens,
+      temperature: req.temperature,
       // Grounding runs after the call (collegeFeatures.ts), the same for a live call or a batch result.
       validate: (value) => value,
       onUsage: (u) => {
