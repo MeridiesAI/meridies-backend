@@ -57,6 +57,7 @@ import {
   type SummaryRow,
 } from "../lib/studentExport.js";
 import { serviceClient } from "../lib/supabase.js";
+import { FORUM_COLUMNS, forumsMissing } from "../lib/forums.js";
 
 type Row = Record<string, unknown>;
 
@@ -131,6 +132,27 @@ async function exportStudent(request: FastifyRequest, studentId: string, chats: 
 }
 
 /**
+ * The student's own Forums posts (20261201000001), read apart from STUDENT_RECORD_TABLES because clients hold a
+ * column grant there (`select *` is refused): FORUM_COLUMNS only, so who reported or reviewed a post never leaves.
+ * Before the migration the table isn't there and the export says nothing about it.
+ */
+async function ownForumPosts(request: FastifyRequest, me: string) {
+  const r = await readTable(request, "forum_posts", "student_id", me, undefined, FORUM_COLUMNS);
+  return forumsMissing(r.error) ? null : r;
+}
+
+function withForumPosts<T extends { records: Record<string, Row[]>; notIncluded: string[]; truncated?: string[] }>(
+  exported: T,
+  forum: Awaited<ReturnType<typeof ownForumPosts>>
+): T {
+  if (!forum) return exported;
+  if (forum.error) return { ...exported, notIncluded: [...exported.notIncluded, "forum_posts"] };
+  const records = forum.rows.length ? { ...exported.records, forum_posts: forum.rows } : exported.records;
+  const truncated = forum.truncated ? [...(exported.truncated ?? []), "forum_posts"] : exported.truncated;
+  return { ...exported, records, ...(truncated ? { truncated } : {}) };
+}
+
+/**
  * Which of `ids` the caller may see: `caseloadStudentIds` (roster with archived, shared students, and the
  * caller), or, past its 250-id cap, the same rule asked about these ids only. RLS applies on top either way.
  */
@@ -191,7 +213,8 @@ export default async function accountRoutes(app: FastifyInstance) {
     }
     if (request.profile.role === "student") {
       // Their own chats, all of them: a student's (from before chats were counselor-only) usually name no student.
-      return { exportedAt: new Date().toISOString(), kind: "student", ...(await exportStudent(request, me, { owner: me })) };
+      const [own, forum] = await Promise.all([exportStudent(request, me, { owner: me }), ownForumPosts(request, me)]);
+      return { exportedAt: new Date().toISOString(), kind: "student", ...withForumPosts(own, forum) };
     }
     // Each list is paged (PostgREST's max_rows would cut it at 1,000) up to the per-table cap.
     const truncated: string[] = [];
