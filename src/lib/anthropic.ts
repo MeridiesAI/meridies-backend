@@ -3,8 +3,12 @@
  *
  * Speed first: counselors run these live, in session with a family, so the
  * default is Haiku 4.5. Sonnet is opt-in per call for the few places where
- * Haiku's quality genuinely isn't enough. `thinking` is never enabled —
- * Haiku 4.5 doesn't support it.
+ * Haiku's quality genuinely isn't enough. Haiku 4.5 calls never enable
+ * `thinking` or `effort` (it supports neither). Sonnet 5.5 (DEEP_MODEL) always
+ * thinks adaptively, so its calls set an effort (low unless a call asks for
+ * more), leave max_tokens room for
+ * the thinking, and get structured answers through structured outputs instead
+ * of a forced tool, which it refuses (see `refusesForcedTool`).
  *
  * Every call is wrapped so that it: enforces the caller's spend quota, writes
  * an `ai_runs` row (success or failure), and records token usage. A model call
@@ -23,7 +27,150 @@ import { assertAiAllowed } from "./practiceSettings.js";
 import { serviceClient } from "./supabase.js";
 
 export const FAST_MODEL = "claude-haiku-4-5";
-export const DEEP_MODEL = "claude-sonnet-4-5";
+export const DEEP_MODEL = "claude-sonnet-5-5";
+
+/**
+ * Models this code sends that answer a forced `tool_choice` with a 400 and think adaptively on every request:
+ * Claude Sonnet 5.5 and Opus 5.5 (Fable 5.1 and 5.2 do too; add them here, with their `private.ai_prices` rows,
+ * before using one). Compared as whole IDs. A structured call to one of them uses structured outputs
+ * (`output_config.format`) instead of a forced tool, with adaptive thinking at a set effort and room for that
+ * thinking in max_tokens. Every other model, FAST_MODEL included, keeps the forced tool and sends no thinking or
+ * effort, exactly as before: Haiku 4.5 supports neither.
+ */
+const NO_FORCED_TOOL = new Set(["claude-sonnet-5-5", "claude-opus-5-5"]);
+export const refusesForcedTool = (model: string): boolean => NO_FORCED_TOOL.has(model);
+
+/**
+ * How much those models think, unless a call asks for more. Low: these features run live, in session with a family,
+ * and at low effort the model keeps its thinking short and skips it on simple requests. Chosen against the Sonnet 4.5
+ * answers DEEP_MODEL replaced (narrative coherence, lists, the concierge, translation, the chat tools), same inputs
+ * before and after. The two program recommenders ask for high (routes/ai.ts, routes/applicationAi.ts).
+ */
+export type Effort = "low" | "medium" | "high";
+export const THINKING_EFFORT: Effort = "low";
+
+/** Room for thinking at each effort; the most measured was about 5,300 tokens at high (thinking and answer together). */
+const THINKING_ROOM: Record<Effort, number> = { low: 2_000, medium: 4_000, high: 6_000 };
+
+/**
+ * max_tokens on a thinking model: the call's own cap, plus 30% for the newer tokenizer (the same text is about 30%
+ * more tokens than on Sonnet 4.5) and room for thinking, which counts against max_tokens though none of it is
+ * returned. A cap sized for Sonnet 4.5's answer alone would cut the answer off.
+ */
+export const withThinkingRoom = (maxTokens: number, effort: Effort = THINKING_EFFORT): number =>
+  Math.ceil(maxTokens * 1.3) + THINKING_ROOM[effort];
+
+/**
+ * What a counselor reads when the model declines (stop_reason "refusal"); asking again the same way gets the same
+ * answer. No server-side fallback (`fallbacks`, beta): for Sonnet 5.5 it re-runs only cyber and frontier-AI declines,
+ * which none of these features invite, and it would put a beta flag on every call.
+ */
+const DECLINED = "The AI declined this request. Try rewording it, or contact support if this keeps happening.";
+const declined = () => new HttpError(422, DECLINED, "ai_declined");
+
+// Structured outputs enforce these as constraints: types, enum, const, required, anyOf/allOf, $ref/$defs, and
+// these string formats. Lengths, numeric bounds and item counts above one are not supported there, so
+// outputSchema keeps them as a hint in the description, the way the SDK's own transform does.
+const OUTPUT_FORMATS = new Set(["date-time", "time", "date", "duration", "email", "hostname", "uri", "ipv4", "ipv6", "uuid"]);
+const HINT_ONLY = new Set([
+  "minLength", "maxLength", "pattern", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+  "maxItems", "uniqueItems", "minProperties", "maxProperties", "patternProperties", "propertyNames",
+]);
+
+/**
+ * A tool's JSON Schema as structured outputs accepts it: `additionalProperties: false` on every object, the
+ * unsupported bounds moved into the description as a hint ("{maxLength: 200}"), `oneOf` read as `anyOf`, and
+ * everything else (enum above all) kept as written. The SDK's transformJSONSchema (0.131) would demote `enum` to a
+ * hint too, losing the severity, fit and axis-key choices, hence this one. Pure; the input is not changed.
+ */
+export function outputSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(outputSchema);
+  if (!schema || typeof schema !== "object") return schema;
+  const out: Record<string, unknown> = {};
+  const hints: string[] = [];
+  for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
+    if (key === "properties" || key === "$defs" || key === "definitions") {
+      out[key] = Object.fromEntries(Object.entries((value ?? {}) as Record<string, unknown>).map(([k, v]) => [k, outputSchema(v)]));
+    } else if (key === "items" || key === "anyOf" || key === "allOf" || key === "not") {
+      out[key] = outputSchema(value);
+    } else if (key === "oneOf") {
+      out.anyOf = outputSchema(value);
+    } else if (key === "additionalProperties") {
+      // Set below: false on every object, whatever the tool schema said.
+    } else if (key === "minItems") {
+      if (value === 0 || value === 1) out.minItems = value;
+      else hints.push(`minItems: ${JSON.stringify(value)}`);
+    } else if (key === "format") {
+      if (typeof value === "string" && OUTPUT_FORMATS.has(value)) out.format = value;
+      else hints.push(`format: ${JSON.stringify(value)}`);
+    } else if (HINT_ONLY.has(key)) {
+      hints.push(`${key}: ${JSON.stringify(value)}`);
+    } else {
+      out[key] = value;
+    }
+  }
+  const type = out.type;
+  if (type === "object" || (Array.isArray(type) && type.includes("object")) || "properties" in out) out.additionalProperties = false;
+  if (hints.length) out.description = [typeof out.description === "string" ? out.description : "", `{${hints.join(", ")}}`].filter(Boolean).join("\n\n");
+  return out;
+}
+
+/**
+ * The Messages API request for one structured answer, in the shape the model takes: structured outputs on a model
+ * that refuses a forced tool (adaptive thinking at THINKING_EFFORT, max_tokens with thinking room), the forced tool
+ * on every other model (unchanged). Shared by `runStructured` and the college-features batch entry
+ * (lib/ingest/collegeFeatures.ts), so both follow the model.
+ */
+export function structuredRequest(o: {
+  model: string;
+  maxTokens: number;
+  system: string;
+  content: Anthropic.MessageParam["content"];
+  schema: Record<string, unknown>;
+  toolName: string;
+  effort?: Effort;
+}): Anthropic.MessageCreateParamsNonStreaming {
+  const messages: Anthropic.MessageParam[] = [{ role: "user", content: o.content }];
+  if (refusesForcedTool(o.model)) {
+    const effort = o.effort ?? THINKING_EFFORT;
+    return {
+      model: o.model,
+      max_tokens: withThinkingRoom(o.maxTokens, effort),
+      thinking: { type: "adaptive" },
+      output_config: { effort, format: { type: "json_schema", schema: outputSchema(o.schema) as Record<string, unknown> } },
+      system: o.system,
+      messages,
+    };
+  }
+  return {
+    model: o.model,
+    max_tokens: o.maxTokens,
+    system: o.system,
+    messages,
+    tools: [{ name: o.toolName, description: "Return the result in this exact structure.", input_schema: o.schema as never }],
+    tool_choice: { type: "tool", name: o.toolName },
+  };
+}
+
+/**
+ * The structured answer in a response: the forced tool's input, or the JSON that structured outputs wrote as text
+ * (read by block type: a thinking block may come first). Undefined when there is none or the text isn't
+ * JSON (a cut-off answer).
+ */
+export function structuredValue(m: { content: ReadonlyArray<{ type: string }> }): unknown {
+  const tool = m.content.find((b) => b.type === "tool_use") as { input?: unknown } | undefined;
+  if (tool) return tool.input;
+  const text = m.content
+    .map((b) => (b.type === "text" ? (b as { text?: string }).text ?? "" : ""))
+    .join("")
+    .trim();
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
 
 let client: Anthropic | null = null;
 
@@ -140,6 +287,11 @@ export type RunOptions<T> = {
   toolName: string;
   model?: string;
   maxTokens?: number;
+  /**
+   * How hard a thinking model (DEEP_MODEL) thinks, when THINKING_EFFORT (low) isn't enough for this call. Ignored on
+   * FAST_MODEL, which takes no effort.
+   */
+  effort?: Effort;
   /** Files the model reads alongside the prompt (see AiAttachment). */
   attachments?: AiAttachment[];
   /** Last line of defence over model output before it is stored or returned. */
@@ -221,16 +373,21 @@ async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: Call
   const { actorId } = ctx;
 
   const model = opts.model ?? FAST_MODEL;
-  const maxTokens = opts.maxTokens ?? 2048;
   const content = userContent(opts.prompt, opts.attachments);
-  const tools = [{ name: opts.toolName, description: "Return the result in this exact structure.", input_schema: opts.schema as never }];
+  const params = structuredRequest({ model, maxTokens: opts.maxTokens ?? 2048, system: opts.system, content, schema: opts.schema, toolName: opts.toolName, effort: opts.effort });
   // A programming mistake, not a user error: a call with no actor must name its system budget.
   const subject: BudgetSubject | null = ctx.subject ?? (actorId ? { userId: actorId, role: ctx.role } : null);
   if (!subject) throw new Error("structuredCall: no actor and no system budget");
   // Every model call reserves against the budget first (lib/aiBudget.ts) and settles after, whatever happens.
+  // The schema counts towards the prompt whether it travels as a tool or as the output format.
   const hold = await reserve(
     subject,
-    { model, maxOutputTokens: maxTokens, promptTokens: estimatePromptTokens({ system: opts.system, tools, messages: [{ role: "user", content }] }), module },
+    {
+      model,
+      maxOutputTokens: params.max_tokens,
+      promptTokens: estimatePromptTokens({ system: opts.system, tools: params.tools ?? [{ input_schema: opts.schema }], messages: params.messages }),
+      module,
+    },
     ctx.log
   );
   let used: CallUsage | "unused" | null = null;
@@ -256,11 +413,14 @@ async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: Call
     runId = data?.id ?? null;
   }
 
+  // The first outcome recorded is the one that stands: a refusal stays "blocked" when the catch below runs.
+  let closed = false;
   const finish = async (
     status: "succeeded" | "failed" | "blocked",
     extra: Record<string, unknown>
   ) => {
-    if (!svc || !runId) return;
+    if (closed || !svc || !runId) return;
+    closed = true;
     await svc
       .from("ai_runs")
       .update({
@@ -273,14 +433,7 @@ async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: Call
   };
 
   try {
-    const response = await anthropic().messages.create({
-      model,
-      max_tokens: maxTokens,
-      system: opts.system,
-      messages: [{ role: "user", content }],
-      tools,
-      tool_choice: { type: "tool", name: opts.toolName },
-    });
+    const response = await anthropic().messages.create(params);
     used = usageOf(response);
     answered = true;
 
@@ -292,13 +445,19 @@ async function structuredCall<T>(opts: Omit<RunOptions<T>, "request">, ctx: Call
       }
     }
 
-    const block = response.content.find((c) => c.type === "tool_use");
-    if (!block || block.type !== "tool_use") {
-      await finish("failed", { error: "model returned no structured output" });
+    const tokens = { input_tokens: response.usage.input_tokens, output_tokens: response.usage.output_tokens };
+    if (response.stop_reason === "refusal") {
+      await finish("blocked", { ...tokens, error: "refusal" });
+      throw declined();
+    }
+    const raw = structuredValue(response);
+    if (raw === undefined) {
+      // A thinking model that ran out of room stops mid-answer: the JSON is cut off.
+      await finish("failed", { ...tokens, error: response.stop_reason === "max_tokens" ? "model ran out of output tokens" : "model returned no structured output" });
       throw unavailable("The model didn't return a usable result. Try again.");
     }
 
-    const value = opts.validate ? opts.validate(block.input) : (block.input as T);
+    const value = opts.validate ? opts.validate(raw) : (raw as T);
 
     await finish("succeeded", {
       input_tokens: response.usage.input_tokens,
@@ -346,7 +505,8 @@ export async function streamChat(opts: {
   const actorId = request.auth.userId;
 
   const model = opts.model ?? FAST_MODEL;
-  const maxTokens = opts.maxTokens ?? 1200;
+  const thinks = refusesForcedTool(model);
+  const maxTokens = thinks ? withThinkingRoom(opts.maxTokens ?? 1200) : (opts.maxTokens ?? 1200);
   const messages = opts.messages.map((m) => ({ role: m.role, content: m.content }));
   const hold = await reserve(
     { userId: actorId },
@@ -379,8 +539,11 @@ export async function streamChat(opts: {
     runId = data?.id ?? null;
   }
 
-  const finish = async (status: "succeeded" | "failed", extra: Record<string, unknown>) => {
-    if (!svc || !runId) return;
+  // The first outcome recorded is the one that stands: a refusal stays "blocked" when the catch below runs.
+  let closed = false;
+  const finish = async (status: "succeeded" | "failed" | "blocked", extra: Record<string, unknown>) => {
+    if (closed || !svc || !runId) return;
+    closed = true;
     await svc
       .from("ai_runs")
       .update({
@@ -397,12 +560,15 @@ export async function streamChat(opts: {
     const stream = anthropic().messages.stream({
       model,
       max_tokens: maxTokens,
+      // A thinking model thinks briefly at low effort; Haiku 4.5 gets neither field.
+      ...(thinks ? { thinking: { type: "adaptive" as const }, output_config: { effort: THINKING_EFFORT } } : {}),
       system: opts.system,
       messages,
     });
     stream.on("streamEvent", () => {
       started = true;
     });
+    // Only text reaches the counselor: a thinking model's thinking blocks stream with no text.
     stream.on("text", (delta: string) => {
       text += delta;
       opts.onDelta(delta);
@@ -410,6 +576,11 @@ export async function streamChat(opts: {
 
     const final = await stream.finalMessage();
     used = usageOf(final);
+    if (final.stop_reason === "refusal") {
+      // Declined before or part-way through the answer: whatever streamed is not an answer, and is not saved.
+      await finish("blocked", { input_tokens: final.usage.input_tokens, output_tokens: final.usage.output_tokens, error: "refusal" });
+      throw declined();
+    }
     await finish("succeeded", {
       input_tokens: final.usage.input_tokens,
       output_tokens: final.usage.output_tokens,

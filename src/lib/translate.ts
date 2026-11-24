@@ -95,7 +95,8 @@ export function translateSystem(to: LanguageCode, channel: "email" | "sms"): str
     channel === "sms"
       ? "This is a text message: keep it about as short as the original. Begin it with one short phrase, translated, saying it is a text from the sender about the student (both are in <context>), unless the message already says so. Leave out any greeting by name."
       : "",
-    "Answer only through the tool.",
+    // Sonnet 5.5 answers in a structured format, not through a tool (lib/anthropic.ts); this reads right for both.
+    "Answer with the translation only, in the structure you are given.",
   ]
     .filter(Boolean)
     .join("\n");

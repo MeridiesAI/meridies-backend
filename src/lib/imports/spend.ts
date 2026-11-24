@@ -7,6 +7,7 @@
 const PRICES: Record<string, { input: number; output: number }> = {
   "claude-haiku-4-5": { input: 1, output: 5 },
   "claude-sonnet-4-5": { input: 3, output: 15 },
+  "claude-sonnet-5-5": { input: 2, output: 10 },
 };
 const FALLBACK = { input: 15, output: 75 };
 

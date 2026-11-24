@@ -28,6 +28,7 @@
 
 import { createHash } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
+import { structuredRequest } from "../anthropic.js";
 import { figures, normalizeForQuote, quoteIsOn } from "../collegeSiteInfo.js";
 import { HttpError } from "../errors.js";
 import {
@@ -161,18 +162,15 @@ export function buildExtractionRequest(college: { id: string; name: string }, sh
   };
 }
 
-/** The same request as one Message Batches entry: answers come back by custom_id and go through groundExtraction. */
+/**
+ * The same request as one Message Batches entry: answers come back by custom_id and go through groundExtraction
+ * (read each with `structuredValue` from lib/anthropic.ts). Built like the live call (`structuredRequest`): the
+ * forced tool on FAST_MODEL, structured outputs on a model that refuses a forced tool.
+ */
 export function toBatchRequest(req: ExtractionRequest): { custom_id: string; params: Anthropic.MessageCreateParamsNonStreaming } {
   return {
     custom_id: req.customId,
-    params: {
-      model: req.model,
-      max_tokens: req.maxTokens,
-      system: req.system,
-      messages: [{ role: "user", content: req.prompt }],
-      tools: [{ name: req.toolName, description: "Return the result in this exact structure.", input_schema: req.schema as Anthropic.Tool.InputSchema }],
-      tool_choice: { type: "tool", name: req.toolName },
-    },
+    params: structuredRequest({ model: req.model, maxTokens: req.maxTokens, system: req.system, content: req.prompt, schema: req.schema, toolName: req.toolName }),
   };
 }
 
