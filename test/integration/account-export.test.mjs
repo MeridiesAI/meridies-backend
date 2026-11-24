@@ -190,6 +190,24 @@ await sql(`update profiles set counselor_id = '${busy.id}' where email like '${t
 const busyRoster = await call(busy.token, "POST", "/account/export/drive", { scope: "roster-summary" });
 check("a roster summary over 250 students is 413 roster_too_large", busyRoster.status === 413 && busyRoster.body?.code === "roster_too_large" && !/fewer students/i.test(busyRoster.body?.error ?? ""), JSON.stringify(busyRoster.body));
 
+// ---- A student's own export carries their Forums posts (20261201000001) -------------------------------
+// Read with the granted columns only: who reported or reviewed a post never leaves (the column grant refuses it).
+const noPosts = await call(s2.token, "GET", "/account/export");
+check("a student with no Forums posts still exports, and forum_posts is not listed as left out",
+  noPosts.status === 200 && noPosts.body?.kind === "student" && !noPosts.body?.records?.forum_posts && Array.isArray(noPosts.body?.notIncluded) && !noPosts.body.notIncluded.includes("forum_posts"),
+  `${noPosts.status} ${JSON.stringify(noPosts.body?.notIncluded)}`);
+const forumCollege = await sql(`select id from public.colleges limit 1`);
+const forumPost = await sql(`with p as (insert into public.forum_posts (student_id, college_id, kind, title, body, status, author_first, reported_by, reviewed_by, reviewed_at, review_note)
+  values ('${s1.id}', '${forumCollege}', 'thought', 'My campus visit', 'Loved the library', 'approved', 'Ana', '${s2.id}', '${c.id}', now(), 'Looks good') returning id) select id from p`);
+const withPost = await call(s1.token, "GET", "/account/export");
+const exported = withPost.body?.records?.forum_posts ?? [];
+check("a student's export carries their own Forums post", withPost.status === 200 && exported.length === 1 && exported[0].id === forumPost && exported[0].title === "My campus visit" && exported[0].review_note === "Looks good" && exported[0].student_id === s1.id,
+  `${withPost.status} ${JSON.stringify(exported).slice(0, 200)}`);
+check("...without who reported or reviewed it", exported.length === 1 && !("reported_by" in exported[0]) && !("reviewed_by" in exported[0]) && !("reviewed_at" in exported[0]) && !JSON.stringify(withPost.body).includes(s2.id),
+  JSON.stringify(Object.keys(exported[0] ?? {})));
+check("...and forum_posts is not listed as left out", Array.isArray(withPost.body?.notIncluded) && !withPost.body.notIncluded.includes("forum_posts"), JSON.stringify(withPost.body?.notIncluded));
+await sql(`delete from public.forum_posts where id = '${forumPost}'`);
+
 if (process.env.API_LOG) {
   const log = readFileSync(process.env.API_LOG, "utf8");
   check("the API log has no token and no exported text", !log.includes(TOKEN_MARKER) && !log.includes(NAME_MARKER) && !log.includes(EVIL_HOST));

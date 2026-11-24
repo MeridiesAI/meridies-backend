@@ -54,8 +54,12 @@ export const forumsUnavailable = () => new HttpError(503, "Forums isn't switched
 
 // A table, column or embed this build reads that isn't there yet: the migration isn't applied.
 const MISSING = new Set(["42P01", "42703", "PGRST200", "PGRST202", "PGRST204", "PGRST205"]);
+export const forumsMissing = (e: unknown): boolean => {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && MISSING.has(code);
+};
 export const forumErr = (e: Pick<PostgrestError, "code" | "message"> | null): HttpError =>
-  e?.code && MISSING.has(e.code) ? forumsUnavailable() : fromPostgrest(e);
+  forumsMissing(e) ? forumsUnavailable() : fromPostgrest(e);
 
 export function rowToPost(row: ForumRow): ForumPost {
   return {

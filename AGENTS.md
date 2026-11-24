@@ -792,7 +792,10 @@ forget it.
   (`private.forum_is_assigned_counselor(student, viewer)`: `profiles.counselor_id` is the viewer **and** the viewer is an
   approved counselor). **Deliberately not `can_view_student` / `is_counselor_of`**: those admit collaborators (and the
   student), and a collaborator is not who approves a minor's post. Parents and pending counselors read nothing (the
-  approval gate). **Clients write nothing** (select grant only): every write is the service role after the caller's own
+  approval gate). **Clients read through a COLUMN grant** (exactly `FORUM_COLUMNS`' columns; `select=*` is refused):
+  `reported_by`, `reviewed_by` and `reviewed_at` are service-role only on purpose, so a reported author can never learn
+  through PostgREST who reported them; `student_id` is readable on approved posts (an opaque uuid, known and needed by the
+  routes for `mine`). **Clients write nothing** (select grant only): every write is the service role after the caller's own
   read showed they may make it (their own RLS read of the post; for a create, their own profile), so a student can't
   approve their own post through PostgREST. A post the caller can't see is 404, never 403 (a pending counselor is
   stopped earlier, 403 `account_pending`). **Routes** (errors come back `{ error, code }`; bodies and queries are
@@ -817,7 +820,7 @@ forget it.
   **`lib/forumPosts.ts` is copied byte for byte to `meridies-demo` and `meridies-app` as `lib/forumPosts.ts`; change all
   three together, never here alone.** **The status machine:** a new or edited post is `pending`; the counselor approves
   (`approved`, note cleared) or rejects (`rejected`, a note required: a blank one is 400 `forum_review_note`), and either
-  decision clears a report; **Remove is a reject with a note** (no separate route; it pulls an approved post back); a
+  decision clears `reported_at` (`reported_by` stays, the service-role-only record of who reported it); **Remove is a reject with a note** (no separate route; it pulls an approved post back); a
   post already `rejected` answers 409 `forum_post_rejected` to both decisions (the author edits it first). Another
   student's report moves an `approved` post to `reported` **at once**, so it leaves every feed and waits in the author's
   counselor's review tab; the write is conditional on still `approved`, so two reports, or a report racing a decision,
@@ -5066,7 +5069,7 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   `GET /account/students/:id/export` (counselor) read through the caller's RLS
   client, so an export holds exactly what that person can already see (the
   counselor's export of a student includes `recommendations` and `research_runs`;
-  the student's own export holds neither). The list-builder learning tables are in
+  the student's own export holds neither, but adds their own Forums posts as `records.forum_posts`, `FORUM_COLUMNS` only). The list-builder learning tables are in
   no export, by that rule: no client can read them (see "List-builder learning").
   **AxIS chats** (`lib/axisChatExport.ts`; no migration) are in all three exports, in four parts: the chat
   (`ai_conversations`), its messages, its action cards (`axis_actions`) and its attached files, each file row with
