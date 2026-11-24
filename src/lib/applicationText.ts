@@ -112,6 +112,7 @@ const ESSAY_SPAN_SYSTEM = [
   "Besides the essay the document may hold a title, the student's name, the prompt, a word count, notes, outlines or bullet lists. Those are not the essay.",
   "Quote the first 6 to 12 words of the essay itself exactly as they appear, and its last 6 to 12 words exactly as they appear. Copy the words character for character. Never fix, change or add words.",
   "If the whole document is the essay, quote its first and last words.",
+  "If the document holds more than one essay or draft and an essay prompt is given, choose the one that answers that prompt; with no prompt, choose the first complete one.",
   UNTRUSTED_DATA_RULE,
 ].join("\n");
 
@@ -136,7 +137,7 @@ export async function essayOnly(
   request: FastifyRequest,
   studentId: string,
   text: string,
-  opts: { aiAllowed: boolean }
+  opts: { aiAllowed: boolean; prompt?: string | null }
 ): Promise<{ text: string; trimmed: boolean }> {
   if (!opts.aiAllowed || !hasAnthropic || countWords(text) < 60 || text.length > MAX_SPAN_INPUT) return { text, trimmed: false };
   try {
@@ -146,7 +147,7 @@ export async function essayOnly(
       studentId,
       model: FAST_MODEL,
       system: ESSAY_SPAN_SYSTEM,
-      prompt: wrapUntrusted("uploaded document", text),
+      prompt: (opts.prompt?.trim() ? `${wrapUntrusted("essay prompt", opts.prompt.trim().slice(0, 2000))}\n\n` : "") + wrapUntrusted("uploaded document", text),
       toolName: "essay_span",
       schema: ESSAY_SPAN_SCHEMA as unknown as Record<string, unknown>,
       maxTokens: 300,

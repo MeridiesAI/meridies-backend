@@ -147,12 +147,12 @@ test("an empty Doc read for the first time is stamped, so it stops reading as no
   }
 });
 
-test("an unchanged Doc that was read before writes nothing (so its edited time doesn't move)", async () => {
+test("a Doc read before the essay-only rule is read once more; unchanged text only stamps the read", async () => {
   const { request, writes } = fakeRequest();
   const e = linked({ body: "Same text", word_count: 2, text_synced_at: "2026-11-01T00:00:00Z" });
-  const r = await readLinkedEssay(request, e, { exportText: async () => ({ ok: true, text: "Same text" }) });
-  assert.deepEqual(r, { ok: true, text: "Same text", changed: false, row: null });
-  assert.equal(writes.length, 0);
+  const r = await readLinkedEssay(request, e, { now: "2026-12-02T00:00:00.000Z", exportText: async () => ({ ok: true, text: "Same text" }) });
+  assert.equal(r.ok && r.changed, false);
+  assert.deepEqual(writes.map((w) => w.update), [{ text_status: "read", text_synced_at: "2026-12-02T00:00:00.000Z" }], "no body write");
 });
 
 test("a Doc the grant can't reach is not-picked, and nothing is written", async () => {
