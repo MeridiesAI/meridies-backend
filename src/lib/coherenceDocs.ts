@@ -4,7 +4,7 @@
  */
 import type { FastifyRequest } from "fastify";
 import type { UnreadDoc } from "./context/coherenceMaterial.js";
-import { essayTextState, readLinkedEssay, type EssayTextState } from "./essayText.js";
+import { essayTextState, linkedGoogleDoc, readLinkedEssay, type EssayTextState } from "./essayText.js";
 
 type Row = Record<string, unknown>;
 
@@ -31,8 +31,10 @@ export const RUN_READ_CAP = 25;
 
 /**
  * Ticked essays linked to a Google Doc that hasn't been read in yet are read now, with the caller's own grant (the
- * read Essays sync does), and their rows in `essays` replaced by what the database stored. Returns every ticked
- * essay that still can't be read, with why, in the order ticked: the run refuses rather than quietly leave one out.
+ * read Essays sync does), and their rows in `essays` replaced by what the database stored. Ticked linked Docs that
+ * were read before are read again if they changed since (lib/essayText.ts skips an unchanged one); if that fails the
+ * text already on file is used. Returns every ticked essay that still can't be read, with why, in the order ticked:
+ * the run refuses rather than quietly leave one out.
  * `select` is the caller's essay select, so a replaced row has the same shape.
  */
 export async function readTicked(
@@ -52,18 +54,21 @@ export async function readTicked(
       message,
     });
   const waiting: Row[] = [];
+  const refresh: Row[] = [];
   for (const e of ticked) {
     const state = essayTextState(e);
     if (state === "unreadable") unread(e, "unreadable");
     else if (state === "pending") waiting.push(e);
+    else if ("fileId" in linkedGoogleDoc(e, request.auth.userId)) refresh.push(e);
   }
   for (const e of waiting.slice(RUN_READ_CAP)) unread(e, "too-many");
-  const toRead = waiting.slice(0, RUN_READ_CAP);
+  const toRead = [...waiting.slice(0, RUN_READ_CAP), ...refresh.slice(0, Math.max(0, RUN_READ_CAP - waiting.length))];
+  const mustRead = new Set(waiting);
   for (let i = 0; i < toRead.length; i += 4) {
     await Promise.all(
       toRead.slice(i, i + 4).map(async (e) => {
         const r = await read(request, e, { select: opts.select });
-        if (!r.ok) return unread(e, r.reason, r.message);
+        if (!r.ok) return mustRead.has(e) ? unread(e, r.reason, r.message) : undefined;
         const fresh = r.row ?? e;
         const at = essays.findIndex((x) => x.id === e.id);
         if (at >= 0) essays[at] = fresh;

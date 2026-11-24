@@ -1594,6 +1594,19 @@ forget it.
   reads ticked pending Docs first (`readTicked`, at most 25, four at a time) and answers 409 `coherence_docs_unread`
   naming each ticked document it couldn't read and why (`unreadDocsMessage`), never a report that quietly left one
   out. Tests: `test/unit/essay-text.test.ts`.
+- **A Doc's count is the essay's, kept current** (`lib/essayText.ts`; no migration; tests
+  `test/unit/essay-word-count.test.ts`, `test/integration/essays-relink.test.mjs`).
+  - Only the essay counts: a linked or Drive-picked Doc is cut down with `essayOnly` (AxIS quotes the start and end,
+    code takes that slice; the essay's `prompt` is the hint when a Doc holds several), the rule uploads already use.
+    `essay_kind` "other" (materials) is counted whole.
+  - Read again only when Drive's `modifiedAt` is after `text_synced_at` (`stillCurrent`); every real read stamps
+    `text_synced_at`. Rows read before `READ_RULE_SINCE` are read once more so whole-Doc text gets cut down; move that
+    constant forward if the fix ships after it.
+  - Essays sync also re-reads essays filed from a Drive pick (`readPickedEssay`): only by `documents.owner_id`, only a
+    confirmed Google Doc, cut down under the document AI rules. A Coherence run re-reads ticked linked Docs that changed
+    (a failure there keeps the text on file).
+  - `PATCH /application/essays/:id` with a different `externalUrl` (and no `body`) clears the old text to `pending`,
+    then reads the new Doc if the caller may. Removing the link keeps the text.
 
 ### The student view (SV Demo v2)
 

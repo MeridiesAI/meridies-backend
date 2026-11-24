@@ -69,7 +69,7 @@ import {
   splitAnswers,
   type DocPrompt,
 } from "../lib/supplementDocs.js";
-import { linkedGoogleDoc, readLinkedEssay } from "../lib/essayText.js";
+import { ESSAY_TEXT_COLUMNS, linkedGoogleDoc, readLinkedEssay, readPickedEssay } from "../lib/essayText.js";
 
 type Row = Record<string, unknown>;
 
@@ -911,7 +911,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       // The body is read only to tell the counselor it changed (lib/essayNotice.ts); it is never logged.
       const { data: current, error: readError } = await request.db
         .from("essays")
-        .select(b.body !== undefined ? "student_id, body" : "student_id")
+        .select(b.body !== undefined ? "student_id, body, external_url" : "student_id, external_url")
         .eq("id", id)
         .maybeSingle<Row>();
       if (readError) throw fromPostgrest(readError);
@@ -931,13 +931,23 @@ export default async function applicationRoutes(app: FastifyInstance) {
         update.text_status = "read";
       }
       if (b.externalUrl !== undefined) update.external_url = b.externalUrl;
+      // A different Doc: the old Doc's text and count go, and the row reads "not read yet" until the new one is read
+      // (just below, when the caller may read it). Removing the link keeps the text, so typed work isn't lost.
+      const relinked = Boolean(b.externalUrl) && b.externalUrl !== current.external_url && b.body === undefined;
+      if (relinked) Object.assign(update, { body: "", text_status: "pending", text_synced_at: null });
       if (b.status !== undefined) update.status = b.status;
       if (b.dueDate !== undefined) update.due_date = b.dueDate;
       if (b.sortOrder !== undefined) update.sort_order = b.sortOrder;
 
-      const { data, error } = await request.db.from("essays").update(update).eq("id", id).select(ESSAY_SELECT).maybeSingle();
+      const { data: saved, error } = await request.db.from("essays").update(update).eq("id", id).select(ESSAY_SELECT).maybeSingle();
       if (error) throw fromPostgrest(error);
-      if (!data) throw notFound();
+      if (!saved) throw notFound();
+      let data = saved as Row;
+      if (relinked) {
+        // Best effort: a Doc the caller can't read yet stays "not read yet" and Essays offers to pick it.
+        const r = await readLinkedEssay(request, data, { select: ESSAY_SELECT }).catch(() => null);
+        if (r?.ok && r.row) data = r.row;
+      }
       if (b.body !== undefined) {
         await logEssayProgress(request, studentId, data as Row, "update");
         if (essayBodyChanged(current.body as string | null, b.body)) void noticeEssayEdit(request, studentId, id);
@@ -1002,7 +1012,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       if (b.essayId) {
         const { data, error: curError } = await request.db
           .from("essays")
-          .select("id, student_id, essay_kind, body")
+          .select("id, student_id, essay_kind, body, prompt")
           .eq("id", b.essayId)
           .maybeSingle();
         if (curError) throw fromPostgrest(curError);
@@ -1013,7 +1023,7 @@ export default async function applicationRoutes(app: FastifyInstance) {
       const kind = current ? String(current.essay_kind ?? "supplement") : (b.essayKind ?? "supplement");
       if (text && kind !== "other") {
         const aiAllowed = documentReadableForTask(toAiDoc(doc as Row), true).allowed;
-        text = (await essayOnly(request, studentId, text, { aiAllowed })).text;
+        text = (await essayOnly(request, studentId, text, { aiAllowed, prompt: current ? (current.prompt as string | null) : null })).text;
       }
 
       if (b.essayId) {
@@ -1088,9 +1098,19 @@ export default async function applicationRoutes(app: FastifyInstance) {
         .limit(25);
       const { data: essays } = await request.db
         .from("essays")
-        .select("id, body, supplement_doc_id, college_supplement_id, prompt, external_url, link_owner_id, document_id, text_status, text_synced_at")
+        .select(`id, body, college_supplement_id, ${ESSAY_TEXT_COLUMNS}`)
         .eq("student_id", studentId)
         .limit(300);
+      // Essays filed from a Doc the caller picked in Drive, read again when the Doc changed (lib/essayText.ts).
+      const pickedIds = [...new Set((essays ?? []).map((e) => e.document_id).filter((id): id is string => typeof id === "string"))];
+      const { data: pickedDocs } = pickedIds.length
+        ? await request.db
+            .from("documents")
+            .select("id, student_id, owner_id, external_provider, external_file_id, external_drive_id, kind_confirmed, available_to_llm, kind, ai_access, ferpa_waived")
+            .in("id", pickedIds.slice(0, 300))
+            .eq("owner_id", me)
+            .eq("external_provider", "google")
+        : { data: [] as Row[] };
 
       const jobs: (() => Promise<void>)[] = [];
       for (const d of docs ?? []) {
@@ -1127,6 +1147,18 @@ export default async function applicationRoutes(app: FastifyInstance) {
           if (!r.ok) {
             if (r.reason === "not-picked") notPicked.push(String(e.id));
             else failed.push(String(e.id));
+            return;
+          }
+          if (r.row) updated++;
+        });
+      }
+
+      const docById = new Map((pickedDocs ?? []).map((d) => [String(d.id), d as Row]));
+      for (const e of (essays ?? []).filter((x) => docById.has(String(x.document_id))).slice(0, 25)) {
+        jobs.push(async () => {
+          const r = await readPickedEssay(request, e as Row, docById.get(String(e.document_id))!, { now });
+          if (!r.ok) {
+            if (r.reason !== "skip") failed.push(String(e.id));
             return;
           }
           if (r.row) updated++;

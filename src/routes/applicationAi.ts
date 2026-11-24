@@ -147,7 +147,7 @@ type CoherenceDocs = {
 };
 
 const COHERENCE_ESSAY_SELECT =
-  `id, title, prompt, school, body, essay_kind, student_college_id, updated_at, ${ESSAY_TEXT_COLUMNS}, document:documents(available_to_llm, kind_confirmed)`;
+  `id, title, school, body, student_college_id, updated_at, ${ESSAY_TEXT_COLUMNS}, document:documents(available_to_llm, kind_confirmed)`;
 
 async function coherenceDocs(request: FastifyRequest, studentId: string): Promise<{ docs: CoherenceDocs; essays: Row[] }> {
   const [essays, list, acts, honors] = await Promise.all([
