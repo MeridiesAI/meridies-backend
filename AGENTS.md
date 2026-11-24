@@ -1272,8 +1272,8 @@ forget it.
   beyond é/ù/ì/ò/è/à or any non-Latin letter makes a text UCS-2 at 70 characters a segment. The first text to a number still carries
   the English "Reply STOP to opt out." line, which can take a full six-segment text one over. The email HTML gives every paragraph
   `dir="auto"` (Arabic, Urdu and Persian read right to left above their English) and `white-space:pre-line`. **The model** is
-  `TRANSLATE_MODEL` (default `DEEP_MODEL`: Haiku is too risky for Vietnamese, Hindi and Arabic; check `claude-sonnet-5-5` takes a
-  forced `tool_choice` before changing it, and add its `private.ai_prices` row first). The prompt keeps names, dates, numbers, links and
+  `TRANSLATE_MODEL` (default `DEEP_MODEL`, Claude Sonnet 5.5: Haiku is too risky for Vietnamese, Hindi and Arabic; an override needs
+  its `private.ai_prices` row first, and a retired model there breaks translation). The prompt keeps names, dates, numbers, links and
   paragraph breaks, keeps the English term in brackets the first time an admissions word appears, and wraps the message as data
   (`<` swapped for a look-alike so it can't close its block). **The answer is checked in code** (`cleanTranslation`): non-empty, a sane
   length for its source, an echoed English divider dropped, and every link and email address the source had present **exactly**
@@ -3263,7 +3263,17 @@ weights are downloaded from Hugging Face. Generation stays Anthropic only.
   and the Application page's Coherence, Recommended column and Activities
   Build (`routes/applicationAi.ts`). Everything the v10 sync added beyond
   those (college research, the Build College Lists bar, Mass invite, email
-  templates, the composer's drafts) runs on Haiku, and so does Profile Update
+  templates, the composer's drafts) runs on Haiku, and so does Profile Update.
+  `DEEP_MODEL` is `claude-sonnet-5-5` (`claude-sonnet-4-5` retires 2026-11-30). It answers a forced
+  `tool_choice` with a 400 and thinks on every request, so for it (`refusesForcedTool`) `runStructured`
+  sends structured outputs instead of the forced tool (`structuredRequest`; the tool schema through
+  `outputSchema`, which keeps `enum` and turns length and count bounds into description hints), and both
+  it and `streamChat` send adaptive thinking at `THINKING_EFFORT` (`low`) with max_tokens raised for the
+  thinking and the newer tokenizer (`withThinkingRoom`). The two program recommenders (`/ai/concierge`,
+  Activities Build) pass `effort: "high"` and their prompts say "Aim for six to eight": without both,
+  Sonnet 5.5 read "a short honest list beats a long invented one" as one to four programs, and at low
+  or medium it sometimes wrote its doubts into the names. A refusal (`stop_reason: "refusal"`) is a 422
+  `ai_declined`, audited `blocked`. Haiku 4.5 calls are unchanged: forced tool, no thinking, no effort
 - **Opus** effectively never on a hot path, and never without documenting why
 - Every model must support image and file attachments
 - Never enable `thinking` / `effort` on models that don't support them
@@ -3314,7 +3324,8 @@ failed after it started, which may still be billed: the whole reservation stays)
   **To change a price:** a new migration that updates the row (`update private.ai_prices
   set input_usd = ..., updated_at = now() where model = '...'`); add a row for a new model
   in the same PR that starts using it. Known exception: `lib/imports/spend.ts` keeps its
-  own two prices for the per-import 200-cent cap (they match the table today).
+  own prices (Haiku 4.5, Sonnet 4.5, Sonnet 5.5) for the per-import 200-cent cap (they
+  match the table today).
 - **Deploy order:** either. Without the migration the gate falls back as above; with it
   and the previous build, nothing calls the new functions. Not in `REQUIRED_SCHEMA`. The
   counters (`private.ai_budget`) and prices have no client grants; the functions are
@@ -5229,7 +5240,10 @@ code `lib/caseloadTransfer.ts`, routes in `routes/management.ts` and
   counselor approval gate (`access`, `access-review`, `service-callsites`),
   the questionnaire sync's read side and activity-type list (`intake-sync`),
   caseload transfer bodies and answers (`caseload-transfer`), campus photos
-  (`college-photos*`), /health's key check (`anthropic-key-check`), the
+  (`college-photos*`), /health's key check (`anthropic-key-check`), DEEP_MODEL's
+  request on Sonnet 5.5 (`structured-outputs`: structured outputs instead of the
+  forced tool, the schema conversion, refusals and cut-off answers, against a
+  stand-in Messages API), the
   import pipeline (`import-*`: parsing and the zip guard, the capped
   child process, profile and masking, sensitive values, the plan and presets,
   the AI mapping with its spend, rows and matching, values, rollout),
