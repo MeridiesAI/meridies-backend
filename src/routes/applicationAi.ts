@@ -820,6 +820,9 @@ export default async function applicationAiRoutes(app: FastifyInstance) {
         module: "concierge",
         studentId,
         model: DEEP_MODEL,
+        // High: at low and medium Sonnet 5.5 sometimes skipped thinking and wrote one program, or wrote its doubts into
+        // the names ("Girls Who Code... not applicable; ..."). At high, six real programs in about 35 s, as Sonnet 4.5 took.
+        effort: "high",
         system: activitiesSystem(audience, { onlineOnly, miles: b.miles, near: near ?? null }),
         prompt: [
           `Subjects: ${b.subjects.join(", ") || "any"}`,

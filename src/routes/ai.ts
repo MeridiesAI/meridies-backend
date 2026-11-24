@@ -629,9 +629,14 @@ export default async function aiRoutes(app: FastifyInstance) {
         module: "concierge",
         studentId: b.studentId,
         model: DEEP_MODEL,
+        // High: at low and medium Sonnet 5.5 sometimes skipped thinking and wrote one program, or wrote its doubts into
+        // the names ("Girls/Boys inclusive: ..."). At high, six or seven real programs in about 40 s, as Sonnet 4.5 took.
+        effort: "high",
         system: [
           BASE_SYSTEM,
           "Recommend real, named programs the student can actually sign up for.",
+          // Without a number Sonnet 5.5 read the honesty line below as "list two to four" (Sonnet 4.5 listed ten).
+          "Aim for six to eight. Established national programs and competitions, and online ones, count toward that.",
           "Work from their STATED interests. Do not collapse them into one academic theme.",
           "Every recommendation needs: what it is, why it fits THIS student, eligibility, rough timing, and where to apply.",
           "If you are not confident a program currently exists and is open, leave it out. A short honest list beats a long invented one.",

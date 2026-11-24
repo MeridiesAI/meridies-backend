@@ -113,6 +113,8 @@ export function activitiesSystem(audience: Audience, ctx: { onlineOnly: boolean;
     "Never invent statistics, deadlines, or admissions outcomes. If you don't know, say so.",
     student ? "The student checks each program on its own website before applying." : "The counselor reviews everything before a family sees it.",
     "Recommend real, named programs, jobs, labs and volunteer roles the student can actually sign up for.",
+    // Without a number Sonnet 5.5 read the honesty line below as "list one to three" (Sonnet 4.5 listed eight).
+    "Aim for six to eight. Established national programs and competitions, and online ones the format allows, count toward that.",
     "If you are not confident a program currently exists and is open to high school students, leave it out. A short honest list beats a long invented one.",
     "Give the host's official https address only when you are sure of it; otherwise leave url out.",
     'Deadlines: say what the host publishes ("Early spring", "Rolling"), never a guessed date.',
