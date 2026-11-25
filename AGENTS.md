@@ -2912,35 +2912,56 @@ without them, naming both). A real run holds the `college-features` job lease (6
 - **Grounding** (dropped and counted, never repaired): a feature key not in `CORE_FEATURES`, a category not in
   `OPPORTUNITY_CATEGORIES`, a value outside 0-1, a `source_url` that isn't a page read this call, a quote that isn't
   on THAT page (`quoteIsOn` from `lib/collegeSiteInfo.ts`: 12+ characters after folding case, quotes, dashes and
-  spaces), a feature quote without that feature's topic words (`quoteIsOnTopic`, `offTopic`: a double-major sentence
-  isn't about required courses; checked before duplicates, so an on-topic second answer for a key still counts), an
-  opportunity name not on its page, an opportunity quote that is only its name, or its name plus its acronym
-  (`quoteIsOnlyName`, `nameOnlyQuote`: a directory listing such as a research-units page says nothing about what it
-  offers, so a description written from it is a guess), a description holding a figure its page doesn't (`figures`),
-  and duplicates (first per key; opportunities by normalized name, at most 40). The script prints each college's
-  non-zero drop counts. Descriptions are cut to two sentences
+  spaces), a quote that is only a heading (`quoteIsHeading`, `headingOnly`: under three words, or up to eight
+  capitalised words with no figure, like CMU's study_abroad 0.5 on "Study Abroad"), a feature quote without that
+  feature's topic words (`quoteIsOnTopic`, `offTopic`: a double-major sentence isn't about required courses; both
+  checked before duplicates, so an on-topic second answer for a key still counts), an opportunity name not on its
+  page, an opportunity that isn't for undergraduates (`notUndergraduate`: the model's required `audience` other than
+  `undergraduates`, or a name that says so for certain, `nameIsNotUndergraduate`: graduate and professional schools
+  and degrees, "BC Law"-style college-plus-school names, a single course ("Introduction to Wines", a course code),
+  faculty seminars and development, K-12, pre-college and teachers; a name holding "undergraduate" or "bachelor", or
+  starting pre-law / pre-med, is never caught; a public venue such as "Lawrence Hall of Science" has nothing in its
+  name to check and rests on `audience` and the prompt; a missing or unknown `audience` is `invalid`), an
+  opportunity quote that is only its name, or its name plus its acronym (`quoteIsOnlyName`, `nameOnlyQuote`: a
+  directory listing such as a research-units page says nothing about what it offers, so a description written from
+  it is a guess), an opportunity quote that doesn't name it (`quoteNamesOpportunity`, `quoteNotAbout`: no word of its
+  own name outside generic ones (program, center, research...) and the college's own name, nor its acronym; a name
+  of generic words only must be in the quote whole; "Located here: Anthropology, Archaeology" doesn't name the
+  Archaeological Research Facility), a description holding a figure its page doesn't (`figures`), and duplicates
+  (first per key; opportunities by normalized name, at most 40). The script prints each college's non-zero drop
+  counts. Descriptions are cut to two sentences
   and 400 characters. A feature the pages don't speak to is not written: unknown stays unknown (null is never
   written by this job). The quote proves the words are on the page, not that the value is right: a value is the
   model's reading.
-- **Storing.** Features upsert on (college, key). Opportunities match the college's rows by `opportunityKey` (case,
-  accents, punctuation, "&"/"and", a leading "the" folded): seen -> fields and `last_seen_at` updated, `active` true,
-  `missed_runs` 0; new -> inserted; an active row not found **whose source page the model read this run** ->
-  `missed_runs` + 1, and the second miss in a row (`MISSES_TO_DEACTIVATE`) sets `active = false`. A row on a page not
-  read (unchanged, or no longer picked) isn't touched. Nothing is deleted. New or changed rows are embedded
+- **Storing.** Features upsert on (college, key). A stored feature **whose source page the model read this run** and
+  that the run didn't confirm (left out, or dropped by a check) is deleted at once (`planFeatures`, `featuresCleared`
+  in the report): one value matching reads as fact, so it doesn't wait for a second miss the way an opportunity does;
+  confirmed from another page it is upserted instead. Opportunities match the college's rows by `opportunityKey`
+  (case, accents, punctuation, "&"/"and", a leading "the" folded): seen -> fields and `last_seen_at` updated, `active`
+  true, `missed_runs` 0; new -> inserted; an active row not found **whose source page the model read this run** ->
+  `missed_runs` + 1, and the second miss in a row (`MISSES_TO_DEACTIVATE`) sets `active = false`; an active row whose
+  name this run judged not for undergraduates (`notForUndergraduates`) -> `active = false` at once, whatever page it
+  was on. A row on a page not read (unchanged, or no longer picked) isn't touched. No opportunity row is deleted.
+  New or changed rows are embedded
   ("name: description", `lib/embeddings.ts`, 16 a batch); `content_hash` is the sha256 of that text and is set only
   with a vector, so an embedding failure stores the row without one and the next run that sees it embeds it.
 - **Yield report.** Printed at the end and written as one `ai_runs` row (module `college-features`, `input.kind`
   `run-summary`, the per-college lines and totals in `output`, total tokens): per college pages fetched and read,
-  text characters, features and opportunities found, new/seen/missed, tokens. Low yield is flagged
+  text characters, features found and cleared, opportunities found, new/seen/missed, tokens. Low yield is flagged
   (`lowYieldReason`): pages averaging under 500 characters, a home page with almost no links, or nothing extracted;
   usually a JavaScript-rendered site, which this job doesn't render (no browser). The run stops on an AI budget
   refusal (429) or three failed colleges in a row; the rest read `stopped`, exit code 2.
 - **Known limits.** The topics don't target student-life pages, so `greek_life`, `athletics_culture` and
   `residential` will mostly stay unknown. A partial re-read sends only the changed pages, so a feature is re-judged
   from them alone (the newest quote wins). An opportunity whose page drops out of the picks is never marked missed.
-  A model that omits a real program on two re-reads of its page in a row deactivates it until it is seen again.
+  A model that omits a real program on two re-reads of its page in a row deactivates it until it is seen again, and
+  one that omits a real feature on one re-read clears it until a re-read finds it. Clearing and switching off need
+  the page re-read: an unchanged page isn't, so clean up after a rule change with `--force`; a program the new rules
+  make the model leave out still takes two forced runs (a program it still reports but the code rejects as not for
+  undergraduates goes on the first).
 - **Deploy order:** either; the job is the only reader. Not in `REQUIRED_SCHEMA`. Tests (fixtures, no network):
-  `test/unit/college-features.test.ts` (grounding, the upsert diff over runs, skipping, dry run, stopping, robots,
+  `test/unit/college-features.test.ts` (grounding, who an opportunity is for, the upsert diff and feature clearing
+  over runs, skipping, dry run, stopping, robots,
   sitemaps, picking, main text, the throttle and the crawl on a fake site).
 
 ### Catalog data: yearly refresh
