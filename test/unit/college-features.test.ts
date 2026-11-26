@@ -5,14 +5,20 @@ import { HttpError } from "../../src/lib/errors.js";
 import {
   buildExtractionRequest,
   embeddingHash,
+  EXTRACTION_SCHEMA,
+  EXTRACTION_SYSTEM,
   firstSentences,
   formatReport,
   groundExtraction,
   lowYieldReason,
   MISSES_TO_DEACTIVATE,
+  nameIsNotUndergraduate,
   opportunityKey,
+  planFeatures,
   planOpportunities,
   processCollege,
+  quoteIsHeading,
+  quoteNamesOpportunity,
   runCollegeFeatures,
   shownPages,
   toBatchRequest,
@@ -87,6 +93,9 @@ test("grounding keeps what the pages quote and drops made-up quotes, unknown key
     nameNotOnPage: 1, // Ivy Leadership Institute
     madeUpFigure: 1, // "15 departments" is on the honors page, not the research page it cites
     nameOnlyQuote: 0,
+    quoteNotAbout: 0,
+    headingOnly: 0,
+    notUndergraduate: 0,
     offTopic: 1, // a second small_classes, quoting the senior thesis: nothing about class size
     invalid: 1, // residential 1.4
     duplicate: 1, // "the honors college" again
@@ -111,6 +120,7 @@ test("an opportunity whose quote is only its name (a directory listing) is dropp
   const opp = (name: string, quote: string, source_url: string) => ({
     name,
     category: "research",
+    audience: "undergraduates",
     description: "Undergraduates can participate in its research projects.",
     quote,
     source_url,
@@ -136,6 +146,204 @@ test("an opportunity whose quote is only its name (a directory listing) is dropp
   );
   assert.deepEqual(g.opportunities.map((o) => o.name), ["Simons Institute for the Theory of Computing"]);
   assert.equal(g.dropped.nameOnlyQuote, 3);
+});
+
+// The two re-runs after PR #212 (the same 5 colleges, 2026-11-24): what still got through.
+const BC_SCHOOLS = "https://www.bc.edu/bc-web/schools.html";
+const CORNELL_COURSES = "https://sha.cornell.edu/academics/courses";
+const BERKELEY_PUBLIC = "https://www.berkeley.edu/about/public-programs";
+
+/** An opportunity as the model returns it. `audience` null leaves the field out. */
+const said = (name: string, quote: string, source_url: string, audience: string | null = "undergraduates") => ({
+  name,
+  category: "academic_program",
+  ...(audience === null ? {} : { audience }),
+  description: "Undergraduates can take part.",
+  quote,
+  source_url,
+});
+
+test("an opportunity that isn't for undergraduates is dropped: graduate and professional schools, single courses, faculty, school children and the public", () => {
+  const pages = shownPages([
+    {
+      url: BC_SCHOOLS,
+      text:
+        "BC Law trains lawyers in the Jesuit tradition through its J.D. program. " +
+        "Boston College Law School offers clinics for law students. " +
+        "The Clough School of Theology and Ministry prepares graduate students for ministry. " +
+        "The Global Faculty Seminar takes faculty members abroad each summer. " +
+        "Pre-Law Advising helps undergraduates plan for law school applications. " +
+        "Faculty-Led Programs Abroad let undergraduates spend three weeks abroad with a professor. " +
+        "The Connell School of Nursing prepares undergraduates for nursing careers in its four-year program.",
+    },
+    {
+      url: CORNELL_COURSES,
+      text: "Introduction to Wines covers the major wine regions of the world in one semester. HADM 4300: Introduction to Wines meets twice a week in Statler Hall.",
+    },
+    {
+      url: BERKELEY_PUBLIC,
+      text:
+        "The Lawrence Hall of Science is a public science center offering exhibits and programs for K-12 students and teachers. " +
+        "The UC Botanical Garden is open to the public every day and holds plants from around the world. " +
+        "The Pre-College Scholars program lets high school students take Berkeley courses in summer.",
+    },
+  ]);
+  const g = groundExtraction(
+    {
+      core_features: [],
+      opportunities: [
+        // Caught by the name, whatever the model called the audience.
+        said("BC Law", "BC Law trains lawyers in the Jesuit tradition through its J.D. program", BC_SCHOOLS),
+        said("Boston College Law School", "Boston College Law School offers clinics for law students", BC_SCHOOLS),
+        said("Clough School of Theology and Ministry", "The Clough School of Theology and Ministry prepares graduate students for ministry", BC_SCHOOLS),
+        said("Global Faculty Seminar", "The Global Faculty Seminar takes faculty members abroad each summer", BC_SCHOOLS),
+        said("Introduction to Wines", "Introduction to Wines covers the major wine regions of the world in one semester", CORNELL_COURSES),
+        said("HADM 4300: Introduction to Wines", "HADM 4300: Introduction to Wines meets twice a week in Statler Hall", CORNELL_COURSES),
+        said("Pre-College Scholars", "The Pre-College Scholars program lets high school students take Berkeley courses in summer", BERKELEY_PUBLIC),
+        // Nothing in the name to check: the model's own label decides.
+        said("Lawrence Hall of Science", "The Lawrence Hall of Science is a public science center offering exhibits and programs for K-12 students", BERKELEY_PUBLIC, "k12_or_public"),
+        said("UC Botanical Garden", "The UC Botanical Garden is open to the public every day", BERKELEY_PUBLIC, "k12_or_public"),
+        // For undergraduates, though the names hold "law", "faculty" and "school".
+        said("Pre-Law Advising", "Pre-Law Advising helps undergraduates plan for law school applications", BC_SCHOOLS),
+        said("Faculty-Led Programs Abroad", "Faculty-Led Programs Abroad let undergraduates spend three weeks abroad with a professor", BC_SCHOOLS),
+        said("Connell School of Nursing", "The Connell School of Nursing prepares undergraduates for nursing careers in its four-year program", BC_SCHOOLS),
+      ],
+    },
+    pages,
+    { collegeName: "Boston College" }
+  );
+  assert.deepEqual(g.opportunities.map((o) => o.name), ["Pre-Law Advising", "Faculty-Led Programs Abroad", "Connell School of Nursing"]);
+  assert.equal(g.dropped.notUndergraduate, 9);
+  // The names the run judged not for undergraduates, so a stored row of the same name can be switched off.
+  assert.equal(g.notForUndergraduates.length, 9);
+  assert.ok(g.notForUndergraduates.includes("BC Law") && g.notForUndergraduates.includes("UC Botanical Garden"));
+
+  // No audience, or one off the list, is a malformed item: dropped, but not a verdict that switches a stored row off.
+  const unlabeled = groundExtraction(
+    {
+      core_features: [],
+      opportunities: [
+        said("Pre-Law Advising", "Pre-Law Advising helps undergraduates plan for law school applications", BC_SCHOOLS, null),
+        said("Faculty-Led Programs Abroad", "Faculty-Led Programs Abroad let undergraduates spend three weeks abroad with a professor", BC_SCHOOLS, "everyone"),
+      ],
+    },
+    pages
+  );
+  assert.equal(unlabeled.opportunities.length, 0);
+  assert.equal(unlabeled.dropped.invalid, 2);
+  assert.deepEqual(unlabeled.notForUndergraduates, []);
+});
+
+test("nameIsNotUndergraduate reads only what a name says for certain", () => {
+  const not = [
+    ["BC Law", "Boston College"],
+    ["Berkeley Law", "University of California-Berkeley"],
+    ["Duke Divinity", "Duke University"],
+    ["Graduate School of Education"],
+    ["Carroll School MBA Program"],
+    ["Ph.D. Program in Economics"],
+    ["Master's in Finance"],
+    ["Postdoctoral Fellows Program"],
+    ["School of Medicine"],
+    ["Intro to Programming"],
+    ["CS 1110 Introduction to Computing"],
+    ["K-12 Outreach"],
+    ["Workshops for Teachers"],
+  ];
+  for (const [name, college] of not) assert.equal(nameIsNotUndergraduate(name!, college), true, name);
+  const ok = [
+    ["Undergraduate Research Opportunities Program"],
+    ["Graduate and Undergraduate Research Symposium"],
+    ["Pre-Law Society"],
+    ["Pre-Med and Pre-Law Advising for Law School and Medical School"],
+    ["Faculty-Led Programs Abroad"],
+    ["Combined Bachelor's/Master's Program"],
+    ["Connell School of Nursing"],
+    ["Duke Engage", "Duke University"],
+    ["Environmental Law Minor", "Boston College"],
+    ["Lawrence Hall of Science"],
+    ["STEM Scholars"],
+  ];
+  for (const [name, college] of ok) assert.equal(nameIsNotUndergraduate(name!, college), false, name);
+});
+
+test("the prompt names what isn't an undergraduate opportunity and asks who each one is for", () => {
+  const items = EXTRACTION_SCHEMA.properties.opportunities.items as unknown as { required: string[]; properties: Record<string, { enum?: string[] }> };
+  assert.ok(items.required.includes("audience"));
+  assert.deepEqual(items.properties.audience!.enum, ["undergraduates", "graduate_or_professional", "faculty_or_staff", "k12_or_public"]);
+  for (const words of [/graduate and professional schools/i, /single course/i, /faculty/i, /K-12/, /general public/i, /heading/i, /name it/i]) {
+    assert.match(EXTRACTION_SYSTEM, words);
+  }
+});
+
+test("an opportunity whose quote doesn't name it is dropped; a word of its own name or its acronym counts, the college's name doesn't", () => {
+  const pages = shownPages([
+    {
+      url: BERKELEY_UNITS,
+      text:
+        "Archaeological Research Facility. Located here: Anthropology, Archaeology. " +
+        "Berkeley Center for Cosmological Physics. Berkeley researchers welcome undergraduates into labs every summer. " +
+        "Berkeley Institute for Data Science. BIDS runs weekly office hours for undergraduates. " +
+        "Cornell Tradition Fellowship. The fellowship rewards students who work during college.",
+    },
+  ]);
+  const g = groundExtraction(
+    {
+      core_features: [],
+      opportunities: [
+        // The second re-run's row: a directory line about where it is.
+        said("Archaeological Research Facility", "Located here: Anthropology, Archaeology", BERKELEY_UNITS),
+        // Only the college's name and generic words in common.
+        said("Berkeley Center for Cosmological Physics", "Berkeley researchers welcome undergraduates into labs every summer", BERKELEY_UNITS),
+        said("Berkeley Institute for Data Science", "BIDS runs weekly office hours for undergraduates", BERKELEY_UNITS),
+        said("Cornell Tradition Fellowship", "The fellowship rewards students who work during college", BERKELEY_UNITS),
+      ],
+    },
+    pages,
+    { collegeName: "University of California-Berkeley" }
+  );
+  assert.deepEqual(g.opportunities.map((o) => o.name), ["Berkeley Institute for Data Science", "Cornell Tradition Fellowship"]);
+  assert.equal(g.dropped.quoteNotAbout, 2);
+
+  assert.equal(quoteNamesOpportunity("SURF pays students to do research all summer", "Summer Undergraduate Research Fellowship (SURF)"), true);
+  // A name of generic words only must be in the quote whole.
+  assert.equal(quoteNamesOpportunity("The Center for Undergraduate Research funds projects", "Center for Undergraduate Research"), true);
+  assert.equal(quoteNamesOpportunity("Undergraduate research is funded in every college", "Center for Undergraduate Research"), false);
+});
+
+test("a quote that is only a heading is dropped, for a feature or an opportunity", () => {
+  const CMU_ABROAD = "https://www.cmu.edu/studyabroad/";
+  const pages = shownPages([
+    {
+      url: CMU_ABROAD,
+      text:
+        "Study Abroad\nGlobal Engagement and Study Abroad\nOver 60% of undergraduates study abroad before they graduate.\n" +
+        "Research Units: Archaeological Research Facility\nArchaeological Research Facility",
+    },
+  ]);
+  const g = groundExtraction(
+    {
+      core_features: [
+        // The re-run's row: CMU study_abroad 0.5 on the page's title alone.
+        { key: "study_abroad", value: 0.5, quote: "Study Abroad", source_url: CMU_ABROAD },
+        { key: "study_abroad", value: 0.6, quote: "Global Engagement and Study Abroad", source_url: CMU_ABROAD },
+        { key: "study_abroad", value: 0.8, quote: "Over 60% of undergraduates study abroad before they graduate.", source_url: CMU_ABROAD },
+      ],
+      opportunities: [said("Archaeological Research Facility", "Research Units: Archaeological Research Facility", CMU_ABROAD)],
+    },
+    pages
+  );
+  assert.deepEqual(g.features.map((f) => [f.key, f.value]), [["study_abroad", 0.8]]);
+  assert.equal(g.opportunities.length, 0);
+  assert.equal(g.dropped.headingOnly, 3);
+  assert.equal(g.dropped.duplicate, 0);
+
+  for (const h of ["Study Abroad", "STUDY ABROAD", "Global Engagement and Study Abroad", "Housing", "Undergraduate Research Opportunities Program (UROP)"]) {
+    assert.equal(quoteIsHeading(h), true, h);
+  }
+  for (const s of ["Over 60% study abroad.", "Co-op is required.", "Class Size: 18", "Most classes have fewer than 20 students."]) {
+    assert.equal(quoteIsHeading(s), false, s);
+  }
 });
 
 test("a feature whose quote isn't about that feature is dropped; the first on-topic quote for a key wins", () => {
@@ -294,6 +502,16 @@ test("worst-case descriptions and keys are read in linear time", () => {
   assert.ok(elapsed(() => opportunityKey(marks)) < BUDGET_MS);
 });
 
+test("worst-case names and quotes for the audience, heading and naming checks are read in linear time", () => {
+  const near = "graduat school of la faculty semina pre colleg ".repeat(5_000);
+  assert.ok(elapsed(() => nameIsNotUndergraduate(near, near)) < BUDGET_MS);
+  assert.ok(elapsed(() => nameIsNotUndergraduate(`AB${"1".repeat(100_000)}`)) < BUDGET_MS);
+  const title = "Study Abroad and ".repeat(20_000);
+  assert.ok(elapsed(() => quoteIsHeading(title)) < BUDGET_MS);
+  const words = "Archaeological Research Facility ".repeat(10_000);
+  assert.ok(elapsed(() => quoteNamesOpportunity(words, words, words)) < BUDGET_MS);
+});
+
 // ---- The Batch-ready request -------------------------------------------------------------------
 
 test("the request is plain data and maps one to one onto a Message Batches entry", () => {
@@ -370,6 +588,38 @@ test("a row seen with the same text keeps its vector; an inactive row seen again
   assert.equal(plan.inserts.length, 0);
 });
 
+test("a stored row the run judged not for undergraduates is switched off at once, whatever page it was on", () => {
+  const existing = [
+    row("a", "BC Law", { source_url: "https://www.bc.edu/law" }),
+    row("b", "Global Faculty Seminar"),
+    row("c", "Honors Program"),
+    row("d", "Lawrence Hall of Science"),
+  ];
+  // d is also found for undergraduates this run (under another page's wording): seen wins.
+  const plan = planOpportunities(existing, [opp("Lawrence Hall of Science")], keys(), ["BC Law", "the global faculty seminar", "Lawrence Hall of Science"]);
+  assert.deepEqual(plan.missed, [
+    { id: "a", missedRuns: MISSES_TO_DEACTIVATE, deactivate: true },
+    { id: "b", missedRuns: MISSES_TO_DEACTIVATE, deactivate: true },
+  ]);
+  assert.deepEqual(plan.seen.map((s) => s.id), ["d"]);
+  // c: neither found nor judged, and its page wasn't read: untouched.
+});
+
+test("a stored feature whose page was read again and didn't confirm it is cleared; one on a page not read stays", () => {
+  const existing = [
+    { feature_key: "study_abroad", source_url: ABROAD },
+    { feature_key: "small_classes", source_url: HONORS },
+    { feature_key: "undergrad_research", source_url: RESEARCH },
+    { feature_key: "residential", source_url: null },
+  ];
+  const found = [{ key: "undergrad_research" as const, value: 0.9, quote: "a quote", sourceUrl: RESEARCH }];
+  // study_abroad: its page was read and nothing confirmed it. small_classes: its page wasn't read. undergrad_research:
+  // confirmed. residential: no page on file to judge by.
+  assert.deepEqual(planFeatures(existing, found, keys(ABROAD, RESEARCH)), ["study_abroad"]);
+  // Confirmed from another page than the one on file: not cleared (the upsert moves it).
+  assert.deepEqual(planFeatures([{ feature_key: "undergrad_research", source_url: HONORS }], found, keys(HONORS, RESEARCH)), []);
+});
+
 test("opportunityKey folds case, accents, punctuation, '&' and a leading 'the'", () => {
   assert.equal(opportunityKey("The Honors College"), opportunityKey("honors college"));
   assert.equal(opportunityKey("Co-op & Internships"), "co op and internships");
@@ -383,7 +633,7 @@ type StoredOpp = ExistingOpportunity & { category: string; description: string |
 
 function memoryStore() {
   const pages = new Map<string, string>();
-  const features = new Map<string, { value: number; quote: string }>();
+  const features = new Map<string, { value: number; quote: string; sourceUrl: string }>();
   const opps: StoredOpp[] = [];
   let nextId = 1;
   const writes: string[] = [];
@@ -394,9 +644,13 @@ function memoryStore() {
     async opportunities() {
       return opps.map((o) => ({ ...o }));
     },
+    async features() {
+      return [...features.entries()].map(([feature_key, f]) => ({ feature_key, source_url: f.sourceUrl }));
+    },
     async save(_id, w: CollegeWrite) {
       writes.push("save");
-      for (const f of w.features) features.set(f.key, { value: f.value, quote: f.quote });
+      for (const f of w.features) features.set(f.key, { value: f.value, quote: f.quote, sourceUrl: f.sourceUrl });
+      for (const k of w.clearedFeatures) features.delete(k);
       for (const o of w.inserts) {
         opps.push({ id: String(nextId++), name: o.name, category: o.category, description: o.description, source_url: o.sourceUrl, content_hash: o.contentHash, embedding: o.embedding, missed_runs: 0, active: true, last_seen_at: w.at });
       }
@@ -521,6 +775,31 @@ test("only changed pages are read; missed on two runs in a row deactivates, seen
   assert.equal(r4.seen, 1);
   assert.deepEqual([surf().missed_runs, surf().active], [0, true]);
   assert.equal(mem.opps.length, 3, "never a second row for the same name");
+});
+
+test("a re-read page that no longer supports a feature clears it; a dry run only counts it", async () => {
+  const mem = memoryStore();
+  let pages = threePages();
+  const { d } = deps(mem.store, () => crawlOf(pages), []);
+  d.extract = async () => ({ raw: answer(), usage: null });
+  await processCollege(college, d, {});
+  assert.deepEqual([...mem.features.keys()], ["small_classes", "undergrad_research"]);
+
+  // The research page changed, and the answer no longer has undergrad_research (here: nothing at all).
+  pages = [pages[0]!, crawled(RESEARCH, fixture("research.html").replace("</main>", "<p>Updated.</p></main>"), "research"), pages[2]!];
+  d.extract = async () => ({ raw: { core_features: [], opportunities: [] }, usage: null });
+  const dry = await processCollege(college, d, { dryRun: true });
+  assert.equal(dry.featuresCleared, 1);
+  assert.deepEqual([...mem.features.keys()], ["small_classes", "undergrad_research"], "a dry run writes nothing");
+
+  const r = await processCollege(college, d, {});
+  assert.equal(r.featuresCleared, 1);
+  assert.deepEqual([...mem.features.keys()], ["small_classes"], "small_classes' page wasn't read: it stays");
+
+  const run = await runCollegeFeatures([college], { ...d, crawl: async () => crawlOf(pages) }, { force: true });
+  assert.equal(run.totals.featuresCleared, 1, "a forced re-read of the honors page without small_classes clears it too");
+  assert.match(formatReport(run), /1 cleared/);
+  assert.equal(mem.features.size, 0);
 });
 
 test("an answer without both lists is a failed college: nothing is marked missed or written", async () => {

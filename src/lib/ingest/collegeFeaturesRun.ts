@@ -5,8 +5,9 @@
  * module "college-features", an ai_runs row per call), the in-process embedder, and the service-role store.
  *
  * A system job acting for no one: it reads public catalog rows and the colleges' public pages, and writes only
- * catalog tables no client can write (college_core_features, college_opportunities, college_source_pages) and the
- * run's ai_runs summary row. No student or counselor data is read except which colleges students list, as ids.
+ * catalog tables no client can write (college_core_features, college_opportunities, college_source_pages; a feature its
+ * re-read page no longer supports is deleted) and the run's ai_runs summary row. No student or counselor data is read
+ * except which colleges students list, as ids.
  */
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
@@ -79,12 +80,23 @@ export function supabaseFeatureStore(svc: SupabaseClient): FeatureStore {
       }));
     },
 
+    async features(collegeId) {
+      const { data, error } = await svc.from("college_core_features").select("feature_key, source_url").eq("college_id", collegeId).limit(500);
+      if (error) fail("college_core_features", error.message);
+      return ((data ?? []) as Row[]).map((r) => ({ feature_key: String(r.feature_key), source_url: (r.source_url as string | null) ?? null }));
+    },
+
     async save(collegeId, w) {
       if (w.features.length) {
         const { error } = await svc.from("college_core_features").upsert(
           w.features.map((f) => ({ college_id: collegeId, feature_key: f.key, value: f.value, quote: f.quote, source_url: f.sourceUrl, extracted_at: w.at })),
           { onConflict: "college_id,feature_key" }
         );
+        if (error) fail("college_core_features", error.message);
+      }
+      // Disjoint from the upsert above (planFeatures never clears a key this run confirmed): unknown again.
+      if (w.clearedFeatures.length) {
+        const { error } = await svc.from("college_core_features").delete().eq("college_id", collegeId).in("feature_key", w.clearedFeatures);
         if (error) fail("college_core_features", error.message);
       }
       if (w.inserts.length) {
@@ -198,6 +210,7 @@ async function writeSummary(svc: SupabaseClient, report: RunReport, selection: "
     pagesRead: c.pagesRead,
     textChars: c.textChars,
     featuresFound: c.featuresFound,
+    featuresCleared: c.featuresCleared,
     opportunitiesFound: c.opportunitiesFound,
     inserted: c.inserted,
     seen: c.seen,
