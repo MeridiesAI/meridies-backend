@@ -62,6 +62,19 @@ test("who is behind: ranked in code, no model call", async () => {
   assert.deepEqual(events.find(([e]) => e === "route")?.[1], { intent: "roster", path: "direct", frame: "caseload-risk" });
 });
 
+test("why is anyone behind: reasons per student in code, not just the ranking (P2-4)", async () => {
+  for (const q of ["Why is anyone behind?", "why are my students falling behind"]) {
+    const { api, calls } = scriptedApi([{ text: "should not be called" }]);
+    const { res, text, events } = await turn(q, null, api);
+    assert.equal(res.path, "direct", q);
+    assert.equal(calls.length, 0);
+    assert.match(text(), /^Why each student needs attention/);
+    assert.match(text(), /\n- Sophia Martinez\n {2}- "Common App essay" is 4 days overdue/);
+    assert.doesNotMatch(text(), /^1\. /m, "not the numbered ranking");
+    assert.deepEqual(events.find(([e]) => e === "route")?.[1], { intent: "roster", path: "direct", frame: "caseload-risk" });
+  }
+});
+
 test("a named student's GPA in a roster chat: answered from the row, exactly", async () => {
   const { res, text } = await turn("What's Ethan's GPA?", null);
   assert.equal(res.path, "direct");

@@ -68,6 +68,9 @@ export type CompileContext = {
 const PERSON = /\b(she|her|hers|he|him|his|they|them|their|theirs)\b/;
 const RISK = /\b(behind|falling behind|at risk|need attention|needs attention|overdue|stalled|struggling|slipping|focus on|worry about|check on|follow up with)\b/;
 const RISK_WHO = /\b(who|which students?|which of my students|anyone|anybody|whos)\b/;
+/** Asking for the reasons, not the order: "why is anyone behind?" gets each student's overdue and stalled items. */
+const WHY = /\b(why|how come|whats wrong|what is wrong|whats going on|what is going on|reasons?)\b/;
+const MY_STUDENTS = /\b(my students|students|my caseload|caseload|my roster|roster)\b/;
 const UPCOMING = /\b(due|deadlines?|coming up|upcoming|next deadline|next meeting|whats next|on the calendar|this week|next week)\b/;
 const SINGULAR_NEXT = /\bnext (deadline|meeting|task|thing)\b/;
 /** Time words the date parser didn't turn into a window: answering with a default window would answer a different question. */
@@ -103,8 +106,10 @@ export async function compileDirect(u: Understanding, ctx: CompileContext): Prom
 
   const timeUnclear = !u.window && UNPARSED_TIME.test(u.norm);
   // Caseload risk comes first: "who should I focus on" carries a judgement word but is a ranking the code owns.
-  if (!ctx.chatStudentId && !u.students.length && RISK_WHO.test(u.norm) && RISK.test(u.norm) && !u.colleges.length && !timeUnclear) {
-    return caseloadRisk(ctx, horizonFor(u.window, now));
+  // It runs before the judgement-word test on purpose (AXIS_SYSTEM.md, "Direct answers").
+  const why = WHY.test(u.norm);
+  if (!ctx.chatStudentId && !u.students.length && (RISK_WHO.test(u.norm) || (why && MY_STUDENTS.test(u.norm))) && RISK.test(u.norm) && !u.colleges.length && !timeUnclear) {
+    return caseloadRisk(ctx, horizonFor(u.window, now), why);
   }
   if (u.judgement || !isLookup(u)) return null;
 
@@ -147,16 +152,27 @@ function horizonFor(window: DateWindow | null, now: Date): number {
   return Math.max(1, Math.min(days, 60));
 }
 
-async function caseloadRisk(ctx: CompileContext, horizon: number): Promise<DirectAnswer> {
+/**
+ * The caseload ranking. A "why" question gets the same students in the same order, each with their reasons on
+ * their own lines (which items are overdue and by how long, which are due soon with no activity, red flags),
+ * since the reasons are the answer there rather than the order.
+ */
+async function caseloadRisk(ctx: CompileContext, horizon: number, why = false): Promise<DirectAnswer> {
   const ranked = (await loadRosterRisk(ctx.request, horizon)).slice(0, 5);
   const span = horizon === 1 ? "by tomorrow" : `in the next ${horizon} days`;
-  const text = ranked.length
-    ? [
-        `Ranked by overdue work, deadlines ${span} and days without activity:`,
-        ...ranked.map((r, i) => `${i + 1}. ${plain(r.name, 60)}: ${r.reasons.join("; ")}.`),
-      ].join("\n")
-    : `Nobody on your roster has overdue work, a red flag or a deadline at risk ${span}.`;
-  return { frame: "caseload-risk", text, trace: ["Ranked the caseload by urgency"], sources: ["Tasks", "Calendar"], outside: ranked.some((r) => r.outside), freeText: false };
+  const text = !ranked.length
+    ? `Nobody on your roster has overdue work, a red flag or a deadline at risk ${span}.`
+    : why
+      ? [
+          `Why each student needs attention (overdue work, deadlines ${span} and days without activity), most urgent first:`,
+          ...ranked.flatMap((r) => [`- ${plain(r.name, 60)}`, ...r.reasons.map((x) => `  - ${x}`)]),
+        ].join("\n")
+      : [
+          `Ranked by overdue work, deadlines ${span} and days without activity:`,
+          ...ranked.map((r, i) => `${i + 1}. ${plain(r.name, 60)}: ${r.reasons.join("; ")}.`),
+        ].join("\n");
+  const trace = [why ? "Listed why each student needs attention" : "Ranked the caseload by urgency"];
+  return { frame: "caseload-risk", text, trace, sources: ["Tasks", "Calendar"], outside: ranked.some((r) => r.outside), freeText: false };
 }
 
 async function upcoming(ctx: CompileContext, u: Understanding, studentId: string | null, now: Date): Promise<DirectAnswer> {
