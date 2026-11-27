@@ -383,8 +383,8 @@ path.
   student-written fields hold back only changes a student or family would see; `COUNSELOR_ONLY`, `ops/run.ts:82`).
 - **Limits:** 20 writes a turn; card lines are refused, never cut, when too long to show whole.
 - **Deletes that wait for Confirm** (32 operations, `TRASH_COVERED`) keep their rows in a 30-day trash, and Undo
-  restores them (needs migration `20261108000003`; without it these deletes don't run). A restored meeting re-sends
-  its invitation.
+  restores them (needs migration `20261108000003`; without it these deletes don't run). A restored meeting goes back on
+  the counselor's calendar quietly: no new invitation is emailed (Elvin, 11/26).
 
 Each later turn reads the last 12 actions in the chat and their status (`recentActionsText`), so AxIS knows what was
 confirmed, dismissed or undone.
