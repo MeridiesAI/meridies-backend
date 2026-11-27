@@ -15,6 +15,7 @@
  * AxIS change anything without a click, and after five auto writes in one
  * turn, so a runaway loop stops at a card. A turn holds twenty writes at most.
  */
+import { counselorZone } from "../tz.js";
 import { restoreUntil, TRASH_COVERED, TRASH_MISSING, trashReady } from "./trash.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
@@ -264,6 +265,7 @@ const writeLimit = (): OpOutput => ({
 export function helpers(request: FastifyRequest, roster: OpContext["roster"] | null): OpHelpers {
   return {
     studentName: (id) => (id && roster?.get(id)?.name) || "the student",
+    zone: counselorZone(request),
     get: async <T>(url: string): Promise<T | null> => {
       try {
         const r = await dispatch(request, { method: "GET", url });

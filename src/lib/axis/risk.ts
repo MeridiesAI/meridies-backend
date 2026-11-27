@@ -21,6 +21,7 @@ import { fromPostgrest } from "../errors.js";
 import { plainName } from "../context/identity.js";
 import { researchTaskIds } from "../research/origin.js";
 import { isoDay, plain } from "./data.js";
+import { addDays, counselorZone } from "./tz.js";
 
 type Row = Record<string, unknown>;
 
@@ -102,8 +103,9 @@ export function rankStudents(
 
 export async function loadRosterRisk(request: FastifyRequest, horizonDays = 14): Promise<StudentRisk[]> {
   const counselorId = request.auth.userId;
-  const today = isoDay();
-  const horizon = isoDay(new Date(Date.now() + horizonDays * DAY));
+  const zone = counselorZone(request);
+  const today = isoDay(zone);
+  const horizon = addDays(today, horizonDays);
   const [settings, students] = await Promise.all([
     loadSettings(request, counselorId),
     request.db.from("profiles").select("id, full_name").eq("counselor_id", counselorId).eq("role", "student").is("archived_at", null).limit(1000),

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseWindow } from "../../src/lib/axis/dates.js";
+import { explicitDates, parseWindow, schoolBreak } from "../../src/lib/axis/dates.js";
 import { CollegeIndex, jaroWinkler, RosterIndex } from "../../src/lib/axis/entities.js";
-import { asksForEssayText, attributesOf, nextState, understand } from "../../src/lib/axis/nlu.js";
+import { asksForEssayText, attributesOf, nextState, pickCandidate, understand } from "../../src/lib/axis/nlu.js";
 import { splitClauses, tokens } from "../../src/lib/axis/text.js";
 
 const NOW = new Date("2026-10-11T15:00:00Z"); // a Sunday
@@ -190,4 +190,109 @@ test("an essay turn says it doesn't write essay text only when asked to write it
   // "Could I get…" asks for text only when what it asks for is text.
   assert.equal(asksForEssayText("Could I get feedback on her essay?", "could i get feedback on her essay"), false);
   assert.equal(asksForEssayText("Can I get a new intro for her essay?", "can i get a new intro for her essay"), true);
+});
+
+test("fixed-rule dates: Thanksgiving, Christmas, New Year's, end of month", () => {
+  assert.deepEqual(parseWindow("what's due before thanksgiving", NOW), { from: "2026-10-11", to: "2026-11-26", label: "by Thanksgiving (Nov 26)" });
+  assert.deepEqual(parseWindow("anything due on Thanksgiving?", NOW), { from: "2026-11-26", to: "2026-11-26", label: "on Thanksgiving (Nov 26)" });
+  // The next occurrence: the day after Thanksgiving it is next year's (the fourth Thursday of November 2027).
+  assert.equal(parseWindow("by thanksgiving", new Date("2026-11-27T12:00:00Z"))?.to, "2027-11-25");
+  assert.equal(parseWindow("by thanksgiving", new Date("2026-11-26T12:00:00Z"))?.to, "2026-11-26", "on the day itself, today");
+  assert.deepEqual(parseWindow("what's due by Christmas", NOW), { from: "2026-10-11", to: "2026-12-25", label: "by Christmas (Dec 25)" });
+  assert.equal(parseWindow("due by christmas eve", NOW)?.to, "2026-12-24");
+  assert.equal(parseWindow("due before New Year's Eve", NOW)?.to, "2026-12-31");
+  assert.equal(parseWindow("anything due by new year's", NOW)?.to, "2027-01-01");
+  assert.equal(parseWindow("due by New Year’s Day", NOW)?.to, "2027-01-01");
+  assert.deepEqual(parseWindow("what's due by the end of the month", NOW), { from: "2026-10-11", to: "2026-10-31", label: "by the end of the month" });
+  assert.deepEqual(parseWindow("due by end of next month", NOW), { from: "2026-10-11", to: "2026-11-30", label: "by the end of next month" });
+  assert.equal(parseWindow("what's due after thanksgiving", NOW), null, "after a holiday isn't a window the code builds");
+});
+
+test("fixed-rule dates count from the counselor's today in their zone, not UTC's", () => {
+  const LA = "America/Los_Angeles";
+  // 7pm on Thanksgiving in Los Angeles is already Nov 27 in UTC: still Thanksgiving for the counselor.
+  const thanksgivingEvening = new Date("2026-11-27T03:00:00Z");
+  assert.deepEqual(parseWindow("anything due by thanksgiving?", thanksgivingEvening, LA), { from: "2026-11-26", to: "2026-11-26", label: "by Thanksgiving (Nov 26)" });
+  assert.equal(parseWindow("anything due by thanksgiving?", thanksgivingEvening, "UTC")?.to, "2027-11-25", "in UTC it would already be next year's");
+  // 8pm on New Year's Eve in Los Angeles: New Year's Eve is today, not next year's.
+  const nyeEvening = new Date("2027-01-01T04:00:00Z");
+  assert.equal(parseWindow("due by new year's eve", nyeEvening, LA)?.to, "2026-12-31");
+  assert.equal(parseWindow("due by new year's eve", nyeEvening, "UTC")?.to, "2027-12-31");
+  // 7pm on Oct 31 in Los Angeles: the end of the month is today.
+  assert.deepEqual(parseWindow("what's due by the end of the month", new Date("2026-11-01T02:00:00Z"), LA), { from: "2026-10-31", to: "2026-10-31", label: "by the end of the month" });
+  // A reply's dates are read from the counselor's year too.
+  assert.deepEqual(explicitDates("Dec 31", nyeEvening, LA), ["2026-12-31"]);
+});
+
+test("school breaks are never guessed: no window, and the break is named for the question back", () => {
+  assert.equal(parseWindow("what's due before winter break", NOW), null);
+  assert.equal(parseWindow("anything due over Christmas break?", NOW), null, "a school's Christmas break is not Christmas Day");
+  assert.equal(parseWindow("overdue or due before spring break", NOW), null);
+  assert.equal(schoolBreak("what's due before winter break"), "winter break");
+  assert.equal(schoolBreak("anything due over Christmas break?"), "Christmas break");
+  assert.equal(schoolBreak("due before the holidays"), "the holiday break");
+  assert.equal(schoolBreak("what's due by thanksgiving"), null);
+  assert.deepEqual(explicitDates("Dec 19", NOW), ["2026-12-19"]);
+  assert.deepEqual(explicitDates("Dec 20 to Jan 4", NOW), ["2026-12-20", "2027-01-04"]);
+  assert.deepEqual(explicitDates("12/20-1/4", NOW), ["2026-12-20", "2027-01-04"]);
+});
+
+// Two students with one first name, for the code's own "which one?".
+const twins = new RosterIndex([
+  { id: "a1", name: "Alex Chen", gradYear: "2027" },
+  { id: "a2", name: "Alex Park", gradYear: "2028" },
+  { id: "s5", name: "Maya Brooks" },
+]);
+const ask = { kind: "student" as const, question: "What's Alex's GPA?", candidates: [{ id: "a1", name: "Alex Chen", grade: 12 }, { id: "a2", name: "Alex Park", grade: 11 }] };
+
+test("which student: the reply to the code's question resolves by last name, grade or position", () => {
+  assert.equal(pickCandidate("Chen", ask.candidates), 0);
+  assert.equal(pickCandidate("Alex Park", ask.candidates), 1);
+  assert.equal(pickCandidate("the 12th grader", ask.candidates), 0);
+  assert.equal(pickCandidate("the junior", ask.candidates), 1);
+  assert.equal(pickCandidate("the first one", ask.candidates), 0);
+  assert.equal(pickCandidate("second", ask.candidates), 1);
+  assert.equal(pickCandidate("2", ask.candidates), 1);
+  assert.equal(pickCandidate("Alex", ask.candidates), null, "the shared name decides nothing");
+  assert.equal(pickCandidate("Chen, the junior", ask.candidates), null, "signals that disagree decide nothing");
+  assert.equal(pickCandidate("the sophomore", ask.candidates), null);
+  assert.equal(pickCandidate("Chan", ask.candidates), null, "never a close spelling between students");
+  assert.equal(pickCandidate("what is the admit rate for the first school on her list", ask.candidates), null, "a new question isn't a reply");
+});
+
+test("which student: the remembered question is answered about the chosen student", () => {
+  const state = { students: [], colleges: [], at: "2026-10-11T14:58:00Z", pending: ask };
+  const first = understand("What's Alex's GPA?", { chatStudentId: null, roster: twins, colleges, state: null, now: NOW });
+  assert.equal(first.ambiguousStudents.length, 1);
+  const x = understand("the 12th grader", { chatStudentId: null, roster: twins, colleges, state, now: NOW });
+  assert.deepEqual(x.students.map((s) => [s.id, s.score]), [["a1", 1]]);
+  assert.deepEqual(x.ambiguousStudents, []);
+  assert.deepEqual(x.attributes, ["gpa"]);
+  assert.equal(x.text, "What's Alex's GPA?");
+  const other = understand("how many students do I have", { chatStudentId: null, roster: twins, colleges, state, now: NOW });
+  assert.equal(other.text, "how many students do I have", "a message that isn't a reply is its own question");
+  const stale = understand("Chen", { chatStudentId: null, roster: twins, colleges, state: { ...state, at: "2026-10-11T13:00:00Z" }, now: NOW });
+  assert.notEqual(stale.text, "What's Alex's GPA?", "the question back expires with the rest of the state");
+  assert.equal(nextState(x, state, null, NOW).pending, undefined, "answered once, forgotten");
+});
+
+test("which break dates: the reply's date finishes the remembered question", () => {
+  const state = { students: [], colleges: [], at: "2026-10-11T14:58:00Z", pending: { kind: "date" as const, question: "what's due before winter break", label: "winter break", mode: "by" as const } };
+  const x = understand("Dec 18", { chatStudentId: null, roster, colleges, state, now: NOW });
+  assert.deepEqual(x.window, { from: "2026-10-11", to: "2026-12-18", label: "before winter break (Dec 18)" });
+  const during = { ...state, pending: { ...state.pending, question: "what's due during winter break", mode: "during" as const } };
+  assert.deepEqual(understand("Dec 21 to Jan 1", { chatStudentId: null, roster, colleges, state: during, now: NOW }).window, { from: "2026-12-21", to: "2027-01-01", label: "during winter break" });
+  assert.equal(understand("Dec 21", { chatStudentId: null, roster, colleges, state: during, now: NOW }).text, "Dec 21", "one date can't bound a break");
+});
+
+test("a misspelled school with one close match is assumed; two close matches or a student never are", () => {
+  const x = u("what's the admit rate at Cornel", null);
+  assert.deepEqual(x.colleges.map((c) => [c.id, c.via]), [["c1", "fuzzy"]]);
+  assert.deepEqual(u("Northeastrn acceptance rate", null).colleges.map((c) => c.id), ["c12"]);
+  assert.deepEqual(u("what's Cornel's GPA", null).colleges, [], "only when a school figure is asked");
+  assert.deepEqual(u("admit rate at Bethal", null).colleges, [], "two schools named Bethel: no single close match");
+  assert.deepEqual(u("what's the admit rate at Zzyzx", null).colleges, []);
+  // A close spelling of a carried-over school wins over the pronoun guess.
+  const state = { students: [], colleges: [{ id: "c2", name: "Brown University" }], at: "2026-10-11T14:58:00Z" };
+  assert.deepEqual(understand("admit rate at Tufs", { chatStudentId: null, roster, colleges, state, now: NOW }).colleges.map((c) => c.id), ["c13"]);
 });
