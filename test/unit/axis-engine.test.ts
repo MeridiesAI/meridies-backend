@@ -124,8 +124,9 @@ test("essay writing is refused into bullets, never sent to the free-text path", 
 });
 
 test("a time the parser can't read keeps the question off the direct path", async () => {
-  const scripted = scriptedApi([{ text: "Two things are due before Thanksgiving." }]);
-  const { res } = await turn("anything due for her before thanksgiving", "s1", scripted.api);
+  // Thanksgiving is a fixed-rule date the parser reads now (lib/axis/dates.ts); the end of a semester is not.
+  const scripted = scriptedApi([{ text: "Two things are due before the semester ends." }]);
+  const { res } = await turn("anything due for her before the end of the semester", "s1", scripted.api);
   assert.equal(res.path, "agent");
   assert.equal(scripted.calls.length, 1);
 });

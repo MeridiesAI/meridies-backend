@@ -1,9 +1,18 @@
 /**
  * Relative dates in a counselor's question, read without a model: "this
- * week", "by Friday", "next 10 days", "before Nov 1", "overdue". The result is
- * a window of ISO dates the planner and the direct answers query with. "Today"
- * is the counselor's today, in their timezone (lib/axis/tz.ts); the calendar
- * math after that runs on UTC-midnight dates, so it never shifts a day.
+ * week", "by Friday", "next 10 days", "before Nov 1", "overdue", and the days
+ * fixed by rule ("by Thanksgiving", "before Christmas", "New Year's Eve", "end
+ * of the month"). The result is a window of ISO dates the planner and the
+ * direct answers query with. "Today" is the counselor's today, in their
+ * timezone (lib/axis/tz.ts); the calendar math after that runs on UTC-midnight
+ * dates, so it never shifts a day.
+ *
+ * A school's own break ("winter break", "spring break") has no rule: every
+ * school sets its own dates, so it never becomes a window. `schoolBreak` names
+ * it, and the direct answers ask the counselor for the date instead.
+ *
+ * Every function takes "now" and the zone from the caller, so the day it counts
+ * from is whatever the caller treats as today.
  */
 import { fold } from "./text.js";
 import { DEFAULT_ZONE, todayAsUtcDate } from "./tz.js";
@@ -69,8 +78,75 @@ function explicitDate(t: string, today: Date): Date | null {
   return null;
 }
 
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** "Nov 26", for labels. */
+export const shortDay = (d: Date) => `${SHORT_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+
+/** The fourth Thursday of November. */
+function thanksgivingIn(y: number): Date {
+  const firstThursday = 1 + ((4 - new Date(Date.UTC(y, 10, 1)).getUTCDay() + 7) % 7);
+  return new Date(Date.UTC(y, 10, firstThursday + 21));
+}
+
+/** Days fixed by rule, most specific first ("Christmas Eve" before "Christmas"). Matched on the text without apostrophes. */
+const HOLIDAYS: { re: RegExp; name: string; on: (y: number) => Date }[] = [
+  { re: /\bthanksgiving( day)?\b/, name: "Thanksgiving", on: thanksgivingIn },
+  { re: /\b(christmas|xmas) eve\b/, name: "Christmas Eve", on: (y) => new Date(Date.UTC(y, 11, 24)) },
+  { re: /\b(christmas|xmas)( day)?\b/, name: "Christmas", on: (y) => new Date(Date.UTC(y, 11, 25)) },
+  { re: /\bnew years? eve\b/, name: "New Year's Eve", on: (y) => new Date(Date.UTC(y, 11, 31)) },
+  { re: /\bnew years?( day)?\b/, name: "New Year's Day", on: (y) => new Date(Date.UTC(y, 0, 1)) },
+];
+
+/** The holiday's next date, today included. */
+function holiday(t: string, today: Date): { name: string; date: Date } | null {
+  const bare = t.replace(/'/g, "");
+  for (const h of HOLIDAYS) {
+    if (!h.re.test(bare)) continue;
+    let date = h.on(today.getUTCFullYear());
+    if (date.getTime() < today.getTime()) date = h.on(today.getUTCFullYear() + 1);
+    return { name: h.name, date };
+  }
+  return null;
+}
+
+/**
+ * A break whose dates each school sets: "winter break", "spring break", "Christmas break", "the holidays". Its
+ * name as the counselor would say it, or null.
+ */
+export function schoolBreak(text: string): string | null {
+  const t = fold(text).replace(/'/g, "");
+  const m = /\b(winter|spring|fall|autumn|christmas|xmas|holiday|thanksgiving|february|feb|midwinter|summer|semester|mid ?term)\s+(break|vacation|recess|holidays)\b/.exec(t);
+  if (m) {
+    const season = m[1] === "christmas" || m[1] === "xmas" ? "Christmas" : m[1] === "thanksgiving" ? "Thanksgiving" : m[1] === "feb" ? "February" : m[1]!;
+    return `${season} ${m[2] === "holidays" ? "break" : m[2]}`;
+  }
+  if (/\b(the|over|during|before|after|until|by) holidays\b/.test(t)) return "the holiday break";
+  return null;
+}
+
+/** The explicit dates in a short reply ("Dec 19", "Dec 20 to Jan 4", "12/20-1/4"), at most two, as ISO days. */
+export function explicitDates(text: string, now = new Date(), zone: string = DEFAULT_ZONE): string[] {
+  const today = todayAsUtcDate(zone, now);
+  const t = fold(text).replace(/[,?!]/g, " ").replace(/\s+/g, " ").trim();
+  const parts = t.split(/\s+(?:to|through|thru|until|till|and|-|–|—)\s+|\s*[–—]\s*|(?<=[a-z0-9])-(?=[a-z]|\d{1,2}\/)/);
+  const out: string[] = [];
+  let prev: Date | null = null;
+  for (const part of parts) {
+    const d = explicitDate(part, today);
+    if (!d) continue;
+    // A range runs forward: "Dec 20 to Jan 4" ends in the next year.
+    const fwd: Date = prev && d.getTime() < prev.getTime() ? new Date(Date.UTC(d.getUTCFullYear() + 1, d.getUTCMonth(), d.getUTCDate())) : d;
+    out.push(iso(fwd));
+    prev = fwd;
+    if (out.length === 2) break;
+  }
+  return out;
+}
+
 export function parseWindow(text: string, now = new Date(), zone: string = DEFAULT_ZONE): DateWindow | null {
   const t = fold(text).replace(/[,?!]/g, " ").replace(/\s+/g, " ");
+  // A school break has no date the code can know: no window at all, so nothing answers a different question.
+  if (schoolBreak(t)) return null;
   const today = todayAsUtcDate(zone, now);
   const overdue = /\b(overdue|past due|late|missed)\b/.test(t);
   const window = forwardWindow(t, today);
@@ -106,6 +182,14 @@ function forwardWindow(t: string, today: Date): DateWindow | null {
     const sunday = nextWeekday(today, 0);
     return { from: iso(today), to: iso(sunday), label: "this week" };
   }
+  if (/\bend of next month\b/.test(t)) {
+    const last = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 2, 0));
+    return { from: iso(today), to: iso(last), label: "by the end of next month" };
+  }
+  if (/\bend of (the |this )?month\b/.test(t)) {
+    const last = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0));
+    return { from: iso(today), to: iso(last), label: "by the end of the month" };
+  }
   if (/\bnext month\b/.test(t)) {
     const first = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1));
     const last = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 2, 0));
@@ -114,6 +198,18 @@ function forwardWindow(t: string, today: Date): DateWindow | null {
   if (/\bthis month\b/.test(t)) {
     const last = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0));
     return { from: iso(today), to: iso(last), label: "this month" };
+  }
+  const h = holiday(t, today);
+  if (h) {
+    // "After Thanksgiving" runs to no end the code could pick: no window (the direct answers then step aside).
+    if (/\b(after|since|following|past)\b/.test(t)) return null;
+    const label = `${h.name} (${shortDay(h.date)})`;
+    if (/\b(by|before|until|till|through|ahead of|prior to)\b/.test(t)) return { from: iso(today), to: iso(h.date), label: `by ${label}` };
+    if (/\bweek\b/.test(t)) {
+      const monday = addDays(h.date, -((h.date.getUTCDay() + 6) % 7));
+      return { from: iso(monday), to: iso(addDays(monday, 6)), label: `the week of ${label}` };
+    }
+    return { from: iso(h.date), to: iso(h.date), label: `on ${label}` };
   }
   const until = /\b(by|before|until|till|through|ahead of)\s+(.+)$/.exec(t);
   if (until) {

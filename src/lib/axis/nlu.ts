@@ -15,7 +15,8 @@
  *  - A time window (lib/axis/dates.ts).
  *  - Complexity, from clauses, entities, judgement words and length.
  */
-import { parseWindow, type DateWindow } from "./dates.js";
+import { explicitDates, parseWindow, shortDay, type DateWindow } from "./dates.js";
+import { dayIn, DEFAULT_ZONE } from "./tz.js";
 import type { AmbiguousCollege, AmbiguousMention, CollegeIndex, CollegeMention, RosterIndex, StudentMention } from "./entities.js";
 import {
   ATTRIBUTE_PATTERNS,
@@ -33,6 +34,14 @@ import type { DraftHeader } from "./drafts/state.js";
 
 export type { Intent, Attribute };
 
+/**
+ * A question AxIS asked back in code, kept for one turn so the reply finishes the original question: which of two
+ * students with one first name ("Chen", "the 12th grader", "the first one"), or when a school's break is.
+ */
+export type PendingAsk =
+  | { kind: "student"; question: string; candidates: { id: string; name: string; grade: number | null; gradYear?: string | null }[] }
+  | { kind: "date"; question: string; label: string; mode: "by" | "during" };
+
 export type DialogueState = {
   students: { id: string; name: string }[];
   colleges: { id: string; name: string }[];
@@ -43,6 +52,8 @@ export type DialogueState = {
   short?: boolean;
   /** The chat's open activity draft: its header (the rows are in ai_conversations.draft_rows; lib/axis/drafts/state.ts). */
   draft?: DraftHeader;
+  /** The question the last answer asked back, if it did. Kept one turn, and expires with the rest of the state. */
+  pending?: PendingAsk;
 };
 
 export type Clause = { text: string; intent: Intent; score: number };
@@ -158,8 +169,84 @@ export function keywordsOf(text: string): string[] {
   return [...new Set(out)];
 }
 
+const ORDINALS: [RegExp, (n: number) => number][] = [
+  [/\b(first|1st|former)\b/, () => 0],
+  [/\b(second|2nd)\b/, () => 1],
+  [/\b(third|3rd)\b/, () => 2],
+  [/\b(fourth|4th)\b/, () => 3],
+  [/\b(latter|last)\b/, (n) => n - 1],
+];
+const GRADES: [RegExp, number][] = [
+  [/\b(12th|twelfth|senior|seniors)\b/, 12],
+  [/\b(11th|eleventh|junior|juniors)\b/, 11],
+  [/\b(10th|tenth|sophomore|sophomores)\b/, 10],
+  [/\b(9th|ninth|freshman|freshmen)\b/, 9],
+];
+
+/**
+ * Which of the students AxIS listed a short reply picks: by a part of the name only one of them has ("Chen",
+ * "Alex Park"), by grade or class year ("the 12th grader", "class of 2027"), or by position ("the first one",
+ * "2"). Every signal in the reply has to point at the same one student; a close spelling never counts (no guessing
+ * between students). Null when the reply picks nobody, or is a new question (over eight words).
+ */
+export function pickCandidate(text: string, candidates: { name: string; grade: number | null; gradYear?: string | null }[]): number | null {
+  const words = tokens(text);
+  if (!words.length || words.length > 8) return null;
+  const norm = words.join(" ");
+  const picks: number[][] = [];
+  if (/^\d$/.test(norm)) picks.push([Number(norm) - 1]);
+  for (const [re, at] of ORDINALS) if (re.test(norm)) picks.push([at(candidates.length)]);
+  for (const [re, grade] of GRADES) if (re.test(norm)) picks.push(candidates.flatMap((c, i) => (c.grade === grade ? [i] : [])));
+  const year = /\b(20\d\d)\b/.exec(norm)?.[1];
+  if (year) picks.push(candidates.flatMap((c, i) => (c.gradYear === year ? [i] : [])));
+  const parts = candidates.map((c) => tokens(c.name));
+  const shared = new Set(parts[0]!.filter((p) => parts.every((ps) => ps.includes(p))));
+  const named = candidates.flatMap((_, i) => (words.some((w) => !shared.has(w) && parts[i]!.includes(w)) ? [i] : []));
+  if (named.length) picks.push(named);
+  if (!picks.length) return null;
+  const first = picks[0]!;
+  if (first.length !== 1 || first[0]! < 0 || first[0]! >= candidates.length) return null;
+  return picks.every((p) => p.length === 1 && p[0] === first[0]) ? first[0]! : null;
+}
+
+/** The remembered question, finished by this reply; null when the message isn't a reply to it. */
+function resolvePending(text: string, pending: PendingAsk, ctx: UnderstandContext, fresh: DialogueState, now: Date): Understanding | null {
+  const again = (q: string) => understand(q, { ...ctx, state: { ...fresh, pending: undefined } });
+  if (pending.kind === "student") {
+    const i = pickCandidate(text, pending.candidates);
+    if (i === null) return null;
+    const c = pending.candidates[i]!;
+    const base = again(pending.question);
+    // The chat's own student is the chat's (the direct answers read it through the chat); anyone else is named.
+    const students: StudentMention[] = c.id === ctx.chatStudentId ? [] : [{ id: c.id, name: c.name, score: 1, via: "full" }];
+    return { ...base, students, ambiguousStudents: [] };
+  }
+  // The counselor's today, in their zone: "Dec 19" and "before" are read from their date, not UTC's.
+  const zone = ctx.zone ?? DEFAULT_ZONE;
+  const days = explicitDates(text, now, zone);
+  if (!days.length || tokens(text).length > 8) return null;
+  const today = dayIn(zone, now);
+  const label = (d: string) => shortDay(new Date(`${d}T00:00:00Z`));
+  // "Before winter break": from today to the day it starts. "During": its first and last day, both needed.
+  const window: DateWindow | null =
+    pending.mode === "by"
+      ? days[0]! >= today
+        ? { from: today, to: days[0]!, label: `before ${pending.label} (${label(days[0]!)})` }
+        : null
+      : days.length === 2
+        ? { from: days[0]!, to: days[1]!, label: `during ${pending.label}` }
+        : null;
+  if (!window) return null;
+  return { ...again(pending.question), window };
+}
+
 export function understand(text: string, ctx: UnderstandContext): Understanding {
   const now = ctx.now ?? new Date();
+  const live = ctx.state && now.getTime() - Date.parse(ctx.state.at) < STATE_TTL_MS ? ctx.state : null;
+  if (live?.pending) {
+    const resolved = resolvePending(text, live.pending, ctx, live, now);
+    if (resolved) return resolved;
+  }
   const norm = tokens(text).join(" ");
   const fromRoster = ctx.roster ? ctx.roster.match(text) : { students: [], ambiguous: [] };
   const fromCatalog = ctx.colleges ? ctx.colleges.match(text) : { colleges: [], ambiguous: [] };
@@ -173,6 +260,13 @@ export function understand(text: string, ctx: UnderstandContext): Understanding 
     students = [{ ...fresh.students[0], score: 0.6, via: "pronoun" }];
   }
   const asksSchoolFact = attributes.some((a) => COLLEGE_ATTRIBUTES.has(a));
+  // A school figure asked of a name the catalog doesn't know: the one school it is a close spelling of, if there is
+  // exactly one (the direct answer then says "Assuming you meant …"). Before the carried-over school, which a
+  // misspelled name is plainly not about. Never for students.
+  if (!colleges.length && !fromCatalog.ambiguous.length && asksSchoolFact && ctx.colleges) {
+    const guess = ctx.colleges.closest(text);
+    if (guess) colleges = [guess];
+  }
   if (!colleges.length && !fromCatalog.ambiguous.length && fresh?.colleges[0] && (PRONOUN_SCHOOL.test(norm) || asksSchoolFact)) {
     colleges = [{ ...fresh.colleges[0], score: 0.6, via: "pronoun", span: "" }];
   }

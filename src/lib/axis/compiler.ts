@@ -11,6 +11,14 @@
  *
  * Frames: roster count, caseload risk, what is due (one student or the
  * roster), a student's facts, catalog figures for up to four schools.
+ *
+ * Two questions back, also in code, when the rest of the request is one of
+ * those lookups: which student, when two on the roster share the first name
+ * ("Which Alex: Alex Chen (12th) or Alex Park (11th)?"), and when a school's
+ * break is ("before winter break"). The question is kept in the dialogue
+ * state (lib/axis/nlu.ts PendingAsk), so the reply finishes the lookup. A
+ * misspelled school with exactly one close match is answered with "Assuming
+ * you meant …"; a student never is.
  */
 import type { FastifyRequest } from "fastify";
 import { resolveStudentId } from "../guards.js";
@@ -27,17 +35,17 @@ import {
   type UpcomingItem,
 } from "./data.js";
 import { plainGradYear } from "../context/identity.js";
-import type { DateWindow } from "./dates.js";
-import { addDays, counselorZone } from "./tz.js";
-import type { RosterIndex } from "./entities.js";
+import { schoolBreak, type DateWindow } from "./dates.js";
+import { addDays, counselorZone, dayIn, DEFAULT_ZONE } from "./tz.js";
+import type { AmbiguousMention, RosterIndex } from "./entities.js";
 import type { SourceLedger } from "./ledger.js";
 import { COLLEGE_ATTRIBUTES, STUDENT_ATTRIBUTES, type Attribute } from "./lexicon.js";
-import type { Understanding } from "./nlu.js";
+import type { PendingAsk, Understanding } from "./nlu.js";
 import { loadRosterRisk } from "./risk.js";
 import { anyLong } from "../context/freeText.js";
 
 export type DirectAnswer = {
-  frame: "roster-count" | "caseload-risk" | "upcoming" | "student-facts" | "college-facts";
+  frame: "roster-count" | "caseload-risk" | "upcoming" | "student-facts" | "college-facts" | "ask-student" | "ask-date";
   text: string;
   trace: string[];
   sources: string[];
@@ -54,6 +62,8 @@ export type DirectAnswer = {
   freeText: boolean;
   /** Those values, for the quote check. */
   freeBlocks?: { source: string; text: string }[];
+  /** The answer is a question back: the engine keeps this in the dialogue state for the reply. */
+  pending?: PendingAsk;
 };
 
 export type CompileContext = {
@@ -87,13 +97,74 @@ function shortDate(iso: string, today: string): string {
   return iso.slice(0, 4) === today.slice(0, 4) ? md : `${md}, ${d.getUTCFullYear()}`;
 }
 
-/** One resolved student the question is about: the chat's, or exactly one named without ambiguity. */
-function targetStudent(u: Understanding, ctx: CompileContext): { id: string; viaChat: boolean } | "ambiguous" | null {
-  if (u.ambiguousStudents.length) return "ambiguous";
+type Target = { id: string; viaChat: boolean } | { ask: AmbiguousMention } | "ambiguous" | null;
+
+/**
+ * One resolved student the question is about: the chat's, or exactly one named without ambiguity. A first name two
+ * students share, with nobody else named, is a question back (`ask`). A name read only as a close spelling is never
+ * answered about anyone, not even the chat's student: the model takes it.
+ */
+function targetStudent(u: Understanding, ctx: CompileContext): Target {
+  if (u.ambiguousStudents.length) return u.ambiguousStudents.length === 1 && !u.students.length ? { ask: u.ambiguousStudents[0]! } : "ambiguous";
   const named = u.students.filter((s) => s.score >= 0.8 || s.via === "pronoun");
-  if (named.length > 1) return "ambiguous";
+  if (named.length !== u.students.length || named.length > 1) return "ambiguous";
   if (named.length === 1) return { id: named[0]!.id, viaChat: false };
   return ctx.chatStudentId ? { id: ctx.chatStudentId, viaChat: true } : null;
+}
+
+/**
+ * The grade a class year means on the counselor's today (`now` in `zone`; the school year turns over in July), when
+ * it is 9 through 12.
+ */
+export function gradeOf(gradYear: string | null | undefined, now: Date, zone: string = DEFAULT_ZONE): number | null {
+  if (!gradYear || !/^\d{4}$/.test(gradYear)) return null;
+  const today = dayIn(zone, now);
+  const year = Number(today.slice(0, 4));
+  const endsIn = Number(today.slice(5, 7)) >= 7 ? year + 1 : year;
+  const grade = 12 - (Number(gradYear) - endsIn);
+  return grade >= 9 && grade <= 12 ? grade : null;
+}
+
+const MAX_CHOICES = 5;
+
+/** "Which Alex: Alex Chen (12th) or Alex Park (11th)?", with the question kept for the reply. Null past five names. */
+function askWhichStudent(u: Understanding, ctx: CompileContext, mention: AmbiguousMention, now: Date): DirectAnswer | null {
+  const cands = mention.candidates;
+  if (cands.length < 2 || cands.length > MAX_CHOICES) return null;
+  const candidates = cands.map((c) => {
+    const gradYear = ctx.roster.get(c.id)?.gradYear ?? c.gradYear ?? null;
+    return { id: c.id, name: c.name, grade: gradeOf(gradYear, now, counselorZone(ctx.request)), gradYear };
+  });
+  const label = (c: (typeof candidates)[number]) =>
+    `${plain(c.name, 60)}${c.grade ? ` (${c.grade}th)` : c.gradYear ? ` (class of ${c.gradYear})` : ""}`;
+  const names = candidates.map(label);
+  const list = `${names.slice(0, -1).join(", ")} or ${names.at(-1)}`;
+  return {
+    frame: "ask-student",
+    text: `Which ${firstName(cands[0]!.name)}: ${list}?`,
+    trace: [`Found ${cands.length} students named ${firstName(cands[0]!.name)}`],
+    sources: ["Roster"],
+    outside: false,
+    freeText: false,
+    pending: { kind: "student", question: u.text, candidates },
+  };
+}
+
+/** "When does winter break start at your school?": a school's break has no date the code may assume. */
+function askBreakDate(u: Understanding, label: string): DirectAnswer | null {
+  if (/\b(after|since|following)\b/.test(u.norm)) return null;
+  const by = /\b(before|by|until|till|ahead of|prior to)\b/.test(u.norm);
+  return {
+    frame: "ask-date",
+    text: by
+      ? `When does ${label} start at your school? Reply with the date (for example "Dec 19") and I'll list what's due before then.`
+      : `What are the dates of ${label} at your school? Reply with the first and last day (for example "Dec 20 to Jan 4") and I'll list what's due then.`,
+    trace: [`Asked for the dates of ${label}`],
+    sources: [],
+    outside: false,
+    freeText: false,
+    pending: { kind: "date", question: u.text, label, mode: by ? "by" : "during" },
+  };
 }
 
 const isLookup = (u: Understanding) =>
@@ -122,21 +193,38 @@ export async function compileDirect(u: Understanding, ctx: CompileContext): Prom
     if (u.attributes.includes("sat")) asks.add("sat_range");
     if (u.attributes.includes("act")) asks.add("act_range");
     const unrelated = u.attributes.filter((a) => !COLLEGE_ATTRIBUTES.has(a) && a !== "sat" && a !== "act");
-    const sure = u.colleges.every((c) => c.score >= 0.8 || c.via === "pronoun");
-    if (asks.size && !unrelated.length && sure && u.colleges.length <= 4) return collegeFigures(ctx, u.colleges.map((c) => c.id), [...asks]);
+    // A close spelling only when it is the one school asked about: "Assuming you meant …" never covers a guess among several.
+    const assumed = u.colleges.length === 1 && u.colleges[0]!.via === "fuzzy" ? u.colleges[0]! : null;
+    const sure = assumed !== null || u.colleges.every((c) => c.score >= 0.8 || c.via === "pronoun");
+    if (asks.size && !unrelated.length && sure && u.colleges.length <= 4) {
+      const answer = await collegeFigures(ctx, u.colleges.map((c) => c.id), [...asks]);
+      if (answer && assumed) return { ...answer, text: `Assuming you meant ${plain(assumed.name, 100)}:\n${answer.text}` };
+      return answer;
+    }
     return null;
   }
   if (u.colleges.length || u.ambiguousColleges.length) return null;
 
-  if (UPCOMING.test(u.norm) && (u.attributes.includes("deadline") || u.window) && !studentAttrs.length && !timeUnclear) {
+  const asksDue = UPCOMING.test(u.norm) && !studentAttrs.length;
+  // "Before winter break": the school sets the date, so ask for it (once the student, if any, is certain).
+  const breakName = !u.window ? schoolBreak(u.text) : null;
+  if (asksDue && breakName && u.attributes.includes("deadline")) {
+    const who = targetStudent(u, ctx);
+    if (who === "ambiguous" || (who && "ask" in who)) return null;
+    return askBreakDate(u, breakName);
+  }
+
+  if (asksDue && (u.attributes.includes("deadline") || u.window) && !timeUnclear) {
     const who = targetStudent(u, ctx);
     if (who === "ambiguous") return null;
+    if (who && "ask" in who) return askWhichStudent(u, ctx, who.ask, now);
     return upcoming(ctx, u, who?.id ?? null, now);
   }
 
   if (studentAttrs.length && studentAttrs.length === u.attributes.length) {
     const who = targetStudent(u, ctx);
     if (!who || who === "ambiguous") return null;
+    if ("ask" in who) return askWhichStudent(u, ctx, who.ask, now);
     return studentFactsAnswer(ctx, who.id, who.viaChat, studentAttrs);
   }
   return null;

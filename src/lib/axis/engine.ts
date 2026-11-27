@@ -447,6 +447,8 @@ async function axisTurn(opts: {
           ...((flags ? direct.freeText : direct.outside) ? { ...state, outside: true } : state),
           // A direct answer that shows her short fields: the next turn's student-visible changes wait.
           ...(flags && direct.outside ? { short: true } : {}),
+          // A question back ("Which Alex: …?"): kept one turn, so the reply finishes the original lookup.
+          ...(direct.pending ? { pending: direct.pending } : {}),
         },
         true
       );
