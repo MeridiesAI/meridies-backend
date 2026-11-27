@@ -187,4 +187,7 @@ test("an essay turn says it doesn't write essay text only when asked to write it
   for (const t of ["How can she improve her essay?", "What should she fix in her personal statement?", "Any tips to strengthen her supplement?", "Help her improve her essay", "can you help her improve her essay"]) {
     assert.equal(asks(t), false, t);
   }
+  // "Could I get…" asks for text only when what it asks for is text.
+  assert.equal(asksForEssayText("Could I get feedback on her essay?", "could i get feedback on her essay"), false);
+  assert.equal(asksForEssayText("Can I get a new intro for her essay?", "can i get a new intro for her essay"), true);
 });

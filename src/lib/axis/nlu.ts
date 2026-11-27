@@ -126,7 +126,7 @@ const ASK_LEAD = /^(?:(?:please|pls|axis) )?(?:(?:can|could|would|will) you |i n
 /** Asking for help, feedback or a review rather than for text. */
 const ADVICE_LEAD = /^(?:help|advise|suggest|review|critique|check|read|look (?:at|over)|give (?:me|her|him|them) (?:some )?(?:feedback|advice|tips|ideas|suggestions|pointers|notes)|tell me (?:how|what|where|why|if|whether)|any (?:tips|advice|ideas|suggestions|feedback|thoughts))\b/;
 /** "Could I get a draft of…" is a question in form but asks for text. */
-const GET_TEXT = /^(?:can|could|may) i (?:get|have|see)\b/;
+const GET_TEXT = /^(?:can|could|may) i (?:get|have|see) (?:a |an |the )?(?:new |first |rough |rewritten |better |stronger )?(?:draft|version|rewrite|paragraph|intro|introduction|opening|conclusion|ending|hook|essay)\b/;
 
 /**
  * Whether an essay-intent message asks AxIS to write or rewrite essay text (so the answer opens by saying it

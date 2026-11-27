@@ -204,11 +204,13 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
   let firstEventSeen = false;
   let pendingBreak = false;
   let askedForText = false;
+  // Set when the in-round cutoff fired (a timer can fire a millisecond before Date.now() reaches the deadline).
+  let pastDeadline = false;
   let topEffort = o.base.output_config?.effort ?? o.effort;
 
   for (;;) {
     calls++;
-    const mustAnswer = calls >= o.maxCalls || Date.now() > o.deadline || stale >= STALE_ROUNDS;
+    const mustAnswer = calls >= o.maxCalls || pastDeadline || Date.now() >= o.deadline || stale >= STALE_ROUNDS;
     const round = new AbortController();
     const relay = () => round.abort();
     o.signal.addEventListener("abort", relay, { once: true });
@@ -319,6 +321,7 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
       const cutoff = new Promise<ToolOutput>((resolve) => {
         timer = setTimeout(() => {
           // Settled first, so a lookup that answers its abort with a result doesn't win the race.
+          pastDeadline = true;
           resolve(TIMED_OUT);
           reads.abort();
         }, Math.max(0, o.deadline - Date.now()));
