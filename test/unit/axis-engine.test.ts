@@ -5,12 +5,14 @@ import { runAxisTurn, type Emit } from "../../src/lib/axis/engine.js";
 import { reserveTurn } from "../../src/lib/axis/llm.js";
 import { AXIS_MODEL, PER_MESSAGE_EFFORT_BETA, resetFeatures } from "../../src/lib/axis/models.js";
 import { fakeRequest, scriptedApi } from "./axis-fakes.js";
+import { DEFAULT_ZONE, daysFromToday } from "../../src/lib/axis/tz.js";
 import { resetFlagsReadyForTest } from "../../src/lib/axis/failsafe.js";
 import { foldTranscript } from "../../src/lib/axis/memory.js";
 import type { MessagesApi } from "../../src/lib/axis/loop.js";
 
 const ME = "counselor-1";
-const day = (offset: number) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+// Dates as AxIS reads them: the counselor's (the fake request has no timezone, so the default zone's).
+const day = (offset: number) => daysFromToday(DEFAULT_ZONE, offset);
 
 const TABLES = {
   profiles: [
@@ -92,7 +94,7 @@ test("a judgement goes to Haiku 5.5 with evidence gathered first, and the reques
   const system = p.system as { text: string; cache_control?: { ttl?: string } }[];
   assert.equal(system[0]!.cache_control?.ttl, "1h");
   assert.equal(system[1]!.cache_control?.ttl, "1h");
-  assert.match(system[1]!.text, /^Today is \d{4}-\d{2}-\d{2}\./);
+  assert.match(system[1]!.text, /^Today is \d{4}-\d{2}-\d{2} \([A-Z][a-z]+day\) in the counselor's timezone, America\/New_York\./);
   assert.ok((p.tools ?? []).every((t) => "eager_input_streaming" in t && t.eager_input_streaming === true));
   const roles = p.messages.map((m) => m.role);
   assert.deepEqual(roles.slice(-3), ["system", "user", "system"], "effort before the question, mode after it");

@@ -29,9 +29,10 @@
 import { z } from "zod";
 import { BUILTIN_TYPES, isTimeZone } from "../../../calendarFeed.js";
 import { op, type OpGroup, type UndoStep } from "../types.js";
+import { DEFAULT_ZONE, daysFromToday } from "../../tz.js";
 import { asArray, asRecord, changeLines, dayLabel, defined, idOf, isoDateTime, listReply, plainText, qs, seg, str, untrusted, uuid } from "../util.js";
 
-type Get = { get<T>(url: string): Promise<T | null> };
+type Get = { get<T>(url: string): Promise<T | null>; zone?: string };
 type Row = Record<string, unknown>;
 
 // ---- shared ---------------------------------------------------------------------
@@ -407,7 +408,9 @@ const BUILTIN_LABELS: Record<string, string> = {
   event: "Professional event",
 };
 
-const dayOffset = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+/** The date `days` from today in the counselor's timezone, and that zone, for a feed read. */
+const dayOffset = (h: Get, days: number) => daysFromToday(h.zone ?? DEFAULT_ZONE, days);
+const feedZone = (h: Get) => h.zone ?? DEFAULT_ZONE;
 
 type EventType = { id?: string; name?: string; description?: string | null; timeZone?: string; color?: string; sortOrder?: number };
 
@@ -444,7 +447,7 @@ async function findPracticeEvent(h: Get, id: string): Promise<PracticeEvent | nu
     [280, 679],
     [-520, -121],
   ] as const) {
-    const feed = await h.get<unknown>(`/calendar/feed${qs({ from: dayOffset(a), to: dayOffset(b), tz: "UTC" })}`);
+    const feed = await h.get<unknown>(`/calendar/feed${qs({ from: dayOffset(h, a), to: dayOffset(h, b), tz: feedZone(h) })}`);
     if (!feed) return null;
     const f = asRecord(feed);
     const hit = asArray(f.items).find((r) => r.kind === "milestone" && r.ref === id);
@@ -711,7 +714,7 @@ export const calendar: OpGroup = {
       request: (i) => ({ method: "PUT", url: "/calendar/assignments", body: { eventKind: i.event_kind, eventRef: i.event_ref, type: i.type } }),
       describe: async (i, h) => `Show ${await feedItemLabel(h, i.event_kind, i.event_ref)} as ${await typeLabel(h, i.type)}`,
       snapshot: async (i, h) => {
-        const feed = await h.get<unknown>(`/calendar/feed${qs({ from: dayOffset(0), to: dayOffset(0), tz: "UTC" })}`);
+        const feed = await h.get<unknown>(`/calendar/feed${qs({ from: dayOffset(h, 0), to: dayOffset(h, 0), tz: feedZone(h) })}`);
         if (!feed) return null;
         const hit = asArray(asRecord(feed).assignments).find((a) => a.eventKind === i.event_kind && a.eventRef === i.event_ref);
         return { type: hit ? str(hit.type) : i.event_kind };
