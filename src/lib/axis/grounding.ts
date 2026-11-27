@@ -5,12 +5,15 @@
  * Numbers are where a fluent answer goes wrong without anyone noticing: a GPA
  * one hundredth off, last year's admit rate, a deadline on the wrong day. So
  * the evidence (the student record, the roster, every numbered passage, the
- * counselor's own question) is indexed once per turn into normalized numbers
- * and calendar days. As each sentence of the answer completes, its figures
+ * counselor's own question) is indexed once per turn into numbers, calendar
+ * days and stated counts, each with the line, passage and text it sits in. As each sentence of the answer completes, its figures
  * are extracted and looked up:
  *
  *   found     the value is in the evidence at the precision written (3.874 on
- *             file supports "3.87"; 12.3% supports "12%")
+ *             file supports "3.87"; 12.3% supports "12%"; never "4" for 3.874),
+ *             with the year when both sides state one, and, when the sentence
+ *             names a school or student, next to that name (Cornell's 7.3%
+ *             does not support "Brown admits 7.3%")
  *   derived   it is the sum or difference of two figures in the same
  *             sentence that were found ("30 points above the 1490 median"
  *             next to a found 1520)
@@ -295,8 +298,8 @@ export class EvidenceIndex {
   }
 
   /**
-   * What a figure is about: the nearest name before it in its clause, else after it in the clause, else the
-   * nearest in the sentence. "Her" is the chat's student. A sentence that names nothing gets no nearness.
+   * What a figure is about: the nearest name or pronoun before it in its clause, else after it in the clause,
+   * else the last name before it in the sentence, else the first after it. "Her" is the chat's student. A sentence that names nothing gets no nearness.
    */
   nearness(f: Figure, refs: Ref[], base: string): Nearness | null {
     if (f.at === undefined || !refs.some((r) => r.ref !== "subject" && r.ref !== "any")) return null;
@@ -314,8 +317,14 @@ export class EvidenceIndex {
     const clause = refs.filter((r) => r.start >= cs && r.end <= ce);
     const before = clause.filter((r) => r.end <= at).sort((a, b) => b.end - a.end)[0];
     const after = clause.filter((r) => r.start >= at).sort((a, b) => a.start - b.start)[0];
-    const dist = (r: Ref) => (r.end <= at ? at - r.end : r.start - at);
-    const chosen = before ?? after ?? [...refs].sort((a, b) => dist(a) - dist(b) || a.start - b.start)[0];
+    // A clause that names nothing carries on the last name before it ("Sophia has a 3.87, and a 1520 SAT"), else
+    // the first after it ("At 5.1%, Brown is..."); a pronoun counts only in its own clause.
+    const named = refs.filter((r) => r.ref !== "subject" && r.ref !== "any");
+    const chosen =
+      before ??
+      after ??
+      named.filter((r) => r.end <= at).sort((a, b) => b.end - a.end)[0] ??
+      named.filter((r) => r.start >= at).sort((a, b) => a.start - b.start)[0];
     const resolve = (r: Ref): Group | null => (r.ref === "any" ? null : r.ref === "subject" ? this.subject : r.ref);
     const group = chosen ? resolve(chosen) : null;
     if (!group) return null;

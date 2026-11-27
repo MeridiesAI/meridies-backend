@@ -156,6 +156,7 @@ test("nearness: a student's figure is found in their record, not another student
   assert.deepEqual(missing("Her 1520 sits inside Cornell's 1480–1560 range.", ev), [], "her = the chat student");
   assert.deepEqual(missing("Sophia's Cornell application is due Dec 1.", ev), [], "a line about the chat student without her name");
   assert.deepEqual(missing("Liam's Cornell application is due Dec 1.", ev), ["Dec 1"]);
+  assert.deepEqual(missing("Cornell is a reach: her record is strong but the admit rate is 7.3%.", ev), [], "a clause naming nothing goes with the nearest name, not a pronoun");
 });
 
 // ---- Counts ----
@@ -232,4 +233,26 @@ test("existing answers in the evals' style stay grounded", () => {
     "Sophia is 40 points above the 1480 floor with her 1520.",
     "Sophia Chen (class of 2027) has an Early decision application to Cornell due 2026-12-01.",
   ]) assert.deepEqual(missing(s, ev), [], s);
+});
+
+test("nearness: in the roster view each JSON object is its own passage", () => {
+  const ev = new EvidenceIndex();
+  ev.setNames(null, ["Sophia Chen", "Liam Patel"]);
+  ev.add(JSON.stringify({
+    today: "2026-11-26",
+    students: [{ name: "Sophia Chen", gradYear: 2027 }, { name: "Liam Patel", gradYear: 2027 }],
+    deadlinesNext3Weeks: [
+      { student: "Sophia Chen", title: "Early decision application", school: "Cornell", due_date: "2026-12-01" },
+      { student: "Liam Patel", title: "Early action application", school: "Brown", due_date: "2026-12-10" },
+    ],
+  }, null, 1));
+  assert.deepEqual(missing("Sophia Chen's Cornell application is due Dec 1.", ev), []);
+  assert.deepEqual(missing("Liam's Brown application is due Dec 10.", ev), []);
+  assert.deepEqual(missing("Liam's application is due Dec 1.", ev), ["Dec 1"], "Sophia's deadline given to Liam");
+  assert.deepEqual(missing("The next deadline is Dec 1.", ev), [], "no name: any deadline on file");
+});
+
+test("hedging never rescues a figure that belongs to another school", () => {
+  assert.deepEqual(missing("Brown admits about 7% of applicants."), ["7%"]);
+  assert.deepEqual(missing("Cornell admits about 7% of applicants."), []);
 });
