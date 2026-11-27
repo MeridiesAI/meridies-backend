@@ -26,6 +26,7 @@ import type { SectionName } from "../context/profiles.js";
 import type { ContextUsage } from "../context/types.js";
 import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems, type UpcomingItem } from "./data.js";
 import type { RosterIndex } from "./entities.js";
+import { counselorZone, daysFromToday } from "./tz.js";
 import { filterAllowedChunks } from "./guard.js";
 import { clip, type SourceLedger } from "./ledger.js";
 import { keywordsOf } from "./nlu.js";
@@ -307,7 +308,8 @@ const DEFS: ToolDef[] = [
       const days = i.days ?? 14;
       const target = i.student_id ?? ctx.studentId;
       const student = target ? await resolveStudentId(ctx.request, target, "view") : null;
-      const window = { from: null, to: isoDay(new Date(Date.now() + days * 86_400_000)), label: `in the next ${days} days` };
+      const zone = counselorZone(ctx.request);
+      const window = { from: null, to: daysFromToday(zone, days), label: `in the next ${days} days` };
       const items = await upcomingItems(ctx.request, { studentId: student, window, meetings: true, roster: ctx.roster, limit: 80 });
       // A deadline's title, or a task the student added, is the student's words. Under the free-text rule only a
       // title or detail over 80 characters flags the turn.
@@ -320,7 +322,7 @@ const DEFS: ToolDef[] = [
           `${it.date}${it.overdue ? " OVERDUE" : ""} ${it.kind}${it.status ? ` [${it.status}]` : ""}${student ? "" : ` ${wrapUntrusted("student", name(it.studentId), anyLong([name(it.studentId)]))}`} ${wrapUntrusted(it.kind, `${it.title}${it.detail ? ` · ${it.detail}` : ""}`, long(it))}`
       );
       return {
-        content: lines.length ? `Today is ${isoDay()}.\n${lines.join("\n")}` : `Nothing open is due ${window.label}.`,
+        content: lines.length ? `Today is ${isoDay(zone)}.\n${lines.join("\n")}` : `Nothing open is due ${window.label}.`,
         fresh: lines.length > 0,
         freeBlocks: items.filter(long).map((it) => ({ source: it.kind, text: `${it.title}${it.detail ? ` · ${it.detail}` : ""}` })),
       };

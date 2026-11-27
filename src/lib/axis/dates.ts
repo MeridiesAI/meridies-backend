@@ -1,10 +1,12 @@
 /**
  * Relative dates in a counselor's question, read without a model: "this
  * week", "by Friday", "next 10 days", "before Nov 1", "overdue". The result is
- * a window of ISO dates (UTC, like every date the backend writes) the planner
- * and the direct answers query with.
+ * a window of ISO dates the planner and the direct answers query with. "Today"
+ * is the counselor's today, in their timezone (lib/axis/tz.ts); the calendar
+ * math after that runs on UTC-midnight dates, so it never shifts a day.
  */
 import { fold } from "./text.js";
+import { DEFAULT_ZONE, todayAsUtcDate } from "./tz.js";
 
 export type DateWindow = {
   /** Null reaches back without limit: overdue items are in the window. */
@@ -16,7 +18,6 @@ export type DateWindow = {
 const DAY = 86_400_000;
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * DAY);
-const utcMidnight = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const WEEKDAY_ABBR: Record<string, number> = { sun: 0, mon: 1, tue: 2, tues: 2, wed: 3, thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6 };
@@ -68,9 +69,9 @@ function explicitDate(t: string, today: Date): Date | null {
   return null;
 }
 
-export function parseWindow(text: string, now = new Date()): DateWindow | null {
+export function parseWindow(text: string, now = new Date(), zone: string = DEFAULT_ZONE): DateWindow | null {
   const t = fold(text).replace(/[,?!]/g, " ").replace(/\s+/g, " ");
-  const today = utcMidnight(now);
+  const today = todayAsUtcDate(zone, now);
   const overdue = /\b(overdue|past due|late|missed)\b/.test(t);
   const window = forwardWindow(t, today);
   if (overdue && window) return { from: null, to: window.to, label: `overdue and ${window.label}` };
