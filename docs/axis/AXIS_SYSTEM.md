@@ -134,9 +134,11 @@ Raw results are kept two minutes per caller, student and query, so a follow-up d
 | Item | Urgency |
 |---|---|
 | Overdue | 3, plus up to 2 as it ages (two weeks late is the cap) |
-| Due within the window | (1 − days left / window) × 2 × a status weight (not started 1, stalled 1.2, in progress 0.6, in review 0.3, deadline 0.8) |
-| Stalled task | × up to 2, by days without activity past the threshold |
+| Due within the window | (1 − days left / (window + 1)) × 2 × a status weight (not started 1, stalled 1.2, in progress 0.6, in review 0.3, deadline 0.8) |
+| Stalled task | × (1 + min(idle days − threshold, 21) / 21): ×1 on the day it crosses the counselor's threshold, rising evenly to ×2 three weeks later. Applies to overdue tasks too (never to deadlines) |
 | Open red flag | 1.5 each, added to the student's score |
+
+Idle days count from the task's last activity; a task the student never touched counts from when it was assigned (`created_at`), so a task set today is not "stalled" (its reason reads "not started in N days" once it is). A task with neither date is not treated as stalled.
 
 A student's score is their worst item plus 0.6 of the second and 0.3 of the third, so one overdue essay outranks three mild items. Each rank carries its reasons in words a counselor can check ("Common App essay is 4 days overdue; Cornell supplement due in 6 days, no activity for 12 days").
 
@@ -158,7 +160,7 @@ A student's score is their worst item plus 0.6 of the second and 0.3 of the thir
 
 Effort comes from the profile and the question: a complexity score counts extra clauses, distinct intents, more than one student, more than two schools, judgement words, length over 400 characters and strategy itself. A score of 3 raises effort one level and 5 raises it two.
 
-Compound questions fan out to specialists only when two or more parts still need their own searching after the planner (a documents or email part its search came back empty for). Each part gets a short tool loop with the specialist contract: terse cited findings, then what it couldn't find. One streamed synthesis writes the answer from their findings. Details that keep this efficient:
+Compound questions fan out to specialists only when two or more parts still need their own searching after the planner (a documents or email part its search came back empty for). A part whose search tool isn't offered this turn counts as covered: with no RAG port registered there is no document search, and with no connected mail account there is no email search, so a specialist could only report nothing found (`coveredParts`). The fan-out returns by itself once the ports are wired and an account is connected. Each part gets a short tool loop with the specialist contract: terse cited findings, then what it couldn't find. One streamed synthesis writes the answer from their findings. Details that keep this efficient:
 
 - All specialists share one ledger, so a passage two of them found has one number and their citations stay valid in the synthesis.
 - They send the same model, tools, system blocks and effort as the main request, with the gathered evidence first in their turn as a cache breakpoint. The first specialist starts alone and the rest wait for its first streamed event (or 600 ms): a cache entry becomes readable once the request writing it starts streaming, so started together they would each pay for the whole prefix.
@@ -180,6 +182,8 @@ A cited sentence also gets a support score: the share of its content words that 
 
 **By model, after the answer.** Only sentences with a missing figure or a weak citation go to Haiku 5.5 at low effort, with the material they should rest on. It rules each one supported, general knowledge, or unsupported. The counselor sees what is still unsupported under the answer. This runs after `done`.
 
+**Attached files.** A chat's files are read once, after the turn they arrive in, and stored as text (`extractChatFiles` in `attachments.ts`: a PDF's text layer, else a word-for-word transcription, which is also how an image is read). From then on that stored text is evidence like any other: it is in the index while the answer streams, and the after-answer check gets it as material too (each file cut at 12,000 characters, the most the model saw of it). So a chat with a PDF or an image is checked like any other on every later turn. Grounding is off only on a turn where a PDF or an image still goes to the model as a file (`FileBlocks.opaque`): the turn it is attached in (its text isn't stored until after the answer), a turn sent before that reading finished or while it waits to be retried, or a file whose reading failed (which goes as a file every turn, so its chat stays unchecked). Text files are always read back as text.
+
 Citations are resolved against the ledger: a marker that points at nothing the model was shown is removed before the answer is saved, and the client renders only resolved markers.
 
 ### 3.9 Memory
@@ -189,6 +193,8 @@ Citations are resolved against the ledger: a marker that points at nothing the m
 ### 3.10 Tools
 
 `tools.ts`. Ten tools, in a fixed order so the cached prefix doesn't move: `search_documents`, `read_document`, `search_email`, `search_connected_files`, `find_student`, `get_student_record`, `list_upcoming`, `rank_caseload`, `search_colleges`, `propose_action`. Every passage goes through the AI guard and the ledger. Inputs are validated with zod (streamed inputs aren't validated by the API). Each call has 8 seconds; a timeout or an error comes back as a result the model can work with. Only `propose_action` writes, and it writes a proposal the counselor confirms.
+
+Now (2026-11): twelve tools; `lookup` and `perform_action` reach the operation catalog (section 14). `propose_action` only drafts an email (`type` is `email_draft`, no due date; a Work Queue item is `perform_action work_queue.add`). `rank_caseload` takes an optional `days` (1-60, default 14), so "this week" ranks over the same window as the fast path (`caseloadWindow` in `tools.ts`). `npm run eval:axis:tools` (`evals/axis/tool-calls.mjs`, 41 cases) checks the model picks the right tool and key input, perform_action's operation above all; see `evals/axis/README.md`.
 
 ### 3.11 What stays from version 1
 
@@ -6436,7 +6442,8 @@ Added after version 2 shipped. AxIS can now change things in Meridies, not only 
 
 - Every change is one request to this API's own routes, run in-process (`app.inject`) with the counselor's token, so the route's validation, authorization, side effects and RLS all apply. AxIS holds no database client for writes.
 - The operation catalog (`ops/catalog/*.ts`) is rendered once into the cached system prompt. Two tools reach it: `lookup` (reads that return ids) and `perform_action` (writes).
-- Small, reversible edits run at once and the card offers Undo. Deletes, archives, sends, money, sharing, practice-wide settings and anything irreversible wait for Confirm. Outside content read in the turn, or more than five instant changes, turns the rest into cards; twenty is the cap per turn.
+- Small, reversible edits run at once and the card offers Undo. Deletes, archives, sends, money, sharing, practice-wide settings and anything irreversible wait for Confirm. Outside content read in the turn, or more than five instant changes, turns the rest into cards; twenty is the cap per turn. Every write that can run at once has an Undo, and a unit test (`axis-ops.test.ts`) fails on one that doesn't: adding a pipeline stage waits for Confirm (deleting a stage isn't an operation), and finding the Policy & research folder for a school can be undone when it made the folder.
 - The `action` SSE event gains `type: "operation"` (payload: op, area, summary, details, warning, status, undoable, reason). `POST /axis/actions/:id/undo` and `GET /axis/actions?status=all` are new.
+- Undo of a confirmed delete (Restore) is quiet: a restored meeting goes back on the counselor's own calendar (`lib/axisRestoreMeetings.ts`; no attendees, Google `sendUpdates=none`) and no invitation or update is emailed (Elvin, 11/26).
 - `propose_action` keeps only the email draft; a Work Queue item is `perform_action work_queue.add`.
 - The lexicon recognises change requests ("delete…", "mark … done", "move … to …", "change … to …") as the `action` intent, so they skip the direct-answer compiler; the Clerk gets six model calls.

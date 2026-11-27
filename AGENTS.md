@@ -3589,19 +3589,19 @@ action already restored leaves the card undone. A restore rewrites nothing: 19 t
 it runs (`meridies.axis_restore = 'on'`, listed in the migration, which stops if one is missing). Three rows come back
 changed so a restore can't undo what happened since: a sequence enrollment comes back `paused` at its own step, a
 school the student enrolled in comes back `accepted` when they've enrolled elsewhere since, and a meeting comes back
-without its calendar pointer. **A restore sends nothing, except a meeting's invitation** (Elvin, 11/8;
-`lib/axisRestoreMeetings.ts`, `20261113000001`): the delete took the event off the calendar and emailed a
-cancellation, so after the restore the undo route asks `axis_trash_restored_meetings(action)` (the deleter only; the
-meetings the restore brought back, from the trash rows, each with the calendar it was on) which also raises each
-one's `ics_sequence` above the cancellation's (the `meetings_ics_sequence` trigger wouldn't let a client). A meeting
-still ahead that was on the caller's own Google or Microsoft calendar (or was a Zoom meeting) is put back there the way a new meeting is
-(`createConferenceEvent`, a new link; a failure is logged and the invitation still goes, without the old link, which
-died with the deleted event; an event the row couldn't be pointed at is deleted again; a collaborator's restore
-keeps the link, since their delete never touched the owner's calendar), then it gets a new meeting's round (`prepareInviteRound` with no "before": invites
-on, scheduled, not over, the usual fail-closed recipients). The answer adds `invited: true` when a round went out. A
-past meeting, invites off or no one to email sends nothing. It is the counselor's own click on the card; AxIS can't
-call the undo route. Before `20261113000001` (PGRST202) the restore sends nothing, as before; either deploy order, not
-in `REQUIRED_SCHEMA`. Tests: `test/unit/axis-restore-meetings.test.ts` and the meeting section of
+without its calendar pointer. **A restore sends nothing, a meeting included** (Elvin, 11/26: restore quietly; it
+re-sent the invitation from 11/8 to 11/26; `lib/axisRestoreMeetings.ts`, `20261113000001`): the delete took the event
+off the calendar and emailed a cancellation, so after the restore the undo route asks
+`axis_trash_restored_meetings(action)` (the deleter only; the meetings the restore brought back, from the trash rows,
+each with the calendar it was on) which also raises each one's `ics_sequence` above the cancellation's (the
+`meetings_ics_sequence` trigger wouldn't let a client). A meeting still ahead that was on the caller's own Google or
+Microsoft calendar (or was a Zoom meeting) is put back there the way a new meeting is (`createConferenceEvent`, a new
+link; no attendees, Google with `sendUpdates=none`, so the provider emails nobody either; a failure is logged and the
+old link, which died with the deleted event, is cleared; an event the row couldn't be pointed at is deleted again; a
+collaborator's restore keeps the link, since their delete never touched the owner's calendar). No invitation or
+update is emailed and the answer has no `invited` field; the counselor can resend the invitation from the meeting.
+It is the counselor's own click on the card; AxIS can't call the undo route. Before `20261113000001` (PGRST202) the
+meeting comes back without a calendar event; either deploy order, not in `REQUIRED_SCHEMA`. Tests: `test/unit/axis-restore-meetings.test.ts` and the meeting section of
 `test/integration/axis-trash.test.mjs`.
 A document AxIS deletes keeps its Storage object until the trash's purge, which keeps a file any remaining trash row
 still needs. A client can set the database header itself (straight to PostgREST), but that only keeps a copy of its
@@ -3612,7 +3612,7 @@ make them restorable; a stage's delete moves its cards, so adding a stage has no
 a deleted task, meeting or report is kept and put back, so a reminder already sent isn't sent again. Before the migration a covered delete is refused with "AxIS can't delete things until
 the database update 20261108000003_axis_trash is applied." **Deploy order:** either; not in `REQUIRED_SCHEMA`.
 Tests: `test/unit/axis-trash.test.ts`, `test/integration/axis-trash-db.test.mjs`, `test/integration/axis-trash.test.mjs`
-(every covered op through the API, a caseload move, an expired card, nothing sent but a restored meeting's invitation).
+(every covered op through the API, a caseload move, an expired card, nothing sent, a restored meeting included).
 
 **Deploy order.** Apply `20261019000001_axis_operations.sql` (widens the
 `axis_actions` type and status checks, payload cap 32 KB). Either order is
