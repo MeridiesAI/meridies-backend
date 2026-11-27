@@ -184,6 +184,8 @@ Citations are resolved against the ledger: a marker that points at nothing the m
 
 `memory.ts`. The last 12 messages go verbatim (old citation markers removed: they pointed at another turn's passages). Past 20 unsummarized messages, everything older is folded into a running summary by Haiku 5.5 after the answer, never on the counselor's time. The dialogue state from 3.1 is saved after each turn.
 
+Summary taint (P1-7, migration `20261203000002`): each AxIS answer stores whether its turn read outside content (`ai_messages.read_outside`). The fold strips 8+ word quotes, but a paraphrase still gets into the summary, so a fold over any answer that read outside content, quoted free text or was never checked for quotes sets `ai_conversations.summary_outside` (sticky: the next fold merges the old summary in). While such a summary is in use (`History.summaryOutside`), the turn counts as inherited-tainted and every instant change waits for Confirm with reason `outside-content`. Before the migration (`taintReady` in `failsafe.ts`) neither column is named, the summary is trusted as before, and the gap is logged.
+
 ### 3.10 Tools
 
 `tools.ts`. Ten tools, in a fixed order so the cached prefix doesn't move: `search_documents`, `read_document`, `search_email`, `search_connected_files`, `find_student`, `get_student_record`, `list_upcoming`, `rank_caseload`, `search_colleges`, `propose_action`. Every passage goes through the AI guard and the ledger. Inputs are validated with zod (streamed inputs aren't validated by the API). Each call has 8 seconds; a timeout or an error comes back as a result the model can work with. Only `propose_action` writes, and it writes a proposal the counselor confirms.

@@ -29,6 +29,7 @@ import {
   logSkipped,
   probeAxisSchema,
   runSseTurn,
+  taintReady,
   unavailableBody,
 } from "../lib/axis/failsafe.js";
 import { foldIfLong, saveState } from "../lib/axis/memory.js";
@@ -154,6 +155,7 @@ export default async function axisRoutes(app: FastifyInstance) {
             request, conversationId: id, studentId, content: body.content, emit, signal, prepaid, newFiles: attached.length > 0,
             messageId: userMsg.id as string,
           });
+          const taintOk = await taintReady(request.db, request.log).catch(() => false);
           const { data: saved, error: saveErr } = await request.db
             .from("ai_messages")
             .insert({
@@ -166,6 +168,9 @@ export default async function axisRoutes(app: FastifyInstance) {
               // The runs the answer quoted from free text (lib/axis/quotes.ts), [] when clean. Only once
               // 20261108000004 is in (quotesChecked), so the column is never named before it exists; capped to fit it.
               ...(turn.quotesChecked ? { outside_quotes: storableRuns(turn.quotes) } : {}),
+              // Whether this turn read outside content (the dialogue state's flag), for the memory fold's summary
+              // taint. Only once 20261203000002 is in, so the insert never names a missing column.
+              ...(taintOk ? { read_outside: turn.state.outside === true } : {}),
               sources: turn.sources,
               ai_run_id: turn.runId,
             })

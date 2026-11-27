@@ -505,8 +505,9 @@ async function axisTurn(opts: {
   const outside = flags
     ? hasFiles || outsidePassages || ctx.freeText || evidence.freeText
     : hasFiles || outsidePassages || ctx.outside || evidence.outside;
-  // The previous turn read free text, or an answer that quoted some is among the replayed messages.
-  const inherited = history.state?.outside === true || (flags && history.flagged);
+  // The previous turn read free text, an answer that quoted some is among the replayed messages, or the memory
+  // summary in the system prompt was folded from turns that read outside content (it may paraphrase it).
+  const inherited = history.state?.outside === true || (flags && history.flagged) || history.summaryOutside === true;
   // Everything free the turn could see, for the quote check after the answer.
   const seen: Free = [...ctx.free, ...evidence.freeBlocks, ...history.quoted, ...files.texts.map((text) => ({ source: "attachment", text }))];
   const toolCtx: ToolContext = {

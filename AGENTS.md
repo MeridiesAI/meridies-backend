@@ -3512,7 +3512,15 @@ anyone copying it.
   (`ai_messages.outside_quotes`), keeps the chat flagged while it is among
   the 12 replayed messages, and reaches the memory fold as "[quote from
   <source>]" (`foldTranscript`, which also checks each answer against the
-  chat's stored file texts), so the summary never holds the words. Every
+  chat's stored file texts), so the summary never holds the words. A
+  paraphrase can still reach it, so **once `20261203000002` is in**
+  (`taintReady`) each answer also stores `ai_messages.read_outside` (its
+  turn's `state.outside`), and a fold over any answer that read outside
+  content, quoted free text or was never checked sets
+  `ai_conversations.summary_outside` (sticky); while that summary is in use
+  every instant change waits for Confirm (`outside-content`). Before it the
+  summary is trusted as before and the gap is logged; not in
+  `REQUIRED_SCHEMA`. Tests: `test/unit/axis-summary-taint.test.ts`. Every
   answer under the rule is stored with its runs (`[]` when clean); a replayed
   answer without them (saved before the migration, or by `/chat`) keeps the
   chat flagged, so an existing chat asks first for about six turns after the

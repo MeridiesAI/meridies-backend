@@ -5,7 +5,7 @@ import { runAxisTurn, type Emit } from "../../src/lib/axis/engine.js";
 import { reserveTurn } from "../../src/lib/axis/llm.js";
 import { AXIS_MODEL, PER_MESSAGE_EFFORT_BETA, resetFeatures } from "../../src/lib/axis/models.js";
 import { fakeRequest, scriptedApi } from "./axis-fakes.js";
-import { resetFlagsReadyForTest } from "../../src/lib/axis/failsafe.js";
+import { resetFlagsReadyForTest, resetTaintReadyForTest } from "../../src/lib/axis/failsafe.js";
 import { foldTranscript } from "../../src/lib/axis/memory.js";
 import type { MessagesApi } from "../../src/lib/axis/loop.js";
 
@@ -363,6 +363,43 @@ test("the turn after one that read outside content asks before changing anything
   await runAxisTurn({ request: withState, conversationId: "conv-1", studentId: "s1", content: "Add a to-do to call her family", emit: ev.emit, signal: new AbortController().signal, api });
   assert.deepEqual(injected.filter((c) => c.method !== "GET"), [], "inherited: waits for a click");
   assert.equal(recorded[0]!.status, "pending");
+});
+
+test("a memory summary folded from outside content makes changes wait for Confirm (P1-7)", async () => {
+  for (const tainted of [true, false]) {
+    resetFeatures();
+    resetTaintReadyForTest();
+    const { request, injected, recorded } = docsRig(`counselor-docs-sum-${tainted}`);
+    const db = request.db;
+    const conv = { id: "conv-1", summary: "- Talked through her transcript.", summary_through: "2026-01-01T00:00:00Z", state: null, summary_outside: tainted };
+    const withSummary = Object.assign(request, {
+      db: {
+        ...db,
+        from: (t: string) =>
+          t === "ai_conversations"
+            ? {
+                select: () => ({
+                  limit: async () => ({ data: [], error: null }),
+                  eq: () => ({ maybeSingle: async () => ({ data: conv, error: null }) }),
+                }),
+              }
+            : t === "ai_messages"
+              ? { ...db.from(t), select: (c: string) => (c === "read_outside" ? { limit: async () => ({ data: [], error: null }) } : db.from(t).select(c)) }
+              : db.from(t),
+      },
+    });
+    const { api } = addTodo("Call the Martinez family");
+    const ev = collect();
+    await runAxisTurn({ request: withSummary, conversationId: "conv-1", studentId: "s1", content: "Add a to-do to call her family", emit: ev.emit, signal: new AbortController().signal, api });
+    if (tainted) {
+      assert.deepEqual(injected.filter((c) => c.method !== "GET"), [], "a tainted summary: waits for a click");
+      assert.equal(recorded[0]!.status, "pending");
+      assert.equal((recorded[0]!.payload as { reason?: string }).reason, "outside-content");
+    } else {
+      assert.deepEqual(injected.filter((c) => c.method !== "GET").map((c) => c.url), ["/work-items"], "a clean summary: runs at once");
+    }
+  }
+  resetTaintReadyForTest();
 });
 
 // ---- Text a student wrote counts as outside content (security review) ------------------------
