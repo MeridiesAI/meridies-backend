@@ -77,6 +77,8 @@ export type UnderstandContext = {
   colleges: CollegeIndex | null;
   state: DialogueState | null;
   now?: Date;
+  /** The counselor's timezone (lib/axis/tz.ts): "today" and "this week" are theirs. */
+  zone?: string;
 };
 
 const PRONOUN_PERSON = /\b(she|her|hers|he|him|his|they|them|their|theirs)\b/;
@@ -223,7 +225,7 @@ export function understand(text: string, ctx: UnderstandContext): Understanding 
     colleges,
     ambiguousColleges: fromCatalog.ambiguous,
     attributes,
-    window: parseWindow(text, now),
+    window: parseWindow(text, now, ctx.zone),
     form,
     judgement,
     keywords: keywordsOf(text),

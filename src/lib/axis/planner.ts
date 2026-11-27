@@ -26,6 +26,7 @@ import type { FastifyRequest } from "fastify";
 import { resolveStudentId } from "../guards.js";
 import { cachedStudentContext, collegeFacts, collegeFactText, isoDay, plain, upcomingItems } from "./data.js";
 import type { RosterIndex } from "./entities.js";
+import { counselorZone, daysFromToday } from "./tz.js";
 import { filterAllowedChunks } from "./guard.js";
 import type { SourceLedger } from "./ledger.js";
 import type { Intent, Understanding } from "./nlu.js";
@@ -219,7 +220,8 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
   if ((intents.has("roster") || intents.has("record") || intents.has("strategy") || intents.has("action")) && (u.window || UPCOMING_WORDS.test(u.norm))) {
     const named = u.students.length === 1 ? u.students[0]!.id : null;
     const target = ctx.chatStudentId ?? named;
-    const window = u.window ?? { from: null, to: isoDay(new Date(Date.now() + 21 * 86_400_000)), label: "in the next three weeks" };
+    const zone = counselorZone(ctx.request);
+    const window = u.window ?? { from: null, to: daysFromToday(zone, 21), label: "in the next three weeks" };
     const outside = flag();
     const free = freeOf();
     steps.push({
@@ -236,7 +238,7 @@ export function planSteps(ctx: PlanContext): { steps: Step[]; passages: string[]
         free.set(items.filter((i) => i.outside && anyLong([i.title, i.detail])).map((i) => ({ source: i.kind, text: `${i.title}${i.detail ? `, ${i.detail}` : ""}` })));
         if (!items.length) return `## Due ${window.label}\nNothing open.`;
         return [
-          `## Due ${window.label} (today is ${isoDay()})`,
+          `## Due ${window.label} (today is ${isoDay(zone)})`,
           ...items.map(
             (i) =>
               // Titles and details are the student's words (a deadline, a task they added): in a data block, short or free.
