@@ -39,7 +39,7 @@ import { anyLong, freeBlocks } from "../context/freeText.js";
 
 export type ProposedAction = {
   id: string;
-  type: "work_item" | "email_draft";
+  type: "email_draft";
   studentId: string | null;
   payload: Record<string, unknown>;
 };
@@ -333,19 +333,26 @@ const DEFS: ToolDef[] = [
     tool: {
       name: "rank_caseload",
       description:
-        "The counselor's students ranked by how much attention they need: overdue work, deadlines in the next 14 days, days without activity and red flags, each with its reasons. Computed, not estimated; use it as given.",
+        "The counselor's students ranked by how much attention they need: overdue work, deadlines in the window (default the next 14 days), days without activity and red flags, each with its reasons. Computed, not estimated; use it as given.",
       eager_input_streaming: true,
-      input_schema: { type: "object", properties: { limit: { type: "integer", description: "1 to 20, default 8" } } },
+      input_schema: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", description: "1 to 20, default 8" },
+          days: { type: "integer", description: "How far ahead deadlines count, 1 to 60 days (default 14). Match what the counselor asked: this week = 7, today or tomorrow = 1, this month = 30." },
+        },
+      },
     },
     run: async (ctx, raw) => {
-      const { limit } = z.object({ limit: z.number().int().min(1).max(20).optional() }).parse(raw ?? {});
-      const ranked = (await loadRosterRisk(ctx.request, 14)).slice(0, limit ?? 8);
-      if (!ranked.length) return { content: "Nobody has overdue work, a red flag or a deadline at risk in the next 14 days.", fresh: true };
+      const i = z.object({ limit: z.number().int().min(1).max(20).optional(), days: z.number().int().min(1).max(60).optional() }).parse(raw ?? {});
+      const { horizon, span } = caseloadWindow(i.days);
+      const ranked = (await loadRosterRisk(ctx.request, horizon)).slice(0, i.limit ?? 8);
+      if (!ranked.length) return { content: `Nobody has overdue work, a red flag or a deadline at risk ${span}.`, fresh: true };
       // A reason quotes a title cut to 80 characters (lib/axis/risk.ts): a short field, never free text.
       if (!ctx.turn.freeRule && ranked.some((r) => r.outside)) markOutside(ctx.turn);
       else if (ranked.some((r) => r.outside)) markShort(ctx.turn);
       return {
-        content: ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name, anyLong([r.name]))} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "), false)}`).join("\n"),
+        content: `Ranked by overdue work, deadlines ${span} and days without activity:\n${ranked.map((r, n) => `${n + 1}. ${wrapUntrusted("student", r.name, anyLong([r.name]))} score ${r.score}: ${wrapUntrusted("reasons", r.reasons.join("; "), false)}`).join("\n")}`,
         fresh: true,
         freeBlocks: [],
       };
@@ -399,7 +406,7 @@ const DEFS: ToolDef[] = [
   {
     name: "propose_action",
     readOnly: false,
-    label: (i) => (i.type === "email_draft" ? "Drafting an email" : "Adding to My Work Queue"),
+    label: () => "Drafting an email",
     tool: {
       name: "propose_action",
       description:
@@ -410,9 +417,8 @@ const DEFS: ToolDef[] = [
         properties: {
           type: { type: "string", enum: ["email_draft"] },
           student_id: { type: "string", description: "Omit for this chat's student." },
-          title: { type: "string", description: "work_item: the task. email_draft: the subject line. Up to 300 characters." },
-          detail: { type: "string", description: "work_item: notes. email_draft: the body. Up to 2000 characters." },
-          due_date: { type: "string", description: "YYYY-MM-DD" },
+          title: { type: "string", description: "The subject line. Up to 300 characters." },
+          detail: { type: "string", description: "The body. Up to 2000 characters." },
           to: { type: "string", enum: ["parents", "student"] },
         },
         required: ["type", "title"],
@@ -421,11 +427,10 @@ const DEFS: ToolDef[] = [
     run: async (ctx, raw) => {
       const i = z
         .object({
-          type: z.enum(["work_item", "email_draft"]),
+          type: z.literal("email_draft"),
           student_id: z.string().uuid().optional(),
           title: z.string().trim().min(1).max(300),
           detail: z.string().max(2000).optional(),
-          due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
           to: z.enum(["parents", "student"]).optional(),
         })
         .parse(raw);
@@ -434,13 +439,10 @@ const DEFS: ToolDef[] = [
       if (prose) return { content: `Not drafted: ${prose}`, isError: true, fresh: false };
       const target = i.student_id ?? ctx.studentId;
       const studentId = target ? await resolveStudentId(ctx.request, target, "view") : null;
-      if (i.type === "email_draft" && !studentId) return { content: "An email draft needs a student.", isError: true, fresh: false };
+      if (!studentId) return { content: "An email draft needs a student.", isError: true, fresh: false };
       // `outside`: written in a turn that read someone else's words, so later turns recall it by kind only.
       const outside = ctx.turn.tainted || ctx.turn.sawOutside;
-      const payload =
-        i.type === "work_item"
-          ? { title: i.title, detail: i.detail ?? null, dueDate: i.due_date ?? null, outside }
-          : { to: i.to ?? "parents", subject: i.title, body: i.detail ?? "", outside };
+      const payload = { to: i.to ?? "parents", subject: i.title, body: i.detail ?? "", outside };
       const { data, error } = await ctx.request.db
         .from("axis_actions")
         .insert({ owner_id: ctx.request.auth.userId, conversation_id: ctx.conversationId, student_id: studentId, type: i.type, payload })
@@ -502,6 +504,12 @@ const DEFS: ToolDef[] = [
     },
   },
 ];
+
+/** rank_caseload's look-ahead and how the answer says it: the window asked about, else two weeks (as the fast path, lib/axis/compiler.ts). */
+export function caseloadWindow(days: number | undefined): { horizon: number; span: string } {
+  const horizon = days ?? 14;
+  return { horizon, span: horizon === 1 ? "by tomorrow" : `in the next ${horizon} days` };
+}
 
 function opContext(ctx: ToolContext) {
   return {
