@@ -297,7 +297,7 @@ and one streamed **synthesis** call writes the answer from their findings.
 | `find_student` | yes | Roster lookup by name |
 | `get_student_record` | yes | Sections of a student's record |
 | `list_upcoming` | yes | Deadlines, tasks and meetings in the next N days |
-| `rank_caseload` | yes | The caseload ranking |
+| `rank_caseload` | yes | The caseload ranking, over `days` ahead (1-60, default 14; "this week" = 7, as the fast path) |
 | `search_colleges` | yes | Catalog search, returns `[S#]` passages |
 | `lookup` | yes | Read operations from the action catalog (ids for changes) |
 | `perform_action` | yes | Write operations from the action catalog (stage 10) |
@@ -354,8 +354,8 @@ check rather than flag every figure).
 `ops/dispatch.ts`, `ops/registry.ts`, `ops/types.ts`, `ops/trash.ts`, `ops/catalog/*.ts`,
 `src/routes/axis.ts:236-415`.
 
-**Email drafts** (`propose_action`). The model can only file an email draft (the schema's `type` enum is
-`email_draft`). It is saved as a pending `axis_actions` row and shown as a card. Confirm returns the subject and body
+**Email drafts** (`propose_action`). The model can only file an email draft (the schema's `type` enum and the input check both take only
+`email_draft`; there is no due date). A `work_item` card filed before that still confirms (`routes/axis.ts`). It is saved as a pending `axis_actions` row and shown as a card. Confirm returns the subject and body
 for the app's Communication composer; nothing is sent from AxIS. The draft's text is held to the essay guard.
 
 **The operation catalog.** 248 operations in 41 groups (students, tasks, deadlines, college list, meetings,

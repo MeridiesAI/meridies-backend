@@ -188,6 +188,8 @@ Citations are resolved against the ledger: a marker that points at nothing the m
 
 `tools.ts`. Ten tools, in a fixed order so the cached prefix doesn't move: `search_documents`, `read_document`, `search_email`, `search_connected_files`, `find_student`, `get_student_record`, `list_upcoming`, `rank_caseload`, `search_colleges`, `propose_action`. Every passage goes through the AI guard and the ledger. Inputs are validated with zod (streamed inputs aren't validated by the API). Each call has 8 seconds; a timeout or an error comes back as a result the model can work with. Only `propose_action` writes, and it writes a proposal the counselor confirms.
 
+Now (2026-11): twelve tools; `lookup` and `perform_action` reach the operation catalog (section 14). `propose_action` only drafts an email (`type` is `email_draft`, no due date; a Work Queue item is `perform_action work_queue.add`). `rank_caseload` takes an optional `days` (1-60, default 14), so "this week" ranks over the same window as the fast path (`caseloadWindow` in `tools.ts`). `npm run eval:axis:tools` (`evals/axis/tool-calls.mjs`, 41 cases) checks the model picks the right tool and key input, perform_action's operation above all; see `evals/axis/README.md`.
+
 ### 3.11 What stays from version 1
 
 The AI guard re-applies the per-document AI rules to everything retrieval returns (`guard.ts`). Essay requests never reach the free-text path. Proposals are confirmed by the counselor; an email draft opens the Communication composer, where recipients, quiet hours and the throttle are enforced. One `ai_runs` row per turn, the daily call quota charged per model call, the monthly output quota per turn.
