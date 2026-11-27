@@ -832,3 +832,18 @@ test("Elvin's test 1: the PDF's words reached the model in the turn that read it
     assert.ok(sent.includes("Her resume lists a robotics captaincy."), "turn 1's answer is replayed");
     assert.ok(!sent.includes("Wire the deposit refund"), "the file's words are not");
   }));
+
+test("the turn log line carries each planner step's time in ms", async () => {
+  const scripted = scriptedApi([{ text: "Cornell is a reach [S1]." }]);
+  const request = fakeRequest(TABLES, ME);
+  const lines: [unknown, string][] = [];
+  (request.log as unknown as { info: (o: unknown, m: string) => void }).info = (o, m) => lines.push([o, m]);
+  const ev = collect();
+  await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "Is Cornell realistic for her?", emit: ev.emit, signal: new AbortController().signal, api: scripted.api });
+  const line = lines.find(([, m]) => m === "axis turn")?.[0] as { axis: { planner?: { step: string; ms: number; outcome: string }[] } } | undefined;
+  assert.ok(line, "one axis turn line");
+  const colleges = line.axis.planner?.find((s) => s.step === "colleges");
+  assert.ok(colleges, "the college lookup step is logged");
+  assert.equal(typeof colleges.ms, "number");
+  assert.equal(colleges.outcome, "ok");
+});
