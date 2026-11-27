@@ -1,26 +1,26 @@
 /**
- * A restored meeting sends its invitation again (Elvin, 11/8; migration 20261113000001).
+ * A restored meeting comes back quietly (Elvin, 11/26; was "sends its invitation again", 11/8).
  *
- * meetings.delete took the event off the counselor's connected calendar and emailed the invitees a cancellation, so
- * a meeting the AxIS card's Restore (`POST /axis/actions/:id/undo`) puts back would otherwise be in Meridies while the
- * families think it's off. After `axis_trash_restore` succeeds, the route calls `reinviteRestoredMeetings`:
+ * meetings.delete took the event off the counselor's connected calendar and emailed the invitees a cancellation. The
+ * AxIS card's Restore (`POST /axis/actions/:id/undo`) puts the meeting back in Meridies and on the counselor's own
+ * calendar, and emails nobody: no new invitation, no update. After `axis_trash_restore` succeeds, the route calls
+ * `resyncRestoredMeetings`:
  *
  *   1. `axis_trash_restored_meetings` lists the meetings that restore brought back (from the trash rows, so a
- *      cascade would count too), each with the calendar it was on, and raises its invite sequence above the
- *      cancellation the delete sent (the meetings_ics_sequence trigger won't let a client do that).
+ *      cascade would count too), each with the calendar it was on (it also raises the invite sequence above the
+ *      delete's cancellation, so a later edit's update still outranks it).
  *   2. A meeting still ahead that was on its owner's Google or Microsoft calendar (or a Zoom meeting) goes back there the way a new
- *      meeting does (`createConferenceEvent`, owner only, with the caller's own token), with its new link. If that
- *      fails, the old link (which died with the deleted event) is cleared, so the invitation carries none.
- *   3. It gets the round a new meeting gets (`prepareInviteRound` with no "before"): invites on, scheduled, not
- *      over, and the same fail-closed rules decide who is emailed. A past meeting sends nothing.
+ *      meeting does (`createConferenceEvent`, owner only, with the caller's own token), with its new link. That call
+ *      adds no attendees and sends no mail: Google with `sendUpdates=none`, Microsoft and Zoom with no attendees
+ *      (nobody to notify). If it fails, the old link (which died with the deleted event) is cleared.
+ *   3. Nothing is emailed. The counselor can send the invitation again from the meeting if they want families told.
  *
- * It is the counselor's own click on their card, never AxIS's (AxIS can't call the undo route). Every other restore
- * still sends nothing. Never throws: the rows are already back, so a failure here costs only the invitation.
+ * It is the counselor's own click on their card, never AxIS's (AxIS can't call the undo route). Never throws: the rows
+ * are already back, so a failure here costs only the calendar event.
  */
 
 import type { FastifyRequest } from "fastify";
 import { isSchemaMissing } from "./axis/failsafe.js";
-import { invitesReady, loadAttendeeIds, meetingState, prepareInviteRound, startInviteDelivery } from "./meetingInvites.js";
 import type { ConnectProvider } from "./oauth.js";
 import { createConferenceEvent, deleteCalendarEvent } from "./suiteApi.js";
 
@@ -68,40 +68,35 @@ export function calendarPlan(
 type Deps = {
   createEvent: typeof createConferenceEvent;
   dropEvent: typeof deleteCalendarEvent;
-  prepare: typeof prepareInviteRound;
-  start: typeof startInviteDelivery;
   now: () => Date;
 };
 const DEFAULT_DEPS: Deps = {
   createEvent: createConferenceEvent,
   dropEvent: deleteCalendarEvent,
-  prepare: prepareInviteRound,
-  start: startInviteDelivery,
   now: () => new Date(),
 };
 
 /**
- * Puts the meetings an AxIS restore brought back on the calendar again and sends their invitations. Resolves
- * `invited: true` when at least one invite round went out (the card then says "The invitation went out again").
+ * Puts the meetings an AxIS restore brought back on the counselor's calendar again, quietly: no invitation or update
+ * is emailed. Resolves how many calendar events were made.
  */
-export async function reinviteRestoredMeetings(
+export async function resyncRestoredMeetings(
   request: Pick<FastifyRequest, "db" | "log" | "auth">,
   actionId: string,
   deps: Deps = DEFAULT_DEPS
-): Promise<{ invited: boolean }> {
+): Promise<{ calendars: number }> {
   const log = request.log;
   try {
     const { data, error } = await request.db.rpc("axis_trash_restored_meetings", { p_action: actionId });
     if (error) {
-      // Before 20261113000001 a restore sends nothing, as it always did.
-      if (!isSchemaMissing(error)) log.warn({ code: error.code }, "restored meetings not read; no invitation sent");
-      return { invited: false };
+      // Before 20261113000001 the meeting comes back without its calendar event.
+      if (!isSchemaMissing(error)) log.warn({ code: error.code }, "restored meetings not read; not put back on the calendar");
+      return { calendars: 0 };
     }
     const meetings = restoredMeetingsFrom(data);
-    if (meetings.length === 0) return { invited: false };
-    const ready = await invitesReady(request.db);
+    if (meetings.length === 0) return { calendars: 0 };
     const callerId = request.auth.userId;
-    let invited = false;
+    let calendars = 0;
 
     for (const m of meetings) {
       const { data: found, error: readErr } = await request.db.from("meetings").select("*").eq("id", m.id).maybeSingle();
@@ -134,15 +129,16 @@ export async function reinviteRestoredMeetings(
             log.warn({ code: saveErr?.code }, "restored meeting's calendar event not saved; removed it again");
           } else {
             row = saved as Row;
+            calendars++;
           }
         } catch (err) {
           log.warn(
             { provider: plan.provider, err: err instanceof Error ? err.message : "unknown" },
-            "restored meeting not put back on the calendar; the invitation still goes"
+            "restored meeting not put back on the calendar"
           );
         }
         // Still no event: the delete took the owner's event off the calendar, and its Meet/Teams link with it. The
-        // invitation (and the app) show no link rather than a dead one; the counselor can add a new one. (A
+        // app shows no link rather than a dead one; the counselor can add a new one. (A
         // collaborator's delete never touched the owner's calendar, so their restore keeps the link: no plan.put.)
         if (!row.calendar_event_id && row.join_url) {
           const { data: cleared, error: clearErr } = await request.db
@@ -152,33 +148,14 @@ export async function reinviteRestoredMeetings(
             .select("*")
             .single();
           if (clearErr || !cleared) log.warn({ code: clearErr?.code }, "restored meeting's old link not cleared");
-          else row = cleared as Row;
         }
       }
 
-      if (!ready) continue;
-      const state = meetingState(row);
-      if (!state.sendInvites) continue;
-      const attendees = await loadAttendeeIds(request.db, state).catch(() => null);
-      if (!attendees) {
-        log.warn("restored meeting's invitees not read; no invitation sent");
-        continue;
-      }
-      const prepared = await deps.prepare(request, {
-        before: null,
-        after: state,
-        attendeesBefore: [],
-        attendeesAfter: attendees,
-        notify: true,
-      });
-      if (prepared.round) {
-        deps.start(prepared.round, log);
-        invited = true;
-      }
+      // No invitation, update or notification is sent: a restore is quiet (Elvin, 11/26).
     }
-    return { invited };
+    return { calendars };
   } catch (err) {
-    log.warn({ err: err instanceof Error ? err.message : "unknown" }, "restored meetings' invitations not sent");
-    return { invited: false };
+    log.warn({ err: err instanceof Error ? err.message : "unknown" }, "restored meetings not put back on the calendar");
+    return { calendars: 0 };
   }
 }

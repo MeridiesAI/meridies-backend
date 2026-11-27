@@ -104,3 +104,31 @@ It prints passes out of runs per case. Against the baseline's last line it exits
 A new case is never a drop, and a case run a different number of times from the baseline is not compared. Keep
 quality scores in their own file: the runner refuses a baseline whose last line isn't a quality score. The `AxIS evals`
 workflow does not run this suite; run it by hand.
+
+## Tool-call evals (`tool-call-cases.mjs`)
+
+A fourth suite: for a counselor's request, does the model call the **right tool with the right key input**? Most of
+its 41 cases are `perform_action`, where one tool fronts the whole operation catalog and the model must name the
+operation (`deadlines.update` with the SAT deadline's id, not `deadlines.delete`). The rest check reads
+(`rank_caseload` with `days` for "this week", `list_upcoming`, `search_colleges`...) and email drafts
+(`propose_action`, never `messages.send`); a Work Queue request must be `work_queue.add`, never `propose_action`.
+
+It needs **no database and no API server**. `tool-calls.mjs` sends AxIS's real system prompt, tools and mode for a
+fixed, made-up student and roster straight to the Anthropic API, and executes nothing: a `lookup` or `find_student`
+gets a canned answer (`LOOKUPS` in the cases file) and the model goes on, up to 3 rounds, so a change that needs an id
+is scored on the `perform_action` that follows. A run scores 1 when an expected call was made and no forbidden one
+(`tool-call-score.mjs`); a case may accept several calls (`expect` as a list) and forbid some (`never`).
+
+It reads the key **only** from `AXIS_EVAL_ANTHROPIC_API_KEY` (the evals' own spend-limited key, never production's)
+and never loads a `.env` file:
+
+```bash
+AXIS_EVAL_ANTHROPIC_API_KEY=... npm run eval:axis:tools -- --runs 1 --case deadline-move
+AXIS_EVAL_ANTHROPIC_API_KEY=... npm run eval:axis:tools -- --runs 3 --store tool-scores.jsonl     # baseline
+AXIS_EVAL_ANTHROPIC_API_KEY=... npm run eval:axis:tools -- --baseline tool-scores.jsonl --store tool-scores.jsonl
+```
+
+A drop is the quality suite's rule (a case's passes falling by 2, or the total by 3). Keep its scores in their own
+file. A new case needs only an entry in `TOOL_CASES`; `test/unit/axis-tool-eval-score.test.ts` checks every expected
+tool, operation and input key against the real catalog, so a renamed one fails there and not in a paid run. The
+`AxIS evals` workflow does not run this suite.

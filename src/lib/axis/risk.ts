@@ -7,8 +7,14 @@
  * Management's alerts. On top of that each open item gets an urgency:
  *
  *   overdue        3 + up to 2 more as it ages (two weeks late is the cap)
- *   due in window  (1 - days left / window) x 2 x how started it is
- *   stalled        x up to 2 by days without activity past the threshold
+ *   due in window  (1 - days left / (horizon + 1)) x 2 x how started it is
+ *   stalled task   x (1 + min(idle days - threshold, 21) / 21), so x1 on the
+ *                  day it crosses the counselor's threshold, rising to x2 three
+ *                  weeks later. Idle days count from the last activity, or from
+ *                  when the task was assigned if the student never touched it.
+ *                  The factor applies to overdue tasks too (an overdue task
+ *                  nobody is working on is worse than one in progress), never
+ *                  to deadlines.
  *
  * A student's score is their worst item plus 0.6 of the second and 0.3 of the
  * third, so one disaster outranks several mild items and a student isn't
@@ -32,6 +38,8 @@ export type RiskInput = {
   due: string | null;
   status: string | null;
   lastActivityAt: string | null;
+  /** When the task was assigned; idle time counts from here until the student first touches it. */
+  createdAt?: string | null;
   /** The title isn't the counselor's own words (a task accepted from Research). Deadlines always count as such. */
   outside?: boolean;
 };
@@ -48,6 +56,8 @@ export type StudentRisk = {
 
 const STATUS_WEIGHT: Record<string, number> = { "not-started": 1, stalled: 1.2, "in-progress": 0.6, review: 0.3 };
 const DAY = 86_400_000;
+/** Days past the stall threshold at which the stall factor reaches its cap of x2. */
+const STALL_RAMP_DAYS = 21;
 
 export function daysBetween(fromIso: string, toIso: string): number {
   return Math.round((Date.parse(`${toIso}T00:00:00Z`) - Date.parse(`${fromIso}T00:00:00Z`)) / DAY);
@@ -56,9 +66,12 @@ export function daysBetween(fromIso: string, toIso: string): number {
 export function urgency(item: RiskInput, today: string, horizonDays: number, stallAfterDays: number): { u: number; reason: string | null } {
   if (!item.due) return { u: 0, reason: null };
   const left = daysBetween(today, item.due);
-  const idle = item.kind === "task" ? daysSince(item.lastActivityAt) : null;
-  const stalled = item.kind === "task" && (idle === null || idle >= stallAfterDays);
-  const stallFactor = stalled ? 1 + Math.min(idle ?? 21, 21) / 21 : 1;
+  // deliverables.last_activity_at has no default, so an untouched task falls back to when it was assigned.
+  const neverTouched = !item.lastActivityAt;
+  const idle = item.kind === "task" ? daysSince(item.lastActivityAt ?? item.createdAt) : null;
+  // No timestamp at all: we can't say it's stalled, so it isn't.
+  const stalled = idle !== null && idle >= stallAfterDays;
+  const stallFactor = stalled ? 1 + Math.min(Math.max(0, idle - stallAfterDays), STALL_RAMP_DAYS) / STALL_RAMP_DAYS : 1;
   const title = `"${plain(item.title, 80)}"`;
   if (left < 0) {
     const late = -left;
@@ -69,7 +82,7 @@ export function urgency(item: RiskInput, today: string, horizonDays: number, sta
   const w = item.kind === "deadline" ? 0.8 : (STATUS_WEIGHT[item.status ?? ""] ?? 0.8);
   const u = (1 - left / (horizonDays + 1)) * 2 * w * stallFactor;
   const when = left === 0 ? "due today" : `due in ${left} day${left === 1 ? "" : "s"}`;
-  const quiet = stalled ? (idle === null ? ", never started" : `, no activity for ${idle} days`) : "";
+  const quiet = stalled ? (neverTouched ? `, not started in ${idle} days` : `, no activity for ${idle} days`) : "";
   return { u, reason: `${title} ${when}${quiet}` };
 }
 
@@ -118,7 +131,7 @@ export async function loadRosterRisk(request: FastifyRequest, horizonDays = 14):
   const [tasks, deadlines, flags] = await Promise.all([
     request.db
       .from("deliverables")
-      .select("id, student_id, title, status, due_date, last_activity_at")
+      .select("id, student_id, title, status, due_date, last_activity_at, created_at")
       .in("student_id", ids)
       .neq("status", "complete")
       // As in the sweep: a student's own to-do and a counselor-only task are not the student's assigned work.
@@ -141,6 +154,7 @@ export async function loadRosterRisk(request: FastifyRequest, horizonDays = 14):
       due: (t.due_date as string | null) ?? null,
       status: (t.status as string | null) ?? null,
       lastActivityAt: (t.last_activity_at as string | null) ?? null,
+      createdAt: (t.created_at as string | null) ?? null,
     })),
     ...((deadlines.data ?? []) as Row[]).map((d): RiskInput => ({
       kind: "deadline",
