@@ -84,3 +84,18 @@ test("effort follows the question: a plain lookup stays low, a tangled judgement
   assert.ok(tangled.complexity >= 3);
   assert.equal(effortFor(PROFILES.documents, tangled), "high");
 });
+
+test("effort steps down a level for a plain, confident one-part question at medium (P2-7)", () => {
+  // The Document researcher is medium; "what's in her transcript?" scores documents alone, one clause, no judgement.
+  const plainDoc = u("What's in her transcript?");
+  assert.equal(plainDoc.intent, "documents");
+  assert.equal(plainDoc.complexity, 0);
+  assert.ok(plainDoc.confidence >= 0.6);
+  assert.equal(effortFor(PROFILES.documents, plainDoc), "low");
+  // A documents question that also names a record attribute ("AP") is less certain and keeps medium.
+  const mixed = u("What does her transcript say about AP Chem?");
+  assert.ok(mixed.confidence < 0.6);
+  assert.equal(effortFor(PROFILES.documents, mixed), "medium");
+  // Synthesis is medium too, but it only runs for two or more parts, so its complexity is never 0: no step-down there.
+  assert.equal(effortFor(PROFILES.synthesis, u("Did her mom reply about the CSS Profile, and what does her transcript show for junior year?")), "medium");
+});
