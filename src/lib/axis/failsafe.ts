@@ -68,6 +68,43 @@ export function resetFlagsReadyForTest(): void {
   flagsMissingUntil = 0;
 }
 
+/**
+ * Whether 20261203000002 (ai_conversations.summary_outside, ai_messages.read_outside) is in: the memory fold then
+ * marks a summary folded from turns that read outside content, and while that summary is in use instant changes wait
+ * for Confirm (lib/axis/memory.ts). Before it nothing names the columns and the summary is trusted as before; the
+ * first miss in each 30 s window is logged. Zero-row probes; ready is kept for the process.
+ */
+let taintOk = false;
+let taintMissingUntil = 0;
+export async function taintReady(
+  db: { from(table: string): { select(cols: string): { limit(n: number): PromiseLike<{ error: { code?: string } | null }> } } },
+  log?: { warn: (obj: object, msg: string) => void }
+): Promise<boolean> {
+  if (taintOk) return true;
+  if (Date.now() < taintMissingUntil) return false;
+  const results = await Promise.all([
+    db.from("ai_conversations").select("summary_outside").limit(0),
+    db.from("ai_messages").select("read_outside").limit(0),
+  ]);
+  const error = results.find((r) => r.error)?.error ?? null;
+  if (!error) {
+    taintOk = true;
+    return true;
+  }
+  if (isSchemaMissing(error)) {
+    taintMissingUntil = Date.now() + 30_000;
+    log?.warn({ code: error.code }, "axis summary taint off: apply supabase/migrations/20261203000002_axis_summary_outside.sql");
+    return false;
+  }
+  throw error;
+}
+
+/** Tests only. */
+export function resetTaintReadyForTest(): void {
+  taintOk = false;
+  taintMissingUntil = 0;
+}
+
 /** The JSON body of the fallback signal: `error` is what the app's ApiError reads, `message` the same text. */
 export const unavailableBody = (message = AXIS_UNAVAILABLE_MESSAGE) => ({ error: message, message, code: AXIS_UNAVAILABLE });
 

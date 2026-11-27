@@ -15,13 +15,18 @@
  * while it is among the replayed messages the chat is flagged (`History.flagged`),
  * and the fold replaces each run with "[quote from <source>]", so the summary
  * never carries the words.
+ *
+ * A paraphrase still gets through, so once 20261203000002 is in each answer stores whether its turn read outside
+ * content (`ai_messages.read_outside`, the dialogue state's `outside`), and a fold over any such turn, a quoting
+ * answer or an unchecked one marks the summary (`ai_conversations.summary_outside`, sticky: the next fold merges the
+ * old summary in). While a marked summary is in use (`History.summaryOutside`) instant changes wait for Confirm.
  */
 import type Anthropic from "@anthropic-ai/sdk";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { wrapUntrusted } from "../context/pack.js";
 import { fromPostgrest } from "../errors.js";
-import { flagsReady, isSchemaMissing } from "./failsafe.js";
+import { flagsReady, isSchemaMissing, taintReady } from "./failsafe.js";
 import { mergeRuns, quotedRuns, redactQuotes, validRuns } from "./quotes.js";
 import { stripCitations } from "./ledger.js";
 import { structured } from "./llm.js";
@@ -33,7 +38,7 @@ export const RECENT_MESSAGES = 12;
 /** Unsummarised messages that trigger a fold. Above RECENT_MESSAGES so a fold always has something to fold. */
 export const FOLD_AT = 20;
 
-type MsgRow = { role: string; content: string; created_at: string; outside_quotes?: unknown };
+type MsgRow = { role: string; content: string; created_at: string; outside_quotes?: unknown; read_outside?: unknown };
 
 export type History = {
   summary: string | null;
@@ -47,13 +52,33 @@ export type History = {
   flagged: boolean;
   /** Those quoted words, as free text this turn can see (re-quoting them keeps the flag). */
   quoted: { source: string; text: string }[];
+  /**
+   * The summary in use was folded from turns that read outside content (20261203000002): it may paraphrase text
+   * someone else wrote, so instant changes wait for Confirm. False with no summary, or before the migration.
+   */
+  summaryOutside: boolean;
   /** The conversation's updated_at as read: the route's after-`done` state write lands only if it hasn't moved. */
   version: string | null;
 };
 
 /** The columns history reads: the text, and its quote marks once 20261108000004 is in. */
-const messageColumns = (flags: boolean) => `role, content, created_at${flags ? ", outside_quotes" : ""}`;
+const messageColumns = (flags: boolean, taint = false) => `role, content, created_at${flags ? ", outside_quotes" : ""}${taint ? ", read_outside" : ""}`;
 const flagsOn = (request: FastifyRequest) => flagsReady(request.db).catch(() => false);
+/** 20261203000002 is in. Any probe failure reads as not: the summary is then trusted as before. */
+const taintOn = (request: FastifyRequest) => taintReady(request.db, request.log).catch(() => false);
+
+/**
+ * Whether folding these messages could carry outside content into the summary: an answer whose turn read some
+ * (`read_outside`), one that quoted free text, or (once quotes are checked) one never checked. The counselor's own
+ * messages never do.
+ */
+export function foldTainted(rows: MsgRow[], flags: boolean): boolean {
+  return rows.some(
+    (r) =>
+      r.role === "assistant" &&
+      (r.read_outside === true || validRuns(r.content, r.outside_quotes).length > 0 || (flags && !Array.isArray(r.outside_quotes)))
+  );
+}
 
 /** Alternating user/assistant turns from a user turn, with old citation markers removed. */
 export function toTurns(rows: MsgRow[]): Anthropic.Beta.BetaMessageParam[] {
@@ -93,15 +118,17 @@ const stateSchema = z.object({
 });
 
 export async function loadHistory(request: FastifyRequest, conversationId: string): Promise<History> {
+  const taint = await taintOn(request);
+  const convCols: string = `summary, summary_through, state, updated_at${taint ? ", summary_outside" : ""}`;
   const { data: convRow, error } = await request.db
     .from("ai_conversations")
-    .select("summary, summary_through, state, updated_at")
+    .select(convCols)
     .eq("id", conversationId)
     .maybeSingle();
   // Before 20261018000001 the memory columns don't exist: answer from recent turns alone.
   if (error && !isSchemaMissing(error)) throw fromPostgrest(error);
   if (error) request.log.warn({ code: error.code }, "axis memory columns missing; recent turns only");
-  const conv = error ? null : convRow;
+  const conv = (error ? null : convRow) as Record<string, unknown> | null;
   const flags = await flagsOn(request);
   let query = request.db
     .from("ai_messages")
@@ -119,12 +146,14 @@ export async function loadHistory(request: FastifyRequest, conversationId: strin
     .flatMap((r) => validRuns(r.content, r.outside_quotes).map((q) => ({ source: q.source, text: r.content.slice(q.start, q.end) })));
   // Under the rule every AxIS answer is stored with its runs ([] when clean); one without (null) wasn't checked.
   const unchecked = flags && rows.some((r) => r.role === "assistant" && !Array.isArray(r.outside_quotes));
+  const summary = (conv?.summary as string | null) ?? null;
   return {
-    summary: (conv?.summary as string | null) ?? null,
+    summary,
     turns: toTurns(rows),
     state: parsedState.success ? parsedState.data : null,
     flagged: quoted.length > 0 || unchecked,
     quoted,
+    summaryOutside: taint && !!summary && conv?.summary_outside === true,
     version: typeof conv?.updated_at === "string" ? conv.updated_at : null,
   };
 }
@@ -173,23 +202,43 @@ export function foldTranscript(rows: MsgRow[], fileTexts: { source: string; text
     .join("\n\n");
 }
 
+type Summarize = (o: { request: FastifyRequest; studentId: string | null; memory: string; transcript: string }) => Promise<{ summary: string } | null>;
+
+/** The fold's model call (Haiku 5.5, structured). */
+const summarizeWithModel: Summarize = ({ request, studentId, memory, transcript }) =>
+  structured({
+    request,
+    module: "axis-memory",
+    studentId,
+    system:
+      "You keep a running memory of a counselor's conversation with their assistant. Merge the earlier memory and the new turns into one set of short bullets, at most about 300 words. Keep facts, conclusions and open questions; drop pleasantries.",
+    prompt: `Earlier memory:\n${wrapUntrusted("memory", memory)}\n\nNew turns:\n${wrapUntrusted("transcript", transcript)}`,
+    schema: SUMMARY_SCHEMA as unknown as Record<string, unknown>,
+    parse: z.object({ summary: z.string() }),
+    effort: "low",
+  });
+
 /**
  * Folds everything but the most recent messages into the summary. Called
  * without awaiting after a turn; a failure keeps the old summary and the next
  * turn simply sends more history.
+ * `deps.summarize` replaces the model call (tests).
  */
-export async function foldIfLong(request: FastifyRequest, conversationId: string): Promise<void> {
-  const { data: conv, error: convErr } = await request.db
+export async function foldIfLong(request: FastifyRequest, conversationId: string, deps: { summarize?: Summarize } = {}): Promise<void> {
+  const taint = await taintOn(request);
+  const convCols: string = `summary, summary_through, student_id${taint ? ", summary_outside" : ""}`;
+  const { data: convData, error: convErr } = await request.db
     .from("ai_conversations")
-    .select("summary, summary_through, student_id")
+    .select(convCols)
     .eq("id", conversationId)
     .maybeSingle();
+  const conv = convData as Record<string, unknown> | null;
   // No memory columns (migration not applied) or no row: nothing to fold into.
   if (convErr || !conv) return;
   const flags = await flagsOn(request);
   let query = request.db
     .from("ai_messages")
-    .select(messageColumns(flags))
+    .select(messageColumns(flags, taint))
     .eq("conversation_id", conversationId)
     .order("created_at")
     .limit(200);
@@ -201,20 +250,20 @@ export async function foldIfLong(request: FastifyRequest, conversationId: string
   const older = rows.slice(0, rows.length - RECENT_MESSAGES);
   const through = older.at(-1)!.created_at;
   const transcript = foldTranscript(older, flags ? await chatFileTexts(request, conversationId) : []);
-  const out = await structured({
+  const out = await (deps.summarize ?? summarizeWithModel)({
     request,
-    module: "axis-memory",
     studentId: (conv?.student_id as string | null) ?? null,
-    system:
-      "You keep a running memory of a counselor's conversation with their assistant. Merge the earlier memory and the new turns into one set of short bullets, at most about 300 words. Keep facts, conclusions and open questions; drop pleasantries.",
-    prompt: `Earlier memory:\n${wrapUntrusted("memory", (conv?.summary as string | null) ?? "(none)")}\n\nNew turns:\n${wrapUntrusted("transcript", transcript)}`,
-    schema: SUMMARY_SCHEMA as unknown as Record<string, unknown>,
-    parse: z.object({ summary: z.string() }),
-    effort: "low",
+    memory: (conv?.summary as string | null) ?? "(none)",
+    transcript,
   });
   if (!out) return;
   // Only forward: if two folds race, the later point wins and nothing is folded twice.
-  let update = request.db.from("ai_conversations").update({ summary: out.summary.slice(0, 4000), summary_through: through }).eq("id", conversationId);
+  // A summary folded from outside content stays marked: the next fold merges it in, paraphrase and all.
+  const outside = taint ? { summary_outside: conv?.summary_outside === true || foldTainted(older, flags) } : {};
+  let update = request.db
+    .from("ai_conversations")
+    .update({ summary: out.summary.slice(0, 4000), summary_through: through, ...outside })
+    .eq("id", conversationId);
   update = conv?.summary_through ? update.lt("summary_through", through) : update.is("summary_through", null);
   const { error: upErr } = await update;
   if (upErr) request.log.warn({ code: upErr.code }, "axis memory summary not saved");
