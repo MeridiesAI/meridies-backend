@@ -180,6 +180,8 @@ A cited sentence also gets a support score: the share of its content words that 
 
 **By model, after the answer.** Only sentences with a missing figure or a weak citation go to Haiku 5.5 at low effort, with the material they should rest on. It rules each one supported, general knowledge, or unsupported. The counselor sees what is still unsupported under the answer. This runs after `done`.
 
+**Attached files.** A chat's files are read once, after the turn they arrive in, and stored as text (`extractChatFiles` in `attachments.ts`: a PDF's text layer, else a word-for-word transcription, which is also how an image is read). From then on that stored text is evidence like any other: it is in the index while the answer streams, and the after-answer check gets it as material too (each file cut at 12,000 characters, the most the model saw of it). So a chat with a PDF or an image is checked like any other on every later turn. Grounding is off only on a turn where a PDF or an image still goes to the model as a file (`FileBlocks.opaque`): the turn it is attached in (its text isn't stored until after the answer), a turn sent before that reading finished or while it waits to be retried, or a file whose reading failed (which goes as a file every turn, so its chat stays unchecked). Text files are always read back as text.
+
 Citations are resolved against the ledger: a marker that points at nothing the model was shown is removed before the answer is saved, and the client renders only resolved markers.
 
 ### 3.9 Memory
