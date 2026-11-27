@@ -121,6 +121,27 @@ function pickIntent(scores: Record<Intent, number>, fallback: Intent): { intent:
 const QUESTION_LEAD = /^(should|shall|is|are|was|were|what|whats|how|why|when|which|who|whom|where|do|does|did|has|have|had|am|would i|could i|can i|should i)\b/;
 const REQUEST_FORM = /^(please |pls |axis )?(can|could|would|will) you\b|\bplease\b|\bgo ahead\b/;
 
+/** The lead of a request put to AxIS, stripped before asking what it asks for. */
+const ASK_LEAD = /^(?:(?:please|pls|axis) )?(?:(?:can|could|would|will) you |i need you to |i want you to |go ahead and )?(?:please )?/;
+/** Asking for help, feedback or a review rather than for text. */
+const ADVICE_LEAD = /^(?:help|advise|suggest|review|critique|check|read|look (?:at|over)|give (?:me|her|him|them) (?:some )?(?:feedback|advice|tips|ideas|suggestions|pointers|notes)|tell me (?:how|what|where|why|if|whether)|any (?:tips|advice|ideas|suggestions|feedback|thoughts))\b/;
+/** "Could I get a draft of…" is a question in form but asks for text. */
+const GET_TEXT = /^(?:can|could|may) i (?:get|have|see)\b/;
+
+/**
+ * Whether an essay-intent message asks AxIS to write or rewrite essay text (so the answer opens by saying it
+ * doesn't), rather than asking for advice about an essay ("how can she improve her essay?", "help her tighten
+ * her intro"), which gets straight advice. The essay intent catches both: its edit verbs ("improve", "fix",
+ * "strengthen") match advice questions too. A plain question is advice unless put as a request ("can you
+ * rewrite…?"); a request that leads with help, feedback or a review is advice.
+ */
+export function asksForEssayText(text: string, norm: string): boolean {
+  if (GET_TEXT.test(norm)) return true;
+  if (ADVICE_LEAD.test(norm.replace(ASK_LEAD, ""))) return false;
+  const question = text.trim().endsWith("?") || QUESTION_LEAD.test(norm);
+  return !question || REQUEST_FORM.test(norm);
+}
+
 /**
  * A question asks; it doesn't order a change. "Should I remove Yale from her list?" is advice,
  * "Change in her GPA since last year?" a lookup. Unless it is put as a request ("can you…",

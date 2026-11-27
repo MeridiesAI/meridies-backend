@@ -121,6 +121,25 @@ test("essay writing is refused into bullets, never sent to the free-text path", 
   assert.match(text(), /^- I don't write essay text/);
 });
 
+test("an essay turn logs the one model call it makes (P2-1)", async () => {
+  const request = fakeRequest(TABLES, ME);
+  const lines: { axis?: { path: string; calls: number; maxCalls: number } }[] = [];
+  (request.log as unknown as { info: (o: unknown) => void }).info = (o) => lines.push(o as (typeof lines)[number]);
+  await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "Write her Why Cornell essay", emit: collect().emit, signal: new AbortController().signal, api: scriptedApi([]).api });
+  const line = lines.find((l) => l.axis?.path === "essay");
+  assert.ok(line, "one axis turn line");
+  assert.equal(line!.axis!.calls, 1);
+  assert.equal(line!.axis!.maxCalls, 1);
+});
+
+test("an essay advice question gets straight advice, not the 'I don't write essay text' line (P2-2)", async () => {
+  const scripted = scriptedApi([{ text: "should not be called" }]);
+  const { res, text } = await turn("How can she improve her essay?", "s1", scripted.api);
+  assert.equal(res.path, "essay");
+  assert.doesNotMatch(text(), /I don't write essay text/);
+  assert.match(text(), /^- /);
+});
+
 test("a time the parser can't read keeps the question off the direct path", async () => {
   const scripted = scriptedApi([{ text: "Two things are due before Thanksgiving." }]);
   const { res } = await turn("anything due for her before thanksgiving", "s1", scripted.api);

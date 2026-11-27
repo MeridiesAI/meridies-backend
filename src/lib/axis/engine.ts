@@ -55,7 +55,7 @@ import {
   THINKING,
   type Effort,
 } from "./models.js";
-import { dampQuestions, nextState, scoreIntents, understand, type DialogueState, type Understanding } from "./nlu.js";
+import { asksForEssayText, dampQuestions, nextState, scoreIntents, understand, type DialogueState, type Understanding } from "./nlu.js";
 import { gatherEvidence } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
@@ -229,15 +229,19 @@ async function essayAdvice(
   studentId: string | null,
   question: string,
   record: string | null,
-  o: { signal: AbortSignal; hold?: Hold }
+  o: { signal: AbortSignal; hold?: Hold; asksForText: boolean }
 ): Promise<string> {
+  // Only a request to write or rewrite essay text opens with the refusal; an advice question gets advice (P2-2).
+  const ask = o.asksForText
+    ? "The counselor asked for essay writing. Open with one bullet saying you don't write essay text, then advise."
+    : "The counselor asked for advice about an essay. Answer with the advice directly; don't say that you don't write essay text.";
   const out = await structured({
     signal: o.signal,
     hold: o.hold,
     request,
     module: "essay-advice",
     studentId,
-    system: `${NO_PROSE_SYSTEM}\n\nThe counselor asked for essay writing. Open with one bullet saying you don't write essay text, then advise.\n\n${UNTRUSTED_DATA_RULE}`,
+    system: `${NO_PROSE_SYSTEM}\n\n${ask}\n\n${UNTRUSTED_DATA_RULE}`,
     prompt: `${record ? `Student on file:\n${record.slice(0, 30_000)}\n\n` : ""}Counselor's request:\n${wrapUntrusted("request", question)}`,
     schema: ESSAY_SCHEMA as unknown as Record<string, unknown>,
     parse: z.object({ bullets: z.array(z.string()) }),
@@ -247,7 +251,7 @@ async function essayAdvice(
   const bullets = enforceNoProse(out?.bullets ?? []).slice(0, 8);
   return bullets.length
     ? bullets.map((b) => `- ${b}`).join("\n")
-    : "- I don't write essay text. Tell me which part of the draft worries you and I'll point at what to change.";
+    : `- ${o.asksForText ? "I don't write essay text. " : ""}Tell me which part of the draft worries you and I'll point at what to change.`;
 }
 
 /** One AxIS turn. A reservation the route made that the turn never used is released at the end (the call stays counted). */
@@ -443,7 +447,7 @@ async function axisTurn(opts: {
     // Advice needs the whole record (an uploaded draft, the activity descriptions) and runs no tools to fetch what
     // a short-only record leaves out: under the rule it reads the full record and the turn is judged by it.
     const essayCtx = flags && !forChange && studentId ? await loadContext(request, studentId, false, false) : ctx;
-    const bullets = await essayAdvice(request, studentId, content, essayCtx.record, { signal, hold: opts.prepaid });
+    const bullets = await essayAdvice(request, studentId, content, essayCtx.record, { signal, hold: opts.prepaid, asksForText: asksForEssayText(u.text, u.norm) });
     emit("delta", { text: `${lead}${bullets}` });
     const fin = await finishDraft(
       {
@@ -454,7 +458,8 @@ async function axisTurn(opts: {
     );
     if (fin.tail) emit("delta", { text: `\n\n${fin.tail}` });
     const text = `${lead}${bullets}${fin.tail ? `\n\n${fin.tail}` : ""}`;
-    logTurn("essay", 0, 0);
+    // One structured call (essay-advice), whatever it returned.
+    logTurn("essay", 1, 1);
     return {
       // The bullets were written over the student's record (their essays, activities): saved to the
       // chat, they are outside content for the next turn.

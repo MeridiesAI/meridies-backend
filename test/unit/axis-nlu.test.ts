@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseWindow } from "../../src/lib/axis/dates.js";
 import { CollegeIndex, jaroWinkler, RosterIndex } from "../../src/lib/axis/entities.js";
-import { attributesOf, nextState, understand } from "../../src/lib/axis/nlu.js";
+import { asksForEssayText, attributesOf, nextState, understand } from "../../src/lib/axis/nlu.js";
 import { splitClauses, tokens } from "../../src/lib/axis/text.js";
 
 const NOW = new Date("2026-10-11T15:00:00Z"); // a Sunday
@@ -171,4 +171,20 @@ test("asking AxIS to write an activity description is an essay request; copying 
   assert.equal(u("rewrite the activity description"), "essay");
   assert.equal(u("come up with a blurb for her robotics club"), "essay");
   assert.equal(u("add the description from her resume"), "action");
+});
+
+test("an essay turn says it doesn't write essay text only when asked to write it (P2-2)", () => {
+  const asks = (t: string) => {
+    const x = understand(t, { chatStudentId: "s1", roster: null, colleges: null, state: null, now: NOW });
+    assert.equal(x.intent, "essay", t);
+    return asksForEssayText(x.text, x.norm);
+  };
+  // Asked to write or rewrite text.
+  for (const t of ["Write her Why Cornell essay", "Rewrite her intro", "Can you tighten her Why Cornell essay?", "Please polish her common app essay intro", "draft her supplement for Tufts", "Could I get a draft of her personal statement?"]) {
+    assert.equal(asks(t), true, t);
+  }
+  // Asking for advice about an essay.
+  for (const t of ["How can she improve her essay?", "What should she fix in her personal statement?", "Any tips to strengthen her supplement?", "Help her improve her essay", "can you help her improve her essay"]) {
+    assert.equal(asks(t), false, t);
+  }
 });
