@@ -150,10 +150,79 @@ test("a turn that ends in thinking only is asked once for the answer, appending 
   assert.deepEqual(calls[1]!.params.tool_choice, { type: "none" });
 });
 
-test("text written before a tool round is kept apart from the answer after it", async () => {
-  const { api } = scriptedApi([{ text: "Checking.", tools: [{ id: "x", name: "list_upcoming", input: {} }] }, { text: "Two items are due." }]);
+test("filler text in a round that ends in tool calls is held back; the steps still show (P2-6)", async () => {
+  const { api } = scriptedApi([{ text: "Let me check her deadlines.", tools: [{ id: "x", name: "list_upcoming", input: {} }] }, { text: "Two items are due." }]);
+  const deltas: string[] = [];
+  const steps: string[] = [];
+  const res = await runLoop(options(api, { onText: (d) => deltas.push(d), onToolStart: (c) => steps.push(`start:${c.name}`), onToolEnd: (c) => steps.push(`end:${c.name}`) }));
+  assert.equal(res.text, "Two items are due.");
+  assert.equal(deltas.join(""), "Two items are due.");
+  assert.deepEqual(steps, ["start:list_upcoming", "end:list_upcoming"]);
+});
+
+test("a long answer in a round that could still call tools streams live, before the message ends (P2-6)", async () => {
+  const timeline: string[] = [];
+  const answer = "Her GPA is 3.87 unweighted and 4.31 weighted, which puts her in the middle fifty percent for most of her list. Her SAT is 1490.";
+  const { api } = timed([{ text: answer, tailMs: 20 }], timeline);
+  const res = await runLoop(options(api, { onText: (d) => timeline.push(`text:${d}`) }));
+  assert.equal(res.text, answer);
+  assert.ok(timeline.indexOf("final") > timeline.findIndex((x) => x.startsWith("text:")), "text went out before the message ended");
+  assert.equal(timeline.filter((x) => x.startsWith("text:")).map((x) => x.slice(5)).join(""), answer);
+});
+
+test("a short answer is held only until its round ends, then shown whole (P2-6)", async () => {
+  const deltas: string[] = [];
+  const { api } = scriptedApi([{ text: "Her GPA is 3.87." }]);
+  const res = await runLoop(options(api, { onText: (d) => deltas.push(d) }));
+  assert.equal(res.text, "Her GPA is 3.87.");
+  assert.equal(deltas.join(""), "Her GPA is 3.87.");
+});
+
+test("the round that must answer streams live from the first word (P2-6)", async () => {
+  const timeline: string[] = [];
+  const { api } = timed([{ text: "Short.", tailMs: 20 }], timeline);
+  await runLoop(options(api, { maxCalls: 1, onText: (d) => timeline.push(`text:${d}`) }));
+  assert.ok(timeline.indexOf("final") > timeline.findIndex((x) => x.startsWith("text:")));
+});
+
+test("a long preamble already shown before a tool round is kept apart from the answer after it", async () => {
+  const preamble = "Before I answer, here is what I know so far from her record and what I still need to confirm.\n";
+  const { api } = scriptedApi([{ text: preamble, tools: [{ id: "x", name: "list_upcoming", input: {} }] }, { text: "Two items are due." }]);
   const res = await runLoop(options(api));
-  assert.equal(res.text, "Checking.\n\nTwo items are due.");
+  assert.equal(res.text, `${preamble}\n\nTwo items are due.`);
+});
+
+test("a read-only tool still running at the deadline is cut off, and the next call answers (P2-5)", async () => {
+  const { api, calls } = scriptedApi([{ tools: [{ id: "slow", name: "search_documents", input: { query: "q" } }, { id: "fast", name: "list_upcoming", input: {} }] }, { text: "Answer." }]);
+  let aborted = false;
+  const exec = (c: { id: string }, signal: AbortSignal): Promise<ToolOutput> =>
+    c.id === "fast"
+      ? Promise.resolve({ content: "fast result", fresh: true })
+      : new Promise((resolve) => signal.addEventListener("abort", () => ((aborted = true), resolve({ content: "late", fresh: true }))));
+  const started = Date.now();
+  const res = await runLoop(options(api, { exec, deadline: Date.now() + 400 }));
+  assert.ok(Date.now() - started < 5_000, "didn't wait for the slow tool");
+  assert.equal(aborted, true, "the slow lookup was told to stop");
+  const results = calls[1]!.params.messages.at(-1)!.content as { tool_use_id: string; content: string; is_error?: boolean }[];
+  assert.equal(results.find((r) => r.tool_use_id === "fast")!.content, "fast result");
+  const slow = results.find((r) => r.tool_use_id === "slow")!;
+  assert.match(slow.content, /ran out of time/);
+  assert.equal(slow.is_error, true);
+  assert.deepEqual(calls[1]!.params.tool_choice, { type: "none" }, "past the deadline the next call must answer");
+  assert.equal(res.text, "Answer.");
+});
+
+test("a write in flight at the deadline is waited for, never cut off (P2-5)", async () => {
+  const { api, calls } = scriptedApi([{ tools: [{ id: "w", name: "propose_action", input: {} }] }, { text: "Filed." }]);
+  let aborted = false;
+  const exec = (_c: unknown, signal: AbortSignal): Promise<ToolOutput> => {
+    signal.addEventListener("abort", () => (aborted = true));
+    return new Promise((resolve) => setTimeout(() => resolve({ content: "Filed for the counselor's confirmation.", fresh: true }), 300));
+  };
+  await runLoop(options(api, { exec, deadline: Date.now() + 100 }));
+  assert.equal(aborted, false);
+  const results = calls[1]!.params.messages.at(-1)!.content as { content: string }[];
+  assert.equal(results[0]!.content, "Filed for the counselor's confirmation.");
 });
 
 test("degrade folds the mode into the user turn and drops effort-only messages", () => {
