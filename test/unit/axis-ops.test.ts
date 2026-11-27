@@ -53,6 +53,36 @@ test("every operation is well formed and uniquely named", () => {
   assert.equal(READ_OPS.length + WRITE_OPS.length, allOps().length);
 });
 
+// A write that can run at once (risk "auto", or a risk that depends on the input) must have an Undo:
+// the counselor never clicked to approve it, so the card's Undo is their only way back.
+// Add a name here only with a comment saying why it can't be undone and why it still runs at once.
+const AUTO_WITHOUT_UNDO: ReadonlySet<string> = new Set([]);
+
+test("every write that can run at once has an undo", () => {
+  const missing = allOps()
+    .filter((d) => d.kind === "write" && (d.risk === "auto" || typeof d.risk === "function"))
+    .filter((d) => typeof d.undo !== "function" && !AUTO_WITHOUT_UNDO.has(d.name))
+    .map((d) => d.name);
+  assert.deepEqual(missing, [], `give these an undo or make them risk "confirm": ${missing.join(", ")}`);
+  for (const name of AUTO_WITHOUT_UNDO) assert.ok(getOp(name), `${name} in AUTO_WITHOUT_UNDO is not an op`);
+});
+
+test("the two former gaps: a new pipeline stage waits for Confirm; a new research folder can be undone", () => {
+  const stage = getOp("pipeline.create_stage")!;
+  assert.equal(riskOf(stage, { name: "Waitlist" }), "confirm");
+  assert.ok(stage.warning, "a confirm card says what is at stake");
+  assert.ok(!COUNSELOR_ONLY.has("pipeline.create_stage"));
+  const folder = getOp("colleges.research_folder")!;
+  assert.equal(riskOf(folder, { url: "https://admissions.cornell.edu" }), "auto");
+  assert.deepEqual(folder.undo!({ url: "https://admissions.cornell.edu" }, { folderId: SAMPLE_UUID, created: true }, null), {
+    op: "files.delete_folder",
+    input: { folder_id: SAMPLE_UUID },
+  });
+  assert.equal(folder.undo!({ url: "https://admissions.cornell.edu" }, { folderId: SAMPLE_UUID, created: false }, null), null, "a folder that was already there stays");
+  assert.equal(folder.undo!({ filename: "x.pdf" }, {}, null), null);
+  assert.equal(undoStepOf({ undo: { op: "files.delete_folder", input: { folder_id: SAMPLE_UUID } } })?.op, "files.delete_folder", "the step passes the undo check");
+});
+
 test("every input schema is strict: an unknown key is refused", () => {
   for (const d of allOps()) {
     const input = sampleInput(d.name);
