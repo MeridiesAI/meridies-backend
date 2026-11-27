@@ -102,6 +102,10 @@ Measured intent accuracy: the tuning set scored 45 of 45. A second set scored 25
 
 A question takes this path only when it is one clause, carries no judgement word ("good enough", "should", "chances", "compared"), resolves every student and school without ambiguity, and has no time expression the date parser couldn't read ("before Thanksgiving" goes to the model, since answering with a default two-week window would answer a different question). Otherwise the compiler returns nothing and the turn goes on.
 
+Caseload risk is checked **before** the judgement-word test, on purpose: "who should I focus on?" carries a judgement word ("should") but is still the ranking the code owns, so it stays on the direct path (`compiler.ts`). It needs a caseload question (who, which students, anyone), a risk word (behind, overdue, stalled, at risk, focus on…), no student in view and no school named.
+
+A **"why" question** ("why is anyone behind?", "why are my students falling behind?") gets the same students in the same order, each with their reasons on their own lines (which items are overdue and by how many days, which are due soon with no activity for how long, open red flags), instead of the numbered ranking, since the reasons are the answer there. Still no model call. The reason wording comes from `risk.ts`; an overdue item says how late it is but not how long it has been idle.
+
 ### 3.3 The evidence planner
 
 `planner.ts`. A tool-calling model finds what it needs one round trip at a time. Most of those calls can be predicted from the question, so the planner makes them before the model starts, in parallel, each with 2.5 seconds:
@@ -145,7 +149,8 @@ A student's score is their worst item plus 0.6 of the second and 0.3 of the thir
 - **Early dispatch.** Tool inputs stream as the model writes them (`eager_input_streaming`). A read-only lookup starts the moment its block closes, while the model is still writing the rest of its turn. Results are sent only when the turn ends on `tool_use`; a refused or truncated turn throws its early work away. A write (`propose_action`) starts only after the turn is complete.
 - **One message of results.** Every call in a round runs at once and all results return in one user message, which keeps the model calling in parallel.
 - **Novelty stop.** A round whose lookups all came back empty, failed or repeated brought nothing new. After two such rounds the next call has to answer (`tool_choice: none`). A repeated lookup in the same turn is answered from memory.
-- **Budgets.** Each specialist profile has a call cap (1 to 5) and the tool phase has 40 seconds; the last call always answers.
+- **Budgets.** Each specialist profile has a call cap (1 to 6) and the tool phase has 40 seconds; the last call always answers. The 40 seconds hold inside a round too: a read-only lookup still running at the deadline has its signal aborted and goes back to the model as "this lookup ran out of time" (an error result, nothing new), and the next call must answer. A write (`perform_action`, `propose_action`) is always waited for, never cut off: aborting the request wouldn't undo a change that already happened, and the model would then tell the counselor it failed. The model call itself isn't cut.
+- **Filler held back.** Text from a round that ends in tool calls ("Let me check her deadlines.") is not shown and not saved: only the final round's text is the answer. While a round may still call tools its text waits until the round ends, a tool call starts (then it is dropped), or it is clearly an answer (120 characters, or a line break), after which it streams live. A round that must answer (the last call, the deadline passed, two stale rounds) streams from the first word. Tool steps (`reasoning` events: "Reading…", "Creating task…") and status phases are separate events and are never held.
 - **Degradation.** If the API rejects the per-message effort or the mode message on an account without them, the first call is retried once without them and both stay off for the process.
 - **Thinking blocks.** Passed back exactly as received, and the history is only appended to, which Haiku 5.5's history check requires. A turn that ends in thinking only is asked once, by an appended user message, for its answer.
 - The client is injected, so the loop is tested against a scripted model (section 10).
@@ -154,7 +159,9 @@ A student's score is their worst item plus 0.6 of the second and 0.3 of the thir
 
 `profiles.ts`, `specialists.ts`. Each intent is answered by a profile: Record analyst, Document researcher, Correspondence, College data, Caseload, Strategist, Clerk. A profile sets the effort, the call cap, whether figures go to the adjudicator, and the contract it answers under. All contracts sit in the cached system prompt; a turn picks one with a short system message after the question (`Mode: strategy.`), so switching specialist leaves the cache intact.
 
-Effort comes from the profile and the question: a complexity score counts extra clauses, distinct intents, more than one student, more than two schools, judgement words, length over 400 characters and strategy itself. A score of 3 raises effort one level and 5 raises it two.
+Effort comes from the profile and the question: a complexity score counts extra clauses, distinct intents, more than one student, more than two schools, judgement words, length over 400 characters and strategy itself. A score of 3 raises effort one level and 5 raises it two. A medium profile steps down to low for a plain question: complexity 0 and intent confidence at least 0.6 ("what's in her transcript?" with the Document researcher). A documents question that also names a record attribute ("what does her transcript say about AP Chem?") is under 0.6 and stays medium. Synthesis is medium too but never steps down, because it only runs for two or more parts (complexity at least 1).
+
+**Specialists' effort.** The specialists themselves always run at low effort, whatever the question, each with three calls; the synthesis that writes the answer from their findings runs at the synthesis profile's medium, raised by the question's complexity like any turn.
 
 Compound questions fan out to specialists only when two or more parts still need their own searching after the planner (a documents or email part its search came back empty for). Each part gets a short tool loop with the specialist contract: terse cited findings, then what it couldn't find. One streamed synthesis writes the answer from their findings. Details that keep this efficient:
 
@@ -190,7 +197,25 @@ Citations are resolved against the ledger: a marker that points at nothing the m
 
 ### 3.11 What stays from version 1
 
-The AI guard re-applies the per-document AI rules to everything retrieval returns (`guard.ts`). Essay requests never reach the free-text path. Proposals are confirmed by the counselor; an email draft opens the Communication composer, where recipients, quiet hours and the throttle are enforced. One `ai_runs` row per turn, the daily call quota charged per model call, the monthly output quota per turn.
+The AI guard re-applies the per-document AI rules to everything retrieval returns (`guard.ts`). Essay requests never reach the free-text path.
+
+**Essay answers.** The essay intent catches asking AxIS to write or rewrite essay text and also advice questions phrased with an edit verb ("how can she improve her essay?", "what should she fix in her personal statement?", "any tips to strengthen her supplement?"). Both get guarded bullets (one structured call, logged as one call). Only a request for text (`asksForEssayText` in `nlu.ts`: an imperative or a "can you…" request, or "could I get a draft…") opens with "I don't write essay text"; a plain question, or a request for help, feedback or a review, gets the advice straight. Proposals are confirmed by the counselor; an email draft opens the Communication composer, where recipients, quiet hours and the throttle are enforced. One `ai_runs` row per turn, the daily call quota charged per model call, the monthly output quota per turn.
+
+### 3.12 Activity drafts
+
+`drafts/`. The counselor can add activities across several messages ("add robotics… she's captain… 6 hours a week"). The draft lives on the conversation (`draft_rows`); every value ends on a Confirm card, never written straight to the record. At the start of each turn `drafts/turn.ts` reads the draft and sorts the message: cancel and continue are answered in code with no model call, a message that adds to the draft goes to the Clerk with the draft block, and an unrelated one is answered as usual followed by a reminder. A draft with no counselor message for 30 minutes expires (a yes to the expiry line restores it). Switching student asks first. A draft message never takes the direct path.
+
+### 3.13 Attachments
+
+`attachments.ts`. A PDF, a screenshot or a text file attached to a chat goes to the model as a file the turn it arrives in; after that the server reads it once and stores its text, and later turns send the text in one message ahead of the history, so a reopened chat still knows what was in it. A file is data the counselor brought, never an instruction: a turn in a chat with files counts as outside content (changes wait for Confirm), and a PDF's or image's figures aren't checked by grounding (it can't read them back).
+
+### 3.14 Trash
+
+`ops/trash.ts`, `lib/axisTrash.ts`. A delete AxIS runs (a Confirm-tier delete op) is kept 30 days and restorable from its card (`axis_trash_restore` on the counselor's own client). The API marks the delete with an HMAC only it can make, and the database's capture trigger keeps a copy of what it removed. The scheduled sweep purges what is past 30 days (once an hour across replicas); an account deletion removes the trash it made and the trash about it.
+
+### 3.15 The quote check
+
+`quotes.ts`. An answer that repeats 8 or more consecutive words of free text the turn could see (a document, a long student-written value) is flagged: the runs are saved with the answer, the chat stays flagged while that answer is replayed, and the memory fold replaces each run with "[quote from <source>]". Words are compared with case, punctuation, spacing and invisible characters ignored, so a soft hyphen or a ligature can't hide a run. Direct, essay and agent answers are all checked, once the free-text rule (20261108000004) is in.
 
 ## 4. Claude Haiku 5.5 settings
 
