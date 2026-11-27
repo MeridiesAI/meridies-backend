@@ -78,6 +78,18 @@ const stateSchema = z.object({
   outside: z.boolean().optional(),
   short: z.boolean().optional(),
   draft: draftHeaderSchema.optional(),
+  // The question the last answer asked back (lib/axis/nlu.ts PendingAsk). A malformed one is dropped, never the state.
+  pending: z
+    .union([
+      z.object({
+        kind: z.literal("student"),
+        question: z.string().max(2000),
+        candidates: z.array(z.object({ id: z.string(), name: z.string(), grade: z.number().int().nullable(), gradYear: z.string().nullable().optional() })).min(2).max(5),
+      }),
+      z.object({ kind: z.literal("date"), question: z.string().max(2000), label: z.string().max(60), mode: z.enum(["by", "during"]) }),
+    ])
+    .optional()
+    .catch(undefined),
 });
 
 export async function loadHistory(request: FastifyRequest, conversationId: string): Promise<History> {

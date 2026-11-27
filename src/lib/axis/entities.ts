@@ -16,7 +16,7 @@ import type { FastifyRequest } from "fastify";
 import { TtlLru, sharedLoad } from "./cache.js";
 import { fromPostgrest } from "../errors.js";
 import { COLLEGE_ABBREVIATIONS, COMMON_WORDS, MULTIWORD_PLACES, STATE_NAMES } from "./lexicon.js";
-import { fold } from "./text.js";
+import { fold, STOPWORDS } from "./text.js";
 
 // ---- Tokens with their surface form -------------------------------------------------
 
@@ -107,7 +107,8 @@ export function jaroWinkler(a: string, b: string): number {
 
 // ---- Students ---------------------------------------------------------------------------
 
-export type RosterRow = { id: string; name: string };
+/** `gradYear`: the four-digit class year when the record has one, to tell two students with one first name apart. */
+export type RosterRow = { id: string; name: string; gradYear?: string | null };
 
 export type StudentMention = {
   id: string;
@@ -223,9 +224,9 @@ export type CatalogRow = {
 export type CollegeMention = {
   id: string;
   name: string;
-  /** 1 official name, 0.95 alias or abbreviation, 0.85 unique short form, 0.8 short form of the curated school. */
+  /** 1 official name, 0.95 alias or abbreviation, 0.85 unique short form, 0.8 short form of the curated school, 0.7 the one close spelling. */
   score: number;
-  via: "name" | "alias" | "short" | "pronoun";
+  via: "name" | "alias" | "short" | "pronoun" | "fuzzy";
   span: string;
 };
 
@@ -313,6 +314,56 @@ export class CollegeIndex {
     return this.names.get(id);
   }
 
+  /** Every name, alias and short form of up to three words, by first letter and word count, for `closest`. */
+  private fuzzyKeys: Map<string, { phrase: string; ids: string[] }[]> | null = null;
+
+  private keys(): Map<string, { phrase: string; ids: string[] }[]> {
+    if (this.fuzzyKeys) return this.fuzzyKeys;
+    const out = new Map<string, { phrase: string; ids: string[] }[]>();
+    const walk = (node: TrieNode, words: string[]) => {
+      if (node.hit && words.length) {
+        const k = `${words[0]![0]}:${words.length}`;
+        out.set(k, [...(out.get(k) ?? []), { phrase: words.join(" "), ids: node.hit.ids }]);
+      }
+      if (words.length < 3) for (const [w, n] of node.next) walk(n, [...words, w]);
+    };
+    walk(this.root, []);
+    this.fuzzyKeys = out;
+    return out;
+  }
+
+  /**
+   * The one school a misspelled name points at ("Cornel", "Northeastrn"), for "Assuming you meant …". A window of
+   * one to three words starting at a word that isn't everyday or question vocabulary is compared (Jaro-Winkler, same
+   * first letter, same word count) with every name and short form. Only a close match (0.92 or better) clearly
+   * ahead of every other school's best (by 0.04) counts; a name two schools share is a rival to itself, so it
+   * never wins. Null otherwise.
+   */
+  closest(text: string): CollegeMention | null {
+    const toks = scanTokens(text);
+    const keys = this.keys();
+    const best = new Map<string, { s: number; span: string }>();
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]!;
+      if (t.norm.length < 4 || FUZZY_SKIP.has(t.norm) || STOPWORDS.has(t.norm) || (COMMON_WORDS.has(t.norm) && !t.cap)) continue;
+      if (t.prev && LOCATION_PREPOSITIONS.has(t.prev)) continue;
+      for (let len = 1; len <= 3 && i + len <= toks.length; len++) {
+        const span = toks.slice(i, i + len).map((x) => x.norm).join(" ");
+        for (const key of keys.get(`${span[0]}:${len}`) ?? []) {
+          if (Math.abs(key.phrase.length - span.length) > 3) continue;
+          const s = jaroWinkler(span, key.phrase);
+          if (s < 0.85) continue;
+          // A name two schools share scores for both: neither can be clearly ahead.
+          for (const id of key.ids) if (!best.has(id) || best.get(id)!.s < s) best.set(id, { s, span });
+        }
+      }
+    }
+    const ranked = [...best.entries()].sort((a, b) => b[1].s - a[1].s);
+    const [top, next] = ranked;
+    if (!top || top[1].s < 0.92 || top[1].s >= 1 || (next && top[1].s - next[1].s < 0.04)) return null;
+    return { id: top[0], name: this.names.get(top[0]) ?? top[1].span, score: 0.7, via: "fuzzy", span: top[1].span };
+  }
+
   get size(): number {
     return this.names.size;
   }
@@ -363,6 +414,15 @@ export class CollegeIndex {
 }
 
 const LOCATION_PREPOSITIONS = new Set(["in", "from", "near", "around", "across", "outside", "within"]);
+/** Words of a question about a school's figures, never the start of a misspelled school name. */
+const FUZZY_SKIP = new Set(
+  (
+    "what whats which about admit admits admitted admission admissions acceptance accept accepted rate rates range ranges " +
+    "price prices tuition cost costs enrollment enroll enrolls size undergrads undergraduates undergraduate middle score " +
+    "scores average median percent students school schools college colleges university universities there their " +
+    "much many does have show tell give compare versus"
+  ).split(" ")
+);
 /** Short tokens that are also everyday shorthand ("bc" for because, "ACT" the test): only with capitals. */
 const RISKY_SHORT = new Set(["bc", "bu", "uf", "uc", "ed", "ea", "rd", "ap", "ib", "act", "sat", "gpa", "cds", "css", "ps", "us", "it", "art", "ace", "cal", "am", "pm"]);
 

@@ -5,7 +5,7 @@
  */
 import type { FastifyRequest } from "fastify";
 import { freshness } from "../collegesV10.js";
-import { plainName } from "../context/identity.js";
+import { plainGradYear, plainName } from "../context/identity.js";
 import { buildStudentContext, type StudentContext } from "../context/index.js";
 import { researchTaskIds } from "../research/origin.js";
 import type { SectionName } from "../context/profiles.js";
@@ -36,15 +36,18 @@ export function loadRoster(request: FastifyRequest): Promise<RosterIndex> {
   return sharedLoad(rosterCache, request.auth.userId, async () => {
     const { data, error } = await request.db
       .from("profiles")
-      .select("id, full_name")
+      .select("id, full_name, grad_year")
       .eq("counselor_id", request.auth.userId)
       .eq("role", "student")
       .is("archived_at", null)
       .limit(1000);
     if (error) throw fromPostgrest(error);
     // Names as AxIS shows them everywhere (find_student, cards, rankings): name characters only,
-    // clipped (lib/context/identity.ts). The student writes their own name, at any length.
-    return new RosterIndex(((data ?? []) as Row[]).map((r): RosterRow => ({ id: String(r.id), name: plainName(str(r.full_name)) })));
+    // clipped (lib/context/identity.ts). The student writes their own name, at any length. The class year only when
+    // it is four digits (a number, never text): it tells two students with one first name apart.
+    return new RosterIndex(
+      ((data ?? []) as Row[]).map((r): RosterRow => ({ id: String(r.id), name: plainName(str(r.full_name)), gradYear: plainGradYear(r.grad_year) }))
+    );
   });
 }
 
