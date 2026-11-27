@@ -53,6 +53,22 @@ export function specialistTasks(u: Understanding, covered: (intent: Intent) => b
   return parts.map((p) => ({ clause: p.text, intent: p.intent }));
 }
 
+/**
+ * Which search parts need no specialist. A part is covered when the planner
+ * already found passages of its kind, or when its search tool isn't on offer
+ * this turn: no RAG port registered means no search_documents, no connected
+ * mail account means no search_email. A specialist without the tool can only
+ * say it found nothing, so it would cost model calls for no answer. Once the
+ * ports are wired and an account connected, the parts open up again.
+ */
+export function coveredParts(o: { kinds: ReadonlySet<string>; retrievalReady: boolean; mailConnected: boolean }): (intent: Intent) => boolean {
+  return (i) => {
+    if (i === "documents") return !o.retrievalReady || o.kinds.has("upload") || o.kinds.has("drive") || o.kinds.has("onedrive");
+    if (i === "email") return !o.mailConnected || o.kinds.has("outlook") || o.kinds.has("gmail");
+    return true;
+  };
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export async function runSpecialists(o: {

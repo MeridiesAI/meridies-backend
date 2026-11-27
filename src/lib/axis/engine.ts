@@ -21,7 +21,7 @@
  * The route then saves the answer, sends `done`, and runs the adjudicator
  * and the memory fold after the counselor can already type again.
  */
-import { earlierFilesMessage, fileBlocks, fileTokens, noFiles, withFiles, type FileBlocks } from "./attachments.js";
+import { EARLIER_FILE_MAX_CHARS, earlierFilesMessage, fileBlocks, fileTokens, noFiles, withFiles, type FileBlocks } from "./attachments.js";
 import { errInfo, flagsReady } from "./failsafe.js";
 import { quotedRuns, type QuoteRun } from "./quotes.js";
 import { freeBlocks } from "../context/freeText.js";
@@ -59,7 +59,7 @@ import { asksForEssayText, dampQuestions, nextState, scoreIntents, understand, t
 import { gatherEvidence, type StepTiming } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
-import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
+import { coveredParts, renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
 import { isReadOnly, readsOutside, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
 import { markShort, newTurnBudget, recentActionsText, type OpContext, type OperationEvent } from "./ops/run.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -71,7 +71,7 @@ import { startDraftTurn } from "./drafts/turn.js";
 import { fileIfReady } from "./drafts/write.js";
 import { COLLEGE_ATTRIBUTES } from "./lexicon.js";
 import { PROFILES as CONTEXT_PROFILES, TRUSTED_SECTIONS } from "../context/profiles.js";
-import { tokens } from "./text.js";
+import { cutAt, tokens } from "./text.js";
 
 export type Emit = (event: string, data: unknown) => void;
 
@@ -334,8 +334,13 @@ async function axisTurn(opts: {
   ]);
   const fileNames = [...files.earlierNames, ...files.names];
   const hasFiles = fileNames.length > 0;
-  // A PDF or an image can't be read back by the live grounding, so its figures aren't checked against it.
+  // Files are read once and stored as text (attachments.ts): an earlier PDF or image comes as that text, which
+  // live grounding and the after-answer check read like any other evidence. Only a PDF or image sent as a file
+  // this turn (the turn it arrives in, before it is read; or one whose reading failed) has no text to check
+  // against, so only then are its figures left unchecked.
   const opaqueFiles = files.opaque;
+  // What the after-answer check reads of the files: each at most what the model saw of an earlier file.
+  const fileMaterial = files.texts.map((t) => cutAt(t, EARLIER_FILE_MAX_CHARS));
   // What the counselor confirmed, dismissed or undid since the last answer. Best effort.
   const recentActions = recentActionsText(request, opts.conversationId).catch(() => "");
 
@@ -573,9 +578,9 @@ async function axisTurn(opts: {
   const total: Usage = emptyUsage();
   const add = (x: Usage) => addUsage(total, x);
 
-  // Which kinds of passage the planner already found: a part they cover needs no specialist.
-  const kinds = new Set(ledger.all().map((p) => p.kind));
-  const covered = (i: string) => (i === "documents" ? kinds.has("upload") || kinds.has("drive") || kinds.has("onedrive") : i === "email" ? kinds.has("outlook") || kinds.has("gmail") : true);
+  // A part needs no specialist when the planner already found passages of its kind, or when its search
+  // tool isn't offered this turn (no RAG port, no connected mail account): see coveredParts.
+  const covered = coveredParts({ kinds: new Set(ledger.all().map((p) => p.kind)), retrievalReady: retrievalOn, mailConnected: connected.length > 0 });
   const tasks = drafting ? null : specialistTasks(u, covered);
   if (hasFiles) step(`Reading ${fileNames.length === 1 ? fileNames[0] : `${fileNames.length} attached files`}`);
   const run: Run = await openRun(request, "axis", studentId, {
@@ -691,7 +696,7 @@ async function axisTurn(opts: {
       path: tasks ? "specialists" : "agent", text, citations, trace, sources: [...sources].slice(0, 20), actions, understanding: u,
       state: fin.state,
       stateSaved: fin.involved, stateVersion: history.version,
-      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw], ledger },
+      verify: { wanted: turnProfile.verify && res.stop !== "refusal" && !opaqueFiles && !gate.blocked, checks, material: [ctx.record ?? "", ctx.roster ?? "", ...evidence.raw, ...fileMaterial], ledger },
       runId: run.id,
       quotes,
       quotesChecked: flags,

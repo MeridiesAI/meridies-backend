@@ -4,7 +4,7 @@ import { chunkAllowed, type DocRow } from "../../src/lib/axis/guard.js";
 import { dropInvalidCitations, resolveCitations, SourceLedger, stripCitations, TURN_SOURCE_CHARS } from "../../src/lib/axis/ledger.js";
 import { toTurns } from "../../src/lib/axis/memory.js";
 import type { RetrievedChunk } from "../../src/lib/axis/ports.js";
-import { specialistTasks } from "../../src/lib/axis/specialists.js";
+import { coveredParts, specialistTasks } from "../../src/lib/axis/specialists.js";
 import { understand } from "../../src/lib/axis/nlu.js";
 import { CollegeIndex, RosterIndex } from "../../src/lib/axis/entities.js";
 import { effortFor, PROFILES } from "../../src/lib/axis/profiles.js";
@@ -75,6 +75,22 @@ test("specialists only when two or more parts still need their own searching aft
   assert.equal(specialistTasks(u("What's her GPA?")), null);
   assert.equal(specialistTasks(u("What's her GPA, and what's her SAT?")), null, "two lookups of the same kind stay with one agent");
   assert.equal(specialistTasks(u("Did her mom reply, and remind me to call her Friday")), null, "anything that writes stays with one agent");
+});
+
+test("a search part whose tool isn't on offer needs no specialist", () => {
+  const twoSearches = u("Did her mom reply about the CSS Profile, and what does her transcript show for junior year?");
+  const none = new Set<string>();
+  // Today: no RAG port and no connector port registered, so neither search tool exists.
+  assert.equal(specialistTasks(twoSearches, coveredParts({ kinds: none, retrievalReady: false, mailConnected: false })), null);
+  assert.equal(specialistTasks(twoSearches, coveredParts({ kinds: none, retrievalReady: true, mailConnected: false })), null, "no mail account: only one part is searchable");
+  assert.equal(specialistTasks(twoSearches, coveredParts({ kinds: none, retrievalReady: false, mailConnected: true })), null, "no RAG port: only one part is searchable");
+  // Ports wired and mail connected: the fan-out comes back on its own.
+  assert.deepEqual(specialistTasks(twoSearches, coveredParts({ kinds: none, retrievalReady: true, mailConnected: true }))?.map((t) => t.intent), ["email", "documents"]);
+  // The planner's passages still cover their part.
+  assert.equal(specialistTasks(twoSearches, coveredParts({ kinds: new Set(["gmail"]), retrievalReady: true, mailConnected: true })), null);
+  assert.equal(specialistTasks(twoSearches, coveredParts({ kinds: new Set(["upload"]), retrievalReady: true, mailConnected: true })), null);
+  const c = coveredParts({ kinds: none, retrievalReady: true, mailConnected: true });
+  assert.equal(c("record"), true, "non-search parts are always covered");
 });
 
 test("effort follows the question: a plain lookup stays low, a tangled judgement goes up", () => {
