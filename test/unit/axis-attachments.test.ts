@@ -414,6 +414,55 @@ test("opaque is false when every file went as text", async () => {
   assert.equal(res.path, "agent");
 });
 
+test("an earlier PDF or image read once is checked against its stored text: grounding finds its figures and the after-answer check reads it", async () => {
+  const ev = collect();
+  const { api } = scriptedApi([{ text: "The file shows a weighted GPA of 4.21 and a rank of 7 of 412." }]);
+  const res = await runAxisTurn({
+    request: chatWith([read("a1", "transcript.pdf", NOTES), read("a2", "shot.png", "Unweighted GPA 3.88.")]), conversationId: "conv-1", studentId: null,
+    content: "What GPA does the file show?", emit: ev.emit, signal: new AbortController().signal, api, messageId: "m9",
+  });
+  const checks = res.verify.checks;
+  assert.ok(checks.length > 0, "the sentence was checked");
+  const figures = checks.flatMap((c) => c.figures);
+  assert.ok(figures.some((f) => f.text.includes("4.21") && f.status !== "missing"), "the file's figure is found in its stored text");
+  assert.ok(res.verify.material.some((m) => m.includes("Weighted GPA 4.21")), "the after-answer check gets the PDF's stored text");
+  assert.ok(res.verify.material.some((m) => m.includes("Unweighted GPA 3.88")), "and the image's transcription");
+  assert.equal(res.path, "agent");
+  assert.equal(res.verify.wanted, true, "a record/documents answer is checked even though the chat has a PDF and an image");
+});
+
+test("the after-answer check gets at most the part of a long file the model saw", async () => {
+  const long = `GPA 4.21. ${"z".repeat(20_000)}`;
+  const { api } = scriptedApi([{ text: "GPA 4.21." }]);
+  const res = await runAxisTurn({
+    request: chatWith([read("a1", "long.pdf", long)]), conversationId: "conv-1", studentId: null, content: "What GPA does the file show?",
+    emit: collect().emit, signal: new AbortController().signal, api, messageId: "m9",
+  });
+  const fileMaterial = res.verify.material.filter((m) => m.includes("GPA 4.21. z"));
+  assert.equal(fileMaterial.length, 1);
+  assert.ok(fileMaterial[0]!.length <= 12_000 + 200, "cut like the files message, so it fits the check's material budget");
+});
+
+test("the turn a PDF arrives, it is read after the answer: the check is off for that turn only, and on for the next", async () => {
+  const rows = [stored("a1", "transcript.pdf", "application/pdf", { message_id: "m2", storage_path: `${ME}/conv-1/a1-transcript.pdf` })];
+  const first = await runAxisTurn({
+    request: chatWith(rows), conversationId: "conv-1", studentId: null, content: "What GPA does the file show?", emit: collect().emit,
+    signal: new AbortController().signal, api: scriptedApi([{ text: "Weighted GPA 4.21." }]).api, messageId: "m2", newFiles: true,
+  });
+  assert.equal(first.verify.wanted, false, "no stored text yet: the model reads the PDF itself");
+  // After the answer the file is read once (extractChatFiles) and its text stored.
+  Object.assign(rows[0]!, { extract_kind: "text", extracted_text: NOTES });
+  const ev = collect();
+  const next = await runAxisTurn({
+    request: chatWith(rows), conversationId: "conv-1", studentId: null, content: "What GPA does the file show?", emit: ev.emit,
+    signal: new AbortController().signal, api: scriptedApi([{ text: "Weighted GPA 4.21." }]).api, messageId: "m3",
+  });
+  assert.ok(ev.events.some(([e]) => e === "grounding"), "live grounding runs on the next turn");
+  assert.equal(next.path, "agent");
+  assert.equal(next.verify.wanted, true, "the check is back on once the text is stored");
+  assert.ok(next.verify.material.some((m) => m.includes("Weighted GPA 4.21")));
+});
+
 test("before the migration every file goes as a file, as today", async () => {
   const req = chatWith([stored("a1", "transcript.pdf", "application/pdf", { storage_path: `${ME}/conv-1/a1-transcript.pdf` })]);
   const db = (req as unknown as { db: { from: (t: string) => Record<string, unknown> } }).db;
