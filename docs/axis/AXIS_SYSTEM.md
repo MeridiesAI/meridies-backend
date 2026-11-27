@@ -132,9 +132,11 @@ Raw results are kept two minutes per caller, student and query, so a follow-up d
 | Item | Urgency |
 |---|---|
 | Overdue | 3, plus up to 2 as it ages (two weeks late is the cap) |
-| Due within the window | (1 − days left / window) × 2 × a status weight (not started 1, stalled 1.2, in progress 0.6, in review 0.3, deadline 0.8) |
-| Stalled task | × up to 2, by days without activity past the threshold |
+| Due within the window | (1 − days left / (window + 1)) × 2 × a status weight (not started 1, stalled 1.2, in progress 0.6, in review 0.3, deadline 0.8) |
+| Stalled task | × (1 + min(idle days − threshold, 21) / 21): ×1 on the day it crosses the counselor's threshold, rising evenly to ×2 three weeks later. Applies to overdue tasks too (never to deadlines) |
 | Open red flag | 1.5 each, added to the student's score |
+
+Idle days count from the task's last activity; a task the student never touched counts from when it was assigned (`created_at`), so a task set today is not "stalled" (its reason reads "not started in N days" once it is). A task with neither date is not treated as stalled.
 
 A student's score is their worst item plus 0.6 of the second and 0.3 of the third, so one overdue essay outranks three mild items. Each rank carries its reasons in words a counselor can check ("Common App essay is 4 days overdue; Cornell supplement due in 6 days, no activity for 12 days").
 
