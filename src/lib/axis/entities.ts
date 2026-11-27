@@ -148,6 +148,11 @@ export class RosterIndex {
     return this.byId.get(id);
   }
 
+  /** Every student's name, for the live grounding's nearness check. */
+  names(): string[] {
+    return this.rows.map((r) => r.name);
+  }
+
   match(text: string): { students: StudentMention[]; ambiguous: AmbiguousMention[] } {
     const toks = scanTokens(text);
     const found = new Map<string, StudentMention>();

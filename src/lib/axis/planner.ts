@@ -390,7 +390,9 @@ export async function gatherEvidence(ctx: PlanContext): Promise<Evidence> {
     outside,
     freeText: free.length > 0,
     freeBlocks: free,
-    raw: [...blocks, ...ctx.ledger.all().map((p) => p.text)],
+    // Each passage with its title: a catalog passage names its school only there, and the live grounding
+    // checks a school's figures next to its name.
+    raw: [...blocks, ...ctx.ledger.all().map((p) => `${p.title}\n${p.text}`)],
     sources: [...sources],
     trace,
     skipped,

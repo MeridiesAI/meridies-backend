@@ -183,11 +183,20 @@ Compound questions fan out to specialists only when two or more parts still need
 
 `grounding.ts`, `verify.ts`. Two stages.
 
-**In code, while the answer streams.** The evidence (the record, the roster view, every passage, every tool result, the counselor's own messages) is indexed into normalized numbers and calendar days, each number at every precision it supports. A streaming sentence splitter (decimals, abbreviations and trailing citation markers kept whole across chunk boundaries) hands each finished sentence to a check that extracts its figures: money, percentages, dates, score ranges, decimals, whole numbers of 100 or more, and smaller ones next to a score word ("ACT 34"). Bare years and small counts are skipped. Each figure is:
+**In code, while the answer streams.** The evidence (the record, the roster view, every passage with its title, every tool result, the counselor's own messages) is indexed into numbers, calendar days (with their year when written) and stated counts ("3 overdue tasks", "12 activities"). Each one is remembered with where it sits: its line, its passage (a blank-line block, or one object of the roster's JSON lists) and the whole text it came in. A streaming sentence splitter (decimals, abbreviations and trailing citation markers kept whole across chunk boundaries) hands each finished sentence to a check that extracts its figures: money, percentages, dates, score ranges, decimals, whole numbers of 100 or more, smaller ones next to a score word ("ACT 34"), and small counts of a thing the evidence also counts. Bare years, time spans ("in 5 days") and counts of things the evidence never counts are skipped.
+
+Rules for a match:
+
+- **Precision.** A figure matches a value on file rounded to the precision written, keeping at least two significant figures: 3.874 supports "3.87" and "3.9", never "4"; 7.3% supports "7%" only when the answer says it's approximate ("about 7%"). A scale ("4.0 scale", "out of 4.0") supports only a scale. A rounded amount of money ("$31k", "$31.5k") comes only from an amount of money (a `$` or a money word on the line), never from an enrollment.
+- **Dates.** The day must match, and the year too when both the answer and the evidence state one.
+- **Counts.** "2 overdue tasks" must match a count of the same thing on file, exactly.
+- **Nearness.** When the sentence names a school, a student or another named thing that the evidence also names (a capitalized word the evidence writes capitalized, not a label like GPA, SAT, Early Decision or a month), each figure belongs to one name. That is the nearest name or pronoun before it in its clause, else after it in the clause, else the last name before it in the sentence. "Her" is the chat's student. The figure is found only where that name is the one nearest it: on the same line, else in the same passage, else in the same text, with another named school or roster student at a narrower scope ruling it out. A text that names nobody counts for the chat's student, and figures the counselor typed always count. Other students named in the same clause must fit too ("Liam's Cornell deadline" is not found on Sophia's due list). A sentence that names nothing, or only a name AxIS never read ("Penn" for the University of Pennsylvania), is checked as before: anywhere in the evidence.
+
+Each figure is:
 
 | Status | Meaning |
 |---|---|
-| found | in the evidence at the precision written: 3.874 on file supports "3.87", 12.3% supports "12%", a fraction 0.125 supports "12.5%" |
+| found | in the evidence by the rules above: 3.874 on file supports "3.87", 12.3% supports "12%", a fraction 0.125 supports "12.5%"; Cornell's 7.3% does not support "Brown admits 7.3%" |
 | derived | the sum or difference of two found figures in the same sentence ("40 points above the 1480 floor" beside a found 1520) |
 | missing | neither |
 

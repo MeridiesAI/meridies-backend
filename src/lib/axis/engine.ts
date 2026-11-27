@@ -520,15 +520,19 @@ async function axisTurn(opts: {
 
   // Everything the answer may rest on, indexed for live grounding: the record, the evidence, the
   // counselor's own words this turn and earlier (figures they supplied aren't the model's to defend).
+  // A figure in a sentence that names a school or a student is checked next to that name; a line that names
+  // nobody is about the chat's student, and figures the counselor typed always count.
   const index = new EvidenceIndex();
+  index.setNames(ctx.name, roster.names());
   index.add(ctx.record);
   index.add(ctx.roster);
   for (const r of evidence.raw) index.add(r);
-  index.add(content);
-  // Today's date and the time AxIS was told, so an answer that repeats them isn't flagged as unsupported.
-  index.add(`${todayLine(now, zone)} ${nowLine(now, zone)}`);
+  index.add(content, { counselor: true });
+  // Today's date and the time AxIS was told, so an answer that repeats them isn't flagged as unsupported. Like the
+  // counselor's words, it names no one, so it isn't the model's to defend whichever student a sentence is about.
+  index.add(`${todayLine(now, zone)} ${nowLine(now, zone)}`, { counselor: true });
   for (const t of files.texts) index.add(t);
-  for (const t of history.turns) if (t.role === "user" && typeof t.content === "string") index.add(t.content);
+  for (const t of history.turns) if (t.role === "user" && typeof t.content === "string") index.add(t.content, { counselor: true });
 
   const tools = toolList(connected, retrievalOn);
   const studentZone = chatFacts ? ((await chatFacts)?.timezone ?? null) : null;
