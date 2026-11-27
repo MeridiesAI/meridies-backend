@@ -125,6 +125,8 @@ A **"why" question** ("why is anyone behind?", "why are my students falling behi
 
 The results go into the user turn as numbered passages followed by the computed blocks. A slow source is skipped and named, and the model can still call the matching tool. With the evidence in hand the model usually answers on its first call.
 
+The 2.5-second limit is one constant, `STEP_TIMEOUT_MS`, to be tuned from real step times (about 3× the p95). Each step runs with its own abort signal: when its time runs out, or the counselor closes the panel, the signal aborts and its database queries (every `request.db` query in the step carries it, via `abortableDb`) and searches are cancelled rather than left running. Each step's time and outcome go into the `axis turn` log line as `planner: [{ step, ms, outcome }]`, where `step` is a fixed key (`student_record`, `upcoming`, `caseload_risk`, `colleges`, `files`, `email`, `connected_files`), never a name, and `outcome` is `ok`, `timeout` or `error`.
+
 ### 3.4 Retrieval fusion
 
 `retrieval.ts`, over Elvin's port. A single query misses passages worded differently from the question ("ED" in the question, "Early Decision" in the file). AxIS asks the port up to three ways at once: the question as asked, its keywords with counselor shorthand expanded (ED, EA, REA, CSS, SAI, LOR and others), and the named schools with the attribute asked about. The student's own name is dropped from queries scoped to her folder. Then:

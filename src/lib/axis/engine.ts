@@ -56,7 +56,7 @@ import {
   type Effort,
 } from "./models.js";
 import { asksForEssayText, dampQuestions, nextState, scoreIntents, understand, type DialogueState, type Understanding } from "./nlu.js";
-import { gatherEvidence } from "./planner.js";
+import { gatherEvidence, type StepTiming } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
 import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
@@ -391,10 +391,12 @@ async function axisTurn(opts: {
         : draft.hadHeader && !draft.header
           ? "closed:saved"
           : ds.log;
-  /** One log line per turn: the category and path, the draft's state and outcome codes. Never text, values or names. */
+  // Each evidence-planner step's time (ms) and outcome, keyed by a fixed step name; set once the planner has run.
+  let plannerSteps: StepTiming[] = [];
+  /** One log line per turn: the category and path, the draft's state and outcome codes, planner step times. Never text, values or names. */
   const logTurn = (path: TurnResult["path"], calls: number, maxCalls: number, frame?: string) =>
     request.log.info(
-      { axis: { path, intent: u.intent, ...(frame ? { frame } : {}), draft: draftLog(), outcomes: outcomeCodes(draft), calls, maxCalls, conversationId: opts.conversationId, ms: Date.now() - startedAt } },
+      { axis: { path, intent: u.intent, ...(frame ? { frame } : {}), draft: draftLog(), outcomes: outcomeCodes(draft), calls, maxCalls, conversationId: opts.conversationId, ms: Date.now() - startedAt, ...(plannerSteps.length ? { planner: plannerSteps } : {}) } },
       "axis turn"
     );
   const ledger = new SourceLedger();
@@ -508,6 +510,7 @@ async function axisTurn(opts: {
     request, u: planU, chatStudentId: studentId, roster, ledger, connected, retrievalReady: retrievalOn, speculative, signal, onStep: step,
     freeRule: flags,
   });
+  plannerSteps = evidence.timings;
   for (const s of evidence.sources) sources.add(s);
 
   // Everything the answer may rest on, indexed for live grounding: the record, the evidence, the
