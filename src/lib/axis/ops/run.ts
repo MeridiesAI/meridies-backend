@@ -93,7 +93,6 @@ export const COUNSELOR_ONLY: ReadonlySet<string> = new Set([
   "colleges.add_webinar_tip",
   "colleges.update_webinar_tip",
   "colleges.research_folder",
-  "pipeline.create_stage",
   "pipeline.update_stage",
   "pipeline.reorder_stages",
   "pipeline.move_contact",

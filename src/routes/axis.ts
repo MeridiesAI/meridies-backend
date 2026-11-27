@@ -49,7 +49,7 @@ import { hasAnthropic } from "../env.js";
 import { badRequest, conflict, forbidden, fromPostgrest, HttpError, notFound, unavailable } from "../lib/errors.js";
 import { requireRole, resolveStudentId } from "../lib/guards.js";
 import { limit } from "../lib/limits.js";
-import { reinviteRestoredMeetings } from "../lib/axisRestoreMeetings.js";
+import { resyncRestoredMeetings } from "../lib/axisRestoreMeetings.js";
 import { logRestoredChoice } from "../lib/listLearning.js";
 import { storableRuns } from "../lib/axis/quotes.js";
 
@@ -383,12 +383,12 @@ export default async function axisRoutes(app: FastifyInstance) {
         if (answer.reason === "not-approved") throw forbidden(restoreSentence(answer.reason));
         throw conflict(restoreSentence(String(answer.reason ?? "")));
       }
-      // A restored meeting sends its invitation again (Elvin, 11/8): the delete emailed a cancellation. Nothing
-      // else a restore brings back sends anything. Never throws; `invited` only when a round went out.
-      const { invited } = await reinviteRestoredMeetings(request, id);
+      // A restored meeting goes back on the counselor's calendar quietly (Elvin, 11/26): no invitation or update is
+      // emailed, and nothing else a restore brings back sends anything either. Never throws.
+      await resyncRestoredMeetings(request, id);
       // A school taken off a list and restored is back on it: logged for list-builder learning. Never awaited.
       void logRestoredChoice(request, row.payload);
-      return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [], ...(invited ? { invited: true } : {}) };
+      return { id, status: "undone", restored: answer.restored ?? 0, paused: answer.paused ?? [] };
     }
     let answer: unknown;
     try {

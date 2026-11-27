@@ -213,6 +213,13 @@ export const colleges: OpGroup = {
         if (!folder) return "";
         return `Folder id ${folder}: Policy & research › ${untrusted(b.folderName, "files")}${b.created ? " (new)" : ""}${b.collegeId ? `; college id ${str(b.collegeId)}` : ""}.`;
       },
+      // Undo removes the school's folder only when this call made it; finding one that was there changes nothing.
+      // files.delete_folder refuses a folder that holds anything, so a link filed into it since keeps it.
+      undo: (_i, body) => {
+        const b = asRecord(body);
+        const folder = str(b.folderId);
+        return b.created === true && folder ? { op: "files.delete_folder", input: { folder_id: folder } } : null;
+      },
     }),
   ],
 };
