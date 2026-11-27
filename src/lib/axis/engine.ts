@@ -59,7 +59,7 @@ import { dampQuestions, nextState, scoreIntents, understand, type DialogueState,
 import { gatherEvidence } from "./planner.js";
 import { getConnectors, getRetrieval, retrievalReady, type RetrievedChunk } from "./ports.js";
 import { AXIS_SYSTEM, effortFor, modeLine, PROFILES, type Mode } from "./profiles.js";
-import { renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
+import { coveredParts, renderFindings, runSpecialists, specialistTasks } from "./specialists.js";
 import { isReadOnly, readsOutside, runTool, toolLabel, toolList, type ProposedAction, type ToolContext } from "./tools.js";
 import { markShort, newTurnBudget, recentActionsText, type OpContext, type OperationEvent } from "./ops/run.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -539,9 +539,9 @@ async function axisTurn(opts: {
   const total: Usage = emptyUsage();
   const add = (x: Usage) => addUsage(total, x);
 
-  // Which kinds of passage the planner already found: a part they cover needs no specialist.
-  const kinds = new Set(ledger.all().map((p) => p.kind));
-  const covered = (i: string) => (i === "documents" ? kinds.has("upload") || kinds.has("drive") || kinds.has("onedrive") : i === "email" ? kinds.has("outlook") || kinds.has("gmail") : true);
+  // A part needs no specialist when the planner already found passages of its kind, or when its search
+  // tool isn't offered this turn (no RAG port, no connected mail account): see coveredParts.
+  const covered = coveredParts({ kinds: new Set(ledger.all().map((p) => p.kind)), retrievalReady: retrievalOn, mailConnected: connected.length > 0 });
   const tasks = drafting ? null : specialistTasks(u, covered);
   if (hasFiles) step(`Reading ${fileNames.length === 1 ? fileNames[0] : `${fileNames.length} attached files`}`);
   const run: Run = await openRun(request, "axis", studentId, {
