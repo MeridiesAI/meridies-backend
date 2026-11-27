@@ -6436,5 +6436,6 @@ Added after version 2 shipped. AxIS can now change things in Meridies, not only 
 - The operation catalog (`ops/catalog/*.ts`) is rendered once into the cached system prompt. Two tools reach it: `lookup` (reads that return ids) and `perform_action` (writes).
 - Small, reversible edits run at once and the card offers Undo. Deletes, archives, sends, money, sharing, practice-wide settings and anything irreversible wait for Confirm. Outside content read in the turn, or more than five instant changes, turns the rest into cards; twenty is the cap per turn.
 - The `action` SSE event gains `type: "operation"` (payload: op, area, summary, details, warning, status, undoable, reason). `POST /axis/actions/:id/undo` and `GET /axis/actions?status=all` are new.
+- Undo of a confirmed delete (Restore) is quiet: a restored meeting goes back on the counselor's own calendar (`lib/axisRestoreMeetings.ts`; no attendees, Google `sendUpdates=none`) and no invitation or update is emailed (Elvin, 11/26).
 - `propose_action` keeps only the email draft; a Work Queue item is `perform_action work_queue.add`.
 - The lexicon recognises change requests ("delete…", "mark … done", "move … to …", "change … to …") as the `action` intent, so they skip the direct-answer compiler; the Clerk gets six model calls.
