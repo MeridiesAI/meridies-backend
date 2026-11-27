@@ -64,6 +64,7 @@ import { isReadOnly, readsOutside, runTool, toolLabel, toolList, type ProposedAc
 import { markShort, newTurnBudget, recentActionsText, type OpContext, type OperationEvent } from "./ops/run.js";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { axisNow } from "./clock.js";
+import { counselorZone, dayIn, DEFAULT_ZONE, timeIn, validZone, weekdayIn } from "./tz.js";
 import { continueReply, draftBlock, LINES, missingOf, outcomeCodes, statusLines } from "./drafts/lines.js";
 import { anyOutside, closeIfDone, isOpen, patchHeader, saveDraft } from "./drafts/state.js";
 import { startDraftTurn } from "./drafts/turn.js";
@@ -121,20 +122,38 @@ type Free = { source: string; text: string }[];
 /** Passages from outside Meridies' own records: free text whatever their length. */
 const OUTSIDE_PASSAGES = new Set(["upload", "drive", "onedrive", "outlook", "gmail"]);
 
+/**
+ * "Today" as the cached context block says it: the counselor's date, weekday and timezone. The date only, never the
+ * time, so the 1-hour cache holds all day and turns over at the counselor's midnight, not UTC's (the time goes in the
+ * user turn: `nowLine`). A student whose own timezone is different is a fact about them, said beside it.
+ */
+export function todayLine(now: Date, zone: string, studentZone: string | null = null): string {
+  const line = `Today is ${dayIn(zone, now)} (${weekdayIn(zone, now)}) in the counselor's timezone, ${zone}.`;
+  const theirs = validZone(studentZone);
+  return theirs && theirs !== zone ? `${line} The student's timezone is ${theirs} (today is ${dayIn(theirs, now)} there).` : line;
+}
+
+/** The exact time, for the user turn (never cached). */
+export function nowLine(now: Date, zone: string): string {
+  return `(It is ${timeIn(zone, now)} on ${weekdayIn(zone, now)}, ${dayIn(zone, now)}, ${zone}.)`;
+}
+
 /** The cached system prompt: the stable rules (shared by every counselor), then today and this student or roster. */
 export function systemBlocks(
   record: string | null,
   roster: string | null,
   summary: string | null,
   now = new Date(),
-  signer: string | null = null
+  signer: string | null = null,
+  zone: string = DEFAULT_ZONE,
+  studentZone: string | null = null
 ): Anthropic.Beta.BetaTextBlockParam[] {
-  const today = now.toISOString().slice(0, 10);
+  const today = todayLine(now, zone, record ? studentZone : null);
   const body = record
-    ? `Today is ${today}.\n\n--- STUDENT ON FILE ---\n${record}\n--- END STUDENT ---`
+    ? `${today}\n\n--- STUDENT ON FILE ---\n${record}\n--- END STUDENT ---`
     : roster
-      ? `Today is ${today}. No student is selected; questions are about the roster.\n\n--- ROSTER, NEXT THREE WEEKS ---\n${wrapUntrusted("roster", roster)}\n--- END ROSTER ---`
-      : `Today is ${today}. No student is selected.`;
+      ? `${today} No student is selected; questions are about the roster.\n\n--- ROSTER, NEXT THREE WEEKS ---\n${wrapUntrusted("roster", roster)}\n--- END ROSTER ---`
+      : `${today} No student is selected.`;
   const context = signer ? `${body}\n\n${signer}` : body;
   const blocks: Anthropic.Beta.BetaTextBlockParam[] = [
     { type: "text", text: AXIS_SYSTEM, cache_control: { type: "ephemeral", ttl: "1h" } },
@@ -319,7 +338,9 @@ async function axisTurn(opts: {
   // ---- 2. Understanding ----
   // AxIS's clock: the wall clock, or the evals' controllable one (lib/axis/clock.ts).
   const now = axisNow();
-  const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state, now });
+  // The counselor's timezone (lib/axis/tz.ts): every date this turn computes is theirs.
+  const zone = counselorZone(request);
+  const u = understand(content, { chatStudentId: studentId, roster, colleges, state: history.state, now, zone });
   const chatStudent = studentId ? { id: studentId, name: roster.get(studentId)?.name ?? ctx.name ?? "" } : null;
   // A direct or essay answer runs no tools: whatever the last turn read stays in force, and an answer that
   // quotes text someone else wrote (below) taints the next turn the way reading it would have.
@@ -489,11 +510,14 @@ async function axisTurn(opts: {
   index.add(ctx.roster);
   for (const r of evidence.raw) index.add(r);
   index.add(content);
+  // Today's date and the time AxIS was told, so an answer that repeats them isn't flagged as unsupported.
+  index.add(`${todayLine(now, zone)} ${nowLine(now, zone)}`);
   for (const t of files.texts) index.add(t);
   for (const t of history.turns) if (t.role === "user" && typeof t.content === "string") index.add(t.content);
 
   const tools = toolList(connected, retrievalOn);
-  const system = systemBlocks(ctx.record, ctx.roster, history.summary, new Date(), signerLine(request.profile));
+  const studentZone = chatFacts ? ((await chatFacts)?.timezone ?? null) : null;
+  const system = systemBlocks(ctx.record, ctx.roster, history.summary, now, signerLine(request.profile), zone, studentZone);
   const base = requestBase(system, tools, effort);
   const api = opts.api ?? messagesApi();
   // Outside content the planner already put in front of the model counts too: changes then wait for a click.
@@ -580,6 +604,7 @@ async function axisTurn(opts: {
       evidence.skipped.length ? `Not gathered in time (use a tool if you need it): ${evidence.skipped.join("; ")}.` : "",
       featureOn("systemMessages") ? "" : `(${modeLine(turnMode)})`,
       drafting ? draftBlock(draft) : "",
+      nowLine(now, zone),
       content,
     ].filter(Boolean);
     // Earlier files' text: one message ahead of the history, the same every turn so the prompt cache keeps it.
@@ -674,6 +699,13 @@ async function axisTurn(opts: {
 export async function warmInputs(request: FastifyRequest, studentId: string | null) {
   // The record a question turn would send: short-only under the free-text rule, so the warm cache matches it.
   const flags = await flagsReady(request.db).catch(() => false);
-  const [ctx, connected] = await Promise.all([loadContext(request, studentId, false, flags), getConnectors().connected(request).catch(() => [])]);
-  return { system: systemBlocks(ctx.record, ctx.roster, null, new Date(), signerLine(request.profile)), tools: toolList(connected, retrievalReady()) };
+  const [ctx, connected, facts] = await Promise.all([
+    loadContext(request, studentId, false, flags),
+    getConnectors().connected(request).catch(() => []),
+    studentId ? studentFacts(request, studentId).catch(() => null) : Promise.resolve(null),
+  ]);
+  return {
+    system: systemBlocks(ctx.record, ctx.roster, null, axisNow(), signerLine(request.profile), counselorZone(request), facts?.timezone ?? null),
+    tools: toolList(connected, retrievalReady()),
+  };
 }
