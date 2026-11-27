@@ -214,13 +214,14 @@ export const pipeline: OpGroup = {
     op({
       name: "pipeline.create_stage",
       kind: "write",
-      risk: "auto",
+      // Confirm, not auto: there is no Undo (deleting a stage isn't an op, below), and every instant change needs one.
+      risk: "confirm",
       title: "Add a stage column to the Contact Pipeline (at the end).",
       doc: "{ name? ≤120, lifecycle_group?: prospect|lead|client|current }",
       input: z.object({ name: stageName.optional(), lifecycle_group: z.enum(LIFECYCLE_GROUPS).optional() }).strict(),
       request: (i) => ({ method: "POST", url: "/pipeline/stages", body: defined({ name: i.name, lifecycleGroup: i.lifecycle_group }) }),
       describe: (i) => `Add stage "${plainText(i.name ?? "New stage", 60)}"${i.lifecycle_group ? ` (${i.lifecycle_group})` : ""} to the Contact Pipeline`,
-      // No Undo: deleting a stage isn't an op (below).
+      warning: "The new column shows on the board for everyone in the practice. AxIS can't remove it again; you can delete it on the board.",
     }),
     op({
       name: "pipeline.create_contact",
