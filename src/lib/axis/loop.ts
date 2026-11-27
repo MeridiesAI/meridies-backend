@@ -16,7 +16,17 @@
  *    answer (tool_choice none) instead of searching a fourth way for
  *    something that isn't there.
  *  - Budgets: a cap on model calls and a wall-clock deadline for the tool
- *    phase; the last call always answers.
+ *    phase; the last call always answers. The deadline holds inside a round
+ *    too: a read-only lookup still running when it passes is told to stop
+ *    (its signal aborts) and goes back to the model as "ran out of time". A
+ *    write is always waited for: cutting it off wouldn't undo it, and the
+ *    model would be told a change failed that may have happened.
+ *  - Filler held back. Text the model writes in a round that ends in tool
+ *    calls ("Let me check her deadlines.") is not shown: while a round may
+ *    still call tools its text waits until it ends, or until it is clearly an
+ *    answer (RELEASE_CHARS, or a line break), then streams live. A round that
+ *    must answer streams from the first word. Tool steps and status events are
+ *    callbacks of their own and are never held.
  *  - Graceful degradation. If the API rejects the per-message effort or the
  *    mode system message (an account or platform without them), the first
  *    call is retried once without them and the features stay off for the
@@ -150,6 +160,14 @@ export type LoopResult = {
 /** Two rounds that brought nothing new end the tool phase. */
 export const STALE_ROUNDS = 2;
 const JSON_RETRIES = 2;
+/** Held text this long, or with a line break, is an answer rather than filler before a tool call: it streams from there. */
+export const RELEASE_CHARS = 120;
+/** What a read-only lookup still running at the deadline returns to the model. */
+export const TIMED_OUT: ToolOutput = {
+  content: "This lookup ran out of time and was stopped. Answer with what you have and say what you couldn't check.",
+  isError: true,
+  fresh: false,
+};
 
 /** Folds the optional system messages into plain request shape after the API refused them. */
 export function degrade(messages: BetaMessageParam[]): { changed: boolean; usedPerMessageEffort: boolean; usedSystemMessages: boolean } {
@@ -186,14 +204,19 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
   let firstEventSeen = false;
   let pendingBreak = false;
   let askedForText = false;
+  // Set when the in-round cutoff fired (a timer can fire a millisecond before Date.now() reaches the deadline).
+  let pastDeadline = false;
   let topEffort = o.base.output_config?.effort ?? o.effort;
 
   for (;;) {
     calls++;
-    const mustAnswer = calls >= o.maxCalls || Date.now() > o.deadline || stale >= STALE_ROUNDS;
+    const mustAnswer = calls >= o.maxCalls || pastDeadline || Date.now() >= o.deadline || stale >= STALE_ROUNDS;
     const round = new AbortController();
     const relay = () => round.abort();
     o.signal.addEventListener("abort", relay, { once: true });
+    // Read-only lookups have their own signal: the deadline stops them without touching a write.
+    const reads = new AbortController();
+    round.signal.addEventListener("abort", () => reads.abort(), { once: true });
     const early = new Map<string, Promise<ToolOutput>>();
     const params: StreamParams = {
       ...o.base,
@@ -208,28 +231,47 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
     let roundStarted = false;
     let msg: BetaMessage;
     let roundText = "";
+    // A round that may still call tools holds its text until it is clearly an answer or the round ends.
+    let live = mustAnswer;
+    let held = "";
+    let toolRound = false;
+    const show = (piece: string) => {
+      if (pendingBreak) {
+        pendingBreak = false;
+        text += "\n\n";
+        o.onText?.("\n\n");
+      }
+      text += piece;
+      o.onText?.(piece);
+    };
     try {
       const stream = o.api.stream(params, { signal: o.signal });
-      stream.on("streamEvent", () => {
+      stream.on("streamEvent", (ev) => {
         roundStarted = true;
+        const e = ev as { type?: string; content_block?: { type?: string } } | null;
+        if (e?.type === "content_block_start" && e.content_block?.type === "tool_use") toolRound = true;
         if (!firstEventSeen) {
           firstEventSeen = true;
           o.onFirstEvent?.();
         }
       });
       stream.on("text", (delta) => {
-        if (pendingBreak) {
-          pendingBreak = false;
-          text += "\n\n";
-          o.onText?.("\n\n");
-        }
-        text += delta;
         roundText += delta;
-        o.onText?.(delta);
+        if (live) return show(delta);
+        // Text after a tool call started belongs to a tool round: never shown.
+        if (toolRound) return;
+        held += delta;
+        if (held.length >= RELEASE_CHARS || held.includes("\n")) {
+          live = true;
+          const piece = held;
+          held = "";
+          show(piece);
+        }
       });
       stream.on("contentBlock", (block) => {
+        if (block.type === "tool_use") toolRound = true;
         if (mustAnswer || block.type !== "tool_use" || !o.readOnly(block.name)) return;
-        early.set(block.id, o.exec({ id: block.id, name: block.name, input: block.input }, round.signal));
+        early.set(block.id, o.exec({ id: block.id, name: block.name, input: block.input }, reads.signal));
       });
       msg = await stream.finalMessage();
       used = callUsage(msg);
@@ -274,7 +316,22 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
         tools.push(c.name);
         o.onToolStart?.(c);
       }
-      const outs = await Promise.all(callsThisRound.map((c) => early.get(c.id) ?? o.exec(c, round.signal)));
+      // The deadline holds during the round: a lookup still running then is stopped; a write is waited for.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cutoff = new Promise<ToolOutput>((resolve) => {
+        timer = setTimeout(() => {
+          // Settled first, so a lookup that answers its abort with a result doesn't win the race.
+          pastDeadline = true;
+          resolve(TIMED_OUT);
+          reads.abort();
+        }, Math.max(0, o.deadline - Date.now()));
+      });
+      const outs = await Promise.all(
+        callsThisRound.map((c) => {
+          if (!o.readOnly(c.name)) return o.exec(c, round.signal);
+          return Promise.race([early.get(c.id) ?? o.exec(c, reads.signal), cutoff]);
+        })
+      ).finally(() => clearTimeout(timer));
       callsThisRound.forEach((c, i) => o.onToolEnd?.(c, outs[i]!));
       o.messages.push({
         role: "user",
@@ -291,6 +348,12 @@ export async function runLoop(o: LoopOptions): Promise<LoopResult> {
     }
     // Anything started early for a turn that didn't end on tool_use is dropped unsent.
     round.abort();
+    // Not a tool round after all: the held text is the answer (or its start), shown now.
+    if (held) {
+      const piece = held;
+      held = "";
+      show(piece);
+    }
 
     if (msg.stop_reason === "refusal") {
       const piece = `${text ? "\n\n" : ""}I can't help with that one.`;

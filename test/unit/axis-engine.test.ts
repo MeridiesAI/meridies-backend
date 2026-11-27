@@ -64,6 +64,19 @@ test("who is behind: ranked in code, no model call", async () => {
   assert.deepEqual(events.find(([e]) => e === "route")?.[1], { intent: "roster", path: "direct", frame: "caseload-risk" });
 });
 
+test("why is anyone behind: reasons per student in code, not just the ranking (P2-4)", async () => {
+  for (const q of ["Why is anyone behind?", "why are my students falling behind"]) {
+    const { api, calls } = scriptedApi([{ text: "should not be called" }]);
+    const { res, text, events } = await turn(q, null, api);
+    assert.equal(res.path, "direct", q);
+    assert.equal(calls.length, 0);
+    assert.match(text(), /^Why each student needs attention/);
+    assert.match(text(), /\n- Sophia Martinez\n {2}- "Common App essay" is 4 days overdue/);
+    assert.doesNotMatch(text(), /^1\. /m, "not the numbered ranking");
+    assert.deepEqual(events.find(([e]) => e === "route")?.[1], { intent: "roster", path: "direct", frame: "caseload-risk" });
+  }
+});
+
 test("a named student's GPA in a roster chat: answered from the row, exactly", async () => {
   const { res, text } = await turn("What's Ethan's GPA?", null);
   assert.equal(res.path, "direct");
@@ -121,6 +134,25 @@ test("essay writing is refused into bullets, never sent to the free-text path", 
   assert.equal(res.path, "essay");
   assert.equal(scripted.calls.length, 0);
   assert.match(text(), /^- I don't write essay text/);
+});
+
+test("an essay turn logs the one model call it makes (P2-1)", async () => {
+  const request = fakeRequest(TABLES, ME);
+  const lines: { axis?: { path: string; calls: number; maxCalls: number } }[] = [];
+  (request.log as unknown as { info: (o: unknown) => void }).info = (o) => lines.push(o as (typeof lines)[number]);
+  await runAxisTurn({ request, conversationId: "conv-1", studentId: "s1", content: "Write her Why Cornell essay", emit: collect().emit, signal: new AbortController().signal, api: scriptedApi([]).api });
+  const line = lines.find((l) => l.axis?.path === "essay");
+  assert.ok(line, "one axis turn line");
+  assert.equal(line!.axis!.calls, 1);
+  assert.equal(line!.axis!.maxCalls, 1);
+});
+
+test("an essay advice question gets straight advice, not the 'I don't write essay text' line (P2-2)", async () => {
+  const scripted = scriptedApi([{ text: "should not be called" }]);
+  const { res, text } = await turn("How can she improve her essay?", "s1", scripted.api);
+  assert.equal(res.path, "essay");
+  assert.doesNotMatch(text(), /I don't write essay text/);
+  assert.match(text(), /^- /);
 });
 
 test("a time the parser can't read keeps the question off the direct path", async () => {
