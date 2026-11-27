@@ -36,6 +36,7 @@ import {
 } from "./data.js";
 import { plainGradYear } from "../context/identity.js";
 import { schoolBreak, type DateWindow } from "./dates.js";
+import { addDays, counselorZone, dayIn, DEFAULT_ZONE } from "./tz.js";
 import type { AmbiguousMention, RosterIndex } from "./entities.js";
 import type { SourceLedger } from "./ledger.js";
 import { COLLEGE_ATTRIBUTES, STUDENT_ATTRIBUTES, type Attribute } from "./lexicon.js";
@@ -89,10 +90,11 @@ function firstName(name: string): string {
   return plain(name.split(/\s+/)[0] ?? name, 40);
 }
 
-function shortDate(iso: string, now: Date): string {
+/** A plain date as "Nov 3", with the year when it isn't the counselor's current year (`today`, YYYY-MM-DD). */
+function shortDate(iso: string, today: string): string {
   const d = new Date(`${iso}T00:00:00Z`);
   const md = d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-  return d.getUTCFullYear() === now.getUTCFullYear() ? md : `${md}, ${d.getUTCFullYear()}`;
+  return iso.slice(0, 4) === today.slice(0, 4) ? md : `${md}, ${d.getUTCFullYear()}`;
 }
 
 type Target = { id: string; viaChat: boolean } | { ask: AmbiguousMention } | "ambiguous" | null;
@@ -110,10 +112,15 @@ function targetStudent(u: Understanding, ctx: CompileContext): Target {
   return ctx.chatStudentId ? { id: ctx.chatStudentId, viaChat: true } : null;
 }
 
-/** The grade a class year means on `now` (the school year turns over in July), when it is 9 through 12. */
-export function gradeOf(gradYear: string | null | undefined, now: Date): number | null {
+/**
+ * The grade a class year means on the counselor's today (`now` in `zone`; the school year turns over in July), when
+ * it is 9 through 12.
+ */
+export function gradeOf(gradYear: string | null | undefined, now: Date, zone: string = DEFAULT_ZONE): number | null {
   if (!gradYear || !/^\d{4}$/.test(gradYear)) return null;
-  const endsIn = now.getUTCMonth() >= 6 ? now.getUTCFullYear() + 1 : now.getUTCFullYear();
+  const today = dayIn(zone, now);
+  const year = Number(today.slice(0, 4));
+  const endsIn = Number(today.slice(5, 7)) >= 7 ? year + 1 : year;
   const grade = 12 - (Number(gradYear) - endsIn);
   return grade >= 9 && grade <= 12 ? grade : null;
 }
@@ -126,7 +133,7 @@ function askWhichStudent(u: Understanding, ctx: CompileContext, mention: Ambiguo
   if (cands.length < 2 || cands.length > MAX_CHOICES) return null;
   const candidates = cands.map((c) => {
     const gradYear = ctx.roster.get(c.id)?.gradYear ?? c.gradYear ?? null;
-    return { id: c.id, name: c.name, grade: gradeOf(gradYear, now), gradYear };
+    return { id: c.id, name: c.name, grade: gradeOf(gradYear, now, counselorZone(ctx.request)), gradYear };
   });
   const label = (c: (typeof candidates)[number]) =>
     `${plain(c.name, 60)}${c.grade ? ` (${c.grade}th)` : c.gradYear ? ` (class of ${c.gradYear})` : ""}`;
@@ -170,7 +177,7 @@ export async function compileDirect(u: Understanding, ctx: CompileContext): Prom
   const timeUnclear = !u.window && UNPARSED_TIME.test(u.norm);
   // Caseload risk comes first: "who should I focus on" carries a judgement word but is a ranking the code owns.
   if (!ctx.chatStudentId && !u.students.length && RISK_WHO.test(u.norm) && RISK.test(u.norm) && !u.colleges.length && !timeUnclear) {
-    return caseloadRisk(ctx, horizonFor(u.window, now));
+    return caseloadRisk(ctx, horizonFor(u.window, isoDay(counselorZone(ctx.request), now)));
   }
   if (u.judgement || !isLookup(u)) return null;
 
@@ -224,9 +231,9 @@ export async function compileDirect(u: Understanding, ctx: CompileContext): Prom
 }
 
 /** The ranking's look-ahead: the window asked about ("this week"), else two weeks. */
-function horizonFor(window: DateWindow | null, now: Date): number {
+function horizonFor(window: DateWindow | null, today: string): number {
   if (!window) return 14;
-  const days = Math.round((Date.parse(`${window.to}T00:00:00Z`) - Date.parse(`${isoDay(now)}T00:00:00Z`)) / 86_400_000);
+  const days = Math.round((Date.parse(`${window.to}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000);
   return Math.max(1, Math.min(days, 60));
 }
 
@@ -244,7 +251,8 @@ async function caseloadRisk(ctx: CompileContext, horizon: number): Promise<Direc
 
 async function upcoming(ctx: CompileContext, u: Understanding, studentId: string | null, now: Date): Promise<DirectAnswer> {
   const id = studentId ? await resolveStudentId(ctx.request, studentId, "view") : null;
-  const window: DateWindow = u.window ?? { ...SHORT_DEFAULT_WINDOW, to: isoDay(new Date(now.getTime() + 14 * 86_400_000)) };
+  const today = isoDay(counselorZone(ctx.request), now);
+  const window: DateWindow = u.window ?? { ...SHORT_DEFAULT_WINDOW, to: addDays(today, 14) };
   const meetings = /\b(meeting|meetings|call|calls|session|sessions|calendar|schedule|coming up)\b/.test(u.norm) || !u.attributes.includes("deadline");
   const items = await upcomingItems(ctx.request, { studentId: id, window, meetings, roster: ctx.roster, limit: 100 });
   const who = (it: UpcomingItem) => (id ? "" : `${plain(ctx.roster.get(it.studentId)?.name ?? "Student", 60)} · `);
@@ -252,7 +260,7 @@ async function upcoming(ctx: CompileContext, u: Understanding, studentId: string
   const freeIn = (it: UpcomingItem) => it.outside && anyLong([plain(it.title, 100)]);
   const freeOf = (list: UpcomingItem[]) => list.filter(freeIn).map((it) => ({ source: it.kind, text: plain(it.title, 100) }));
   const line = (it: UpcomingItem) =>
-    `${shortDate(it.date, now)}${it.overdue ? " (overdue)" : ""} · ${who(it)}${plain(it.title, 100)}${it.detail ? `, ${plain(it.detail, 60)}` : ""}${it.kind === "task" && it.status ? ` · ${it.status.replace("-", " ")}` : it.kind === "meeting" ? " · meeting" : ""}`;
+    `${shortDate(it.date, today)}${it.overdue ? " (overdue)" : ""} · ${who(it)}${plain(it.title, 100)}${it.detail ? `, ${plain(it.detail, 60)}` : ""}${it.kind === "task" && it.status ? ` · ${it.status.replace("-", " ")}` : it.kind === "meeting" ? " · meeting" : ""}`;
   const name = id ? firstName(ctx.roster.get(id)?.name ?? (await studentFacts(ctx.request, id))?.name ?? "") : "";
   if (!items.length) {
     return {

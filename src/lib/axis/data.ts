@@ -14,11 +14,13 @@ import { gpaLabel } from "../gpa.js";
 import { TtlLru, sharedLoad } from "./cache.js";
 import type { DateWindow } from "./dates.js";
 import { RosterIndex, type RosterRow } from "./entities.js";
+import { addDays, counselorZone, dayIn, startOfDayIn } from "./tz.js";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const num = (v: unknown) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
-export const isoDay = (d = new Date()) => d.toISOString().slice(0, 10);
+/** The date at `d` in the counselor's timezone (lib/axis/tz.ts), as YYYY-MM-DD. */
+export const isoDay = (zone: string, d = new Date()) => dayIn(zone, d);
 
 /** Student-written text shown in a chat answer: one line, no markdown that could turn into a link or an image. */
 export function plain(s: string, max = 160): string {
@@ -85,11 +87,13 @@ export type StudentFacts = {
   act: number | null;
   testStatus: string | null;
   majors: string[];
+  /** The student's own profiles.timezone, when set. */
+  timezone: string | null;
 };
 
 export async function studentFacts(request: FastifyRequest, studentId: string): Promise<StudentFacts | null> {
   const [profile, academics, personal] = await Promise.all([
-    request.db.from("profiles").select("full_name, grad_year, high_school").eq("id", studentId).maybeSingle(),
+    request.db.from("profiles").select("full_name, grad_year, high_school, timezone").eq("id", studentId).maybeSingle(),
     request.db
       .from("student_academics")
       .select("gpa_unweighted, gpa_weighted, gpa_scale, class_rank, class_rank_value, sat_superscore, sat_ebrw, sat_math, act_composite, test_status")
@@ -124,6 +128,7 @@ export async function studentFacts(request: FastifyRequest, studentId: string): 
     act: num(a.act_composite),
     testStatus: str(a.test_status) || null,
     majors: Array.isArray(majors) ? majors.filter((m): m is string => typeof m === "string" && !!m.trim()) : [],
+    timezone: str(p.timezone) || null,
   };
 }
 
@@ -151,7 +156,9 @@ export async function upcomingItems(
   opts: { studentId: string | null; window: DateWindow; meetings: boolean; roster?: RosterIndex; limit?: number }
 ): Promise<UpcomingItem[]> {
   const db = request.db;
-  const today = isoDay();
+  // The counselor's today: a deadline is overdue once their own day has passed it, not UTC's.
+  const zone = counselorZone(request);
+  const today = isoDay(zone);
   const { from, to } = opts.window;
   let dq = db.from("deadlines").select("student_id, title, school, type, due_date").eq("done", false).lte("due_date", to);
   let tq = db.from("deliverables").select("id, student_id, title, status, due_date, source").neq("status", "complete").lte("due_date", to);
@@ -163,14 +170,16 @@ export async function upcomingItems(
     dq = dq.eq("student_id", opts.studentId);
     tq = tq.eq("student_id", opts.studentId);
   }
-  const meetingsFrom = from && from > today ? `${from}T00:00:00Z` : new Date().toISOString();
+  // Meetings are instants: the window's dates are whole days in the counselor's timezone.
+  const meetingsFrom = from && from > today ? startOfDayIn(zone, from).toISOString() : new Date().toISOString();
   let mq = db
     .from("meetings")
     .select("student_id, title, starts_at")
     .eq("counselor_id", request.auth.userId)
     .eq("status", "scheduled")
     .gte("starts_at", meetingsFrom)
-    .lte("starts_at", `${to}T23:59:59Z`);
+    // Up to the last millisecond of `to` in the counselor's timezone.
+    .lte("starts_at", new Date(startOfDayIn(zone, addDays(to, 1)).getTime() - 1).toISOString());
   if (opts.studentId) mq = mq.eq("student_id", opts.studentId);
   const limit = Math.min(opts.limit ?? 200, 500);
   const [deadlines, tasks, meetings] = await Promise.all([
@@ -210,7 +219,8 @@ export async function upcomingItems(
       studentId: String(m.student_id ?? ""),
       title: str(m.title) || "Meeting",
       detail: null,
-      date: str(m.starts_at).slice(0, 10),
+      // The day it falls on for the counselor, not in UTC (a 6pm Pacific meeting is the next day in UTC).
+      date: str(m.starts_at) && !Number.isNaN(Date.parse(str(m.starts_at))) ? dayIn(zone, new Date(str(m.starts_at))) : "",
       status: null,
       overdue: false,
     })),

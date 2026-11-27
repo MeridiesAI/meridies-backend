@@ -77,6 +77,9 @@ test("class year to grade, turning over in July", () => {
   assert.equal(gradeOf("2027", new Date("2026-05-01T00:00:00Z")), 11);
   assert.equal(gradeOf("2031", NOW), null, "not in high school");
   assert.equal(gradeOf("soon", NOW), null);
+  // 8pm on June 30 in Los Angeles is July 1 in UTC: the school year hasn't turned over for the counselor yet.
+  assert.equal(gradeOf("2027", new Date("2026-07-01T03:00:00Z"), "America/Los_Angeles"), 11);
+  assert.equal(gradeOf("2027", new Date("2026-07-01T03:00:00Z"), "UTC"), 12);
 });
 
 test("two students with one first name: asked in code, then the reply answers the original question", async () => {
@@ -124,6 +127,17 @@ test("a school's break: the code asks for the date, and the reply's date finishe
   const answer = await compileDirect(read("Dec 18", state), ctx());
   assert.equal(answer?.frame, "upcoming");
   assert.match(answer!.text, /before winter break \(Dec 18\)/);
+});
+
+test("a reply to the break question is read against the counselor's today, in their zone", () => {
+  const LA = "America/Los_Angeles";
+  // 7pm Nov 26 in Los Angeles (Nov 27 in UTC): "Nov 26" is today for the counselor, so "before" it is a window.
+  const evening = new Date("2026-11-27T03:00:00Z");
+  const pending = { kind: "date" as const, question: "What's due before winter break?", label: "winter break", mode: "by" as const };
+  const state: DialogueState = { students: [], colleges: [], at: evening.toISOString(), pending };
+  const u = understand("Nov 26", { chatStudentId: null, roster, colleges, state, now: evening, zone: LA });
+  assert.equal(u.window?.from, "2026-11-26");
+  assert.equal(u.window?.to, "2026-11-26");
 });
 
 test("fixed-rule holidays answer straight from the data", async () => {

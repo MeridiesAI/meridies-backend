@@ -2,17 +2,20 @@
  * Relative dates in a counselor's question, read without a model: "this
  * week", "by Friday", "next 10 days", "before Nov 1", "overdue", and the days
  * fixed by rule ("by Thanksgiving", "before Christmas", "New Year's Eve", "end
- * of the month"). The result is a window of ISO dates (UTC, like every date the
- * backend writes) the planner and the direct answers query with.
+ * of the month"). The result is a window of ISO dates the planner and the
+ * direct answers query with. "Today" is the counselor's today, in their
+ * timezone (lib/axis/tz.ts); the calendar math after that runs on UTC-midnight
+ * dates, so it never shifts a day.
  *
  * A school's own break ("winter break", "spring break") has no rule: every
  * school sets its own dates, so it never becomes a window. `schoolBreak` names
  * it, and the direct answers ask the counselor for the date instead.
  *
- * Every function takes "now" from the caller, so the day it counts from is
- * whatever the caller treats as today.
+ * Every function takes "now" and the zone from the caller, so the day it counts
+ * from is whatever the caller treats as today.
  */
 import { fold } from "./text.js";
+import { DEFAULT_ZONE, todayAsUtcDate } from "./tz.js";
 
 export type DateWindow = {
   /** Null reaches back without limit: overdue items are in the window. */
@@ -24,7 +27,6 @@ export type DateWindow = {
 const DAY = 86_400_000;
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * DAY);
-const utcMidnight = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
 
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const WEEKDAY_ABBR: Record<string, number> = { sun: 0, mon: 1, tue: 2, tues: 2, wed: 3, thu: 4, thur: 4, thurs: 4, fri: 5, sat: 6 };
@@ -123,8 +125,8 @@ export function schoolBreak(text: string): string | null {
 }
 
 /** The explicit dates in a short reply ("Dec 19", "Dec 20 to Jan 4", "12/20-1/4"), at most two, as ISO days. */
-export function explicitDates(text: string, now = new Date()): string[] {
-  const today = utcMidnight(now);
+export function explicitDates(text: string, now = new Date(), zone: string = DEFAULT_ZONE): string[] {
+  const today = todayAsUtcDate(zone, now);
   const t = fold(text).replace(/[,?!]/g, " ").replace(/\s+/g, " ").trim();
   const parts = t.split(/\s+(?:to|through|thru|until|till|and|-|–|—)\s+|\s*[–—]\s*|(?<=[a-z0-9])-(?=[a-z]|\d{1,2}\/)/);
   const out: string[] = [];
@@ -141,11 +143,11 @@ export function explicitDates(text: string, now = new Date()): string[] {
   return out;
 }
 
-export function parseWindow(text: string, now = new Date()): DateWindow | null {
+export function parseWindow(text: string, now = new Date(), zone: string = DEFAULT_ZONE): DateWindow | null {
   const t = fold(text).replace(/[,?!]/g, " ").replace(/\s+/g, " ");
   // A school break has no date the code can know: no window at all, so nothing answers a different question.
   if (schoolBreak(t)) return null;
-  const today = utcMidnight(now);
+  const today = todayAsUtcDate(zone, now);
   const overdue = /\b(overdue|past due|late|missed)\b/.test(t);
   const window = forwardWindow(t, today);
   if (overdue && window) return { from: null, to: window.to, label: `overdue and ${window.label}` };

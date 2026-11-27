@@ -189,6 +189,22 @@ test("fixed-rule dates: Thanksgiving, Christmas, New Year's, end of month", () =
   assert.equal(parseWindow("what's due after thanksgiving", NOW), null, "after a holiday isn't a window the code builds");
 });
 
+test("fixed-rule dates count from the counselor's today in their zone, not UTC's", () => {
+  const LA = "America/Los_Angeles";
+  // 7pm on Thanksgiving in Los Angeles is already Nov 27 in UTC: still Thanksgiving for the counselor.
+  const thanksgivingEvening = new Date("2026-11-27T03:00:00Z");
+  assert.deepEqual(parseWindow("anything due by thanksgiving?", thanksgivingEvening, LA), { from: "2026-11-26", to: "2026-11-26", label: "by Thanksgiving (Nov 26)" });
+  assert.equal(parseWindow("anything due by thanksgiving?", thanksgivingEvening, "UTC")?.to, "2027-11-25", "in UTC it would already be next year's");
+  // 8pm on New Year's Eve in Los Angeles: New Year's Eve is today, not next year's.
+  const nyeEvening = new Date("2027-01-01T04:00:00Z");
+  assert.equal(parseWindow("due by new year's eve", nyeEvening, LA)?.to, "2026-12-31");
+  assert.equal(parseWindow("due by new year's eve", nyeEvening, "UTC")?.to, "2027-12-31");
+  // 7pm on Oct 31 in Los Angeles: the end of the month is today.
+  assert.deepEqual(parseWindow("what's due by the end of the month", new Date("2026-11-01T02:00:00Z"), LA), { from: "2026-10-31", to: "2026-10-31", label: "by the end of the month" });
+  // A reply's dates are read from the counselor's year too.
+  assert.deepEqual(explicitDates("Dec 31", nyeEvening, LA), ["2026-12-31"]);
+});
+
 test("school breaks are never guessed: no window, and the break is named for the question back", () => {
   assert.equal(parseWindow("what's due before winter break", NOW), null);
   assert.equal(parseWindow("anything due over Christmas break?", NOW), null, "a school's Christmas break is not Christmas Day");

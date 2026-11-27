@@ -40,6 +40,8 @@ export type OpHelpers = {
   studentName(id: string | null | undefined): string;
   /** A GET through the API as the counselor; null on any failure. For labelling a target on a card. */
   get<T = unknown>(url: string): Promise<T | null>;
+  /** The counselor's timezone (lib/axis/tz.ts), for any date an op computes ("today"). */
+  zone?: string;
 };
 
 // The input type is erased in the registry; each definition is checked where it is written (see `op()`).

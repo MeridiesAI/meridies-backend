@@ -19,9 +19,9 @@ test("signerLine without a name still forbids a placeholder", () => {
 });
 
 test("v2 system context carries the signer after today and the record", () => {
-  const blocks = systemBlocks("RECORD", null, null, new Date("2026-10-12T00:00:00Z"), signerLine({ full_name: "Jordan Rivera" }));
+  const blocks = systemBlocks("RECORD", null, null, new Date("2026-10-12T00:00:00Z"), signerLine({ full_name: "Jordan Rivera" }), "UTC");
   const context = blocks[1].text;
-  assert.match(context, /^Today is 2026-10-12\./);
+  assert.match(context, /^Today is 2026-10-12 \(Monday\) in the counselor's timezone, UTC\./);
   assert.match(context, /The counselor you work for is Jordan Rivera\./);
   // The stable block stays the same for every counselor, so its cache is shared.
   assert.doesNotMatch(blocks[0].text, /Jordan Rivera/);

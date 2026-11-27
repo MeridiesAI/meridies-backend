@@ -16,6 +16,7 @@
  *  - Complexity, from clauses, entities, judgement words and length.
  */
 import { explicitDates, parseWindow, shortDay, type DateWindow } from "./dates.js";
+import { dayIn, DEFAULT_ZONE } from "./tz.js";
 import type { AmbiguousCollege, AmbiguousMention, CollegeIndex, CollegeMention, RosterIndex, StudentMention } from "./entities.js";
 import {
   ATTRIBUTE_PATTERNS,
@@ -87,6 +88,8 @@ export type UnderstandContext = {
   colleges: CollegeIndex | null;
   state: DialogueState | null;
   now?: Date;
+  /** The counselor's timezone (lib/axis/tz.ts): "today" and "this week" are theirs. */
+  zone?: string;
 };
 
 const PRONOUN_PERSON = /\b(she|her|hers|he|him|his|they|them|their|theirs)\b/;
@@ -218,9 +221,11 @@ function resolvePending(text: string, pending: PendingAsk, ctx: UnderstandContex
     const students: StudentMention[] = c.id === ctx.chatStudentId ? [] : [{ id: c.id, name: c.name, score: 1, via: "full" }];
     return { ...base, students, ambiguousStudents: [] };
   }
-  const days = explicitDates(text, now);
+  // The counselor's today, in their zone: "Dec 19" and "before" are read from their date, not UTC's.
+  const zone = ctx.zone ?? DEFAULT_ZONE;
+  const days = explicitDates(text, now, zone);
   if (!days.length || tokens(text).length > 8) return null;
-  const today = now.toISOString().slice(0, 10);
+  const today = dayIn(zone, now);
   const label = (d: string) => shortDay(new Date(`${d}T00:00:00Z`));
   // "Before winter break": from today to the day it starts. "During": its first and last day, both needed.
   const window: DateWindow | null =
@@ -314,7 +319,7 @@ export function understand(text: string, ctx: UnderstandContext): Understanding 
     colleges,
     ambiguousColleges: fromCatalog.ambiguous,
     attributes,
-    window: parseWindow(text, now),
+    window: parseWindow(text, now, ctx.zone),
     form,
     judgement,
     keywords: keywordsOf(text),
